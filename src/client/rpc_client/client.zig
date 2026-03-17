@@ -1679,6 +1679,36 @@ pub const SuiRpcClient = struct {
         );
     }
 
+    pub fn runOptionsFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        options: tx_request_builder.ProgrammaticRequestOptions,
+        preparation: keystore.SignerPreparation,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionResult {
+        return try self.runOptionsWithAccountProvider(
+            allocator,
+            options,
+            .{ .default_keystore = .{ .preparation = preparation } },
+            action,
+        );
+    }
+
+    pub fn runOptionsOrChallengePromptFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        options: tx_request_builder.ProgrammaticRequestOptions,
+        preparation: keystore.SignerPreparation,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionOrChallengePromptResult {
+        return try self.runOptionsOrChallengePromptWithAccountProvider(
+            allocator,
+            options,
+            .{ .default_keystore = .{ .preparation = preparation } },
+            action,
+        );
+    }
+
     pub fn inspectOptionsOrChallengePromptFromDefaultKeystore(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
@@ -1980,6 +2010,36 @@ pub const SuiRpcClient = struct {
             request,
             .{ .default_keystore = .{ .preparation = preparation } },
             kind,
+        );
+    }
+
+    pub fn runRequestFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        request: tx_builder.ProgrammaticTxRequest,
+        preparation: keystore.SignerPreparation,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionResult {
+        return try self.runRequestWithAccountProvider(
+            allocator,
+            request,
+            .{ .default_keystore = .{ .preparation = preparation } },
+            action,
+        );
+    }
+
+    pub fn runRequestOrChallengePromptFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        request: tx_builder.ProgrammaticTxRequest,
+        preparation: keystore.SignerPreparation,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionOrChallengePromptResult {
+        return try self.runRequestOrChallengePromptWithAccountProvider(
+            allocator,
+            request,
+            .{ .default_keystore = .{ .preparation = preparation } },
+            action,
         );
     }
 
@@ -2641,6 +2701,40 @@ pub const SuiRpcClient = struct {
             config,
             .{ .default_keystore = .{ .preparation = preparation } },
             kind,
+        );
+    }
+
+    pub fn runCommandsFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        config: tx_request_builder.CommandRequestConfig,
+        preparation: keystore.SignerPreparation,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionResult {
+        return try self.runCommandsWithAccountProvider(
+            allocator,
+            source,
+            config,
+            .{ .default_keystore = .{ .preparation = preparation } },
+            action,
+        );
+    }
+
+    pub fn runCommandsOrChallengePromptFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        config: tx_request_builder.CommandRequestConfig,
+        preparation: keystore.SignerPreparation,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionOrChallengePromptResult {
+        return try self.runCommandsOrChallengePromptWithAccountProvider(
+            allocator,
+            source,
+            config,
+            .{ .default_keystore = .{ .preparation = preparation } },
+            action,
         );
     }
 
@@ -4001,6 +4095,51 @@ test "buildOptionsArtifactFromDefaultKeystore builds execute payloads immediatel
     try testing.expect(std.mem.indexOf(u8, payload, "sig-builder") != null);
 }
 
+test "runOptionsFromDefaultKeystore completes authorize actions immediately" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const keystore_path = try std.fmt.allocPrint(allocator, "tmp_client_run_options_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(keystore_path);
+
+    const old_override = keystore.test_keystore_path_override;
+    keystore.test_keystore_path_override = keystore_path;
+    defer keystore.test_keystore_path_override = old_override;
+
+    var file = try std.fs.cwd().createFile(keystore_path, .{ .truncate = true });
+    defer file.close();
+    defer _ = std.fs.cwd().deleteFile(keystore_path) catch {};
+    try file.writeAll("[{\"alias\":\"builder\",\"privateKey\":\"sig-builder\",\"address\":\"0xbuilder\"}]");
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+
+    var result = try client_instance.runOptionsFromDefaultKeystore(
+        allocator,
+        .{
+            .source = .{
+                .command_items = &.{
+                    "{\"kind\":\"TransferObjects\",\"objects\":[\"0xcoin\"],\"address\":\"0xreceiver\"}",
+                },
+            },
+        },
+        .{ .signer_selectors = &.{"builder"} },
+        .authorize,
+    );
+    defer result.deinit(allocator);
+
+    switch (result) {
+        .authorized => |prepared| {
+            try testing.expectEqualStrings("0xbuilder", prepared.prepared.request.sender.?);
+            try testing.expectEqualStrings("sig-builder", prepared.prepared.request.signatures[0]);
+            try testing.expect(prepared.supports_execute);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
 test "ownedPlanCommandsWithAccountProvider returns owned plans with structured challenge prompts" {
     const testing = std.testing;
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -4337,6 +4476,87 @@ test "buildCommandsArtifactOrChallengePromptFromDefaultKeystore returns artifact
         },
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "runCommandsOrChallengePromptFromDefaultKeystore completes execute-confirm actions immediately" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const keystore_path = try std.fmt.allocPrint(allocator, "tmp_client_run_commands_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(keystore_path);
+
+    const old_override = keystore.test_keystore_path_override;
+    keystore.test_keystore_path_override = keystore_path;
+    defer keystore.test_keystore_path_override = old_override;
+
+    var file = try std.fs.cwd().createFile(keystore_path, .{ .truncate = true });
+    defer file.close();
+    defer _ = std.fs.cwd().deleteFile(keystore_path) catch {};
+    try file.writeAll("[{\"alias\":\"builder\",\"privateKey\":\"sig-builder\",\"address\":\"0xbuilder\"}]");
+
+    var execute_seen = false;
+    var confirm_seen = false;
+
+    const MockContext = struct {
+        execute_seen: *bool,
+        confirm_seen: *bool,
+    };
+
+    const rpc_callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            _ = req.id;
+            _ = req.params_json;
+            _ = req.request_body;
+            const ctx = @as(*MockContext, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "sui_executeTransactionBlock")) {
+                ctx.execute_seen.* = true;
+                return alloc.dupe(u8, "{\"result\":{\"digest\":\"run-commands-default-keystore\"}}");
+            }
+            if (std.mem.eql(u8, req.method, "sui_getTransactionBlock")) {
+                ctx.confirm_seen.* = true;
+                return alloc.dupe(u8, "{\"result\":{\"digest\":\"run-commands-default-keystore\"}}");
+            }
+            return alloc.dupe(u8, "{\"error\":{\"code\":-32603,\"message\":\"unexpected\"}}");
+        }
+    }.call;
+
+    var ctx = MockContext{
+        .execute_seen = &execute_seen,
+        .confirm_seen = &confirm_seen,
+    };
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &ctx,
+        .callback = rpc_callback,
+    };
+
+    var result = try client_instance.runCommandsOrChallengePromptFromDefaultKeystore(
+        allocator,
+        .{
+            .command_items = &.{
+                "{\"kind\":\"TransferObjects\",\"objects\":[\"0xcoin\"],\"address\":\"0xreceiver\"}",
+            },
+        },
+        .{},
+        .{ .signer_selectors = &.{"builder"} },
+        .{ .execute_confirm = .{ .timeout_ms = 5_000, .poll_ms = 1 } },
+    );
+    defer result.deinit(allocator);
+
+    switch (result) {
+        .completed => |completed| switch (completed) {
+            .executed => |response| try testing.expectEqualStrings("{\"result\":{\"digest\":\"run-commands-default-keystore\"}}", response),
+            else => return error.TestUnexpectedResult,
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    try testing.expect(execute_seen);
+    try testing.expect(confirm_seen);
 }
 
 test "executeOptionsWithAccountProvider uses direct signature accounts" {

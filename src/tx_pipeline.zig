@@ -181,6 +181,36 @@ pub fn programmaticAuthorizationPlanFromArgsWithAccountProvider(
     });
 }
 
+pub fn buildProgrammaticArtifactFromArgsWithAccountProvider(
+    allocator: std.mem.Allocator,
+    args: *const cli.ParsedArgs,
+    signatures: []const []const u8,
+    provider: ?tx_request_builder.AccountProvider,
+    kind: tx_request_builder.ProgrammaticArtifactKind,
+) ![]u8 {
+    if (cli.hasProgrammaticTxContext(args)) {
+        try cli.validateProgrammaticTxInput(args);
+    }
+    if (!cli.supportsProgrammableInput(args)) return error.InvalidCli;
+    return try programmaticAuthorizationPlanFromArgsWithAccountProvider(args, signatures, provider)
+        .buildArtifact(allocator, kind);
+}
+
+pub fn buildProgrammaticArtifactFromArgs(
+    allocator: std.mem.Allocator,
+    args: *const cli.ParsedArgs,
+    signatures: []const []const u8,
+    kind: tx_request_builder.ProgrammaticArtifactKind,
+) ![]u8 {
+    return try buildProgrammaticArtifactFromArgsWithAccountProvider(
+        allocator,
+        args,
+        signatures,
+        defaultProgrammaticAccountProviderFromArgs(args),
+        kind,
+    );
+}
+
 pub fn preparedRequestFromArgs(
     allocator: std.mem.Allocator,
     args: *const cli.ParsedArgs,
@@ -204,8 +234,7 @@ pub fn buildInspectPayloadFromArgs(
         try cli.validateProgrammaticTxInput(args);
     }
     if (cli.supportsProgrammableInput(args)) {
-        const plan = programmaticAuthorizationPlanFromArgs(args, &.{});
-        return try plan.buildArtifact(allocator, .inspect_payload);
+        return try buildProgrammaticArtifactFromArgs(allocator, args, &.{}, .inspect_payload);
     }
 
     return try allocator.dupe(u8, args.params orelse "[]");
@@ -222,8 +251,7 @@ pub fn buildExecutePayloadFromArgs(
     }
     if (cli.supportsProgrammableInput(args)) {
         if (args.tx_bytes != null) return error.InvalidCli;
-        const plan = programmaticAuthorizationPlanFromArgs(args, signatures);
-        return try plan.buildArtifact(allocator, .execute_payload);
+        return try buildProgrammaticArtifactFromArgs(allocator, args, signatures, .execute_payload);
     }
 
     const tx_bytes = args.tx_bytes orelse non_programmatic_default orelse return error.InvalidCli;
@@ -497,4 +525,38 @@ test "buildExecutePayloadFromArgs builds programmatic payloads through prepared 
     defer parsed.deinit();
     try testing.expect(parsed.value == .array);
     try testing.expectEqual(@as(usize, 2), parsed.value.array.items.len);
+}
+
+test "buildProgrammaticArtifactFromArgs resolves default-keystore sender and signatures" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const keystore_path = try std.fmt.allocPrint(allocator, "tmp_tx_pipeline_keystore_artifact_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(keystore_path);
+
+    const old_override = keystore.test_keystore_path_override;
+    keystore.test_keystore_path_override = keystore_path;
+    defer keystore.test_keystore_path_override = old_override;
+
+    var file = try std.fs.cwd().createFile(keystore_path, .{ .truncate = true });
+    defer file.close();
+    defer _ = std.fs.cwd().deleteFile(keystore_path) catch {};
+    try file.writeAll("[{\"alias\":\"builder\",\"privateKey\":\"sig-builder\",\"address\":\"0xbuilder\"}]");
+
+    var args = cli.ParsedArgs{
+        .command = .tx_payload,
+        .tx_build_commands = "[{\"kind\":\"TransferObjects\",\"objects\":[\"0xcoin\"],\"address\":\"0xreceiver\"}]",
+        .tx_build_sender = "builder",
+    };
+    defer args.deinit(allocator);
+    try args.signers.append(allocator, "builder");
+
+    const payload = try buildProgrammaticArtifactFromArgs(allocator, &args, &.{}, .execute_payload);
+    defer allocator.free(payload);
+
+    try testing.expect(std.mem.indexOf(u8, payload, "0xbuilder") != null);
+    try testing.expect(std.mem.indexOf(u8, payload, "sig-builder") != null);
 }

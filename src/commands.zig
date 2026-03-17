@@ -363,11 +363,16 @@ pub fn runCommandWithProgrammaticProvider(
         },
         .tx_simulate => {
             if (cli.supportsProgrammableInput(args)) {
-                const response = try rpc.inspectPlan(
+                var result = try rpc.runPlan(
                     allocator,
                     programmaticAuthorizationPlanFromArgsWithAccountProvider(args, &.{}, effective_programmatic_provider),
+                    .inspect,
                 );
-                defer rpc.allocator.free(response);
+                defer result.deinit(allocator);
+                const response = switch (result) {
+                    .inspected => |value| value,
+                    else => return error.InvalidResponse,
+                };
                 try printResponse(allocator, writer, response, args.pretty);
                 return;
             }
@@ -379,12 +384,25 @@ pub fn runCommandWithProgrammaticProvider(
         },
         .tx_payload => {
             const signatures = if (args.signatures.items.len > 0) args.signatures.items else &.{};
-            const payload = if (cli.supportsProgrammableInput(args) and effective_programmatic_provider != null)
-                try programmaticAuthorizationPlanFromArgsWithAccountProvider(args, signatures, effective_programmatic_provider).buildAuthorizedExecutePayload(allocator)
-            else
+            if (cli.supportsProgrammableInput(args)) {
+                if (args.tx_bytes != null) return error.InvalidCli;
+                var result = try rpc.runPlan(
+                    allocator,
+                    programmaticAuthorizationPlanFromArgsWithAccountProvider(args, signatures, effective_programmatic_provider),
+                    .{ .build_artifact = .execute_payload },
+                );
+                defer result.deinit(allocator);
+                const payload = switch (result) {
+                    .artifact => |value| value,
+                    else => return error.InvalidResponse,
+                };
+                try printResponse(allocator, writer, payload, args.pretty);
+            } else {
+                const payload =
                 try buildExecutePayloadFromArgs(allocator, args, signatures, null);
-            defer allocator.free(payload);
-            try printResponse(allocator, writer, payload, args.pretty);
+                defer allocator.free(payload);
+                try printResponse(allocator, writer, payload, args.pretty);
+            }
         },
         .tx_send => {
             const provider_can_execute = if (effective_programmatic_provider) |provider|
@@ -396,11 +414,22 @@ pub fn runCommandWithProgrammaticProvider(
             }
             if (cli.supportsProgrammableInput(args)) {
                 if (args.tx_bytes != null) return error.InvalidCli;
-                const response = try rpc.executePlan(
+                var result = try rpc.runPlan(
                     allocator,
                     programmaticAuthorizationPlanFromArgsWithAccountProvider(args, args.signatures.items, effective_programmatic_provider),
+                    if (args.tx_send_wait)
+                        .{ .execute_confirm = .{
+                            .timeout_ms = args.confirm_timeout_ms orelse std.math.maxInt(u64),
+                            .poll_ms = args.confirm_poll_ms,
+                        } }
+                    else
+                        .execute,
                 );
-                defer rpc.allocator.free(response);
+                defer result.deinit(allocator);
+                const response = switch (result) {
+                    .executed => |value| value,
+                    else => return error.InvalidResponse,
+                };
                 try printResponse(allocator, writer, response, args.pretty);
                 return;
             }
