@@ -36,6 +36,7 @@ pub const OwnedMoveParameterSummary = struct {
     signature: []u8,
     lowering_kind: ?[]const u8 = null,
     placeholder_json: ?[]u8 = null,
+    auto_selected_arg_json: ?[]u8 = null,
     omitted_from_explicit_args: bool = false,
     shared_object_input_select_token: ?[]u8 = null,
     shared_object_event_query_argv: ?[][]u8 = null,
@@ -55,6 +56,7 @@ pub const OwnedMoveParameterSummary = struct {
     pub fn deinit(self: *OwnedMoveParameterSummary, allocator: std.mem.Allocator) void {
         allocator.free(self.signature);
         if (self.placeholder_json) |value| allocator.free(value);
+        if (self.auto_selected_arg_json) |value| allocator.free(value);
         if (self.shared_object_input_select_token) |value| allocator.free(value);
         if (self.shared_object_event_query_argv) |argv| {
             for (argv) |value| allocator.free(value);
@@ -137,18 +139,30 @@ pub const OwnedMoveFunctionSummary = struct {
 pub const OwnedMoveFunctionCallTemplate = struct {
     type_args_json: []u8,
     args_json: []u8,
+    preferred_args_json: ?[]u8 = null,
     move_call_command_json: []u8,
     tx_dry_run_argv: [][]u8,
+    preferred_tx_dry_run_argv: ?[][]u8 = null,
     tx_send_from_keystore_argv: [][]u8,
+    preferred_tx_send_from_keystore_argv: ?[][]u8 = null,
 
     pub fn deinit(self: *OwnedMoveFunctionCallTemplate, allocator: std.mem.Allocator) void {
         allocator.free(self.type_args_json);
         allocator.free(self.args_json);
+        if (self.preferred_args_json) |value| allocator.free(value);
         allocator.free(self.move_call_command_json);
         for (self.tx_dry_run_argv) |value| allocator.free(value);
         allocator.free(self.tx_dry_run_argv);
+        if (self.preferred_tx_dry_run_argv) |argv| {
+            for (argv) |value| allocator.free(value);
+            allocator.free(argv);
+        }
         for (self.tx_send_from_keystore_argv) |value| allocator.free(value);
         allocator.free(self.tx_send_from_keystore_argv);
+        if (self.preferred_tx_send_from_keystore_argv) |argv| {
+            for (argv) |value| allocator.free(value);
+            allocator.free(argv);
+        }
     }
 };
 

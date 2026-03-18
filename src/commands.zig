@@ -3141,6 +3141,14 @@ test "runCommand move function with --summarize fills owner context into owned o
         "select:{\"kind\":\"object_input\",\"objectId\":\"0xposition1\",\"inputKind\":\"imm_or_owned\",\"version\":7,\"digest\":\"position-digest-1\"}",
         owned_candidates[0].object.get("object_input_select_token").?.string,
     );
+    try testing.expectEqualStrings(
+        "\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xposition1\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":7,\\\"digest\\\":\\\"position-digest-1\\\"}\"",
+        parameter.get("auto_selected_arg_json").?.string,
+    );
+    try testing.expectEqualStrings(
+        "[\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xposition1\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":7,\\\"digest\\\":\\\"position-digest-1\\\"}\"]",
+        parsed.value.object.get("call_template").?.object.get("preferred_args_json").?.string,
+    );
 }
 
 test "runCommand move function with --summarize adds shared object event discovery templates and candidates" {
@@ -3234,6 +3242,14 @@ test "runCommand move function with --summarize adds shared object event discove
         "select:{\"kind\":\"object_input\",\"objectId\":\"0xpool1\",\"inputKind\":\"shared\",\"initialSharedVersion\":7,\"mutable\":true}",
         shared_candidates[0].object.get("mutable_shared_object_input_select_token").?.string,
     );
+    try testing.expectEqualStrings(
+        "\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xpool1\\\",\\\"inputKind\\\":\\\"shared\\\",\\\"initialSharedVersion\\\":7,\\\"mutable\\\":true}\"",
+        parameter.get("auto_selected_arg_json").?.string,
+    );
+    try testing.expectEqualStrings(
+        "[\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xpool1\\\",\\\"inputKind\\\":\\\"shared\\\",\\\"initialSharedVersion\\\":7,\\\"mutable\\\":true}\"]",
+        parsed.value.object.get("call_template").?.object.get("preferred_args_json").?.string,
+    );
 }
 
 test "runCommand move function with --summarize specializes generic signatures with type arguments" {
@@ -3303,10 +3319,12 @@ test "runCommand move function with --summarize specializes generic signatures w
         std.json.Value.null,
         parsed.value.object.get("parameters").?.array.items[0].object.get("owned_object_select_token").?,
     );
+    try testing.expectEqual(std.json.Value.null, parsed.value.object.get("parameters").?.array.items[0].object.get("auto_selected_arg_json").?);
     try testing.expectEqualStrings(
         "[{\"Struct\":{\"address\":\"0x2\",\"module\":\"sui\",\"name\":\"SUI\",\"typeParams\":[]}}]",
         parsed.value.object.get("call_template").?.object.get("type_args_json").?.string,
     );
+    try testing.expectEqual(std.json.Value.null, parsed.value.object.get("call_template").?.object.get("preferred_args_json").?);
 }
 
 test "runCommand move function with --summarize adds vector object discovery templates after type specialization" {
@@ -3387,6 +3405,8 @@ test "runCommand move function with --summarize adds vector object discovery tem
         "[[\"<arg0-item0-object-id-or-select-token>\"]]",
         parsed.value.object.get("call_template").?.object.get("args_json").?.string,
     );
+    try testing.expectEqual(std.json.Value.null, parameter.get("auto_selected_arg_json").?);
+    try testing.expectEqual(std.json.Value.null, parsed.value.object.get("call_template").?.object.get("preferred_args_json").?);
 }
 
 test "runCommand move function with --summarize fills owner context into vector object discovery templates" {
@@ -3465,6 +3485,14 @@ test "runCommand move function with --summarize fills owner context into vector 
     try testing.expectEqualStrings(
         "select:{\"kind\":\"object_input\",\"objectId\":\"0xcoin2\",\"inputKind\":\"imm_or_owned\",\"version\":10,\"digest\":\"coin-digest-2\"}",
         vector_item_candidates[1].object.get("object_input_select_token").?.string,
+    );
+    try testing.expectEqualStrings(
+        "[\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xcoin1\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":9,\\\"digest\\\":\\\"coin-digest-1\\\"}\",\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xcoin2\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":10,\\\"digest\\\":\\\"coin-digest-2\\\"}\"]",
+        parameter.get("auto_selected_arg_json").?.string,
+    );
+    try testing.expectEqualStrings(
+        "[[\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xcoin1\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":9,\\\"digest\\\":\\\"coin-digest-1\\\"}\",\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xcoin2\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":10,\\\"digest\\\":\\\"coin-digest-2\\\"}\"]]",
+        parsed.value.object.get("call_template").?.object.get("preferred_args_json").?.string,
     );
 }
 

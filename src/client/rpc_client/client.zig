@@ -4163,6 +4163,14 @@ pub const SuiRpcClient = struct {
         allocator: std.mem.Allocator,
         parameters: []const move_result.OwnedMoveParameterSummary,
     ) ![]u8 {
+        return try buildMoveFunctionArgsJson(allocator, parameters, false);
+    }
+
+    fn buildMoveFunctionArgsJson(
+        allocator: std.mem.Allocator,
+        parameters: []const move_result.OwnedMoveParameterSummary,
+        prefer_auto_selected: bool,
+    ) ![]u8 {
         var output = std.ArrayList(u8){};
         defer output.deinit(allocator);
 
@@ -4171,13 +4179,74 @@ pub const SuiRpcClient = struct {
         var needs_separator = false;
         for (parameters) |parameter| {
             if (parameter.omitted_from_explicit_args) continue;
-            const placeholder = parameter.placeholder_json orelse continue;
+            const placeholder = if (prefer_auto_selected)
+                parameter.auto_selected_arg_json orelse parameter.placeholder_json orelse continue
+            else
+                parameter.placeholder_json orelse continue;
             if (needs_separator) try writer.writeAll(",");
             try writer.writeAll(placeholder);
             needs_separator = true;
         }
         try writer.writeAll("]");
         return output.toOwnedSlice(allocator);
+    }
+
+    fn buildAutoSelectedVectorArgJson(
+        allocator: std.mem.Allocator,
+        candidates: []const move_result.OwnedMoveObjectCandidate,
+    ) !?[]u8 {
+        if (candidates.len == 0) return null;
+
+        var output = std.ArrayList(u8){};
+        defer output.deinit(allocator);
+        const writer = output.writer(allocator);
+        try writer.writeAll("[");
+        for (candidates, 0..) |candidate, index| {
+            if (index != 0) try writer.writeAll(",");
+            try writer.print("{f}", .{std.json.fmt(candidate.object_input_select_token, .{})});
+        }
+        try writer.writeAll("]");
+        return try output.toOwnedSlice(allocator);
+    }
+
+    fn buildAutoSelectedScalarArgJson(
+        allocator: std.mem.Allocator,
+        token: []const u8,
+    ) ![]u8 {
+        return try std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(token, .{})});
+    }
+
+    fn populateMoveParameterAutoSelectedArgJson(
+        allocator: std.mem.Allocator,
+        parameter: *move_result.OwnedMoveParameterSummary,
+    ) !void {
+        if (parameter.omitted_from_explicit_args) return;
+        if (parameter.auto_selected_arg_json != null) return;
+
+        if (parameter.vector_item_owned_object_candidates) |candidates| {
+            parameter.auto_selected_arg_json = try buildAutoSelectedVectorArgJson(allocator, candidates);
+            if (parameter.auto_selected_arg_json != null) return;
+        }
+
+        if (parameter.shared_object_candidates) |candidates| {
+            if (candidates.len == 1) {
+                const token = if (isMoveMutableReferenceSignature(parameter.signature))
+                    candidates[0].mutable_shared_object_input_select_token
+                else
+                    candidates[0].shared_object_input_select_token;
+                parameter.auto_selected_arg_json = try buildAutoSelectedScalarArgJson(allocator, token);
+                return;
+            }
+        }
+
+        if (parameter.owned_object_candidates) |candidates| {
+            if (candidates.len == 1) {
+                parameter.auto_selected_arg_json = try buildAutoSelectedScalarArgJson(
+                    allocator,
+                    candidates[0].object_input_select_token,
+                );
+            }
+        }
     }
 
     fn resolvedMoveFunctionTypeArgsTemplateJson(
@@ -4486,6 +4555,13 @@ pub const SuiRpcClient = struct {
                     struct_type,
                 );
             }
+
+            try populateMoveParameterAutoSelectedArgJson(allocator, parameter);
+            continue;
+        }
+
+        for (summary.parameters) |*parameter| {
+            try populateMoveParameterAutoSelectedArgJson(allocator, parameter);
         }
 
         const type_args_json = try resolvedMoveFunctionTypeArgsTemplateJson(
@@ -4496,6 +4572,8 @@ pub const SuiRpcClient = struct {
         errdefer allocator.free(type_args_json);
         const args_json = try buildMoveFunctionArgsTemplateJson(allocator, summary.parameters);
         errdefer allocator.free(args_json);
+        const preferred_args_json = try buildMoveFunctionArgsJson(allocator, summary.parameters, true);
+        errdefer allocator.free(preferred_args_json);
         const move_call_command_json = try buildMoveFunctionCommandTemplateJson(
             allocator,
             summary.*,
@@ -4524,12 +4602,45 @@ pub const SuiRpcClient = struct {
             allocator.free(tx_send_from_keystore_argv);
         }
 
+        const preferred_tx_dry_run_argv = if (!std.mem.eql(u8, preferred_args_json, args_json))
+            try buildMoveFunctionTxDryRunArgv(
+                allocator,
+                summary.*,
+                type_args_json,
+                preferred_args_json,
+            )
+        else
+            null;
+        errdefer if (preferred_tx_dry_run_argv) |argv| {
+            for (argv) |value| allocator.free(value);
+            allocator.free(argv);
+        };
+        const preferred_tx_send_from_keystore_argv = if (!std.mem.eql(u8, preferred_args_json, args_json))
+            try buildMoveFunctionTxSendFromKeystoreArgv(
+                allocator,
+                summary.*,
+                type_args_json,
+                preferred_args_json,
+            )
+        else
+            null;
+        errdefer if (preferred_tx_send_from_keystore_argv) |argv| {
+            for (argv) |value| allocator.free(value);
+            allocator.free(argv);
+        };
+
         summary.call_template = .{
             .type_args_json = type_args_json,
             .args_json = args_json,
+            .preferred_args_json = if (std.mem.eql(u8, preferred_args_json, args_json)) blk: {
+                allocator.free(preferred_args_json);
+                break :blk null;
+            } else preferred_args_json,
             .move_call_command_json = move_call_command_json,
             .tx_dry_run_argv = tx_dry_run_argv,
+            .preferred_tx_dry_run_argv = preferred_tx_dry_run_argv,
             .tx_send_from_keystore_argv = tx_send_from_keystore_argv,
+            .preferred_tx_send_from_keystore_argv = preferred_tx_send_from_keystore_argv,
         };
     }
 

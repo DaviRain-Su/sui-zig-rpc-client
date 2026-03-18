@@ -865,6 +865,7 @@ zig build run -- events \
 
 同一个 summary 里现在还会带两层调用模板：
 - `parameters[*].placeholder_json`: 这个参数建议放进 `--args` JSON 的占位片段
+- `parameters[*].auto_selected_arg_json`: 如果 CLI 已经找到确定的 candidate，会把这个参数直接收口成可放进 `--args` 的 JSON 片段
 - `parameters[*].omitted_from_explicit_args`: `true` 表示这是 runtime 注入参数，比如 `TxContext`，不需要你手工传
 - `parameters[*].shared_object_input_select_token`: 如果参数是 by-reference object，CLI 会额外给一个 direct `object_input(shared)` 候选
 - `parameters[*].shared_object_event_query_argv`: 如果参数是非 preset 的 by-reference object，CLI 会额外给一个 `events --package --module` 的 shared object 发现模板
@@ -882,9 +883,12 @@ zig build run -- events \
 - `parameters[*].owned_object_candidates`: 如果有 owner 上下文，CLI 会直接查出一组 concrete owned object 候选，并给出可直接放进 `--args` 的精确 `object_input(imm_or_owned, version, digest)` token
 - `call_template.type_args_json`: 直接可改的 `--type-args` JSON 模板
 - `call_template.args_json`: 直接可改的 `--args` JSON 模板
+- `call_template.preferred_args_json`: 在保留原始模板的同时，优先把 CLI 已经能自动选出的参数回填进去
 - `call_template.move_call_command_json`: 直接可放进 `--commands` / `--command` 的 raw `MoveCall` command 模板
 - `call_template.tx_dry_run_argv`: 直接可执行的 `tx dry-run` argv 模板
+- `call_template.preferred_tx_dry_run_argv`: 如果存在 auto-selected candidate，则给一条更接近可执行的 `tx dry-run` argv 模板
 - `call_template.tx_send_from_keystore_argv`: 直接可改的 `tx send --from-keystore` argv 模板
+- `call_template.preferred_tx_send_from_keystore_argv`: 如果存在 auto-selected candidate，则给一条更接近可执行的 `tx send --from-keystore` argv 模板
 
 这层模板只解决 ABI 到 CLI 输入骨架的映射；真正执行 `tx dry-run` / `tx send` 时，你仍然需要自己补 sender、signer、gas 和具体 object id / select token。
 
