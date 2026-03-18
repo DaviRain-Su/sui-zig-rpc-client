@@ -9,6 +9,10 @@ pub const OwnedMoveParameterSummary = struct {
     imm_or_owned_object_input_select_token: ?[]u8 = null,
     receiving_object_input_select_token: ?[]u8 = null,
     object_get_argv: ?[][]u8 = null,
+    vector_item_imm_or_owned_object_input_select_token: ?[]u8 = null,
+    vector_item_owned_object_select_token: ?[]u8 = null,
+    vector_item_object_get_argv: ?[][]u8 = null,
+    vector_item_owned_object_query_argv: ?[][]u8 = null,
     owned_object_select_token: ?[]u8 = null,
     owned_object_query_argv: ?[][]u8 = null,
 
@@ -19,6 +23,16 @@ pub const OwnedMoveParameterSummary = struct {
         if (self.imm_or_owned_object_input_select_token) |value| allocator.free(value);
         if (self.receiving_object_input_select_token) |value| allocator.free(value);
         if (self.object_get_argv) |argv| {
+            for (argv) |value| allocator.free(value);
+            allocator.free(argv);
+        }
+        if (self.vector_item_imm_or_owned_object_input_select_token) |value| allocator.free(value);
+        if (self.vector_item_owned_object_select_token) |value| allocator.free(value);
+        if (self.vector_item_object_get_argv) |argv| {
+            for (argv) |value| allocator.free(value);
+            allocator.free(argv);
+        }
+        if (self.vector_item_owned_object_query_argv) |argv| {
             for (argv) |value| allocator.free(value);
             allocator.free(argv);
         }

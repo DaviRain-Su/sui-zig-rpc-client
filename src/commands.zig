@@ -3022,6 +3022,86 @@ test "runCommand move function with --summarize specializes generic signatures w
     );
 }
 
+test "runCommand move function with --summarize adds vector object discovery templates after type specialization" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            std.debug.assert(std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction"));
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0x2\"") != null);
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"router\"") != null);
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"deposit_many\"") != null);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"visibility\":\"Public\",\"isEntry\":true,\"typeParameters\":[[]],\"parameters\":[{\"Vector\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"coin\",\"name\":\"Coin\",\"typeParams\":[{\"TypeParameter\":0}]}}},{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[]}}",
+            );
+        }
+    }.call;
+
+    var args = cli.ParsedArgs{
+        .command = .move_function,
+        .has_command = true,
+        .move_package = "0x2",
+        .move_module = "router",
+        .move_function = "deposit_many",
+        .tx_build_type_args = "[\"0x2::sui::SUI\"]",
+        .tx_send_summarize = true,
+    };
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    const parameter = parsed.value.object.get("parameters").?.array.items[0].object;
+    try testing.expectEqualStrings(
+        "vector<0x2::coin::Coin<0x2::sui::SUI>>",
+        parameter.get("signature").?.string,
+    );
+    try testing.expectEqualStrings(
+        "[\"<arg0-item0-object-id-or-select-token>\"]",
+        parameter.get("placeholder_json").?.string,
+    );
+    try testing.expectEqualStrings(
+        "select:{\"kind\":\"object_input\",\"objectId\":\"0x<arg0-item0-object-id>\",\"inputKind\":\"imm_or_owned\"}",
+        parameter.get("vector_item_imm_or_owned_object_input_select_token").?.string,
+    );
+    try testing.expectEqualStrings(
+        "select:{\"kind\":\"owned_object_struct_type\",\"structType\":\"0x2::coin::Coin<0x2::sui::SUI>\"}",
+        parameter.get("vector_item_owned_object_select_token").?.string,
+    );
+    const vector_item_get_argv = parameter.get("vector_item_object_get_argv").?.array.items;
+    try testing.expectEqual(@as(usize, 4), vector_item_get_argv.len);
+    try testing.expectEqualStrings("object", vector_item_get_argv[0].string);
+    try testing.expectEqualStrings("get", vector_item_get_argv[1].string);
+    try testing.expectEqualStrings("0x<arg0-item0-object-id>", vector_item_get_argv[2].string);
+    try testing.expectEqualStrings("--summarize", vector_item_get_argv[3].string);
+    const vector_item_query_argv = parameter.get("vector_item_owned_object_query_argv").?.array.items;
+    try testing.expectEqual(@as(usize, 6), vector_item_query_argv.len);
+    try testing.expectEqualStrings("account", vector_item_query_argv[0].string);
+    try testing.expectEqualStrings("objects", vector_item_query_argv[1].string);
+    try testing.expectEqualStrings("0x<owner>", vector_item_query_argv[2].string);
+    try testing.expectEqualStrings("--struct-type", vector_item_query_argv[3].string);
+    try testing.expectEqualStrings("0x2::coin::Coin<0x2::sui::SUI>", vector_item_query_argv[4].string);
+    try testing.expectEqualStrings(
+        "[[\"<arg0-item0-object-id-or-select-token>\"]]",
+        parsed.value.object.get("call_template").?.object.get("args_json").?.string,
+    );
+}
+
 test "runCommand move package resolves aliases before issuing RPC" {
     const testing = std.testing;
 

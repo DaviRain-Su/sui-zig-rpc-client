@@ -3585,6 +3585,9 @@ pub const SuiRpcClient = struct {
             return try std.fmt.allocPrint(allocator, "\"<arg{d}-object-id-or-select-token>\"", .{index});
         }
         if (std.mem.eql(u8, kind, "vector")) {
+            if (concreteVectorObjectStructTypeFromSignature(parameter.signature) != null) {
+                return try std.fmt.allocPrint(allocator, "[\"<arg{d}-item0-object-id-or-select-token>\"]", .{index});
+            }
             return try std.fmt.allocPrint(allocator, "[\"<arg{d}-item0>\"]", .{index});
         }
         if (std.mem.eql(u8, kind, "vector_u8")) return try allocator.dupe(u8, "\"bytes:0x\"");
@@ -3638,6 +3641,40 @@ pub const SuiRpcClient = struct {
         if (std.mem.indexOf(u8, trimmed, "::") == null) return null;
         if (std.mem.indexOfScalar(u8, trimmed, '<') != null) return null;
         return trimmed;
+    }
+
+    fn vectorElementTypeSignature(signature: []const u8) ?[]const u8 {
+        const trimmed = std.mem.trim(u8, signature, " \t\r\n");
+        if (!std.mem.startsWith(u8, trimmed, "vector<")) return null;
+        if (trimmed.len <= "vector<".len or trimmed[trimmed.len - 1] != '>') return null;
+        return std.mem.trim(u8, trimmed["vector<".len .. trimmed.len - 1], " \t\r\n");
+    }
+
+    fn containsMoveTypeParameterText(signature: []const u8) bool {
+        const trimmed = std.mem.trim(u8, signature, " \t\r\n");
+        var index: usize = 0;
+        while (index < trimmed.len) : (index += 1) {
+            if (trimmed[index] != 'T') continue;
+            if (index + 1 >= trimmed.len or !std.ascii.isDigit(trimmed[index + 1])) continue;
+            if (index != 0) {
+                const previous = trimmed[index - 1];
+                if (previous != '<' and previous != ',' and previous != ' ') continue;
+            }
+
+            var end = index + 1;
+            while (end < trimmed.len and std.ascii.isDigit(trimmed[end])) : (end += 1) {}
+            if (end == trimmed.len or trimmed[end] == '>' or trimmed[end] == ',' or trimmed[end] == ' ') {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    fn concreteVectorObjectStructTypeFromSignature(signature: []const u8) ?[]const u8 {
+        const element_signature = vectorElementTypeSignature(signature) orelse return null;
+        if (std.mem.indexOf(u8, element_signature, "::") == null) return null;
+        if (containsMoveTypeParameterText(element_signature)) return null;
+        return element_signature;
     }
 
     fn buildObjectInputSelectToken(
@@ -3963,6 +4000,32 @@ pub const SuiRpcClient = struct {
 
             if (parameter.omitted_from_explicit_args) continue;
             const lowering_kind = parameter.lowering_kind orelse continue;
+            if (std.mem.eql(u8, lowering_kind, "vector")) {
+                const item_struct_type = concreteVectorObjectStructTypeFromSignature(parameter.signature) orelse continue;
+                const object_id_placeholder = try std.fmt.allocPrint(
+                    allocator,
+                    "0x<arg{d}-item0-object-id>",
+                    .{index},
+                );
+                defer allocator.free(object_id_placeholder);
+
+                parameter.vector_item_object_get_argv = try buildObjectGetArgv(allocator, object_id_placeholder);
+                parameter.vector_item_imm_or_owned_object_input_select_token = try buildObjectInputSelectToken(
+                    allocator,
+                    object_id_placeholder,
+                    .imm_or_owned,
+                    false,
+                );
+                parameter.vector_item_owned_object_select_token = try buildOwnedObjectSelectToken(
+                    allocator,
+                    item_struct_type,
+                );
+                parameter.vector_item_owned_object_query_argv = try buildOwnedObjectQueryArgv(
+                    allocator,
+                    item_struct_type,
+                );
+                continue;
+            }
             if (!std.mem.eql(u8, lowering_kind, "object")) continue;
             if (object_preset.inferKindFromTypeSignature(parameter.signature)) |preset_kind| {
                 parameter.object_get_argv = try buildObjectGetArgv(

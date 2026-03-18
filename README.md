@@ -849,6 +849,10 @@ zig build run -- move function cetus_clmm_mainnet pool add_liquidity_fix_coin \
 - `parameters[*].imm_or_owned_object_input_select_token`: object 参数通用的 direct `object_input(imm_or_owned)` 候选
 - `parameters[*].receiving_object_input_select_token`: 如果参数是 by-value object，CLI 会额外给一个 `object_input(receiving)` 候选
 - `parameters[*].object_get_argv`: 对应的 `object get` 查询模板；preset object 会直接用 alias，其他 object 用 object-id 占位符
+- `parameters[*].vector_item_imm_or_owned_object_input_select_token`: 如果参数是 `vector<object>`，CLI 会给单个元素的 direct `object_input(imm_or_owned)` 候选
+- `parameters[*].vector_item_owned_object_select_token`: 如果参数是 `vector<concrete object struct>`，CLI 会给单个元素的 `owned_object_struct_type` 候选
+- `parameters[*].vector_item_object_get_argv`: `vector<object>` 单个元素的 `object get` 查询模板
+- `parameters[*].vector_item_owned_object_query_argv`: `vector<concrete object struct>` 单个元素的 `account objects --struct-type` 查询模板
 - `parameters[*].owned_object_select_token`: 如果参数类型是 concrete object struct，CLI 会额外给一个 `owned_object_struct_type` 选择 token 候选
 - `parameters[*].owned_object_query_argv`: 对应的 `account objects --struct-type` 查询模板
 - `call_template.type_args_json`: 直接可改的 `--type-args` JSON 模板
@@ -876,6 +880,8 @@ zig build run -- move function cetus_clmm_mainnet pool add_liquidity_fix_coin \
 - `parameters[*].owned_object_query_argv`
 
 这些字段都是“候选调用/发现路径”，不是 ownership 或 sharedness 断言。像 Cetus `Pool<T0,T1>` 这类非 preset shared object，CLI 现在至少会直接给出 `object get` 和 `object_input(shared)` 骨架；而 `Position` 这类 concrete owned object 还会额外带 `account objects --struct-type` 查询模板。
+
+对于 `vector<Coin<T>>` 这类对象向量，summary 现在也会补“单个元素”的 discovery/input skeleton。这对 Cetus 一类要求 coin vector 的接口更实用，因为你可以先拿 `vector_item_owned_object_query_argv` 找一批候选 coin，再把返回的 object id 或 select token 填回 `--args` 数组。
 
 当 ABI 显示参数是非 `vector<u8>` 的 `vector<T>` 时，CLI 现在会在本地 programmable builder 路径里自动插入 `MakeMoveVec`。这对 Cetus 一类需要 `vector<Coin<_>>` 的调用很重要，因为你可以直接传：
 
