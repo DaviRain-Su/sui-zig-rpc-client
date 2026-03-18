@@ -4570,6 +4570,26 @@ pub const SuiRpcClient = struct {
         }
     }
 
+    fn uniqueHighestScoreIndex(scores: []const usize) ?usize {
+        var best_index: ?usize = null;
+        var best_score: usize = 0;
+        var tied = false;
+
+        for (scores, 0..) |score, index| {
+            if (score == 0) continue;
+            if (best_index == null or score > best_score) {
+                best_index = index;
+                best_score = score;
+                tied = false;
+                continue;
+            }
+            if (score == best_score) tied = true;
+        }
+
+        if (tied) return null;
+        return best_index;
+    }
+
     fn applySharedCandidateSelectionHintsFromOwnedCandidates(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
@@ -4587,10 +4607,11 @@ pub const SuiRpcClient = struct {
             for (candidates, 0..) |candidate, index| {
                 candidate_object_ids[index] = candidate.object_id;
             }
+            const candidate_scores = try allocator.alloc(usize, candidates.len);
+            defer allocator.free(candidate_scores);
+            @memset(candidate_scores, 0);
 
-            var matched_index: ?usize = null;
-            var ambiguous = false;
-            outer: for (parameters) |other_parameter| {
+            for (parameters) |other_parameter| {
                 const owned_candidates = other_parameter.owned_object_candidates orelse continue;
                 for (owned_candidates) |owned_candidate| {
                     const response = self.getObjectWithOptions(owned_candidate.object_id, .{ .show_content = true }) catch continue;
@@ -4601,20 +4622,11 @@ pub const SuiRpcClient = struct {
                         response,
                         candidate_object_ids,
                     ) orelse continue;
-
-                    if (matched_index) |existing_index| {
-                        if (existing_index != candidate_index) {
-                            ambiguous = true;
-                            break :outer;
-                        }
-                        continue;
-                    }
-                    matched_index = candidate_index;
+                    candidate_scores[candidate_index] += 1;
                 }
             }
 
-            if (ambiguous) continue;
-            const index = matched_index orelse continue;
+            const index = uniqueHighestScoreIndex(candidate_scores) orelse continue;
             parameter.auto_selected_arg_json = try buildAutoSelectedScalarArgJson(
                 allocator,
                 if (isMoveMutableReferenceSignature(parameter.signature))
