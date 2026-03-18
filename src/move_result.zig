@@ -35,6 +35,7 @@ pub const OwnedMoveFunctionSummary = struct {
     function_name: ?[]u8 = null,
     visibility: ?[]u8 = null,
     is_entry: bool = false,
+    applied_type_args_json: ?[]u8 = null,
     type_parameters: []OwnedMoveTypeParameter,
     parameters: []OwnedMoveParameterSummary,
     returns: []OwnedMoveParameterSummary,
@@ -45,6 +46,7 @@ pub const OwnedMoveFunctionSummary = struct {
         if (self.module_name) |value| allocator.free(value);
         if (self.function_name) |value| allocator.free(value);
         if (self.visibility) |value| allocator.free(value);
+        if (self.applied_type_args_json) |value| allocator.free(value);
         for (self.type_parameters) |*item| item.deinit(allocator);
         allocator.free(self.type_parameters);
         for (self.parameters) |*item| item.deinit(allocator);
@@ -206,7 +208,7 @@ fn appendMoveTypeText(
     }
 }
 
-fn moveTypeText(
+pub fn moveTypeText(
     allocator: std.mem.Allocator,
     value: std.json.Value,
 ) ![]u8 {
@@ -465,6 +467,7 @@ test "extractMoveFunctionSummary parses normalized function responses" {
     try testing.expectEqualStrings("swap", summary.function_name.?);
     try testing.expectEqualStrings("Public", summary.visibility.?);
     try testing.expect(summary.is_entry);
+    try testing.expect(summary.applied_type_args_json == null);
     try testing.expectEqual(@as(usize, 1), summary.type_parameters.len);
     try testing.expect(summary.type_parameters[0].is_phantom);
     try testing.expectEqualStrings("drop", summary.type_parameters[0].abilities[0]);

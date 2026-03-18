@@ -1902,6 +1902,7 @@ fn moveQueryFromArgs(args: *const cli.ParsedArgs) !client.rpc_client.MoveQuery {
                 .package_id = args.move_package orelse return error.InvalidCli,
                 .module = args.move_module orelse return error.InvalidCli,
                 .function_name = args.move_function orelse return error.InvalidCli,
+                .type_arguments_json = args.tx_build_type_args,
             },
         },
         else => return error.InvalidCli,
@@ -2908,6 +2909,72 @@ test "runCommand move function with --summarize adds owned object discovery temp
     try testing.expectEqualStrings(
         "0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb::position::Position",
         position_query_argv[4].string,
+    );
+}
+
+test "runCommand move function with --summarize specializes generic signatures with type arguments" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            std.debug.assert(std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction"));
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0x2\"") != null);
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"pool\"") != null);
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"swap_generic\"") != null);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"visibility\":\"Public\",\"isEntry\":true,\"typeParameters\":[[]],\"parameters\":[{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"pool\",\"name\":\"Pool\",\"typeParams\":[{\"TypeParameter\":0}]}}},{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"coin\",\"name\":\"Coin\",\"typeParams\":[{\"TypeParameter\":0}]}}]}}",
+            );
+        }
+    }.call;
+
+    var args = cli.ParsedArgs{
+        .command = .move_function,
+        .has_command = true,
+        .move_package = "0x2",
+        .move_module = "pool",
+        .move_function = "swap_generic",
+        .tx_build_type_args = "[\"0x2::sui::SUI\"]",
+        .tx_send_summarize = true,
+    };
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    try testing.expectEqualStrings(
+        "[{\"Struct\":{\"address\":\"0x2\",\"module\":\"sui\",\"name\":\"SUI\",\"typeParams\":[]}}]",
+        parsed.value.object.get("applied_type_args_json").?.string,
+    );
+    try testing.expectEqualStrings(
+        "&mut 0x2::pool::Pool<0x2::sui::SUI>",
+        parsed.value.object.get("parameters").?.array.items[0].object.get("signature").?.string,
+    );
+    try testing.expectEqualStrings(
+        "0x2::coin::Coin<0x2::sui::SUI>",
+        parsed.value.object.get("returns").?.array.items[0].object.get("signature").?.string,
+    );
+    try testing.expectEqual(
+        std.json.Value.null,
+        parsed.value.object.get("parameters").?.array.items[0].object.get("owned_object_select_token").?,
+    );
+    try testing.expectEqualStrings(
+        "[{\"Struct\":{\"address\":\"0x2\",\"module\":\"sui\",\"name\":\"SUI\",\"typeParams\":[]}}]",
+        parsed.value.object.get("call_template").?.object.get("type_args_json").?.string,
     );
 }
 

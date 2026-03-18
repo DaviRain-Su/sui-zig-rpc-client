@@ -3246,6 +3246,29 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
                 i += 1;
                 continue;
             }
+            if (parsed.command == .move_function and std.mem.eql(u8, token, "--type-args")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                try setOptionalStringArg(
+                    allocator,
+                    &parsed,
+                    args[i + 1],
+                    &parsed.owned_tx_build_type_args,
+                    &parsed.tx_build_type_args,
+                );
+                i += 2;
+                continue;
+            }
+            if (parsed.command == .move_function and std.mem.eql(u8, token, "--type-arg")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                try appendRepeatedLoadedValue(
+                    allocator,
+                    &parsed.tx_build_type_arg_items,
+                    &parsed.owned_tx_build_type_arg_items,
+                    args[i + 1],
+                );
+                i += 2;
+                continue;
+            }
             return error.InvalidCli;
         }
 
@@ -3543,6 +3566,8 @@ pub fn printUsage(writer: anytype) !void {
         "    --summarize                         Print struct/function inventory instead of raw normalized JSON\n" ++
         "  move function <package-id-or-alias> <module> <function>\n" ++
         "                                       Call sui_getNormalizedMoveFunction\n" ++
+        "    --type-args <json|@file>            Optional JSON array to specialize generic type parameters locally\n" ++
+        "    --type-arg <type>                   Repeatable Move type argument shorthand for --type-args\n" ++
         "    --summarize                         Print parameter/return signature summary, lowering hints, discovery hints, and tx call templates\n" ++
         "  object get <object-id-or-alias>      Call sui_getObject\n" ++
         "    --options <json|@file>              object read options\n" ++
@@ -6199,6 +6224,35 @@ test "parseCliArgs parses move function command with package alias" {
     try testing.expectEqualStrings(package_preset.cetus_clmm_mainnet, parsed.move_package.?);
     try testing.expectEqualStrings("pool", parsed.move_module.?);
     try testing.expectEqualStrings("swap", parsed.move_function.?);
+    try testing.expect(parsed.tx_send_summarize);
+}
+
+test "parseCliArgs parses move function command with type arguments" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "move",
+        "function",
+        "0x2",
+        "pool",
+        "swap",
+        "--type-arg",
+        "0x2::sui::SUI",
+        "--type-arg",
+        "0x2::sui::SUI",
+        "--summarize",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.move_function, parsed.command);
+    try testing.expectEqualStrings("0x2", parsed.move_package.?);
+    try testing.expectEqualStrings("pool", parsed.move_module.?);
+    try testing.expectEqualStrings("swap", parsed.move_function.?);
+    try testing.expectEqualStrings("[\"0x2::sui::SUI\",\"0x2::sui::SUI\"]", parsed.tx_build_type_args.?);
     try testing.expect(parsed.tx_send_summarize);
 }
 

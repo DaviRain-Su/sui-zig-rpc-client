@@ -1682,6 +1682,7 @@ pub const MoveQuery = union(enum) {
         package_id: []const u8,
         module: []const u8,
         function_name: []const u8,
+        type_arguments_json: ?[]const u8 = null,
     },
     module: struct {
         package_id: []const u8,
@@ -3703,6 +3704,15 @@ pub const SuiRpcClient = struct {
         return output.toOwnedSlice(allocator);
     }
 
+    fn resolvedMoveFunctionTypeArgsTemplateJson(
+        allocator: std.mem.Allocator,
+        type_parameter_count: usize,
+        concrete_type_arguments_json: ?[]const u8,
+    ) ![]u8 {
+        if (concrete_type_arguments_json) |value| return try allocator.dupe(u8, value);
+        return try buildMoveFunctionTypeArgsTemplateJson(allocator, type_parameter_count);
+    }
+
     fn buildMoveFunctionCommandTemplateJson(
         allocator: std.mem.Allocator,
         summary: move_result.OwnedMoveFunctionSummary,
@@ -3841,9 +3851,56 @@ pub const SuiRpcClient = struct {
         return argv;
     }
 
+    fn applyMoveFunctionTypeArgumentsToSummary(
+        allocator: std.mem.Allocator,
+        summary: *move_result.OwnedMoveFunctionSummary,
+        parameters_value: std.json.Value,
+        returns_value: std.json.Value,
+        type_arguments_json: []const u8,
+    ) ![]u8 {
+        const parsed_type_arguments = try std.json.parseFromSlice(std.json.Value, allocator, type_arguments_json, .{});
+        defer parsed_type_arguments.deinit();
+        if (parsed_type_arguments.value != .array) return error.InvalidCli;
+        const raw_type_arguments = parsed_type_arguments.value.array.items;
+        if (raw_type_arguments.len != summary.type_parameters.len) return error.InvalidCli;
+
+        const canonical_type_arguments_json = try canonicalMoveTypeArgumentsJson(allocator, raw_type_arguments);
+        errdefer allocator.free(canonical_type_arguments_json);
+
+        for (parameters_value.array.items, 0..) |parameter, index| {
+            const resolved_parameter_json = try substituteNormalizedMoveTypeJson(allocator, parameter, raw_type_arguments);
+            defer allocator.free(resolved_parameter_json);
+            const resolved_parameter_parsed = try std.json.parseFromSlice(std.json.Value, allocator, resolved_parameter_json, .{});
+            defer resolved_parameter_parsed.deinit();
+
+            allocator.free(summary.parameters[index].signature);
+            summary.parameters[index].signature = try move_result.moveTypeText(allocator, resolved_parameter_parsed.value);
+            const classified = try classifyNormalizedMoveType(allocator, resolved_parameter_parsed.value);
+            summary.parameters[index].lowering_kind = if (classified) |kind|
+                @tagName(kind)
+            else
+                "runtime";
+        }
+
+        for (returns_value.array.items, 0..) |item, index| {
+            const resolved_return_json = try substituteNormalizedMoveTypeJson(allocator, item, raw_type_arguments);
+            defer allocator.free(resolved_return_json);
+            const resolved_return_parsed = try std.json.parseFromSlice(std.json.Value, allocator, resolved_return_json, .{});
+            defer resolved_return_parsed.deinit();
+
+            allocator.free(summary.returns[index].signature);
+            summary.returns[index].signature = try move_result.moveTypeText(allocator, resolved_return_parsed.value);
+        }
+
+        summary.applied_type_args_json = try allocator.dupe(u8, canonical_type_arguments_json);
+        return canonical_type_arguments_json;
+    }
+
     fn populateMoveFunctionCallTemplate(
         allocator: std.mem.Allocator,
         summary: *move_result.OwnedMoveFunctionSummary,
+        parameter_allows_owned_discovery: []const bool,
+        concrete_type_arguments_json: ?[]const u8,
     ) !void {
         for (summary.parameters, 0..) |*parameter, index| {
             parameter.placeholder_json = try placeholderJsonForMoveParameter(allocator, parameter.*, index);
@@ -3852,13 +3909,18 @@ pub const SuiRpcClient = struct {
             if (parameter.omitted_from_explicit_args) continue;
             const lowering_kind = parameter.lowering_kind orelse continue;
             if (!std.mem.eql(u8, lowering_kind, "object")) continue;
+            if (!parameter_allows_owned_discovery[index]) continue;
             if (object_preset.inferKindFromTypeSignature(parameter.signature) != null) continue;
             const struct_type = concreteObjectStructTypeFromSignature(parameter.signature) orelse continue;
             parameter.owned_object_select_token = try buildOwnedObjectSelectToken(allocator, struct_type);
             parameter.owned_object_query_argv = try buildOwnedObjectQueryArgv(allocator, struct_type);
         }
 
-        const type_args_json = try buildMoveFunctionTypeArgsTemplateJson(allocator, summary.type_parameters.len);
+        const type_args_json = try resolvedMoveFunctionTypeArgsTemplateJson(
+            allocator,
+            summary.type_parameters.len,
+            concrete_type_arguments_json,
+        );
         errdefer allocator.free(type_args_json);
         const args_json = try buildMoveFunctionArgsTemplateJson(allocator, summary.parameters);
         errdefer allocator.free(args_json);
@@ -3906,6 +3968,7 @@ pub const SuiRpcClient = struct {
         module: []const u8,
         function_name: []const u8,
         response_json: []const u8,
+        type_arguments_json: ?[]const u8,
     ) !move_result.OwnedMoveFunctionSummary {
         _ = self;
         var summary = try move_result.extractMoveFunctionSummary(
@@ -3924,18 +3987,43 @@ pub const SuiRpcClient = struct {
         const result = parsed.value.object.get("result") orelse return error.InvalidResponse;
         if (result != .object) return error.InvalidResponse;
         const parameters = result.object.get("parameters") orelse return error.InvalidResponse;
+        const returns = result.object.get("return") orelse result.object.get("returns") orelse return error.InvalidResponse;
         if (parameters != .array) return error.InvalidResponse;
+        if (returns != .array) return error.InvalidResponse;
         if (parameters.array.items.len != summary.parameters.len) return error.InvalidResponse;
 
+        const parameter_allows_owned_discovery = try allocator.alloc(bool, parameters.array.items.len);
+        defer allocator.free(parameter_allows_owned_discovery);
         for (parameters.array.items, 0..) |item, index| {
-            const classified = try classifyNormalizedMoveType(allocator, item);
-            summary.parameters[index].lowering_kind = if (classified) |kind|
-                @tagName(kind)
-            else
-                "runtime";
+            parameter_allows_owned_discovery[index] = !normalizedMoveTypeContainsTypeParameter(item);
         }
 
-        try populateMoveFunctionCallTemplate(allocator, &summary);
+        const resolved_type_arguments_json = if (type_arguments_json) |raw_type_arguments_json|
+            try applyMoveFunctionTypeArgumentsToSummary(
+                allocator,
+                &summary,
+                parameters,
+                returns,
+                raw_type_arguments_json,
+            )
+        else blk: {
+            for (parameters.array.items, 0..) |item, index| {
+                const classified = try classifyNormalizedMoveType(allocator, item);
+                summary.parameters[index].lowering_kind = if (classified) |kind|
+                    @tagName(kind)
+                else
+                    "runtime";
+            }
+            break :blk null;
+        };
+        defer if (resolved_type_arguments_json) |value| allocator.free(value);
+
+        try populateMoveFunctionCallTemplate(
+            allocator,
+            &summary,
+            parameter_allows_owned_discovery,
+            resolved_type_arguments_json,
+        );
 
         return summary;
     }
@@ -3972,6 +4060,7 @@ pub const SuiRpcClient = struct {
         package_id: []const u8,
         module: []const u8,
         function_name: []const u8,
+        raw_type_arguments_json: ?[]const u8,
     ) ![]LocalMoveCallParameterKind {
         const response = try self.getNormalizedMoveFunction(allocator, package_id, module, function_name);
         defer allocator.free(response);
@@ -3985,10 +4074,26 @@ pub const SuiRpcClient = struct {
         const parameters = result.object.get("parameters") orelse return error.InvalidResponse;
         if (parameters != .array) return error.InvalidResponse;
 
+        var parsed_type_arguments: ?std.json.Parsed(std.json.Value) = null;
+        defer if (parsed_type_arguments) |*value| value.deinit();
+        const raw_type_arguments: []const std.json.Value = if (raw_type_arguments_json) |type_arguments_json| blk: {
+            parsed_type_arguments = try std.json.parseFromSlice(std.json.Value, allocator, type_arguments_json, .{});
+            if (parsed_type_arguments.?.value != .array) return error.InvalidCli;
+            break :blk parsed_type_arguments.?.value.array.items;
+        } else &.{};
+
         var kinds = std.ArrayList(LocalMoveCallParameterKind){};
         defer kinds.deinit(allocator);
         for (parameters.array.items) |parameter| {
-            const classified = try classifyNormalizedMoveType(allocator, parameter);
+            const resolved_parameter_json = if (raw_type_arguments_json != null)
+                try substituteNormalizedMoveTypeJson(allocator, parameter, raw_type_arguments)
+            else
+                try canonicalNormalizedMoveTypeJson(allocator, parameter);
+            defer allocator.free(resolved_parameter_json);
+
+            const resolved_parameter_parsed = try std.json.parseFromSlice(std.json.Value, allocator, resolved_parameter_json, .{});
+            defer resolved_parameter_parsed.deinit();
+            const classified = try classifyNormalizedMoveType(allocator, resolved_parameter_parsed.value);
             if (classified == null) continue;
             try kinds.append(allocator, classified.?);
         }
@@ -5845,7 +5950,7 @@ pub const SuiRpcClient = struct {
             }.send,
         };
 
-        const kinds = try rpc.getMoveCallUserParameterKinds(allocator, "0x2", "pool", "swap");
+        const kinds = try rpc.getMoveCallUserParameterKinds(allocator, "0x2", "pool", "swap", null);
         defer allocator.free(kinds);
         try testing.expectEqual(@as(usize, 3), kinds.len);
         try testing.expectEqual(LocalMoveCallParameterKind.object, kinds[0]);
@@ -11077,6 +11182,7 @@ pub const SuiRpcClient = struct {
                         spec.module,
                         spec.function_name,
                         response,
+                        spec.type_arguments_json,
                     ),
                 };
             },
@@ -20272,6 +20378,7 @@ test "runReadQueryAction dispatches summarized move function queries" {
                     try testing.expectEqualStrings("0x2", value.package_id.?);
                     try testing.expectEqualStrings("swap", value.function_name.?);
                     try testing.expectEqual(@as(usize, 3), value.parameters.len);
+                    try testing.expect(value.applied_type_args_json == null);
                     try testing.expectEqualStrings("object", value.parameters[0].lowering_kind.?);
                     try testing.expectEqualStrings("\"<arg0-object-id-or-select-token>\"", value.parameters[0].placeholder_json.?);
                     try testing.expectEqualStrings(
