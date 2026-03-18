@@ -47,6 +47,8 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
   candidate has a unique highest score.
 - [x] Candidate `selection_score` exposure and deterministic score-first
   ordering in summaries.
+- [x] Deterministic tie-break auto-selection for scored shared/owned
+  candidates, with explicit `auto_selected_tiebreak` visibility.
 
 ### Coin automation
 

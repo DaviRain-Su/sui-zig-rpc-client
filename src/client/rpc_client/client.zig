@@ -4542,6 +4542,7 @@ pub const SuiRpcClient = struct {
     ) []const u8 {
         if (parameter.omitted_from_explicit_args) return "runtime_omitted";
         if (parameter.explicit_arg_json != null) return "explicit";
+        if (parameter.auto_selected_via_tiebreak and parameter.auto_selected_arg_json != null) return "auto_selected_tiebreak";
         if (parameter.auto_selected_arg_json != null) return "auto_selected";
         if (parameter.placeholder_json != null) return "placeholder";
         return "unresolved";
@@ -4870,35 +4871,24 @@ pub const SuiRpcClient = struct {
             }
 
             const index = matched_index orelse continue;
-            parameter.auto_selected_arg_json = try buildAutoSelectedScalarArgJson(
+            replaceMoveParameterAutoSelectedArgJson(
                 allocator,
-                if (isMoveMutableReferenceSignature(parameter.signature))
-                    candidates[index].mutable_shared_object_input_select_token
-                else
-                    candidates[index].shared_object_input_select_token,
+                parameter,
+                try buildAutoSelectedScalarArgJson(
+                    allocator,
+                    if (isMoveMutableReferenceSignature(parameter.signature))
+                        candidates[index].mutable_shared_object_input_select_token
+                    else
+                        candidates[index].shared_object_input_select_token,
+                ),
             );
         }
     }
 
-    fn uniqueHighestScoreIndex(scores: []const usize) ?usize {
-        var best_index: ?usize = null;
-        var best_score: usize = 0;
-        var tied = false;
-
-        for (scores, 0..) |score, index| {
-            if (score == 0) continue;
-            if (best_index == null or score > best_score) {
-                best_index = index;
-                best_score = score;
-                tied = false;
-                continue;
-            }
-            if (score == best_score) tied = true;
-        }
-
-        if (tied) return null;
-        return best_index;
-    }
+    const SortedCandidateSelectionDecision = struct {
+        has_selection: bool = false,
+        used_tiebreak: bool = false,
+    };
 
     fn sharedCandidateShouldSortBefore(
         left: move_result.SharedMoveObjectCandidate,
@@ -4920,6 +4910,27 @@ pub const SuiRpcClient = struct {
                 std.mem.swap(move_result.SharedMoveObjectCandidate, &candidates[scan], &candidates[scan - 1]);
             }
         }
+    }
+
+    fn selectSortedSharedCandidateToken(
+        parameter: move_result.OwnedMoveParameterSummary,
+        candidates: []const move_result.SharedMoveObjectCandidate,
+    ) ?struct { token: []const u8, decision: SortedCandidateSelectionDecision } {
+        if (candidates.len == 0) return null;
+        if (candidates[0].selection_score == 0) return null;
+
+        const used_tiebreak = candidates.len > 1 and
+            candidates[1].selection_score == candidates[0].selection_score;
+        return .{
+            .token = if (isMoveMutableReferenceSignature(parameter.signature))
+                candidates[0].mutable_shared_object_input_select_token
+            else
+                candidates[0].shared_object_input_select_token,
+            .decision = .{
+                .has_selection = true,
+                .used_tiebreak = used_tiebreak,
+            },
+        };
     }
 
     fn populateSharedObjectCandidateFallbacksFromMoveParameters(
@@ -4957,7 +4968,11 @@ pub const SuiRpcClient = struct {
                     discovered_candidates[0].mutable_shared_object_input_select_token
                 else
                     discovered_candidates[0].shared_object_input_select_token;
-                parameter.auto_selected_arg_json = try buildAutoSelectedScalarArgJson(allocator, token);
+                replaceMoveParameterAutoSelectedArgJson(
+                    allocator,
+                    parameter,
+                    try buildAutoSelectedScalarArgJson(allocator, token),
+                );
             }
         }
     }
@@ -4982,6 +4997,23 @@ pub const SuiRpcClient = struct {
                 std.mem.swap(move_result.OwnedMoveObjectCandidate, &candidates[scan], &candidates[scan - 1]);
             }
         }
+    }
+
+    fn selectSortedOwnedCandidateToken(
+        candidates: []const move_result.OwnedMoveObjectCandidate,
+    ) ?struct { token: []const u8, decision: SortedCandidateSelectionDecision } {
+        if (candidates.len == 0) return null;
+        if (candidates[0].selection_score == 0) return null;
+
+        const used_tiebreak = candidates.len > 1 and
+            candidates[1].selection_score == candidates[0].selection_score;
+        return .{
+            .token = candidates[0].object_input_select_token,
+            .decision = .{
+                .has_selection = true,
+                .used_tiebreak = used_tiebreak,
+            },
+        };
     }
 
     fn applySharedCandidateSelectionHintsFromOwnedCandidates(
@@ -5020,21 +5052,18 @@ pub const SuiRpcClient = struct {
                 }
             }
 
-            const selected_token = if (uniqueHighestScoreIndex(candidate_scores)) |index|
-                if (isMoveMutableReferenceSignature(parameter.signature))
-                    candidates[index].mutable_shared_object_input_select_token
-                else
-                    candidates[index].shared_object_input_select_token
-            else
-                null;
-
             for (candidates, 0..) |*candidate, index| {
                 candidate.selection_score = candidate_scores[index];
             }
             sortSharedObjectCandidatesByScore(candidates);
 
-            if (selected_token) |token| {
-                parameter.auto_selected_arg_json = try buildAutoSelectedScalarArgJson(allocator, token);
+            if (selectSortedSharedCandidateToken(parameter.*, candidates)) |selection| {
+                replaceMoveParameterAutoSelectedArgJson(
+                    allocator,
+                    parameter,
+                    try buildAutoSelectedScalarArgJson(allocator, selection.token),
+                );
+                parameter.auto_selected_via_tiebreak = selection.decision.used_tiebreak;
             }
         }
     }
@@ -5072,18 +5101,18 @@ pub const SuiRpcClient = struct {
                 );
             }
 
-            const selected_token = if (uniqueHighestScoreIndex(candidate_scores)) |index|
-                candidates[index].object_input_select_token
-            else
-                null;
-
             for (candidates, 0..) |*candidate, index| {
                 candidate.selection_score = candidate_scores[index];
             }
             sortOwnedObjectCandidatesByScore(candidates);
 
-            if (selected_token) |token| {
-                parameter.auto_selected_arg_json = try buildAutoSelectedScalarArgJson(allocator, token);
+            if (selectSortedOwnedCandidateToken(candidates)) |selection| {
+                replaceMoveParameterAutoSelectedArgJson(
+                    allocator,
+                    parameter,
+                    try buildAutoSelectedScalarArgJson(allocator, selection.token),
+                );
+                parameter.auto_selected_via_tiebreak = selection.decision.used_tiebreak;
             }
         }
     }
@@ -5540,6 +5569,7 @@ pub const SuiRpcClient = struct {
     ) void {
         if (parameter.auto_selected_arg_json) |old_value| allocator.free(old_value);
         parameter.auto_selected_arg_json = value;
+        parameter.auto_selected_via_tiebreak = false;
     }
 
     fn applyCoinCandidateSelectionHintsFromExplicitArgs(
@@ -5601,7 +5631,11 @@ pub const SuiRpcClient = struct {
         if (parameter.auto_selected_arg_json != null) return;
 
         if (parameter.vector_item_owned_object_candidates) |candidates| {
-            parameter.auto_selected_arg_json = try buildAutoSelectedVectorArgJson(allocator, candidates);
+            replaceMoveParameterAutoSelectedArgJson(
+                allocator,
+                parameter,
+                try buildAutoSelectedVectorArgJson(allocator, candidates),
+            );
             if (parameter.auto_selected_arg_json != null) return;
         }
 
@@ -5611,16 +5645,24 @@ pub const SuiRpcClient = struct {
                     candidates[0].mutable_shared_object_input_select_token
                 else
                     candidates[0].shared_object_input_select_token;
-                parameter.auto_selected_arg_json = try buildAutoSelectedScalarArgJson(allocator, token);
+                replaceMoveParameterAutoSelectedArgJson(
+                    allocator,
+                    parameter,
+                    try buildAutoSelectedScalarArgJson(allocator, token),
+                );
                 return;
             }
         }
 
         if (parameter.owned_object_candidates) |candidates| {
             if (candidates.len == 1) {
-                parameter.auto_selected_arg_json = try buildAutoSelectedScalarArgJson(
+                replaceMoveParameterAutoSelectedArgJson(
                     allocator,
-                    candidates[0].object_input_select_token,
+                    parameter,
+                    try buildAutoSelectedScalarArgJson(
+                        allocator,
+                        candidates[0].object_input_select_token,
+                    ),
                 );
             } else if (coinTypeFromMoveSignature(parameter.signature) != null) {
                 var selected_token: ?[]const u8 = null;
@@ -5633,7 +5675,11 @@ pub const SuiRpcClient = struct {
                     }
                 }
                 if (selected_token) |token| {
-                    parameter.auto_selected_arg_json = try buildAutoSelectedScalarArgJson(allocator, token);
+                    replaceMoveParameterAutoSelectedArgJson(
+                        allocator,
+                        parameter,
+                        try buildAutoSelectedScalarArgJson(allocator, token),
+                    );
                 }
             }
         }

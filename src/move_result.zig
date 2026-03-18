@@ -41,6 +41,7 @@ pub const OwnedMoveParameterSummary = struct {
     placeholder_json: ?[]u8 = null,
     explicit_arg_json: ?[]u8 = null,
     auto_selected_arg_json: ?[]u8 = null,
+    auto_selected_via_tiebreak: bool = false,
     omitted_from_explicit_args: bool = false,
     coin_with_min_balance_select_token: ?[]u8 = null,
     shared_object_input_select_token: ?[]u8 = null,

@@ -891,7 +891,7 @@ zig build run -- events \
 - `call_template.type_args_json`: 直接可改的 `--type-args` JSON 模板
 - `call_template.args_json`: 直接可改的 `--args` JSON 模板
 - `call_template.preferred_args_json`: 在保留原始模板的同时，优先把 CLI 已经能自动选出的参数回填进去
-- `call_template.preferred_resolution`: 结构化展示每个参数当前是 `explicit`、`auto_selected`、`placeholder` 还是 `runtime_omitted`，并给出 `is_executable`、`candidate_count` / `top_selection_score` / `unresolved_parameter_indices`，方便直接看出 CLI 认为的“当前最佳组合”，以及还剩哪些参数位会真正阻塞执行
+- `call_template.preferred_resolution`: 结构化展示每个参数当前是 `explicit`、`auto_selected`、`auto_selected_tiebreak`、`placeholder` 还是 `runtime_omitted`，并给出 `is_executable`、`candidate_count` / `top_selection_score` / `unresolved_parameter_indices`，方便直接看出 CLI 认为的“当前最佳组合”，以及还剩哪些参数位会真正阻塞执行
 - `call_template.move_call_command_json`: 直接可放进 `--commands` / `--command` 的 raw `MoveCall` command 模板
 - `call_template.commands_json`: 直接可放进 `--commands` 的 commands array 模板
 - `call_template.preferred_commands_json`: 如果存在 auto-selected candidate，则给一份优先回填 candidate 的 commands array 模板
