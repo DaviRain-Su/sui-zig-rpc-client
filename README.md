@@ -1007,7 +1007,7 @@ zig build run -- move function cetus_clmm_mainnet pool swap \
 
 对于 `vector<Coin<T>>` 这类对象向量，summary 现在也会补“单个元素”的 discovery/input skeleton。这对 Cetus 一类要求 coin vector 的接口更实用，因为你可以先拿 `vector_item_owned_object_query_argv` 找一批候选 coin，再把返回的 object id 或 select token 填回 `--args` 数组。
 
-如果你在 `move function --summarize` 时同时给了 `--sender`、`--signer` 或 `--from-keystore`，CLI 现在还会进一步把 owner 上下文带进 discovery 流程。对 concrete owned object 和 `vector<concrete owned object>` 参数，summary 会直接尝试 `suix_getOwnedObjects`，把找到的候选对象填进 `owned_object_candidates` / `vector_item_owned_object_candidates`。这一步不会替你自动做最终选择，但已经把“提示层”推进成了“候选集层”。
+如果你在 `move function --summarize` 时同时给了 `--sender`、`--signer` 或 `--from-keystore`，CLI 现在还会进一步把 owner 上下文带进 discovery 流程。对 concrete owned object 和 `vector<concrete owned object>` 参数，summary 会直接尝试 `suix_getOwnedObjects`，把找到的候选对象填进 `owned_object_candidates` / `vector_item_owned_object_candidates`。这里的 concrete owned object 也包括已经特化完成的 generic struct，例如 `0x2::balance::Balance<0x2::sui::SUI>` 或 receipt 一类类型；只要签名里不再残留 `T0/T1` 这类未解析 type parameter，就会进入同一套 owned discovery。 这一步不会替你自动做最终选择，但已经把“提示层”推进成了“候选集层”。
 
 当 ABI 显示参数是非 `vector<u8>` 的 `vector<T>` 时，CLI 现在会在本地 programmable builder 路径里自动插入 `MakeMoveVec`。这对 Cetus 一类需要 `vector<Coin<_>>` 的调用很重要，因为你可以直接传：
 

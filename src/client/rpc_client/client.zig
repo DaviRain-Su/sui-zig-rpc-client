@@ -3743,7 +3743,7 @@ pub const SuiRpcClient = struct {
     fn concreteObjectStructTypeFromSignature(signature: []const u8) ?[]const u8 {
         const trimmed = trimMoveReferenceSignature(signature);
         if (std.mem.indexOf(u8, trimmed, "::") == null) return null;
-        if (std.mem.indexOfScalar(u8, trimmed, '<') != null) return null;
+        if (containsMoveTypeParameterText(trimmed)) return null;
         return trimmed;
     }
 
@@ -3793,6 +3793,27 @@ pub const SuiRpcClient = struct {
         if (std.mem.indexOf(u8, element_signature, "::") == null) return null;
         if (containsMoveTypeParameterText(element_signature)) return null;
         return element_signature;
+    }
+
+    test "concreteObjectStructTypeFromSignature accepts concrete generic structs" {
+        const testing = std.testing;
+
+        try testing.expectEqualStrings(
+            "0x2::balance::Balance<0x2::sui::SUI>",
+            SuiRpcClient.concreteObjectStructTypeFromSignature(
+                "&mut 0x2::balance::Balance<0x2::sui::SUI>",
+            ).?,
+        );
+        try testing.expectEqualStrings(
+            "0x1::receipt::AddLiquidityReceipt<0x2::sui::SUI, 0x2::coin::Coin<0x2::sui::SUI>>",
+            SuiRpcClient.concreteObjectStructTypeFromSignature(
+                "0x1::receipt::AddLiquidityReceipt<0x2::sui::SUI, 0x2::coin::Coin<0x2::sui::SUI>>",
+            ).?,
+        );
+        try testing.expectEqual(
+            @as(?[]const u8, null),
+            SuiRpcClient.concreteObjectStructTypeFromSignature("&mut 0x2::balance::Balance<T0>"),
+        );
     }
 
     fn buildObjectInputSelectToken(
@@ -5868,7 +5889,10 @@ pub const SuiRpcClient = struct {
                         .shared,
                         isMoveMutableReferenceSignature(parameter.signature),
                     );
-                    if (concreteObjectStructTypeFromSignature(parameter.signature) == null) {
+                    const trimmed_signature = trimMoveReferenceSignature(parameter.signature);
+                    if (std.mem.indexOfScalar(u8, trimmed_signature, '<') != null or
+                        concreteObjectStructTypeFromSignature(parameter.signature) == null)
+                    {
                         if (summary.package_id) |event_package_id| {
                             const event_module_name = summary.module_name orelse continue;
                             parameter.shared_object_event_query_argv = try buildEventQueryArgv(
@@ -6206,6 +6230,12 @@ pub const SuiRpcClient = struct {
 
         for (summary.parameters, 0..) |parameter, index| {
             if (coinTypeFromMoveSignature(parameter.signature) != null) {
+                parameter_allows_owned_discovery[index] = true;
+                continue;
+            }
+            if (!isMoveReferenceSignature(parameter.signature) and
+                concreteObjectStructTypeFromSignature(parameter.signature) != null)
+            {
                 parameter_allows_owned_discovery[index] = true;
             }
         }

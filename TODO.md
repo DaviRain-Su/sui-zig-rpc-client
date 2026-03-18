@@ -35,6 +35,7 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
 - [x] Shared/owned object input token generation from object summaries.
 - [x] Preset object aliases such as `clock` and Cetus global config.
 - [x] Owned object candidate discovery from owner context.
+- [x] Concrete generic owned object discovery after type specialization.
 - [x] Shared object candidate discovery from module events.
 - [x] `Pool -> Position` candidate linking across parameters.
 - [x] `Position -> Pool` candidate linking from selected objects.

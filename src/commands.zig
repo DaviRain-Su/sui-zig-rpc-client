@@ -3484,6 +3484,91 @@ test "runCommand move function with --summarize fills owner context into owned o
     );
 }
 
+test "runCommand move function with --summarize discovers specialized generic owned objects from owner context" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"visibility\":\"Public\",\"isEntry\":false,\"typeParameters\":[[]],\"parameters\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"balance\",\"name\":\"Balance\",\"typeParams\":[{\"TypeParameter\":0}]}}],\"return\":[]}}",
+                );
+            }
+
+            std.debug.assert(std.mem.eql(u8, req.method, "suix_getOwnedObjects"));
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0xowner\"") != null);
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"StructType\":\"0x2::balance::Balance<0x2::sui::SUI>\"") != null);
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"showType\":true") != null);
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"showOwner\":true") != null);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xbalance1\",\"version\":\"13\",\"digest\":\"balance-digest-1\",\"type\":\"0x2::balance::Balance<0x2::sui::SUI>\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "move",
+        "function",
+        "0x2",
+        "balance",
+        "redeem",
+        "--type-arg",
+        "0x2::sui::SUI",
+        "--sender",
+        "0xowner",
+        "--summarize",
+    });
+    defer args.deinit(allocator);
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    const parameter = parsed.value.object.get("parameters").?.array.items[0].object;
+    try testing.expectEqualStrings(
+        "select:{\"kind\":\"owned_object_struct_type\",\"owner\":\"0xowner\",\"structType\":\"0x2::balance::Balance<0x2::sui::SUI>\"}",
+        parameter.get("owned_object_select_token").?.string,
+    );
+    const owned_query_argv = parameter.get("owned_object_query_argv").?.array.items;
+    try testing.expectEqual(@as(usize, 6), owned_query_argv.len);
+    try testing.expectEqualStrings("account", owned_query_argv[0].string);
+    try testing.expectEqualStrings("objects", owned_query_argv[1].string);
+    try testing.expectEqualStrings("0xowner", owned_query_argv[2].string);
+    try testing.expectEqualStrings("--struct-type", owned_query_argv[3].string);
+    try testing.expectEqualStrings("0x2::balance::Balance<0x2::sui::SUI>", owned_query_argv[4].string);
+    const owned_candidates = parameter.get("owned_object_candidates").?.array.items;
+    try testing.expectEqual(@as(usize, 1), owned_candidates.len);
+    try testing.expectEqualStrings("0xbalance1", owned_candidates[0].object.get("object_id").?.string);
+    try testing.expectEqualStrings(
+        "0x2::balance::Balance<0x2::sui::SUI>",
+        owned_candidates[0].object.get("type_name").?.string,
+    );
+    try testing.expectEqualStrings(
+        "\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xbalance1\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":13,\\\"digest\\\":\\\"balance-digest-1\\\"}\"",
+        parameter.get("auto_selected_arg_json").?.string,
+    );
+    try testing.expectEqualStrings(
+        "[\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xbalance1\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":13,\\\"digest\\\":\\\"balance-digest-1\\\"}\"]",
+        parsed.value.object.get("call_template").?.object.get("preferred_args_json").?.string,
+    );
+}
+
 test "runCommand move function with --summarize links owned object candidates to selected shared objects" {
     const testing = std.testing;
 
