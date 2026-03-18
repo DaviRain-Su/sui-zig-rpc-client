@@ -4367,6 +4367,168 @@ pub const SuiRpcClient = struct {
         return parameter.explicit_arg_json orelse parameter.auto_selected_arg_json orelse parameter.placeholder_json;
     }
 
+    fn appendUniqueMoveSelectedObjectId(
+        allocator: std.mem.Allocator,
+        collected: *std.ArrayList([]u8),
+        object_id: []const u8,
+    ) !void {
+        for (collected.items) |existing| {
+            if (std.mem.eql(u8, existing, object_id)) return;
+        }
+        try collected.append(allocator, try allocator.dupe(u8, object_id));
+    }
+
+    fn appendSelectedObjectIdsFromArgumentJsonValue(
+        allocator: std.mem.Allocator,
+        collected: *std.ArrayList([]u8),
+        value: std.json.Value,
+    ) !void {
+        switch (value) {
+            .string => |text| {
+                if (selectedRequestTokenJsonText(text) == null) return;
+                var request = try parseSelectedArgumentRequestTokenWithDefaultOwner(allocator, text, null);
+                defer request.deinit(allocator);
+
+                switch (request.value) {
+                    .object_preset => |spec| try appendUniqueMoveSelectedObjectId(
+                        allocator,
+                        collected,
+                        object_preset.objectId(spec.preset),
+                    ),
+                    .object_input => |spec| try appendUniqueMoveSelectedObjectId(
+                        allocator,
+                        collected,
+                        spec.object_id,
+                    ),
+                    .owned_object_object_id => |spec| try appendUniqueMoveSelectedObjectId(
+                        allocator,
+                        collected,
+                        spec.object_id,
+                    ),
+                    else => {},
+                }
+            },
+            .array => |array| {
+                for (array.items) |item| {
+                    try appendSelectedObjectIdsFromArgumentJsonValue(allocator, collected, item);
+                }
+            },
+            .object => |object| {
+                var iterator = object.iterator();
+                while (iterator.next()) |entry| {
+                    try appendSelectedObjectIdsFromArgumentJsonValue(allocator, collected, entry.value_ptr.*);
+                }
+            },
+            else => {},
+        }
+    }
+
+    fn collectSelectedObjectIdsFromMoveParameters(
+        allocator: std.mem.Allocator,
+        parameters: []const move_result.OwnedMoveParameterSummary,
+    ) ![][]u8 {
+        var collected = std.ArrayList([]u8).empty;
+        errdefer {
+            for (collected.items) |value| allocator.free(value);
+            collected.deinit(allocator);
+        }
+
+        for (parameters) |parameter| {
+            const arg_json = parameter.explicit_arg_json orelse parameter.auto_selected_arg_json orelse continue;
+            const parsed = std.json.parseFromSlice(std.json.Value, allocator, arg_json, .{}) catch continue;
+            defer parsed.deinit();
+            try appendSelectedObjectIdsFromArgumentJsonValue(allocator, &collected, parsed.value);
+        }
+
+        return try collected.toOwnedSlice(allocator);
+    }
+
+    fn jsonValueContainsExactString(
+        value: std.json.Value,
+        target: []const u8,
+    ) bool {
+        switch (value) {
+            .string => |text| return std.mem.eql(u8, text, target),
+            .array => |array| {
+                for (array.items) |item| {
+                    if (jsonValueContainsExactString(item, target)) return true;
+                }
+                return false;
+            },
+            .object => |object| {
+                var iterator = object.iterator();
+                while (iterator.next()) |entry| {
+                    if (jsonValueContainsExactString(entry.value_ptr.*, target)) return true;
+                }
+                return false;
+            },
+            else => return false,
+        }
+    }
+
+    fn objectResponseContentReferencesAnyObjectId(
+        allocator: std.mem.Allocator,
+        response_json: []const u8,
+        object_ids: []const []u8,
+    ) bool {
+        if (object_ids.len == 0) return false;
+
+        const parsed = std.json.parseFromSlice(std.json.Value, allocator, response_json, .{}) catch return false;
+        defer parsed.deinit();
+        if (parsed.value != .object) return false;
+        const result = parsed.value.object.get("result") orelse return false;
+        if (result != .object) return false;
+        const data = result.object.get("data") orelse return false;
+        if (data != .object) return false;
+        const content = data.object.get("content") orelse return false;
+
+        for (object_ids) |object_id| {
+            if (jsonValueContainsExactString(content, object_id)) return true;
+        }
+        return false;
+    }
+
+    fn applyReferencedOwnedObjectCandidateSelectionHints(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        parameters: []move_result.OwnedMoveParameterSummary,
+    ) !void {
+        const selected_object_ids = try collectSelectedObjectIdsFromMoveParameters(allocator, parameters);
+        defer {
+            for (selected_object_ids) |value| allocator.free(value);
+            allocator.free(selected_object_ids);
+        }
+        if (selected_object_ids.len == 0) return;
+
+        for (parameters) |*parameter| {
+            if (parameter.omitted_from_explicit_args) continue;
+            if (parameter.explicit_arg_json != null or parameter.auto_selected_arg_json != null) continue;
+            if (coinTypeFromMoveSignature(parameter.signature) != null) continue;
+
+            const candidates = parameter.owned_object_candidates orelse continue;
+            if (candidates.len <= 1) continue;
+
+            var matched_index: ?usize = null;
+            for (candidates, 0..) |candidate, index| {
+                const response = self.getObjectWithOptions(candidate.object_id, .{ .show_content = true }) catch continue;
+                defer allocator.free(response);
+                if (!objectResponseContentReferencesAnyObjectId(allocator, response, selected_object_ids)) continue;
+
+                if (matched_index != null) {
+                    matched_index = null;
+                    break;
+                }
+                matched_index = index;
+            }
+
+            const index = matched_index orelse continue;
+            parameter.auto_selected_arg_json = try buildAutoSelectedScalarArgJson(
+                allocator,
+                candidates[index].object_input_select_token,
+            );
+        }
+    }
+
     fn moveParameterSplitSourceArgJson(
         parameter: move_result.OwnedMoveParameterSummary,
     ) ?[]const u8 {
@@ -5559,6 +5721,7 @@ pub const SuiRpcClient = struct {
                 summary.parameters,
             );
         }
+        try self.applyReferencedOwnedObjectCandidateSelectionHints(allocator, summary.parameters);
 
         const type_args_json = try resolvedMoveFunctionTypeArgsTemplateJson(
             allocator,
