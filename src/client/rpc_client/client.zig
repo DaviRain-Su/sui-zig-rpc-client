@@ -20918,6 +20918,67 @@ test "ownOptionsWithAutoGasPayment excludes selected business SUI coin from auto
     try testing.expect(std.mem.indexOf(u8, owned.gas_payment_json.?, "0xb1b1") == null);
 }
 
+test "ownOptionsWithAutoGasPayment excludes multi-coin business inputs referenced by merge split commands" {
+    const testing = std.testing;
+    const Counts = struct { coin: usize = 0 };
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const counts = @as(*Counts, @ptrCast(@alignCast(context)));
+            try testing.expectEqualStrings("suix_getCoins", req.method);
+            counts.coin += 1;
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0xowner\"") != null);
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0x2::sui::SUI\"") != null);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xb1b1\",\"version\":\"9\",\"digest\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"balance\":\"150\"},{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xb2b2\",\"version\":\"10\",\"digest\":\"0x2222222222222222222222222222222222222222222222222222222222222222\",\"balance\":\"200\"},{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xc3c3\",\"version\":\"11\",\"digest\":\"0x3333333333333333333333333333333333333333333333333333333333333333\",\"balance\":\"500\"}],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var counts = Counts{};
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &counts,
+        .callback = callback,
+    };
+
+    var owned = try client_instance.ownOptionsWithAutoGasPayment(
+        allocator,
+        .{
+            .source = .{
+                .commands_json =
+                    \\[
+                    \\  {"kind":"MergeCoins","destination":"select:{\"kind\":\"object_input\",\"objectId\":\"0xb1b1\",\"inputKind\":\"imm_or_owned\",\"version\":9,\"digest\":\"0x1111111111111111111111111111111111111111111111111111111111111111\"}","sources":["select:{\"kind\":\"object_input\",\"objectId\":\"0xb2b2\",\"inputKind\":\"imm_or_owned\",\"version\":10,\"digest\":\"0x2222222222222222222222222222222222222222222222222222222222222222\"}"]},
+                    \\  {"kind":"SplitCoins","coin":"select:{\"kind\":\"object_input\",\"objectId\":\"0xb1b1\",\"inputKind\":\"imm_or_owned\",\"version\":9,\"digest\":\"0x1111111111111111111111111111111111111111111111111111111111111111\"}","amounts":[13]},
+                    \\  {"kind":"MakeMoveVec","type":null,"elements":[{"NestedResult":[1,0]}]},
+                    \\  {"kind":"MoveCall","package":"0x2","module":"router","function":"deposit_many_exact","typeArguments":[{"Struct":{"address":"0x2","module":"sui","name":"SUI","typeParams":[]}}],"arguments":[{"Result":2}]}
+                    \\]
+                ,
+            },
+            .sender = "0xowner",
+            .gas_budget = 50,
+            .signatures = &.{"sig-a"},
+        },
+        50,
+    );
+    defer owned.deinit(allocator);
+
+    try testing.expectEqual(@as(usize, 1), counts.coin);
+    try testing.expect(owned.gas_payment_json != null);
+    try testing.expect(owned.commands_json != null);
+    try testing.expect(std.mem.indexOf(u8, owned.commands_json.?, "0xb1b1") != null);
+    try testing.expect(std.mem.indexOf(u8, owned.commands_json.?, "0xb2b2") != null);
+    try testing.expect(std.mem.indexOf(u8, owned.gas_payment_json.?, "0xc3c3") != null);
+    try testing.expect(std.mem.indexOf(u8, owned.gas_payment_json.?, "0xb1b1") == null);
+    try testing.expect(std.mem.indexOf(u8, owned.gas_payment_json.?, "0xb2b2") == null);
+}
+
 test "runCommandsResolvingSelectedArgumentTokensWithAccountProvider builds summarized artifacts from selected command sources" {
     const testing = std.testing;
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};

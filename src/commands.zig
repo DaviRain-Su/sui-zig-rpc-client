@@ -7714,6 +7714,72 @@ test "runCommand tx_build move-call with auto gas payment excludes selected busi
     try testing.expect(std.mem.indexOf(u8, output.items, "0xb1b1") != null);
 }
 
+test "runCommand tx_build commands with auto gas payment excludes multi-coin business SUI inputs" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const Counts = struct { coin: usize = 0 };
+    var counts = Counts{};
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const state = @as(*Counts, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "suix_getCoins")) {
+                state.coin += 1;
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0xowner\"") != null);
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0x2::sui::SUI\"") != null);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xb1b1\",\"version\":\"9\",\"digest\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"balance\":\"150\"},{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xb2b2\",\"version\":\"10\",\"digest\":\"0x2222222222222222222222222222222222222222222222222222222222222222\",\"balance\":\"200\"},{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xc3c3\",\"version\":\"11\",\"digest\":\"0x3333333333333333333333333333333333333333333333333333333333333333\",\"balance\":\"500\"}],\"hasNextPage\":false}}",
+                );
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+
+    var args = cli.ParsedArgs{
+        .command = .tx_build,
+        .has_command = true,
+        .tx_build_kind = .programmable,
+        .tx_build_commands =
+            \\[
+            \\  {"kind":"MergeCoins","destination":"select:{\"kind\":\"object_input\",\"objectId\":\"0xb1b1\",\"inputKind\":\"imm_or_owned\",\"version\":9,\"digest\":\"0x1111111111111111111111111111111111111111111111111111111111111111\"}","sources":["select:{\"kind\":\"object_input\",\"objectId\":\"0xb2b2\",\"inputKind\":\"imm_or_owned\",\"version\":10,\"digest\":\"0x2222222222222222222222222222222222222222222222222222222222222222\"}"]},
+            \\  {"kind":"SplitCoins","coin":"select:{\"kind\":\"object_input\",\"objectId\":\"0xb1b1\",\"inputKind\":\"imm_or_owned\",\"version\":9,\"digest\":\"0x1111111111111111111111111111111111111111111111111111111111111111\"}","amounts":[13]},
+            \\  {"kind":"MakeMoveVec","type":null,"elements":[{"NestedResult":[1,0]}]},
+            \\  {"kind":"MoveCall","package":"0x2","module":"router","function":"deposit_many_exact","typeArguments":[{"Struct":{"address":"0x2","module":"sui","name":"SUI","typeParams":[]}}],"arguments":[{"Result":2}]}
+            \\]
+        ,
+        .tx_build_sender = "0xowner",
+        .tx_build_gas_budget = 50,
+        .tx_build_gas_price = 7,
+        .tx_build_auto_gas_payment = true,
+        .tx_build_emit_tx_block = true,
+    };
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = &counts,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    try testing.expectEqual(@as(usize, 1), counts.coin);
+    try testing.expect(std.mem.indexOf(u8, output.items, "\"gasPayment\"") != null);
+    try testing.expect(std.mem.indexOf(u8, output.items, "\"objectId\":\"0xc3c3\"") != null);
+    try testing.expect(std.mem.indexOf(u8, output.items, "\"gasPayment\":[{\"objectId\":\"0xb1b1\"") == null);
+    try testing.expect(std.mem.indexOf(u8, output.items, "\"gasPayment\":[{\"objectId\":\"0xb2b2\"") == null);
+    try testing.expect(std.mem.indexOf(u8, output.items, "0xb1b1") != null);
+    try testing.expect(std.mem.indexOf(u8, output.items, "0xb2b2") != null);
+}
+
 test "runCommand tx_payload infers sender for auto gas payment from selected owner" {
     const testing = std.testing;
     const Counts = struct { gas_price: usize = 0, owned: usize = 0, coin: usize = 0, normalized: usize = 0, object: usize = 0, unsafe: usize = 0 };
