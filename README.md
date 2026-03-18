@@ -917,6 +917,8 @@ zig build run -- events \
 
 如果签名是 `vector<Coin<T>>, amount` 这类常见形态，preferred command 模板现在还会继续往前走一步：当需要多枚 coin 才能覆盖金额时，CLI 会自动生成 `MergeCoins -> SplitCoins -> MakeMoveVec -> MoveCall`，把精确金额的 split 结果包装成单元素 coin vector 再传给目标函数。
 
+这套规则也已经能处理多币、多金额的声明顺序配对。例如 `vector<Coin<A>>, vector<Coin<B>>, u64, u64` 这类签名里，CLI 会按参数声明顺序把两个 trailing amount 依次配对到前面的两个 coin 参数，并分别生成自己的 `MergeCoins` / `SplitCoins` / `MakeMoveVec` 片段，再把两边结果一起接到同一个 `MoveCall` 里。
+
 这层模板现在同时覆盖两条路径：
 - typed `--package/--module/--function` argv
 - 更通用的 `--commands` request artifact

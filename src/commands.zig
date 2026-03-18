@@ -5560,6 +5560,88 @@ test "runCommand move function with --summarize plans merge split make-move-vec 
     try testing.expectEqual(@as(i64, 13), move_call_args[1].integer);
 }
 
+test "runCommand move function with --summarize plans dual vector coin templates by amount order" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"visibility\":\"Public\",\"isEntry\":true,\"typeParameters\":[],\"parameters\":[{\"Vector\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"coin\",\"name\":\"Coin\",\"typeParams\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"sui\",\"name\":\"SUI\",\"typeParams\":[]}}]}}},{\"Vector\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"coin\",\"name\":\"Coin\",\"typeParams\":[{\"Struct\":{\"address\":\"0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7\",\"module\":\"usdc\",\"name\":\"USDC\",\"typeParams\":[]}}]}}},\"u64\",\"u64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[]}}",
+                );
+            }
+
+            std.debug.assert(std.mem.eql(u8, req.method, "suix_getCoins"));
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0xowner\"") != null);
+            if (std.mem.indexOf(u8, req.params_json, "\"0x2::sui::SUI\"") != null) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xsui-small\",\"version\":\"9\",\"digest\":\"sui-digest-small\",\"balance\":\"3\"},{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xsui-mid\",\"version\":\"10\",\"digest\":\"sui-digest-mid\",\"balance\":\"5\"},{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xsui-large\",\"version\":\"11\",\"digest\":\"sui-digest-large\",\"balance\":\"9\"}],\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.indexOf(u8, req.params_json, "\"0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC\"") != null) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinType\":\"0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC\",\"coinObjectId\":\"0xusdc-fit\",\"version\":\"12\",\"digest\":\"usdc-digest-fit\",\"balance\":\"7\"}],\"hasNextPage\":false}}",
+                );
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+
+    var args = cli.ParsedArgs{
+        .command = .move_function,
+        .has_command = true,
+        .move_package = "0x2",
+        .move_module = "router",
+        .move_function = "deposit_dual_many_exact",
+        .tx_build_sender = "0xowner",
+        .tx_build_args = "[13,7]",
+        .tx_send_summarize = true,
+    };
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    const template = parsed.value.object.get("call_template").?.object;
+    const preferred_commands = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        template.get("preferred_commands_json").?.string,
+        .{},
+    );
+    defer preferred_commands.deinit();
+    try testing.expectEqual(@as(usize, 6), preferred_commands.value.array.items.len);
+    try testing.expectEqualStrings("MergeCoins", preferred_commands.value.array.items[0].object.get("kind").?.string);
+    try testing.expectEqualStrings("SplitCoins", preferred_commands.value.array.items[1].object.get("kind").?.string);
+    try testing.expectEqualStrings("MakeMoveVec", preferred_commands.value.array.items[2].object.get("kind").?.string);
+    try testing.expectEqualStrings("SplitCoins", preferred_commands.value.array.items[3].object.get("kind").?.string);
+    try testing.expectEqualStrings("MakeMoveVec", preferred_commands.value.array.items[4].object.get("kind").?.string);
+    try testing.expectEqualStrings("MoveCall", preferred_commands.value.array.items[5].object.get("kind").?.string);
+
+    const move_call_args = preferred_commands.value.array.items[5].object.get("arguments").?.array.items;
+    try testing.expectEqual(@as(i64, 2), move_call_args[0].object.get("Result").?.integer);
+    try testing.expectEqual(@as(i64, 4), move_call_args[1].object.get("Result").?.integer);
+    try testing.expectEqual(@as(i64, 13), move_call_args[2].integer);
+    try testing.expectEqual(@as(i64, 7), move_call_args[3].integer);
+}
+
 test "runCommand move function with --summarize lifts coin selector min balance from explicit u64 args" {
     const testing = std.testing;
 

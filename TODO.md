@@ -72,9 +72,9 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
 
 ### 2. Dual-coin and multi-coin automatic arrangement
 
-- [ ] Support dual-coin flows such as liquidity provision with both asset sides
+- [x] Support dual-coin flows such as liquidity provision with both asset sides
   selected automatically.
-- [ ] Support multi-amount and multi-coin merge/split planning in one template.
+- [x] Support multi-amount and multi-coin merge/split planning in one template.
 - [ ] Keep gas coin exclusion correct in multi-coin scenarios.
 
 ### 3. Make `move function --dry-run/--send` close to one-click
