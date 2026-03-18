@@ -795,6 +795,7 @@ zig build run -- move function cetus_clmm_mainnet pool swap --summarize
 
 对于 `move function --summarize`，输出里的 `parameters[*].lowering_kind` 会告诉你当前 CLI 对这个参数的本地 lowering 能力：
 - `object`
+- `vector`
 - `address`
 - `signer`
 - `boolean`
@@ -802,6 +803,16 @@ zig build run -- move function cetus_clmm_mainnet pool swap --summarize
 - `vector_u8`
 - `runtime`（例如 `TxContext`，CLI 不要求你显式提供）
 - `unsupported`
+
+当 ABI 显示参数是非 `vector<u8>` 的 `vector<T>` 时，CLI 现在会在本地 programmable builder 路径里自动插入 `MakeMoveVec`。这对 Cetus 一类需要 `vector<Coin<_>>` 的调用很重要，因为你可以直接传：
+
+```bash
+--args '[
+  ["0xcoin_a","0xcoin_b"]
+]'
+```
+
+而不必先手工写一条额外的 `MakeMoveVec` PTB 命令。只有空向量且元素类型仍然无法从 ABI 推导成具体 `TypeTag` 时，才会继续拒绝本地 lowering。
 
 `--package <package-id-or-alias>` 现在已经支持内置 alias：
 - `sui` / `sui_framework` / `framework` -> `0x2`

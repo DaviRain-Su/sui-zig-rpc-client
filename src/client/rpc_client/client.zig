@@ -2804,6 +2804,7 @@ pub const SuiRpcClient = struct {
 
     pub const LocalMoveCallParameterKind = enum {
         object,
+        vector,
         address,
         signer,
         boolean,
@@ -2844,7 +2845,7 @@ pub const SuiRpcClient = struct {
                 if (object.get("Vector")) |inner| {
                     const nested = try classifyNormalizedMoveType(allocator, inner);
                     if (nested == .u8) return .vector_u8;
-                    return .unsupported;
+                    return .vector;
                 }
                 if (object.get("Struct")) |struct_value| {
                     if (struct_value != .object) return .unsupported;
@@ -2866,6 +2867,116 @@ pub const SuiRpcClient = struct {
             },
             else => return .unsupported,
         }
+    }
+
+    fn canonicalPrimitiveMoveTypeName(name: []const u8) ?[]const u8 {
+        if (std.ascii.eqlIgnoreCase(name, "bool")) return "bool";
+        if (std.ascii.eqlIgnoreCase(name, "u8")) return "u8";
+        if (std.ascii.eqlIgnoreCase(name, "u16")) return "u16";
+        if (std.ascii.eqlIgnoreCase(name, "u32")) return "u32";
+        if (std.ascii.eqlIgnoreCase(name, "u64")) return "u64";
+        if (std.ascii.eqlIgnoreCase(name, "u128")) return "u128";
+        if (std.ascii.eqlIgnoreCase(name, "u256")) return "u256";
+        if (std.ascii.eqlIgnoreCase(name, "address")) return "address";
+        if (std.ascii.eqlIgnoreCase(name, "signer")) return "signer";
+        return null;
+    }
+
+    fn normalizedMoveTypeContainsTypeParameter(value: std.json.Value) bool {
+        return switch (value) {
+            .object => |object| blk: {
+                if (object.get("TypeParameter") != null) break :blk true;
+                if (object.get("Reference")) |inner| break :blk normalizedMoveTypeContainsTypeParameter(inner);
+                if (object.get("MutableReference")) |inner| break :blk normalizedMoveTypeContainsTypeParameter(inner);
+                if (object.get("Vector")) |inner| break :blk normalizedMoveTypeContainsTypeParameter(inner);
+                if (object.get("Struct")) |struct_value| {
+                    if (struct_value != .object) break :blk false;
+                    const type_params_value = struct_value.object.get("typeArguments") orelse
+                        struct_value.object.get("type_arguments") orelse
+                        struct_value.object.get("typeParams") orelse
+                        struct_value.object.get("type_params");
+                    if (type_params_value) |type_params| {
+                        if (type_params != .array) break :blk false;
+                        for (type_params.array.items) |item| {
+                            if (normalizedMoveTypeContainsTypeParameter(item)) break :blk true;
+                        }
+                    }
+                }
+                break :blk false;
+            },
+            else => false,
+        };
+    }
+
+    fn writeCanonicalNormalizedMoveTypeJson(
+        allocator: std.mem.Allocator,
+        writer: anytype,
+        value: std.json.Value,
+    ) !void {
+        switch (value) {
+            .string => |name| {
+                const canonical = canonicalPrimitiveMoveTypeName(name) orelse return error.InvalidCli;
+                try writer.print("{f}", .{std.json.fmt(canonical, .{})});
+            },
+            .object => |object| {
+                if (object.get("Reference")) |inner| {
+                    return try writeCanonicalNormalizedMoveTypeJson(allocator, writer, inner);
+                }
+                if (object.get("MutableReference")) |inner| {
+                    return try writeCanonicalNormalizedMoveTypeJson(allocator, writer, inner);
+                }
+                if (object.get("TypeParameter") != null) return error.InvalidCli;
+                if (object.get("Vector")) |inner| {
+                    try writer.writeAll("{\"Vector\":");
+                    try writeCanonicalNormalizedMoveTypeJson(allocator, writer, inner);
+                    try writer.writeAll("}");
+                    return;
+                }
+                if (object.get("Struct")) |struct_value| {
+                    if (struct_value != .object) return error.InvalidCli;
+                    const address_value = struct_value.object.get("address") orelse return error.InvalidCli;
+                    const module_value = struct_value.object.get("module") orelse return error.InvalidCli;
+                    const name_value = struct_value.object.get("name") orelse return error.InvalidCli;
+                    if (address_value != .string or module_value != .string or name_value != .string) return error.InvalidCli;
+
+                    try writer.print(
+                        "{{\"Struct\":{{\"address\":{f},\"module\":{f},\"name\":{f},\"typeParams\":[",
+                        .{
+                            std.json.fmt(address_value.string, .{}),
+                            std.json.fmt(module_value.string, .{}),
+                            std.json.fmt(name_value.string, .{}),
+                        },
+                    );
+
+                    const type_params_value = struct_value.object.get("typeArguments") orelse
+                        struct_value.object.get("type_arguments") orelse
+                        struct_value.object.get("typeParams") orelse
+                        struct_value.object.get("type_params");
+                    if (type_params_value) |type_params| {
+                        if (type_params != .array) return error.InvalidCli;
+                        for (type_params.array.items, 0..) |item, index| {
+                            if (index != 0) try writer.writeAll(",");
+                            try writeCanonicalNormalizedMoveTypeJson(allocator, writer, item);
+                        }
+                    }
+
+                    try writer.writeAll("]}}}");
+                    return;
+                }
+                return error.InvalidCli;
+            },
+            else => return error.InvalidCli,
+        }
+    }
+
+    fn canonicalNormalizedMoveTypeJson(
+        allocator: std.mem.Allocator,
+        value: std.json.Value,
+    ) ![]u8 {
+        var out = std.ArrayList(u8){};
+        errdefer out.deinit(allocator);
+        try writeCanonicalNormalizedMoveTypeJson(allocator, out.writer(allocator), value);
+        return try out.toOwnedSlice(allocator);
     }
 
     fn buildNormalizedMoveFunctionParams(
@@ -3124,6 +3235,17 @@ pub const SuiRpcClient = struct {
                 return try std.fmt.allocPrint(ctx.allocator, "{{\"Input\":{}}}", .{input_index});
             }
 
+            fn buildResultRefJson(ctx: *@This(), command_index: u16) ![]u8 {
+                return try std.fmt.allocPrint(ctx.allocator, "{{\"Result\":{}}}", .{command_index});
+            }
+
+            fn appendCommand(ctx: *@This(), command_json: []u8) !u16 {
+                try ctx.commands.append(ctx.allocator, command_json);
+                const index = ctx.commands.items.len - 1;
+                if (index > std.math.maxInt(u16)) return error.InvalidCli;
+                return @intCast(index);
+            }
+
             fn normalizePtbRefOrAddExplicitInput(
                 ctx: *@This(),
                 value: std.json.Value,
@@ -3308,6 +3430,7 @@ pub const SuiRpcClient = struct {
                         },
                         else => error.InvalidCli,
                     },
+                    .vector => return error.InvalidCli,
                     .unsupported => return switch (value) {
                         .object => |object| blk: {
                             if (object.get("Input") != null or object.get("Result") != null or object.get("NestedResult") != null or object.get("Pure") != null or object.get("Object") != null) {
@@ -3321,6 +3444,82 @@ pub const SuiRpcClient = struct {
                             error.InvalidCli,
                         else => error.InvalidCli,
                     },
+                }
+            }
+
+            fn lowerVectorMoveCallArgument(
+                ctx: *@This(),
+                value: std.json.Value,
+                element_type: std.json.Value,
+            ) anyerror![]u8 {
+                return switch (value) {
+                    .array => |array| {
+                        var lowered_elements = std.ArrayListUnmanaged([]u8){};
+                        defer {
+                            for (lowered_elements.items) |item| ctx.allocator.free(item);
+                            lowered_elements.deinit(ctx.allocator);
+                        }
+
+                        for (array.items) |item| {
+                            try lowered_elements.append(
+                                ctx.allocator,
+                                try ctx.lowerMoveCallArgumentForNormalizedType(item, element_type),
+                            );
+                        }
+
+                        const elements_json = try ctx.appendJsonArray(lowered_elements.items);
+                        defer ctx.allocator.free(elements_json);
+
+                        const type_json = if (array.items.len == 0) blk: {
+                            if (normalizedMoveTypeContainsTypeParameter(element_type)) return error.InvalidCli;
+                            break :blk try canonicalNormalizedMoveTypeJson(ctx.allocator, element_type);
+                        } else try ctx.allocator.dupe(u8, "null");
+                        defer ctx.allocator.free(type_json);
+
+                        const command_json = try std.fmt.allocPrint(
+                            ctx.allocator,
+                            "{{\"kind\":\"MakeMoveVec\",\"type\":{s},\"elements\":{s}}}",
+                            .{ type_json, elements_json },
+                        );
+                        errdefer ctx.allocator.free(command_json);
+                        const command_index = try ctx.appendCommand(command_json);
+                        return try ctx.buildResultRefJson(command_index);
+                    },
+                    .object => |object| blk: {
+                        if (object.get("Object") != null) return error.InvalidCli;
+                        break :blk try ctx.normalizePtbRefOrAddExplicitInput(value, false);
+                    },
+                    else => return error.InvalidCli,
+                };
+            }
+
+            fn lowerMoveCallArgumentForNormalizedType(
+                ctx: *@This(),
+                value: std.json.Value,
+                parameter_type: std.json.Value,
+            ) anyerror![]u8 {
+                switch (parameter_type) {
+                    .string => {
+                        const kind = (try classifyNormalizedMoveType(ctx.allocator, parameter_type)) orelse return error.InvalidCli;
+                        return try ctx.lowerMoveCallArgumentForKind(value, kind);
+                    },
+                    .object => |object| {
+                        if (object.get("Reference")) |inner| {
+                            return try ctx.lowerMoveCallArgumentForNormalizedType(value, inner);
+                        }
+                        if (object.get("MutableReference")) |inner| {
+                            return try ctx.lowerMoveCallArgumentForNormalizedType(value, inner);
+                        }
+                        if (object.get("Vector")) |inner| {
+                            const nested_kind = try classifyNormalizedMoveType(ctx.allocator, inner);
+                            if (nested_kind == .u8) return try ctx.lowerMoveCallArgumentForKind(value, .vector_u8);
+                            return try ctx.lowerVectorMoveCallArgument(value, inner);
+                        }
+
+                        const kind = (try classifyNormalizedMoveType(ctx.allocator, parameter_type)) orelse return error.InvalidCli;
+                        return try ctx.lowerMoveCallArgumentForKind(value, kind);
+                    },
+                    else => return error.InvalidCli,
                 }
             }
 
@@ -3391,13 +3590,21 @@ pub const SuiRpcClient = struct {
                 const function_name = object.get("function") orelse return error.InvalidCli;
                 if (package_id != .string or module != .string or function_name != .string) return error.InvalidCli;
 
-                const parameter_kinds = try ctx.rpc.getMoveCallUserParameterKinds(
+                const normalized_response = try ctx.rpc.getNormalizedMoveFunction(
                     ctx.allocator,
                     package_id.string,
                     module.string,
                     function_name.string,
                 );
-                defer ctx.allocator.free(parameter_kinds);
+                defer ctx.allocator.free(normalized_response);
+
+                const normalized_parsed = try std.json.parseFromSlice(std.json.Value, ctx.allocator, normalized_response, .{});
+                defer normalized_parsed.deinit();
+                if (normalized_parsed.value != .object) return error.InvalidResponse;
+                const normalized_result = normalized_parsed.value.object.get("result") orelse return error.InvalidResponse;
+                if (normalized_result != .object) return error.InvalidResponse;
+                const parameters_value = normalized_result.object.get("parameters") orelse return error.InvalidResponse;
+                if (parameters_value != .array) return error.InvalidResponse;
 
                 var lowered_arguments = std.ArrayListUnmanaged([]u8){};
                 defer {
@@ -3409,13 +3616,22 @@ pub const SuiRpcClient = struct {
                     if (raw_arguments != .array) return error.InvalidCli;
                     break :blk raw_arguments.array.items;
                 } else &.{};
-                if (arguments.len != parameter_kinds.len) return error.InvalidCli;
-                for (arguments) |argument| {
-                    const index = lowered_arguments.items.len;
+
+                var user_parameter_count: usize = 0;
+                for (parameters_value.array.items) |parameter| {
+                    if ((try classifyNormalizedMoveType(ctx.allocator, parameter)) == null) continue;
+                    user_parameter_count += 1;
+                }
+                if (arguments.len != user_parameter_count) return error.InvalidCli;
+
+                var argument_index: usize = 0;
+                for (parameters_value.array.items) |parameter| {
+                    if ((try classifyNormalizedMoveType(ctx.allocator, parameter)) == null) continue;
                     try lowered_arguments.append(
                         ctx.allocator,
-                        try ctx.lowerMoveCallArgumentForKind(argument, parameter_kinds[index]),
+                        try ctx.lowerMoveCallArgumentForNormalizedType(arguments[argument_index], parameter),
                     );
+                    argument_index += 1;
                 }
                 const arguments_json = try ctx.appendJsonArray(lowered_arguments.items);
                 defer ctx.allocator.free(arguments_json);
@@ -3573,7 +3789,7 @@ pub const SuiRpcClient = struct {
                     .u128 => try ctx.lowerMoveCallArgumentForKind(value, .u128),
                     .u256 => try ctx.lowerMoveCallArgumentForKind(value, .u256),
                     .vector_u8 => try ctx.lowerMoveCallArgumentForKind(value, .vector_u8),
-                    .signer, .unsupported => error.InvalidCli,
+                    .vector, .signer, .unsupported => error.InvalidCli,
                 };
             }
 
@@ -4809,6 +5025,160 @@ pub const SuiRpcClient = struct {
         try testing.expectEqual(@as(usize, 2), inputs.value.array.items.len);
         try testing.expect(inputs.value.array.items[0].object.get("Pure") != null);
         try testing.expect(inputs.value.array.items[1].object.get("Pure") != null);
+    }
+
+    test "local move-call lowering auto-inserts make-move-vec commands for non-u8 vector arguments" {
+        const testing = std.testing;
+
+        var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+        defer _ = gpa.deinit();
+        const allocator = gpa.allocator();
+
+        const State = struct {
+            normalized_calls: usize = 0,
+            object_calls: usize = 0,
+        };
+
+        var rpc = SuiRpcClient.init(allocator, "https://rpc.invalid");
+        defer rpc.deinit();
+
+        var state = State{};
+        rpc.request_sender = .{
+            .context = &state,
+            .callback = struct {
+                fn send(
+                    ctx: *anyopaque,
+                    alloc: std.mem.Allocator,
+                    req: RpcRequest,
+                ) error{OutOfMemory}![]u8 {
+                    const local_state: *State = @ptrCast(@alignCast(ctx));
+                    if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                        local_state.normalized_calls += 1;
+                        return try alloc.dupe(
+                            u8,
+                            "{\"result\":{\"parameters\":[{\"Vector\":\"Address\"},{\"Vector\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"coin\",\"name\":\"Coin\",\"typeParams\":[]}}},{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[],\"typeParameters\":[],\"visibility\":\"Public\",\"isEntry\":true}}",
+                        );
+                    }
+                    if (std.mem.eql(u8, req.method, "sui_getObject")) {
+                        local_state.object_calls += 1;
+                        return if (std.mem.indexOf(u8, req.params_json, "\"0xcoin1\"") != null)
+                            try alloc.dupe(
+                                u8,
+                                "{\"result\":{\"data\":{\"objectId\":\"0xcoin1\",\"version\":\"7\",\"digest\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"owner\":{\"AddressOwner\":\"0xabc\"}}}}",
+                            )
+                        else
+                            try alloc.dupe(
+                                u8,
+                                "{\"result\":{\"data\":{\"objectId\":\"0xcoin2\",\"version\":\"8\",\"digest\":\"0x2222222222222222222222222222222222222222222222222222222222222222\",\"owner\":{\"AddressOwner\":\"0xabc\"}}}}",
+                            );
+                    }
+                    return error.OutOfMemory;
+                }
+            }.send,
+        };
+
+        var parts = try rpc.ownLocalProgrammableTransactionPartsFromCommandSource(
+            allocator,
+            .{
+                .move_call = .{
+                    .package_id = "0x2",
+                    .module = "router",
+                    .function_name = "submit",
+                    .type_args = "[]",
+                    .arguments = "[[\"0x111\",\"0x222\"],[\"0xcoin1\",\"0xcoin2\"]]",
+                },
+            },
+            "0xsender",
+            "[{\"objectId\":\"0xgas\",\"version\":\"5\",\"digest\":\"gas-digest\"}]",
+            7,
+            1200,
+            null,
+        );
+        defer parts.deinit(allocator);
+
+        const inputs = try std.json.parseFromSlice(std.json.Value, allocator, parts.inputs_json, .{});
+        defer inputs.deinit();
+        const commands = try std.json.parseFromSlice(std.json.Value, allocator, parts.commands_json, .{});
+        defer commands.deinit();
+
+        try testing.expectEqual(@as(usize, 4), inputs.value.array.items.len);
+        try testing.expect(inputs.value.array.items[0].object.get("Pure") != null);
+        try testing.expect(inputs.value.array.items[1].object.get("Pure") != null);
+        try testing.expect(inputs.value.array.items[2].object.get("Object") != null);
+        try testing.expect(inputs.value.array.items[3].object.get("Object") != null);
+
+        try testing.expectEqual(@as(usize, 3), commands.value.array.items.len);
+        try testing.expectEqualStrings("MakeMoveVec", commands.value.array.items[0].object.get("kind").?.string);
+        try testing.expectEqual(@as(i64, 0), commands.value.array.items[0].object.get("elements").?.array.items[0].object.get("Input").?.integer);
+        try testing.expectEqual(@as(i64, 1), commands.value.array.items[0].object.get("elements").?.array.items[1].object.get("Input").?.integer);
+        try testing.expect(commands.value.array.items[0].object.get("type").? == .null);
+
+        try testing.expectEqualStrings("MakeMoveVec", commands.value.array.items[1].object.get("kind").?.string);
+        try testing.expectEqual(@as(i64, 2), commands.value.array.items[1].object.get("elements").?.array.items[0].object.get("Input").?.integer);
+        try testing.expectEqual(@as(i64, 3), commands.value.array.items[1].object.get("elements").?.array.items[1].object.get("Input").?.integer);
+        try testing.expect(commands.value.array.items[1].object.get("type").? == .null);
+
+        try testing.expectEqualStrings("MoveCall", commands.value.array.items[2].object.get("kind").?.string);
+        try testing.expectEqual(@as(i64, 0), commands.value.array.items[2].object.get("arguments").?.array.items[0].object.get("Result").?.integer);
+        try testing.expectEqual(@as(i64, 1), commands.value.array.items[2].object.get("arguments").?.array.items[1].object.get("Result").?.integer);
+        try testing.expectEqual(@as(usize, 1), state.normalized_calls);
+        try testing.expectEqual(@as(usize, 2), state.object_calls);
+    }
+
+    test "local move-call lowering uses canonical element types for empty non-u8 vectors" {
+        const testing = std.testing;
+
+        var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+        defer _ = gpa.deinit();
+        const allocator = gpa.allocator();
+
+        var rpc = SuiRpcClient.init(allocator, "https://rpc.invalid");
+        defer rpc.deinit();
+
+        rpc.request_sender = .{
+            .context = undefined,
+            .callback = struct {
+                fn send(
+                    _: *anyopaque,
+                    alloc: std.mem.Allocator,
+                    req: RpcRequest,
+                ) error{OutOfMemory}![]u8 {
+                    std.debug.assert(std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction"));
+                    return try alloc.dupe(
+                        u8,
+                        "{\"result\":{\"parameters\":[{\"Vector\":\"Address\"},{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[],\"typeParameters\":[],\"visibility\":\"Public\",\"isEntry\":true}}",
+                    );
+                }
+            }.send,
+        };
+
+        var parts = try rpc.ownLocalProgrammableTransactionPartsFromCommandSource(
+            allocator,
+            .{
+                .move_call = .{
+                    .package_id = "0x2",
+                    .module = "router",
+                    .function_name = "submit_empty",
+                    .type_args = "[]",
+                    .arguments = "[[]]",
+                },
+            },
+            "0xsender",
+            "[{\"objectId\":\"0xgas\",\"version\":\"5\",\"digest\":\"gas-digest\"}]",
+            7,
+            1200,
+            null,
+        );
+        defer parts.deinit(allocator);
+
+        const commands = try std.json.parseFromSlice(std.json.Value, allocator, parts.commands_json, .{});
+        defer commands.deinit();
+
+        try testing.expectEqual(@as(usize, 2), commands.value.array.items.len);
+        try testing.expectEqualStrings("MakeMoveVec", commands.value.array.items[0].object.get("kind").?.string);
+        try testing.expectEqualStrings("address", commands.value.array.items[0].object.get("type").?.string);
+        try testing.expectEqual(@as(usize, 0), commands.value.array.items[0].object.get("elements").?.array.items.len);
+        try testing.expectEqual(@as(i64, 0), commands.value.array.items[1].object.get("arguments").?.array.items[0].object.get("Result").?.integer);
     }
 
     pub const RealBuilderPayloadSigner = union(enum) {
