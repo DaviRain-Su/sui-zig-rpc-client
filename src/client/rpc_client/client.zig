@@ -4066,6 +4066,14 @@ pub const SuiRpcClient = struct {
         );
     }
 
+    fn buildAutoSelectedOwnerContextArgJson(
+        allocator: std.mem.Allocator,
+        owner_address: ?[]const u8,
+    ) !?[]u8 {
+        const owner = owner_address orelse return null;
+        return try buildAutoSelectedScalarArgJson(allocator, owner);
+    }
+
     fn moveStructPackageAndModule(signature: []const u8) ?struct { package: []const u8, module: []const u8 } {
         const trimmed = trimMoveReferenceSignature(signature);
         const first_sep = std.mem.indexOf(u8, trimmed, "::") orelse return null;
@@ -5666,6 +5674,24 @@ pub const SuiRpcClient = struct {
         parameter.auto_selected_via_tiebreak = false;
     }
 
+    fn applyOwnerContextSelectionHints(
+        allocator: std.mem.Allocator,
+        parameter: *move_result.OwnedMoveParameterSummary,
+        owner_address: ?[]const u8,
+    ) !void {
+        if (parameter.omitted_from_explicit_args) return;
+        const lowering_kind = parameter.lowering_kind orelse return;
+        if (!std.mem.eql(u8, lowering_kind, "address") and !std.mem.eql(u8, lowering_kind, "signer")) {
+            return;
+        }
+
+        replaceMoveParameterAutoSelectedArgJson(
+            allocator,
+            parameter,
+            try buildAutoSelectedOwnerContextArgJson(allocator, owner_address),
+        );
+    }
+
     fn applyCoinCandidateSelectionHintsFromExplicitArgs(
         allocator: std.mem.Allocator,
         parameters: []move_result.OwnedMoveParameterSummary,
@@ -6335,6 +6361,7 @@ pub const SuiRpcClient = struct {
         for (summary.parameters, 0..) |*parameter, index| {
             parameter.placeholder_json = try placeholderJsonForMoveParameter(allocator, parameter.*, index);
             parameter.omitted_from_explicit_args = parameter.placeholder_json == null;
+            try applyOwnerContextSelectionHints(allocator, parameter, owner_address);
 
             if (parameter.omitted_from_explicit_args) continue;
             const lowering_kind = parameter.lowering_kind orelse continue;
@@ -21532,12 +21559,12 @@ test "ownOptionsWithAutoGasPayment excludes multi-coin business inputs reference
         .{
             .source = .{
                 .commands_json =
-                    \\[
-                    \\  {"kind":"MergeCoins","destination":"select:{\"kind\":\"object_input\",\"objectId\":\"0xb1b1\",\"inputKind\":\"imm_or_owned\",\"version\":9,\"digest\":\"0x1111111111111111111111111111111111111111111111111111111111111111\"}","sources":["select:{\"kind\":\"object_input\",\"objectId\":\"0xb2b2\",\"inputKind\":\"imm_or_owned\",\"version\":10,\"digest\":\"0x2222222222222222222222222222222222222222222222222222222222222222\"}"]},
-                    \\  {"kind":"SplitCoins","coin":"select:{\"kind\":\"object_input\",\"objectId\":\"0xb1b1\",\"inputKind\":\"imm_or_owned\",\"version\":9,\"digest\":\"0x1111111111111111111111111111111111111111111111111111111111111111\"}","amounts":[13]},
-                    \\  {"kind":"MakeMoveVec","type":null,"elements":[{"NestedResult":[1,0]}]},
-                    \\  {"kind":"MoveCall","package":"0x2","module":"router","function":"deposit_many_exact","typeArguments":[{"Struct":{"address":"0x2","module":"sui","name":"SUI","typeParams":[]}}],"arguments":[{"Result":2}]}
-                    \\]
+                \\[
+                \\  {"kind":"MergeCoins","destination":"select:{\"kind\":\"object_input\",\"objectId\":\"0xb1b1\",\"inputKind\":\"imm_or_owned\",\"version\":9,\"digest\":\"0x1111111111111111111111111111111111111111111111111111111111111111\"}","sources":["select:{\"kind\":\"object_input\",\"objectId\":\"0xb2b2\",\"inputKind\":\"imm_or_owned\",\"version\":10,\"digest\":\"0x2222222222222222222222222222222222222222222222222222222222222222\"}"]},
+                \\  {"kind":"SplitCoins","coin":"select:{\"kind\":\"object_input\",\"objectId\":\"0xb1b1\",\"inputKind\":\"imm_or_owned\",\"version\":9,\"digest\":\"0x1111111111111111111111111111111111111111111111111111111111111111\"}","amounts":[13]},
+                \\  {"kind":"MakeMoveVec","type":null,"elements":[{"NestedResult":[1,0]}]},
+                \\  {"kind":"MoveCall","package":"0x2","module":"router","function":"deposit_many_exact","typeArguments":[{"Struct":{"address":"0x2","module":"sui","name":"SUI","typeParams":[]}}],"arguments":[{"Result":2}]}
+                \\]
                 ,
             },
             .sender = "0xowner",

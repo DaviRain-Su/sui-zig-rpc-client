@@ -4460,6 +4460,83 @@ test "runCommand move function with --summarize falls back to sender address for
     try testing.expectEqualStrings("0xowner", send_argv[14].string);
 }
 
+test "runCommand move function with --summarize auto-selects address and signer parameters from owner context" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            std.debug.assert(std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction"));
+            std.debug.assert(std.mem.eql(u8, req.params_json, "[\"0x2\",\"auth\",\"authorize\"]"));
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"visibility\":\"Public\",\"isEntry\":true,\"typeParameters\":[],\"parameters\":[\"address\",\"signer\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[]}}",
+            );
+        }
+    }.call;
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "move",
+        "function",
+        "0x2",
+        "auth",
+        "authorize",
+        "--sender",
+        "0xowner",
+        "--signer",
+        "builder",
+        "--from-keystore",
+        "--summarize",
+    });
+    defer args.deinit(allocator);
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    const parameters = parsed.value.object.get("parameters").?.array.items;
+    try testing.expectEqualStrings("\"0xowner\"", parameters[0].object.get("auto_selected_arg_json").?.string);
+    try testing.expectEqualStrings("\"0xowner\"", parameters[1].object.get("auto_selected_arg_json").?.string);
+    const template = parsed.value.object.get("call_template").?.object;
+    try testing.expectEqualStrings("[\"0xowner\",\"0xowner\"]", template.get("preferred_args_json").?.string);
+    const preferred_resolution = template.get("preferred_resolution").?.object;
+    try testing.expect(preferred_resolution.get("is_fully_resolved").?.bool);
+    try testing.expectEqual(@as(usize, 0), preferred_resolution.get("unresolved_parameter_indices").?.array.items.len);
+    try testing.expectEqualStrings(
+        "auto_selected",
+        preferred_resolution.get("parameters").?.array.items[0].object.get("resolution_kind").?.string,
+    );
+    try testing.expectEqualStrings(
+        "auto_selected",
+        preferred_resolution.get("parameters").?.array.items[1].object.get("resolution_kind").?.string,
+    );
+    const preferred_request = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        template.get("preferred_tx_send_from_keystore_request_json").?.string,
+        .{},
+    );
+    defer preferred_request.deinit();
+    try testing.expectEqualStrings("builder", preferred_request.value.object.get("signer").?.string);
+    const preferred_commands = preferred_request.value.object.get("commands").?.array.items;
+    const preferred_arguments = preferred_commands[0].object.get("arguments").?.array.items;
+    try testing.expectEqualStrings("0xowner", preferred_arguments[0].string);
+    try testing.expectEqualStrings("0xowner", preferred_arguments[1].string);
+}
+
 test "runCommand move function with --emit-template prints preferred dry-run request output" {
     const testing = std.testing;
 
@@ -4602,6 +4679,81 @@ test "runCommand move function with --dry-run executes preferred dry-run request
     try testing.expectEqual(@as(usize, 2), counts.dry_run);
     try testing.expectEqual(@as(usize, 0), counts.unsafe);
 
+    try testing.expect(std.mem.indexOf(u8, output.items, "success") != null);
+}
+
+test "runCommand move function with --dry-run auto-resolves address and signer parameters from owner context" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const Counts = struct {
+        normalized: usize = 0,
+        dry_run: usize = 0,
+        unsafe: usize = 0,
+    };
+    var counts = Counts{};
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const state = @as(*Counts, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                state.normalized += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"visibility\":\"Public\",\"isEntry\":true,\"typeParameters\":[],\"parameters\":[\"address\",\"signer\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_dryRunTransactionBlock")) {
+                state.dry_run += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"effects\":{\"status\":{\"status\":\"success\"},\"gasUsed\":{\"computationCost\":\"7\",\"storageCost\":\"2\",\"storageRebate\":\"1\"}},\"balanceChanges\":[]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "suix_getCoins")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinObjectId\":\"0x9999999999999999999999999999999999999999999999999999999999999999\",\"version\":\"1\",\"digest\":\"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"balance\":\"1000000000\"}],\"nextCursor\":null,\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall") or std.mem.eql(u8, req.method, "unsafe_batchTransaction")) {
+                state.unsafe += 1;
+                return alloc.dupe(u8, "{\"result\":{\"txBytes\":\"AQIDBA==\"}}");
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "move",
+        "function",
+        "0x2",
+        "auth",
+        "authorize",
+        "--sender",
+        "0x1111111111111111111111111111111111111111111111111111111111111111",
+        "--dry-run",
+    });
+    defer args.deinit(allocator);
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = &counts,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    try testing.expect(counts.normalized >= 1);
+    try testing.expectEqual(@as(usize, 2), counts.dry_run);
+    try testing.expectEqual(@as(usize, 0), counts.unsafe);
     try testing.expect(std.mem.indexOf(u8, output.items, "success") != null);
 }
 
@@ -8319,12 +8471,12 @@ test "runCommand tx_build commands with auto gas payment excludes multi-coin bus
         .has_command = true,
         .tx_build_kind = .programmable,
         .tx_build_commands =
-            \\[
-            \\  {"kind":"MergeCoins","destination":"select:{\"kind\":\"object_input\",\"objectId\":\"0xb1b1\",\"inputKind\":\"imm_or_owned\",\"version\":9,\"digest\":\"0x1111111111111111111111111111111111111111111111111111111111111111\"}","sources":["select:{\"kind\":\"object_input\",\"objectId\":\"0xb2b2\",\"inputKind\":\"imm_or_owned\",\"version\":10,\"digest\":\"0x2222222222222222222222222222222222222222222222222222222222222222\"}"]},
-            \\  {"kind":"SplitCoins","coin":"select:{\"kind\":\"object_input\",\"objectId\":\"0xb1b1\",\"inputKind\":\"imm_or_owned\",\"version\":9,\"digest\":\"0x1111111111111111111111111111111111111111111111111111111111111111\"}","amounts":[13]},
-            \\  {"kind":"MakeMoveVec","type":null,"elements":[{"NestedResult":[1,0]}]},
-            \\  {"kind":"MoveCall","package":"0x2","module":"router","function":"deposit_many_exact","typeArguments":[{"Struct":{"address":"0x2","module":"sui","name":"SUI","typeParams":[]}}],"arguments":[{"Result":2}]}
-            \\]
+        \\[
+        \\  {"kind":"MergeCoins","destination":"select:{\"kind\":\"object_input\",\"objectId\":\"0xb1b1\",\"inputKind\":\"imm_or_owned\",\"version\":9,\"digest\":\"0x1111111111111111111111111111111111111111111111111111111111111111\"}","sources":["select:{\"kind\":\"object_input\",\"objectId\":\"0xb2b2\",\"inputKind\":\"imm_or_owned\",\"version\":10,\"digest\":\"0x2222222222222222222222222222222222222222222222222222222222222222\"}"]},
+        \\  {"kind":"SplitCoins","coin":"select:{\"kind\":\"object_input\",\"objectId\":\"0xb1b1\",\"inputKind\":\"imm_or_owned\",\"version\":9,\"digest\":\"0x1111111111111111111111111111111111111111111111111111111111111111\"}","amounts":[13]},
+        \\  {"kind":"MakeMoveVec","type":null,"elements":[{"NestedResult":[1,0]}]},
+        \\  {"kind":"MoveCall","package":"0x2","module":"router","function":"deposit_many_exact","typeArguments":[{"Struct":{"address":"0x2","module":"sui","name":"SUI","typeParams":[]}}],"arguments":[{"Result":2}]}
+        \\]
         ,
         .tx_build_sender = "0xowner",
         .tx_build_gas_budget = 50,

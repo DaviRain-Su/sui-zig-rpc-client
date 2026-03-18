@@ -29,6 +29,8 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
 - [x] Indexed explicit argument overrides with `--arg-at`.
 - [x] Indexed object overrides with `--object-arg-at`.
 - [x] Indexed vector object overrides with `--object-arg-at <index> '[]'`.
+- [x] Owner-context auto-selection for pure `address` / `signer`
+  parameters in `move function` templates.
 
 ### Object discovery and candidate linking
 

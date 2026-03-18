@@ -971,6 +971,8 @@ zig build run -- move function cetus_clmm_mainnet pool add_liquidity \
 
 如果你在 `move function --summarize` 时已经给了 `--sender` 或 `--signer`，这些值现在会直接回填到 `call_template.tx_dry_run_*` 和 `call_template.tx_send_from_keystore_*`。当只有 `--sender` 时，`tx send --from-keystore` 模板会回退用这个 sender 地址作为 address-compatible signer selector。
 
+同一份 owner 上下文现在也会继续作用到纯 `address` / `signer` 参数位。也就是说，如果目标函数签名本身显式要求传 `address` 或 `signer`，`move function --summarize` / `--dry-run` / `--send` 会优先把已解析的 sender 地址直接落成 `auto_selected_arg_json`，而不是继续保留 `0x<argN-address>` / `0x<argN-signer>` 这类 placeholder。
+
 真正执行时，你仍然需要自己补 gas 和具体 object id / select token；如果 summary 阶段没有给 sender / signer，上述模板里仍然会保留占位符。
 
 如果你不想再手工中转 `request artifact`，`move function` 现在还支持直接执行：
