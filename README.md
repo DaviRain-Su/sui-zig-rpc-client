@@ -663,7 +663,7 @@ pub fn main() !void {
 - `tx payload --summarize`: 输出 execute payload 的结构化 artifact summary
 - `tx dry-run --summarize`: 输出 dry-run 的结构化 execution summary
 - `tx send --tx-bytes ... --signature ...`: 使用签名+tx bytes 直接调用 `sui_executeTransactionBlock`
-- `tx send --from-keystore`: 当未提供 `--signature` 时，自动追加 `SUI_KEYSTORE` 中首条 key 作为签名参数
+- `tx send --from-keystore`: 当未提供 `--signature` 时，优先从默认 keystore 本地签名；若命令源支持本地 programmable builder，会直接构造 tx bytes 并签名发送
 - `tx send/payload --signer`: 按 keystore 记录中的 `alias/address/key` 选择 signer 并追加签名（配合 `--from-keystore`）
 - `tx send --summarize`: 输出 execute response 的结构化 execution summary
 - `tx send --observe`: 输出 `digest + confirmed_response + insights`
@@ -726,7 +726,7 @@ pub fn main() !void {
 - `--confirm-timeout-ms <ms>`: tx 确认超时时间
 - `--poll-ms <ms>`: tx 确认轮询间隔
 - `SUI_KEYSTORE`: 指向 keystore 文件；未设置时读取 `~/.sui/sui_config/sui.keystore`
-- `--from-keystore`: 从 `SUI_KEYSTORE` 读取首条 key 并作为签名字符串透传（当前未实现真实签名计算）
+- `--from-keystore`: 从 `SUI_KEYSTORE` 读取 signer；在 `tx send/payload` 的本地 programmable builder / tx-bytes 路径里会直接做本地签名
 - `--signer <alias|address|key>`: 从 keystore 里选 signer，配合 `--from-keystore` 使用（可重复）
 - `--version`: 打印版本
 - `--pretty`: 美化返回 JSON
@@ -739,6 +739,8 @@ pub fn main() !void {
 - `--signature <sig>`（可重复）或 `--signature-file <path>`（读取文件内容）
 - `--signer <alias|address|key>`（可重复）
 - `--options <json|@json-file>`（可选）
+
+对于 `tx send/payload --from-keystore`，只要命令源能走本地 programmable builder，并且 gas payment 可显式给出或通过 `--auto-gas-payment` 选出，CLI 现在即使没写 `--gas-price` 也会自动读取 reference gas price，再本地构造 tx bytes 和签名。
 
 `tx build move-call` 常用参数：
 - `--package <package-id>`

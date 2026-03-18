@@ -543,6 +543,7 @@ fn allowReferenceGasPriceFallbackForLocalProviderPath(
     provider: client.tx_request_builder.AccountProvider,
 ) bool {
     return switch (provider) {
+        .default_keystore,
         .direct_signatures,
         .remote_signer,
         .zklogin,
@@ -551,6 +552,12 @@ fn allowReferenceGasPriceFallbackForLocalProviderPath(
         => true,
         else => false,
     };
+}
+
+fn allowReferenceGasPriceFallbackForLocalSignerPath(
+    args: *const cli.ParsedArgs,
+) bool {
+    return hasRealBuilderSignerSource(args);
 }
 
 fn resolvedUnsafeMoveCallArgumentsJson(
@@ -775,13 +782,18 @@ fn buildLocalCommandSourceExecutePayload(
     args: *const cli.ParsedArgs,
     provider: ?client.tx_request_builder.AccountProvider,
 ) !?[]u8 {
+    const allow_reference_gas_price_fallback = if (provider) |value|
+        allowReferenceGasPriceFallbackForLocalProviderPath(value)
+    else
+        allowReferenceGasPriceFallbackForLocalSignerPath(args);
+
     var local = try ownLocalCommandSourceBuildContext(
         allocator,
         rpc,
         args,
         provider,
         true,
-        args.signatures.items.len != 0 and provider == null,
+        allow_reference_gas_price_fallback,
         false,
     ) orelse return null;
     defer local.deinit(allocator);
@@ -5223,7 +5235,7 @@ test "runCommand tx_payload move-call resolves ownerless selected tokens from de
     try testing.expectEqual(@as(usize, 97), decoded_len);
 }
 
-test "runCommand tx_payload move-call with from-keystore builds unsafe execute payload" {
+test "runCommand tx_payload move-call with from-keystore uses local programmable builder path" {
     const testing = std.testing;
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -5267,39 +5279,51 @@ test "runCommand tx_payload move-call with from-keystore builds unsafe execute p
         .tx_build_module = "counter",
         .tx_build_function = "increment",
         .tx_build_type_args = "[]",
-        .tx_build_args = "[\"0xabc\"]",
+        .tx_build_args = "[\"0x1111111111111111111111111111111111111111111111111111111111111111\"]",
         .tx_build_gas_budget = 1200,
-        .tx_build_gas_payment = "[{\"objectId\":\"0xgas\",\"version\":\"1\",\"digest\":\"digest-gas\"}]",
+        .tx_build_gas_payment = "[{\"objectId\":\"0x9999999999999999999999999999999999999999999999999999999999999999\",\"version\":\"1\",\"digest\":\"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}]",
         .from_keystore = true,
     };
 
     var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
     defer rpc.deinit();
 
-    var saw_unsafe_move_call = false;
     const MockContext = struct {
-        saw_unsafe_move_call: *bool,
+        gas_price: usize = 0,
+        normalized: usize = 0,
+        object: usize = 0,
+        unsafe: usize = 0,
         expected_sender: []const u8,
     };
+    var mock_ctx = MockContext{ .expected_sender = expected_sender };
     const callback = struct {
         fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) error{OutOfMemory}![]u8 {
             const ctx = @as(*MockContext, @ptrCast(@alignCast(context)));
-            if (!std.mem.eql(u8, req.method, "unsafe_moveCall")) return error.OutOfMemory;
-            ctx.saw_unsafe_move_call.* = true;
-
-            const params = std.json.parseFromSlice(std.json.Value, alloc, req.params_json, .{}) catch return error.OutOfMemory;
-            defer params.deinit();
-            std.debug.assert(std.mem.eql(u8, params.value.array.items[0].string, ctx.expected_sender));
-            std.debug.assert(std.mem.eql(u8, params.value.array.items[6].string, "0xgas"));
-            std.debug.assert(std.mem.eql(u8, params.value.array.items[7].string, "1200"));
-
-            return alloc.dupe(u8, "{\"result\":{\"txBytes\":\"AQIDBA==\"}}");
+            if (std.mem.eql(u8, req.method, "suix_getReferenceGasPrice")) {
+                ctx.gas_price += 1;
+                return alloc.dupe(u8, "{\"result\":\"8\"}");
+            }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                ctx.normalized += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"parameters\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"counter\",\"name\":\"Counter\"}},{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\"}}}]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getObject")) {
+                ctx.object += 1;
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, "0x1111111111111111111111111111111111111111111111111111111111111111") != null);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":{\"objectId\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"version\":\"5\",\"digest\":\"0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"owner\":{\"AddressOwner\":\"0x1111111111111111111111111111111111111111111111111111111111111111\"}}}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall") or std.mem.eql(u8, req.method, "unsafe_batchTransaction")) {
+                ctx.unsafe += 1;
+            }
+            return error.OutOfMemory;
         }
     }.call;
-    var mock_ctx = MockContext{
-        .saw_unsafe_move_call = &saw_unsafe_move_call,
-        .expected_sender = expected_sender,
-    };
     rpc.request_sender = .{
         .context = &mock_ctx,
         .callback = callback,
@@ -5309,17 +5333,21 @@ test "runCommand tx_payload move-call with from-keystore builds unsafe execute p
     defer output.deinit(allocator);
 
     try runCommand(allocator, &rpc, &args, output.writer(allocator));
-    try testing.expect(saw_unsafe_move_call);
+    try testing.expectEqual(@as(usize, 1), mock_ctx.gas_price);
+    try testing.expectEqual(@as(usize, 1), mock_ctx.normalized);
+    try testing.expectEqual(@as(usize, 1), mock_ctx.object);
+    try testing.expectEqual(@as(usize, 0), mock_ctx.unsafe);
 
     const payload = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
     defer payload.deinit();
-    try testing.expectEqualStrings("AQIDBA==", payload.value.array.items[0].string);
+    try testing.expect(payload.value == .array);
+    try testing.expect(payload.value.array.items[0].string.len > 0);
     const signature = payload.value.array.items[1].array.items[0].string;
     const decoded_len = try std.base64.standard.Decoder.calcSizeForSlice(signature);
     try testing.expectEqual(@as(usize, 97), decoded_len);
 }
 
-test "runCommand tx_payload move-call with from-keystore resolves selected argument tokens into unsafe execute payload" {
+test "runCommand tx_payload move-call with from-keystore resolves selected argument tokens through local programmable builder" {
     const testing = std.testing;
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -5365,47 +5393,67 @@ test "runCommand tx_payload move-call with from-keystore resolves selected argum
         .tx_build_type_args = "[]",
         .tx_build_args = "[\"select:{\\\"kind\\\":\\\"owned_object_struct_type\\\",\\\"structType\\\":\\\"0x2::example::Thing\\\"}\",7]",
         .tx_build_gas_budget = 1200,
-        .tx_build_gas_payment = "[{\"objectId\":\"0xgas\",\"version\":\"1\",\"digest\":\"digest-gas\"}]",
+        .tx_build_gas_payment = "[{\"objectId\":\"0x9999999999999999999999999999999999999999999999999999999999999999\",\"version\":\"1\",\"digest\":\"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}]",
         .from_keystore = true,
     };
 
     var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
     defer rpc.deinit();
 
+    var gas_price_queries: usize = 0;
     var owned_object_queries: usize = 0;
+    var normalized_queries: usize = 0;
+    var object_queries: usize = 0;
     var unsafe_calls: usize = 0;
     const MockContext = struct {
+        gas_price_queries: *usize,
         owned_object_queries: *usize,
+        normalized_queries: *usize,
+        object_queries: *usize,
         unsafe_calls: *usize,
         expected_sender: []const u8,
     };
     const callback = struct {
         fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) error{OutOfMemory}![]u8 {
             const ctx = @as(*MockContext, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "suix_getReferenceGasPrice")) {
+                ctx.gas_price_queries.* += 1;
+                return alloc.dupe(u8, "{\"result\":\"8\"}");
+            }
             if (std.mem.eql(u8, req.method, "suix_getOwnedObjects")) {
                 ctx.owned_object_queries.* += 1;
                 std.debug.assert(std.mem.indexOf(u8, req.params_json, ctx.expected_sender) != null);
                 return alloc.dupe(
                     u8,
-                    "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xabc123\",\"type\":\"0x2::example::Thing\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
+                    "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0x2222222222222222222222222222222222222222222222222222222222222222\",\"type\":\"0x2::example::Thing\",\"owner\":{\"AddressOwner\":\"0x1111111111111111111111111111111111111111111111111111111111111111\"}}}],\"hasNextPage\":false}}",
                 );
             }
-            if (std.mem.eql(u8, req.method, "unsafe_moveCall")) {
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                ctx.normalized_queries.* += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"parameters\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"counter\",\"name\":\"Counter\"}},\"U64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\"}}}]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getObject")) {
+                ctx.object_queries.* += 1;
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, "0x2222222222222222222222222222222222222222222222222222222222222222") != null);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":{\"objectId\":\"0x2222222222222222222222222222222222222222222222222222222222222222\",\"version\":\"5\",\"digest\":\"0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"owner\":{\"AddressOwner\":\"0x1111111111111111111111111111111111111111111111111111111111111111\"}}}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall") or std.mem.eql(u8, req.method, "unsafe_batchTransaction")) {
                 ctx.unsafe_calls.* += 1;
-                const params = std.json.parseFromSlice(std.json.Value, alloc, req.params_json, .{}) catch return error.OutOfMemory;
-                defer params.deinit();
-                std.debug.assert(std.mem.eql(u8, params.value.array.items[0].string, ctx.expected_sender));
-                std.debug.assert(std.mem.eql(u8, params.value.array.items[6].string, "0xgas"));
-                const call_args = params.value.array.items[5].array.items;
-                std.debug.assert(std.mem.eql(u8, call_args[0].string, "0xabc123"));
-                std.debug.assert(call_args[1].integer == 7);
-                return alloc.dupe(u8, "{\"result\":{\"txBytes\":\"AQIDBA==\"}}");
             }
             return error.OutOfMemory;
         }
     }.call;
     var mock_ctx = MockContext{
+        .gas_price_queries = &gas_price_queries,
         .owned_object_queries = &owned_object_queries,
+        .normalized_queries = &normalized_queries,
+        .object_queries = &object_queries,
         .unsafe_calls = &unsafe_calls,
         .expected_sender = expected_sender,
     };
@@ -5418,15 +5466,19 @@ test "runCommand tx_payload move-call with from-keystore resolves selected argum
     defer output.deinit(allocator);
 
     try runCommand(allocator, &rpc, &args, output.writer(allocator));
+    try testing.expectEqual(@as(usize, 1), gas_price_queries);
     try testing.expectEqual(@as(usize, 1), owned_object_queries);
-    try testing.expectEqual(@as(usize, 1), unsafe_calls);
+    try testing.expectEqual(@as(usize, 1), normalized_queries);
+    try testing.expectEqual(@as(usize, 1), object_queries);
+    try testing.expectEqual(@as(usize, 0), unsafe_calls);
 
     const payload = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
     defer payload.deinit();
-    try testing.expectEqualStrings("AQIDBA==", payload.value.array.items[0].string);
+    try testing.expect(payload.value == .array);
+    try testing.expect(payload.value.array.items[0].string.len > 0);
 }
 
-test "runCommand tx_payload move-call with from-keystore resolves selected gas payment tokens into unsafe execute payload" {
+test "runCommand tx_payload move-call with from-keystore resolves selected gas payment tokens through local programmable builder" {
     const testing = std.testing;
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -5470,7 +5522,7 @@ test "runCommand tx_payload move-call with from-keystore resolves selected gas p
         .tx_build_module = "counter",
         .tx_build_function = "increment",
         .tx_build_type_args = "[]",
-        .tx_build_args = "[\"0xabc\"]",
+        .tx_build_args = "[\"0x1111111111111111111111111111111111111111111111111111111111111111\"]",
         .tx_build_gas_budget = 1200,
         .tx_build_gas_payment = "select:{\"kind\":\"gas_coin\",\"minBalance\":1}",
         .from_keystore = true,
@@ -5479,37 +5531,60 @@ test "runCommand tx_payload move-call with from-keystore resolves selected gas p
     var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
     defer rpc.deinit();
 
+    var gas_price_queries: usize = 0;
     var coin_queries: usize = 0;
+    var normalized_queries: usize = 0;
+    var object_queries: usize = 0;
     var unsafe_calls: usize = 0;
     const MockContext = struct {
+        gas_price_queries: *usize,
         coin_queries: *usize,
+        normalized_queries: *usize,
+        object_queries: *usize,
         unsafe_calls: *usize,
         expected_sender: []const u8,
     };
     const callback = struct {
         fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) error{OutOfMemory}![]u8 {
             const ctx = @as(*MockContext, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "suix_getReferenceGasPrice")) {
+                ctx.gas_price_queries.* += 1;
+                return alloc.dupe(u8, "{\"result\":\"8\"}");
+            }
             if (std.mem.eql(u8, req.method, "suix_getCoins")) {
                 ctx.coin_queries.* += 1;
                 std.debug.assert(std.mem.indexOf(u8, req.params_json, ctx.expected_sender) != null);
                 return alloc.dupe(
                     u8,
-                    "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xselected-gas\",\"version\":\"8\",\"digest\":\"digest-selected-gas\",\"balance\":\"900\"}],\"hasNextPage\":false}}",
+                    "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0x9999999999999999999999999999999999999999999999999999999999999999\",\"version\":\"8\",\"digest\":\"0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"balance\":\"900\"}],\"hasNextPage\":false}}",
                 );
             }
-            if (std.mem.eql(u8, req.method, "unsafe_moveCall")) {
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                ctx.normalized_queries.* += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"parameters\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"counter\",\"name\":\"Counter\"}},{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\"}}}]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getObject")) {
+                ctx.object_queries.* += 1;
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, "0x1111111111111111111111111111111111111111111111111111111111111111") != null);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":{\"objectId\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"version\":\"5\",\"digest\":\"0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"owner\":{\"AddressOwner\":\"0x1111111111111111111111111111111111111111111111111111111111111111\"}}}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall") or std.mem.eql(u8, req.method, "unsafe_batchTransaction")) {
                 ctx.unsafe_calls.* += 1;
-                const params = std.json.parseFromSlice(std.json.Value, alloc, req.params_json, .{}) catch return error.OutOfMemory;
-                defer params.deinit();
-                std.debug.assert(std.mem.eql(u8, params.value.array.items[0].string, ctx.expected_sender));
-                std.debug.assert(std.mem.eql(u8, params.value.array.items[6].string, "0xselected-gas"));
-                return alloc.dupe(u8, "{\"result\":{\"txBytes\":\"AQIDBA==\"}}");
             }
             return error.OutOfMemory;
         }
     }.call;
     var mock_ctx = MockContext{
+        .gas_price_queries = &gas_price_queries,
         .coin_queries = &coin_queries,
+        .normalized_queries = &normalized_queries,
+        .object_queries = &object_queries,
         .unsafe_calls = &unsafe_calls,
         .expected_sender = expected_sender,
     };
@@ -5522,15 +5597,19 @@ test "runCommand tx_payload move-call with from-keystore resolves selected gas p
     defer output.deinit(allocator);
 
     try runCommand(allocator, &rpc, &args, output.writer(allocator));
+    try testing.expectEqual(@as(usize, 1), gas_price_queries);
     try testing.expectEqual(@as(usize, 1), coin_queries);
-    try testing.expectEqual(@as(usize, 1), unsafe_calls);
+    try testing.expectEqual(@as(usize, 1), normalized_queries);
+    try testing.expectEqual(@as(usize, 1), object_queries);
+    try testing.expectEqual(@as(usize, 0), unsafe_calls);
 
     const payload = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
     defer payload.deinit();
-    try testing.expectEqualStrings("AQIDBA==", payload.value.array.items[0].string);
+    try testing.expect(payload.value == .array);
+    try testing.expect(payload.value.array.items[0].string.len > 0);
 }
 
-test "runCommand tx_payload commands with from-keystore resolves selected tokens into unsafe batch execute payload" {
+test "runCommand tx_payload commands with from-keystore resolves selected tokens through local programmable builder" {
     const testing = std.testing;
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -5570,7 +5649,7 @@ test "runCommand tx_payload commands with from-keystore resolves selected tokens
     var args = cli.ParsedArgs{
         .command = .tx_payload,
         .has_command = true,
-        .tx_build_commands = "[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"arguments\":[\"select:{\\\"kind\\\":\\\"owned_object_struct_type\\\",\\\"structType\\\":\\\"0x2::example::Thing\\\"}\",7]},{\"kind\":\"TransferObjects\",\"objects\":[\"select:{\\\"kind\\\":\\\"owned_object_struct_type\\\",\\\"structType\\\":\\\"0x2::example::OtherThing\\\"}\"],\"address\":\"0xreceiver\"}]",
+        .tx_build_commands = "[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"arguments\":[\"select:{\\\"kind\\\":\\\"owned_object_struct_type\\\",\\\"structType\\\":\\\"0x2::example::Thing\\\"}\",7]},{\"kind\":\"TransferObjects\",\"objects\":[\"select:{\\\"kind\\\":\\\"owned_object_struct_type\\\",\\\"structType\\\":\\\"0x2::example::OtherThing\\\"}\"],\"address\":\"0x4444444444444444444444444444444444444444444444444444444444444444\"}]",
         .tx_build_gas_budget = 1200,
         .tx_build_gas_payment = "select:{\"kind\":\"gas_coin\",\"minBalance\":1}",
         .from_keystore = true,
@@ -5579,30 +5658,40 @@ test "runCommand tx_payload commands with from-keystore resolves selected tokens
     var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
     defer rpc.deinit();
 
+    var gas_price_queries: usize = 0;
     var owned_object_queries: usize = 0;
     var coin_queries: usize = 0;
+    var normalized_queries: usize = 0;
+    var object_queries: usize = 0;
     var unsafe_batch_calls: usize = 0;
     const MockContext = struct {
+        gas_price_queries: *usize,
         owned_object_queries: *usize,
         coin_queries: *usize,
+        normalized_queries: *usize,
+        object_queries: *usize,
         unsafe_batch_calls: *usize,
         expected_sender: []const u8,
     };
     const callback = struct {
         fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) error{OutOfMemory}![]u8 {
             const ctx = @as(*MockContext, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "suix_getReferenceGasPrice")) {
+                ctx.gas_price_queries.* += 1;
+                return alloc.dupe(u8, "{\"result\":\"8\"}");
+            }
             if (std.mem.eql(u8, req.method, "suix_getOwnedObjects")) {
                 ctx.owned_object_queries.* += 1;
                 std.debug.assert(std.mem.indexOf(u8, req.params_json, ctx.expected_sender) != null);
                 if (std.mem.indexOf(u8, req.params_json, "OtherThing") != null) {
                     return alloc.dupe(
                         u8,
-                        "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xdef456\",\"type\":\"0x2::example::OtherThing\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
+                        "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0x3333333333333333333333333333333333333333333333333333333333333333\",\"type\":\"0x2::example::OtherThing\",\"owner\":{\"AddressOwner\":\"0x1111111111111111111111111111111111111111111111111111111111111111\"}}}],\"hasNextPage\":false}}",
                     );
                 }
                 return alloc.dupe(
                     u8,
-                    "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xabc123\",\"type\":\"0x2::example::Thing\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
+                    "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0x2222222222222222222222222222222222222222222222222222222222222222\",\"type\":\"0x2::example::Thing\",\"owner\":{\"AddressOwner\":\"0x1111111111111111111111111111111111111111111111111111111111111111\"}}}],\"hasNextPage\":false}}",
                 );
             }
             if (std.mem.eql(u8, req.method, "suix_getCoins")) {
@@ -5610,38 +5699,41 @@ test "runCommand tx_payload commands with from-keystore resolves selected tokens
                 std.debug.assert(std.mem.indexOf(u8, req.params_json, ctx.expected_sender) != null);
                 return alloc.dupe(
                     u8,
-                    "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xselected-gas\",\"version\":\"8\",\"digest\":\"digest-selected-gas\",\"balance\":\"900\"}],\"hasNextPage\":false}}",
+                    "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0x9999999999999999999999999999999999999999999999999999999999999999\",\"version\":\"8\",\"digest\":\"0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"balance\":\"900\"}],\"hasNextPage\":false}}",
                 );
             }
-            if (std.mem.eql(u8, req.method, "unsafe_batchTransaction")) {
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                ctx.normalized_queries.* += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"parameters\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"counter\",\"name\":\"Counter\"}},\"U64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\"}}}]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getObject")) {
+                ctx.object_queries.* += 1;
+                if (std.mem.indexOf(u8, req.params_json, "0x3333333333333333333333333333333333333333333333333333333333333333") != null) {
+                    return alloc.dupe(
+                        u8,
+                        "{\"result\":{\"data\":{\"objectId\":\"0x3333333333333333333333333333333333333333333333333333333333333333\",\"version\":\"6\",\"digest\":\"0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"owner\":{\"AddressOwner\":\"0x1111111111111111111111111111111111111111111111111111111111111111\"}}}}",
+                    );
+                }
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":{\"objectId\":\"0x2222222222222222222222222222222222222222222222222222222222222222\",\"version\":\"5\",\"digest\":\"0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"owner\":{\"AddressOwner\":\"0x1111111111111111111111111111111111111111111111111111111111111111\"}}}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_batchTransaction") or std.mem.eql(u8, req.method, "unsafe_moveCall")) {
                 ctx.unsafe_batch_calls.* += 1;
-                const params = std.json.parseFromSlice(std.json.Value, alloc, req.params_json, .{}) catch return error.OutOfMemory;
-                defer params.deinit();
-                std.debug.assert(std.mem.eql(u8, params.value.array.items[0].string, ctx.expected_sender));
-                std.debug.assert(std.mem.eql(u8, params.value.array.items[2].string, "0xselected-gas"));
-                std.debug.assert(std.mem.eql(u8, params.value.array.items[3].string, "1200"));
-
-                const batch_items = params.value.array.items[1].array.items;
-                std.debug.assert(batch_items.len == 2);
-
-                const move_call = batch_items[0].object.get("moveCallRequestParams").?.object;
-                std.debug.assert(std.mem.eql(u8, move_call.get("packageObjectId").?.string, "0x2"));
-                const move_args = move_call.get("arguments").?.array.items;
-                std.debug.assert(std.mem.eql(u8, move_args[0].string, "0xabc123"));
-                std.debug.assert(move_args[1].integer == 7);
-
-                const transfer = batch_items[1].object.get("transferObjectRequestParams").?.object;
-                std.debug.assert(std.mem.eql(u8, transfer.get("recipient").?.string, "0xreceiver"));
-                std.debug.assert(std.mem.eql(u8, transfer.get("objectId").?.string, "0xdef456"));
-
-                return alloc.dupe(u8, "{\"result\":{\"txBytes\":\"AQIDBA==\"}}");
             }
             return error.OutOfMemory;
         }
     }.call;
     var mock_ctx = MockContext{
+        .gas_price_queries = &gas_price_queries,
         .owned_object_queries = &owned_object_queries,
         .coin_queries = &coin_queries,
+        .normalized_queries = &normalized_queries,
+        .object_queries = &object_queries,
         .unsafe_batch_calls = &unsafe_batch_calls,
         .expected_sender = expected_sender,
     };
@@ -5654,16 +5746,20 @@ test "runCommand tx_payload commands with from-keystore resolves selected tokens
     defer output.deinit(allocator);
 
     try runCommand(allocator, &rpc, &args, output.writer(allocator));
+    try testing.expectEqual(@as(usize, 1), gas_price_queries);
     try testing.expectEqual(@as(usize, 2), owned_object_queries);
     try testing.expectEqual(@as(usize, 1), coin_queries);
-    try testing.expectEqual(@as(usize, 1), unsafe_batch_calls);
+    try testing.expectEqual(@as(usize, 1), normalized_queries);
+    try testing.expectEqual(@as(usize, 2), object_queries);
+    try testing.expectEqual(@as(usize, 0), unsafe_batch_calls);
 
     const payload = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
     defer payload.deinit();
-    try testing.expectEqualStrings("AQIDBA==", payload.value.array.items[0].string);
+    try testing.expect(payload.value == .array);
+    try testing.expect(payload.value.array.items[0].string.len > 0);
 }
 
-test "runCommand tx_send commands with from-keystore falls back to unsafe batch execute path" {
+test "runCommand tx_send commands with from-keystore uses local programmable builder path" {
     const testing = std.testing;
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -5703,9 +5799,9 @@ test "runCommand tx_send commands with from-keystore falls back to unsafe batch 
     var args = cli.ParsedArgs{
         .command = .tx_send,
         .has_command = true,
-        .tx_build_commands = "[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"arguments\":[\"0xabc\",7]},{\"kind\":\"TransferObjects\",\"objects\":[\"0xcoin\"],\"address\":\"0x1111111111111111111111111111111111111111111111111111111111111111\"}]",
+        .tx_build_commands = "[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"arguments\":[\"0x1111111111111111111111111111111111111111111111111111111111111111\",7]},{\"kind\":\"TransferObjects\",\"objects\":[\"0x2222222222222222222222222222222222222222222222222222222222222222\"],\"address\":\"0x1111111111111111111111111111111111111111111111111111111111111111\"}]",
         .tx_build_gas_budget = 1200,
-        .tx_build_gas_payment = "[{\"objectId\":\"0xgas\",\"version\":\"1\",\"digest\":\"digest-gas\"}]",
+        .tx_build_gas_payment = "[{\"objectId\":\"0x9999999999999999999999999999999999999999999999999999999999999999\",\"version\":\"1\",\"digest\":\"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}]",
         .from_keystore = true,
     };
 
@@ -5739,33 +5835,28 @@ test "runCommand tx_send commands with from-keystore falls back to unsafe batch 
             }
             if (std.mem.eql(u8, req.method, "sui_getObject")) {
                 ctx.object += 1;
-                if (std.mem.indexOf(u8, req.params_json, "0xabc") != null) {
+                if (std.mem.indexOf(u8, req.params_json, "0x1111111111111111111111111111111111111111111111111111111111111111") != null) {
                     return alloc.dupe(
                         u8,
-                        "{\"result\":{\"data\":{\"objectId\":\"0xabc\",\"version\":\"5\",\"digest\":\"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"owner\":{\"AddressOwner\":\"0x1111111111111111111111111111111111111111111111111111111111111111\"}}}}",
+                        "{\"result\":{\"data\":{\"objectId\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"version\":\"5\",\"digest\":\"0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"owner\":{\"AddressOwner\":\"0x1111111111111111111111111111111111111111111111111111111111111111\"}}}}",
                     );
                 }
-                if (std.mem.indexOf(u8, req.params_json, "0xcoin") != null) {
+                if (std.mem.indexOf(u8, req.params_json, "0x2222222222222222222222222222222222222222222222222222222222222222") != null) {
                     return alloc.dupe(
                         u8,
-                        "{\"result\":{\"data\":{\"objectId\":\"0xcoin\",\"version\":\"6\",\"digest\":\"0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"owner\":{\"AddressOwner\":\"0x2222222222222222222222222222222222222222222222222222222222222222\"}}}}",
+                        "{\"result\":{\"data\":{\"objectId\":\"0x2222222222222222222222222222222222222222222222222222222222222222\",\"version\":\"6\",\"digest\":\"0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"owner\":{\"AddressOwner\":\"0x2222222222222222222222222222222222222222222222222222222222222222\"}}}}",
                     );
                 }
                 return error.OutOfMemory;
             }
-            if (std.mem.eql(u8, req.method, "unsafe_batchTransaction")) {
+            if (std.mem.eql(u8, req.method, "unsafe_batchTransaction") or std.mem.eql(u8, req.method, "unsafe_moveCall")) {
                 ctx.unsafe_batch_calls += 1;
-                const params = std.json.parseFromSlice(std.json.Value, alloc, req.params_json, .{}) catch return error.OutOfMemory;
-                defer params.deinit();
-                std.debug.assert(std.mem.eql(u8, params.value.array.items[0].string, ctx.expected_sender));
-                std.debug.assert(std.mem.eql(u8, params.value.array.items[2].string, "0xgas"));
-                return alloc.dupe(u8, "{\"result\":{\"txBytes\":\"AQIDBA==\"}}");
             }
             if (std.mem.eql(u8, req.method, "sui_executeTransactionBlock")) {
                 ctx.execute_calls += 1;
                 const payload = std.json.parseFromSlice(std.json.Value, alloc, req.params_json, .{}) catch return error.OutOfMemory;
                 defer payload.deinit();
-                std.debug.assert(std.mem.eql(u8, payload.value.array.items[0].string, "AQIDBA=="));
+                std.debug.assert(payload.value.array.items[0].string.len > 0);
                 const signature = payload.value.array.items[1].array.items[0].string;
                 const decoded_len = std.base64.standard.Decoder.calcSizeForSlice(signature) catch return error.OutOfMemory;
                 std.debug.assert(decoded_len == 97);
@@ -5786,7 +5877,7 @@ test "runCommand tx_send commands with from-keystore falls back to unsafe batch 
     try testing.expectEqual(@as(usize, 1), state.gas_price);
     try testing.expectEqual(@as(usize, 1), state.normalized);
     try testing.expectEqual(@as(usize, 2), state.object);
-    try testing.expectEqual(@as(usize, 1), state.unsafe_batch_calls);
+    try testing.expectEqual(@as(usize, 0), state.unsafe_batch_calls);
     try testing.expectEqual(@as(usize, 1), state.execute_calls);
 
     const response = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
@@ -8174,7 +8265,7 @@ test "runCommand tx_send move-call sends execute payload" {
     try testing.expectEqualStrings("sig-a", signatures.items[0].string);
 }
 
-test "runCommand tx_send move-call with from-keystore sends unsafe execute payload" {
+test "runCommand tx_send move-call with from-keystore uses local programmable builder path" {
     const testing = std.testing;
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -8218,9 +8309,9 @@ test "runCommand tx_send move-call with from-keystore sends unsafe execute paylo
         .tx_build_module = "counter",
         .tx_build_function = "increment",
         .tx_build_type_args = "[]",
-        .tx_build_args = "[\"0xabc\"]",
+        .tx_build_args = "[\"0x1111111111111111111111111111111111111111111111111111111111111111\"]",
         .tx_build_gas_budget = 800,
-        .tx_build_gas_payment = "[{\"objectId\":\"0xgas-send\",\"version\":\"2\",\"digest\":\"digest-gas-send\"}]",
+        .tx_build_gas_payment = "[{\"objectId\":\"0x9999999999999999999999999999999999999999999999999999999999999999\",\"version\":\"2\",\"digest\":\"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}]",
         .from_keystore = true,
     };
 
@@ -8254,26 +8345,20 @@ test "runCommand tx_send move-call with from-keystore sends unsafe execute paylo
             }
             if (std.mem.eql(u8, req.method, "sui_getObject")) {
                 ctx.object += 1;
-                std.debug.assert(std.mem.indexOf(u8, req.params_json, "0xabc") != null);
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, "0x1111111111111111111111111111111111111111111111111111111111111111") != null);
                 return alloc.dupe(
                     u8,
-                    "{\"result\":{\"data\":{\"objectId\":\"0xabc\",\"version\":\"5\",\"digest\":\"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"owner\":{\"AddressOwner\":\"0x1111111111111111111111111111111111111111111111111111111111111111\"}}}}",
+                    "{\"result\":{\"data\":{\"objectId\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"version\":\"5\",\"digest\":\"0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"owner\":{\"AddressOwner\":\"0x1111111111111111111111111111111111111111111111111111111111111111\"}}}}",
                 );
             }
-            if (std.mem.eql(u8, req.method, "unsafe_moveCall")) {
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall") or std.mem.eql(u8, req.method, "unsafe_batchTransaction")) {
                 ctx.unsafe_calls += 1;
-                const params = std.json.parseFromSlice(std.json.Value, alloc, req.params_json, .{}) catch return error.OutOfMemory;
-                defer params.deinit();
-                std.debug.assert(std.mem.eql(u8, params.value.array.items[0].string, ctx.expected_sender));
-                std.debug.assert(std.mem.eql(u8, params.value.array.items[6].string, "0xgas-send"));
-                std.debug.assert(std.mem.eql(u8, params.value.array.items[7].string, "800"));
-                return alloc.dupe(u8, "{\"result\":{\"txBytes\":\"AQIDBA==\"}}");
             }
             if (std.mem.eql(u8, req.method, "sui_executeTransactionBlock")) {
                 ctx.execute_calls += 1;
                 const params = std.json.parseFromSlice(std.json.Value, alloc, req.params_json, .{}) catch return error.OutOfMemory;
                 defer params.deinit();
-                std.debug.assert(std.mem.eql(u8, params.value.array.items[0].string, "AQIDBA=="));
+                std.debug.assert(params.value.array.items[0].string.len > 0);
                 const signature = params.value.array.items[1].array.items[0].string;
                 const decoded_len = std.base64.standard.Decoder.calcSizeForSlice(signature) catch return error.OutOfMemory;
                 std.debug.assert(decoded_len == 97);
@@ -8294,7 +8379,7 @@ test "runCommand tx_send move-call with from-keystore sends unsafe execute paylo
     try testing.expectEqual(@as(usize, 1), state.gas_price);
     try testing.expectEqual(@as(usize, 1), state.normalized);
     try testing.expectEqual(@as(usize, 1), state.object);
-    try testing.expectEqual(@as(usize, 1), state.unsafe_calls);
+    try testing.expectEqual(@as(usize, 0), state.unsafe_calls);
     try testing.expectEqual(@as(usize, 1), state.execute_calls);
     try testing.expectEqualStrings("{\"result\":{\"executed\":true}}\n", output.items);
 }
