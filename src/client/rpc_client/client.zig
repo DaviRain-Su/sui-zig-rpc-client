@@ -4284,6 +4284,35 @@ pub const SuiRpcClient = struct {
         return output.toOwnedSlice(allocator);
     }
 
+    fn buildMoveFunctionCommandsTemplateJson(
+        allocator: std.mem.Allocator,
+        move_call_command_json: []const u8,
+    ) ![]u8 {
+        return try std.fmt.allocPrint(allocator, "[{s}]", .{move_call_command_json});
+    }
+
+    fn buildMoveFunctionTxDryRunRequestJson(
+        allocator: std.mem.Allocator,
+        commands_json: []const u8,
+    ) ![]u8 {
+        return try std.fmt.allocPrint(
+            allocator,
+            "{{\"commands\":{s},\"sender\":\"0x<sender>\",\"gasBudget\":100000000,\"gasPrice\":1000,\"summarize\":true}}",
+            .{commands_json},
+        );
+    }
+
+    fn buildMoveFunctionTxSendFromKeystoreRequestJson(
+        allocator: std.mem.Allocator,
+        commands_json: []const u8,
+    ) ![]u8 {
+        return try std.fmt.allocPrint(
+            allocator,
+            "{{\"commands\":{s},\"fromKeystore\":true,\"signer\":\"<alias-or-address>\",\"gasBudget\":100000000,\"autoGasPayment\":true,\"wait\":true,\"summarize\":true}}",
+            .{commands_json},
+        );
+    }
+
     fn buildMoveFunctionTxDryRunArgv(
         allocator: std.mem.Allocator,
         summary: move_result.OwnedMoveFunctionSummary,
@@ -4581,6 +4610,15 @@ pub const SuiRpcClient = struct {
             args_json,
         );
         errdefer allocator.free(move_call_command_json);
+        const commands_json = try buildMoveFunctionCommandsTemplateJson(allocator, move_call_command_json);
+        errdefer allocator.free(commands_json);
+        const tx_dry_run_request_json = try buildMoveFunctionTxDryRunRequestJson(allocator, commands_json);
+        errdefer allocator.free(tx_dry_run_request_json);
+        const tx_send_from_keystore_request_json = try buildMoveFunctionTxSendFromKeystoreRequestJson(
+            allocator,
+            commands_json,
+        );
+        errdefer allocator.free(tx_send_from_keystore_request_json);
         const tx_dry_run_argv = try buildMoveFunctionTxDryRunArgv(
             allocator,
             summary.*,
@@ -4602,7 +4640,34 @@ pub const SuiRpcClient = struct {
             allocator.free(tx_send_from_keystore_argv);
         }
 
-        const preferred_tx_dry_run_argv = if (!std.mem.eql(u8, preferred_args_json, args_json))
+        const has_preferred_args = !std.mem.eql(u8, preferred_args_json, args_json);
+        const preferred_move_call_command_json = if (has_preferred_args)
+            try buildMoveFunctionCommandTemplateJson(
+                allocator,
+                summary.*,
+                type_args_json,
+                preferred_args_json,
+            )
+        else
+            null;
+        errdefer if (preferred_move_call_command_json) |value| allocator.free(value);
+        const preferred_commands_json = if (preferred_move_call_command_json) |value|
+            try buildMoveFunctionCommandsTemplateJson(allocator, value)
+        else
+            null;
+        if (preferred_move_call_command_json) |value| allocator.free(value);
+        errdefer if (preferred_commands_json) |value| allocator.free(value);
+        const preferred_tx_dry_run_request_json = if (preferred_commands_json) |value|
+            try buildMoveFunctionTxDryRunRequestJson(allocator, value)
+        else
+            null;
+        errdefer if (preferred_tx_dry_run_request_json) |value| allocator.free(value);
+        const preferred_tx_send_from_keystore_request_json = if (preferred_commands_json) |value|
+            try buildMoveFunctionTxSendFromKeystoreRequestJson(allocator, value)
+        else
+            null;
+        errdefer if (preferred_tx_send_from_keystore_request_json) |value| allocator.free(value);
+        const preferred_tx_dry_run_argv = if (has_preferred_args)
             try buildMoveFunctionTxDryRunArgv(
                 allocator,
                 summary.*,
@@ -4615,7 +4680,7 @@ pub const SuiRpcClient = struct {
             for (argv) |value| allocator.free(value);
             allocator.free(argv);
         };
-        const preferred_tx_send_from_keystore_argv = if (!std.mem.eql(u8, preferred_args_json, args_json))
+        const preferred_tx_send_from_keystore_argv = if (has_preferred_args)
             try buildMoveFunctionTxSendFromKeystoreArgv(
                 allocator,
                 summary.*,
@@ -4632,13 +4697,19 @@ pub const SuiRpcClient = struct {
         summary.call_template = .{
             .type_args_json = type_args_json,
             .args_json = args_json,
-            .preferred_args_json = if (std.mem.eql(u8, preferred_args_json, args_json)) blk: {
+            .preferred_args_json = if (!has_preferred_args) blk: {
                 allocator.free(preferred_args_json);
                 break :blk null;
             } else preferred_args_json,
             .move_call_command_json = move_call_command_json,
+            .commands_json = commands_json,
+            .preferred_commands_json = preferred_commands_json,
+            .tx_dry_run_request_json = tx_dry_run_request_json,
+            .preferred_tx_dry_run_request_json = preferred_tx_dry_run_request_json,
             .tx_dry_run_argv = tx_dry_run_argv,
             .preferred_tx_dry_run_argv = preferred_tx_dry_run_argv,
+            .tx_send_from_keystore_request_json = tx_send_from_keystore_request_json,
+            .preferred_tx_send_from_keystore_request_json = preferred_tx_send_from_keystore_request_json,
             .tx_send_from_keystore_argv = tx_send_from_keystore_argv,
             .preferred_tx_send_from_keystore_argv = preferred_tx_send_from_keystore_argv,
         };
@@ -21432,8 +21503,20 @@ test "runReadQueryAction dispatches summarized move function queries" {
                     try testing.expect(value.parameters[2].object_get_argv == null);
                     try testing.expect(value.call_template != null);
                     try testing.expectEqualStrings("[\"<arg0-object-id-or-select-token>\",0]", value.call_template.?.args_json);
+                    try testing.expectEqualStrings(
+                        "[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"pool\",\"function\":\"swap\",\"typeArguments\":[],\"arguments\":[\"<arg0-object-id-or-select-token>\",0]}]",
+                        value.call_template.?.commands_json,
+                    );
+                    try testing.expectEqualStrings(
+                        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"pool\",\"function\":\"swap\",\"typeArguments\":[],\"arguments\":[\"<arg0-object-id-or-select-token>\",0]}],\"sender\":\"0x<sender>\",\"gasBudget\":100000000,\"gasPrice\":1000,\"summarize\":true}",
+                        value.call_template.?.tx_dry_run_request_json,
+                    );
                     try testing.expectEqual(@as(usize, 19), value.call_template.?.tx_dry_run_argv.len);
                     try testing.expectEqualStrings("dry-run", value.call_template.?.tx_dry_run_argv[1]);
+                    try testing.expectEqualStrings(
+                        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"pool\",\"function\":\"swap\",\"typeArguments\":[],\"arguments\":[\"<arg0-object-id-or-select-token>\",0]}],\"fromKeystore\":true,\"signer\":\"<alias-or-address>\",\"gasBudget\":100000000,\"autoGasPayment\":true,\"wait\":true,\"summarize\":true}",
+                        value.call_template.?.tx_send_from_keystore_request_json,
+                    );
                     try testing.expectEqual(@as(usize, 20), value.call_template.?.tx_send_from_keystore_argv.len);
                     try testing.expectEqualStrings("send", value.call_template.?.tx_send_from_keystore_argv[1]);
                 },

@@ -2824,6 +2824,14 @@ test "runCommand move function with --summarize prints normalized function summa
         "{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"pool\",\"function\":\"swap\",\"typeArguments\":[],\"arguments\":[\"<arg0-object-id-or-select-token>\",0]}",
         parsed.value.object.get("call_template").?.object.get("move_call_command_json").?.string,
     );
+    try testing.expectEqualStrings(
+        "[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"pool\",\"function\":\"swap\",\"typeArguments\":[],\"arguments\":[\"<arg0-object-id-or-select-token>\",0]}]",
+        parsed.value.object.get("call_template").?.object.get("commands_json").?.string,
+    );
+    try testing.expectEqualStrings(
+        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"pool\",\"function\":\"swap\",\"typeArguments\":[],\"arguments\":[\"<arg0-object-id-or-select-token>\",0]}],\"sender\":\"0x<sender>\",\"gasBudget\":100000000,\"gasPrice\":1000,\"summarize\":true}",
+        parsed.value.object.get("call_template").?.object.get("tx_dry_run_request_json").?.string,
+    );
     const dry_run_argv = parsed.value.object.get("call_template").?.object.get("tx_dry_run_argv").?.array.items;
     try testing.expectEqual(@as(usize, 19), dry_run_argv.len);
     try testing.expectEqualStrings("tx", dry_run_argv[0].string);
@@ -2839,6 +2847,10 @@ test "runCommand move function with --summarize prints normalized function summa
     try testing.expectEqual(@as(usize, 20), send_argv.len);
     try testing.expectEqualStrings("tx", send_argv[0].string);
     try testing.expectEqualStrings("send", send_argv[1].string);
+    try testing.expectEqualStrings(
+        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"pool\",\"function\":\"swap\",\"typeArguments\":[],\"arguments\":[\"<arg0-object-id-or-select-token>\",0]}],\"fromKeystore\":true,\"signer\":\"<alias-or-address>\",\"gasBudget\":100000000,\"autoGasPayment\":true,\"wait\":true,\"summarize\":true}",
+        parsed.value.object.get("call_template").?.object.get("tx_send_from_keystore_request_json").?.string,
+    );
     try testing.expectEqualStrings("--from-keystore", send_argv[12].string);
     try testing.expectEqualStrings("<alias-or-address>", send_argv[14].string);
     try testing.expectEqualStrings("--auto-gas-payment", send_argv[17].string);
@@ -3250,6 +3262,14 @@ test "runCommand move function with --summarize adds shared object event discove
         "[\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xpool1\\\",\\\"inputKind\\\":\\\"shared\\\",\\\"initialSharedVersion\\\":7,\\\"mutable\\\":true}\"]",
         parsed.value.object.get("call_template").?.object.get("preferred_args_json").?.string,
     );
+    try testing.expectEqualStrings(
+        "[{\"kind\":\"MoveCall\",\"package\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"module\":\"pool\",\"function\":\"swap\",\"typeArguments\":[],\"arguments\":[\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xpool1\\\",\\\"inputKind\\\":\\\"shared\\\",\\\"initialSharedVersion\\\":7,\\\"mutable\\\":true}\"]}]",
+        parsed.value.object.get("call_template").?.object.get("preferred_commands_json").?.string,
+    );
+    try testing.expectEqualStrings(
+        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"module\":\"pool\",\"function\":\"swap\",\"typeArguments\":[],\"arguments\":[\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xpool1\\\",\\\"inputKind\\\":\\\"shared\\\",\\\"initialSharedVersion\\\":7,\\\"mutable\\\":true}\"]}],\"sender\":\"0x<sender>\",\"gasBudget\":100000000,\"gasPrice\":1000,\"summarize\":true}",
+        parsed.value.object.get("call_template").?.object.get("preferred_tx_dry_run_request_json").?.string,
+    );
 }
 
 test "runCommand move function with --summarize specializes generic signatures with type arguments" {
@@ -3493,6 +3513,10 @@ test "runCommand move function with --summarize fills owner context into vector 
     try testing.expectEqualStrings(
         "[[\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xcoin1\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":9,\\\"digest\\\":\\\"coin-digest-1\\\"}\",\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xcoin2\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":10,\\\"digest\\\":\\\"coin-digest-2\\\"}\"]]",
         parsed.value.object.get("call_template").?.object.get("preferred_args_json").?.string,
+    );
+    try testing.expectEqualStrings(
+        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"router\",\"function\":\"deposit_many\",\"typeArguments\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"sui\",\"name\":\"SUI\",\"typeParams\":[]}}],\"arguments\":[[\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xcoin1\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":9,\\\"digest\\\":\\\"coin-digest-1\\\"}\",\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xcoin2\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":10,\\\"digest\\\":\\\"coin-digest-2\\\"}\"]]}],\"fromKeystore\":true,\"signer\":\"<alias-or-address>\",\"gasBudget\":100000000,\"autoGasPayment\":true,\"wait\":true,\"summarize\":true}",
+        parsed.value.object.get("call_template").?.object.get("preferred_tx_send_from_keystore_request_json").?.string,
     );
 }
 

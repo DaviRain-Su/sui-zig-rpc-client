@@ -885,12 +885,22 @@ zig build run -- events \
 - `call_template.args_json`: 直接可改的 `--args` JSON 模板
 - `call_template.preferred_args_json`: 在保留原始模板的同时，优先把 CLI 已经能自动选出的参数回填进去
 - `call_template.move_call_command_json`: 直接可放进 `--commands` / `--command` 的 raw `MoveCall` command 模板
+- `call_template.commands_json`: 直接可放进 `--commands` 的 commands array 模板
+- `call_template.preferred_commands_json`: 如果存在 auto-selected candidate，则给一份优先回填 candidate 的 commands array 模板
+- `call_template.tx_dry_run_request_json`: 基于 `--commands` 路径的完整 `tx dry-run` request artifact
+- `call_template.preferred_tx_dry_run_request_json`: 如果存在 auto-selected candidate，则给一份优先回填 candidate 的 `tx dry-run` request artifact
 - `call_template.tx_dry_run_argv`: 直接可执行的 `tx dry-run` argv 模板
 - `call_template.preferred_tx_dry_run_argv`: 如果存在 auto-selected candidate，则给一条更接近可执行的 `tx dry-run` argv 模板
+- `call_template.tx_send_from_keystore_request_json`: 基于 `--commands` 路径的完整 `tx send --from-keystore` request artifact
+- `call_template.preferred_tx_send_from_keystore_request_json`: 如果存在 auto-selected candidate，则给一份优先回填 candidate 的 `tx send --from-keystore` request artifact
 - `call_template.tx_send_from_keystore_argv`: 直接可改的 `tx send --from-keystore` argv 模板
 - `call_template.preferred_tx_send_from_keystore_argv`: 如果存在 auto-selected candidate，则给一条更接近可执行的 `tx send --from-keystore` argv 模板
 
-这层模板只解决 ABI 到 CLI 输入骨架的映射；真正执行 `tx dry-run` / `tx send` 时，你仍然需要自己补 sender、signer、gas 和具体 object id / select token。
+这层模板现在同时覆盖两条路径：
+- typed `--package/--module/--function` argv
+- 更通用的 `--commands` request artifact
+
+真正执行 `tx dry-run` / `tx send` 时，你仍然需要自己补 sender、signer、gas 和具体 object id / select token。
 
 如果你给了 `move function --type-arg/--type-args`，summary 还会带：
 - `applied_type_args_json`

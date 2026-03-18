@@ -141,8 +141,14 @@ pub const OwnedMoveFunctionCallTemplate = struct {
     args_json: []u8,
     preferred_args_json: ?[]u8 = null,
     move_call_command_json: []u8,
+    commands_json: []u8,
+    preferred_commands_json: ?[]u8 = null,
+    tx_dry_run_request_json: []u8,
+    preferred_tx_dry_run_request_json: ?[]u8 = null,
     tx_dry_run_argv: [][]u8,
     preferred_tx_dry_run_argv: ?[][]u8 = null,
+    tx_send_from_keystore_request_json: []u8,
+    preferred_tx_send_from_keystore_request_json: ?[]u8 = null,
     tx_send_from_keystore_argv: [][]u8,
     preferred_tx_send_from_keystore_argv: ?[][]u8 = null,
 
@@ -151,12 +157,18 @@ pub const OwnedMoveFunctionCallTemplate = struct {
         allocator.free(self.args_json);
         if (self.preferred_args_json) |value| allocator.free(value);
         allocator.free(self.move_call_command_json);
+        allocator.free(self.commands_json);
+        if (self.preferred_commands_json) |value| allocator.free(value);
+        allocator.free(self.tx_dry_run_request_json);
+        if (self.preferred_tx_dry_run_request_json) |value| allocator.free(value);
         for (self.tx_dry_run_argv) |value| allocator.free(value);
         allocator.free(self.tx_dry_run_argv);
         if (self.preferred_tx_dry_run_argv) |argv| {
             for (argv) |value| allocator.free(value);
             allocator.free(argv);
         }
+        allocator.free(self.tx_send_from_keystore_request_json);
+        if (self.preferred_tx_send_from_keystore_request_json) |value| allocator.free(value);
         for (self.tx_send_from_keystore_argv) |value| allocator.free(value);
         allocator.free(self.tx_send_from_keystore_argv);
         if (self.preferred_tx_send_from_keystore_argv) |argv| {
