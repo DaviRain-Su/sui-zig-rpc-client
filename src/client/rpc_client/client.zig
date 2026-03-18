@@ -4394,17 +4394,105 @@ pub const SuiRpcClient = struct {
         if (mapped_args != explicit_args.len) return error.InvalidCli;
     }
 
-    fn parseExplicitU64ArgJson(
+    fn parseExplicitCoinBalanceArgJson(
         allocator: std.mem.Allocator,
         parameter: move_result.OwnedMoveParameterSummary,
     ) ?u64 {
         if (parameter.explicit_arg_json == null) return null;
         const lowering_kind = parameter.lowering_kind orelse return null;
-        if (!std.mem.eql(u8, lowering_kind, "u64")) return null;
-
         const parsed = std.json.parseFromSlice(std.json.Value, allocator, parameter.explicit_arg_json.?, .{}) catch return null;
         defer parsed.deinit();
-        return parseUnsignedJsonValueAs(u64, parsed.value) catch null;
+
+        if (std.mem.eql(u8, lowering_kind, "u8") or
+            std.mem.eql(u8, lowering_kind, "u16") or
+            std.mem.eql(u8, lowering_kind, "u32") or
+            std.mem.eql(u8, lowering_kind, "u64"))
+        {
+            return parseUnsignedJsonValueAs(u64, parsed.value) catch null;
+        }
+        if (std.mem.eql(u8, lowering_kind, "u128")) {
+            const value = parseUnsignedJsonValueAs(u128, parsed.value) catch return null;
+            if (value > std.math.maxInt(u64)) return null;
+            return @intCast(value);
+        }
+        if (std.mem.eql(u8, lowering_kind, "u256")) {
+            const value = parseUnsignedJsonValueAs(u256, parsed.value) catch return null;
+            if (value > std.math.maxInt(u64)) return null;
+            return @intCast(value);
+        }
+        return null;
+    }
+
+    fn buildAutoSelectedVectorArgJsonFromTokens(
+        allocator: std.mem.Allocator,
+        tokens: []const []const u8,
+    ) !?[]u8 {
+        if (tokens.len == 0) return null;
+
+        var output = std.ArrayList(u8){};
+        defer output.deinit(allocator);
+        const writer = output.writer(allocator);
+        try writer.writeAll("[");
+        for (tokens, 0..) |token, index| {
+            if (index != 0) try writer.writeAll(",");
+            try writer.print("{f}", .{std.json.fmt(token, .{})});
+        }
+        try writer.writeAll("]");
+        return try output.toOwnedSlice(allocator);
+    }
+
+    fn selectSmallestSufficientCoinCandidateToken(
+        candidates: []const move_result.OwnedMoveObjectCandidate,
+        min_balance: u64,
+    ) ?[]const u8 {
+        var selected_token: ?[]const u8 = null;
+        var selected_balance: u64 = 0;
+        for (candidates) |candidate| {
+            const balance = candidate.balance orelse continue;
+            if (balance < min_balance) continue;
+            if (selected_token == null or balance < selected_balance) {
+                selected_token = candidate.object_input_select_token;
+                selected_balance = balance;
+            }
+        }
+        return selected_token;
+    }
+
+    fn buildCoveringCoinVectorArgJson(
+        allocator: std.mem.Allocator,
+        candidates: []const move_result.OwnedMoveObjectCandidate,
+        min_balance: u64,
+    ) !?[]u8 {
+        if (selectSmallestSufficientCoinCandidateToken(candidates, min_balance)) |token| {
+            return try buildAutoSelectedVectorArgJsonFromTokens(allocator, &.{token});
+        }
+
+        var used = try allocator.alloc(bool, candidates.len);
+        defer allocator.free(used);
+        @memset(used, false);
+
+        var selected_tokens = std.ArrayList([]const u8).empty;
+        defer selected_tokens.deinit(allocator);
+
+        var total_balance: u64 = 0;
+        while (total_balance < min_balance) {
+            var next_index: ?usize = null;
+            var next_balance: u64 = 0;
+            for (candidates, 0..) |candidate, index| {
+                if (used[index]) continue;
+                const balance = candidate.balance orelse continue;
+                if (next_index == null or balance > next_balance) {
+                    next_index = index;
+                    next_balance = balance;
+                }
+            }
+            const index = next_index orelse return null;
+            used[index] = true;
+            try selected_tokens.append(allocator, candidates[index].object_input_select_token);
+            total_balance +|= next_balance;
+        }
+
+        return try buildAutoSelectedVectorArgJsonFromTokens(allocator, selected_tokens.items);
     }
 
     fn applyCoinSelectorMinBalanceHintsFromExplicitArgs(
@@ -4416,11 +4504,11 @@ pub const SuiRpcClient = struct {
         for (parameters, 0..) |parameter, index| {
             if (parameter.omitted_from_explicit_args) continue;
             if (previous_explicit_index) |previous_index| {
-                const min_balance = parseExplicitU64ArgJson(allocator, parameter) orelse {
+                const min_balance = parseExplicitCoinBalanceArgJson(allocator, parameter) orelse {
                     previous_explicit_index = index;
                     continue;
                 };
-                var previous = &parameters[previous_index];
+                const previous = &parameters[previous_index];
 
                 if (previous.explicit_arg_json == null) {
                     if (coinTypeFromMoveSignature(previous.signature)) |coin_type| {
@@ -4451,6 +4539,58 @@ pub const SuiRpcClient = struct {
                                 "[{f}]",
                                 .{std.json.fmt(previous.vector_item_coin_with_min_balance_select_token.?, .{})},
                             );
+                        }
+                    }
+                }
+            }
+            previous_explicit_index = index;
+        }
+    }
+
+    fn replaceMoveParameterAutoSelectedArgJson(
+        allocator: std.mem.Allocator,
+        parameter: *move_result.OwnedMoveParameterSummary,
+        value: ?[]u8,
+    ) void {
+        if (parameter.auto_selected_arg_json) |old_value| allocator.free(old_value);
+        parameter.auto_selected_arg_json = value;
+    }
+
+    fn applyCoinCandidateSelectionHintsFromExplicitArgs(
+        allocator: std.mem.Allocator,
+        parameters: []move_result.OwnedMoveParameterSummary,
+    ) !void {
+        var previous_explicit_index: ?usize = null;
+        for (parameters, 0..) |parameter, index| {
+            if (parameter.omitted_from_explicit_args) continue;
+            if (previous_explicit_index) |previous_index| {
+                const min_balance = parseExplicitCoinBalanceArgJson(allocator, parameter) orelse {
+                    previous_explicit_index = index;
+                    continue;
+                };
+                const previous = &parameters[previous_index];
+                if (previous.explicit_arg_json != null) {
+                    previous_explicit_index = index;
+                    continue;
+                }
+
+                if (coinTypeFromMoveSignature(previous.signature) != null) {
+                    if (previous.owned_object_candidates) |candidates| {
+                        const selected_value = if (selectSmallestSufficientCoinCandidateToken(candidates, min_balance)) |token|
+                            try buildAutoSelectedScalarArgJson(allocator, token)
+                        else
+                            null;
+                        replaceMoveParameterAutoSelectedArgJson(allocator, previous, selected_value);
+                    }
+                } else if (vectorElementTypeSignature(previous.signature)) |element_signature| {
+                    if (coinTypeFromCoinStructType(element_signature) != null) {
+                        if (previous.vector_item_owned_object_candidates) |candidates| {
+                            const selected_value = try buildCoveringCoinVectorArgJson(
+                                allocator,
+                                candidates,
+                                min_balance,
+                            );
+                            replaceMoveParameterAutoSelectedArgJson(allocator, previous, selected_value);
                         }
                     }
                 }
@@ -4927,6 +5067,10 @@ pub const SuiRpcClient = struct {
                 allocator,
                 summary.parameters,
                 owner_address,
+            );
+            try applyCoinCandidateSelectionHintsFromExplicitArgs(
+                allocator,
+                summary.parameters,
             );
         }
 

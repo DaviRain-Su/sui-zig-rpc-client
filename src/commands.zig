@@ -3861,6 +3861,69 @@ test "runCommand move function with --summarize fills owner context into vector 
     );
 }
 
+test "runCommand move function with --summarize chooses covering vector coin candidates from explicit amount" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"visibility\":\"Public\",\"isEntry\":true,\"typeParameters\":[[]],\"parameters\":[{\"Vector\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"coin\",\"name\":\"Coin\",\"typeParams\":[{\"TypeParameter\":0}]}}},\"u64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[]}}",
+                );
+            }
+
+            std.debug.assert(std.mem.eql(u8, req.method, "suix_getCoins"));
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0xowner\"") != null);
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0x2::sui::SUI\"") != null);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xcoin-small\",\"version\":\"9\",\"digest\":\"coin-digest-small\",\"balance\":\"2\"},{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xcoin-mid\",\"version\":\"10\",\"digest\":\"coin-digest-mid\",\"balance\":\"5\"},{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xcoin-large\",\"version\":\"11\",\"digest\":\"coin-digest-large\",\"balance\":\"9\"}],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var args = cli.ParsedArgs{
+        .command = .move_function,
+        .has_command = true,
+        .move_package = "0x2",
+        .move_module = "router",
+        .move_function = "deposit_many_exact",
+        .tx_build_type_args = "[\"0x2::sui::SUI\"]",
+        .tx_build_sender = "0xowner",
+        .tx_build_args = "[11]",
+        .tx_send_summarize = true,
+    };
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    const parameter = parsed.value.object.get("parameters").?.array.items[0].object;
+    try testing.expectEqualStrings(
+        "[\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xcoin-large\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":11,\\\"digest\\\":\\\"coin-digest-large\\\"}\",\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xcoin-mid\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":10,\\\"digest\\\":\\\"coin-digest-mid\\\"}\"]",
+        parameter.get("auto_selected_arg_json").?.string,
+    );
+    try testing.expectEqualStrings(
+        "[[\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xcoin-large\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":11,\\\"digest\\\":\\\"coin-digest-large\\\"}\",\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xcoin-mid\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":10,\\\"digest\\\":\\\"coin-digest-mid\\\"}\"],11]",
+        parsed.value.object.get("call_template").?.object.get("preferred_args_json").?.string,
+    );
+}
+
 test "runCommand move function with --summarize prefers largest scalar coin candidate" {
     const testing = std.testing;
 
@@ -3940,6 +4003,69 @@ test "runCommand move function with --summarize prefers largest scalar coin cand
     );
     try testing.expectEqualStrings(
         "[\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xcoin-large\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":10,\\\"digest\\\":\\\"coin-digest-large\\\"}\"]",
+        parsed.value.object.get("call_template").?.object.get("preferred_args_json").?.string,
+    );
+}
+
+test "runCommand move function with --summarize chooses smallest sufficient scalar coin candidate from explicit amount" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"visibility\":\"Public\",\"isEntry\":true,\"typeParameters\":[[]],\"parameters\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"coin\",\"name\":\"Coin\",\"typeParams\":[{\"TypeParameter\":0}]}},\"u64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[]}}",
+                );
+            }
+
+            std.debug.assert(std.mem.eql(u8, req.method, "suix_getCoins"));
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0xowner\"") != null);
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0x2::sui::SUI\"") != null);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xcoin-small\",\"version\":\"9\",\"digest\":\"coin-digest-small\",\"balance\":\"7\"},{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xcoin-fit\",\"version\":\"10\",\"digest\":\"coin-digest-fit\",\"balance\":\"13\"},{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xcoin-large\",\"version\":\"11\",\"digest\":\"coin-digest-large\",\"balance\":\"42\"}],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var args = cli.ParsedArgs{
+        .command = .move_function,
+        .has_command = true,
+        .move_package = "0x2",
+        .move_module = "router",
+        .move_function = "deposit_exact",
+        .tx_build_type_args = "[\"0x2::sui::SUI\"]",
+        .tx_build_sender = "0xowner",
+        .tx_build_args = "[13]",
+        .tx_send_summarize = true,
+    };
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    const parameter = parsed.value.object.get("parameters").?.array.items[0].object;
+    try testing.expectEqualStrings(
+        "\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xcoin-fit\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":10,\\\"digest\\\":\\\"coin-digest-fit\\\"}\"",
+        parameter.get("auto_selected_arg_json").?.string,
+    );
+    try testing.expectEqualStrings(
+        "[\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xcoin-fit\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":10,\\\"digest\\\":\\\"coin-digest-fit\\\"}\",13]",
         parsed.value.object.get("call_template").?.object.get("preferred_args_json").?.string,
     );
 }

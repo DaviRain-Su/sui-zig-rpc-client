@@ -903,6 +903,10 @@ zig build run -- events \
 
 如果你在 `move function --summarize` 时给的显式参数少于总参数个数，CLI 会优先把这些值按“非 object 参数位”做稀疏回填，而不是强行占掉前面的 object 参数位。这样像 `Coin<T>, u64, TxContext` 这类常见签名里，只传 `--arg 13` 就会优先落到 `u64` 金额参数上；同时前一个 `Coin<T>` 的 `coin_with_min_balance_select_token` 会把 `minBalance` 自动抬到 `13`。
 
+如果同时又有 owner 上下文和真实 `Coin<T>` 候选，CLI 现在还会把这类显式金额继续用于 `preferred_*` 自动选币：
+- scalar `Coin<T>` 会优先选“最小满足金额”的 coin，而不是盲目选最大余额
+- `vector<Coin<T>>` 会优先收敛成一组能覆盖该金额的 coin 子集
+
 这层模板现在同时覆盖两条路径：
 - typed `--package/--module/--function` argv
 - 更通用的 `--commands` request artifact
