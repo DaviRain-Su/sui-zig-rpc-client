@@ -762,6 +762,18 @@ pub fn main() !void {
 - `cetus_clmm_mainnet` / `cetus.mainnet.clmm` -> Cetus CLMM mainnet latest `PublishedAt`
 - `cetus_clmm_testnet` / `cetus.testnet.clmm` -> Cetus CLMM testnet latest `PublishedAt`
 
+对象读取命令也支持内置 object alias：
+- `object get <object-id-or-alias>`
+- `object dynamic-fields <object-id-or-alias>`
+- `object dynamic-field-object <object-id-or-alias> ...`
+
+例如：
+
+```bash
+zig build run -- object get clock --show-type --summarize
+zig build run -- object dynamic-fields preset:cetus.mainnet.clmm.global_config --summarize
+```
+
 也支持 `preset:` / `pkg:` 前缀，例如：
 
 ```bash
@@ -809,7 +821,7 @@ select:{"kind":"object_input","objectId":"0xdef456","inputKind":"imm_or_owned","
 - `cetus_clmm_global_config_mainnet`
 - `cetus_clmm_global_config_testnet`
 
-其中 `clock` 等价于 shared `0x6` + `initialSharedVersion:1`；Cetus 的 `GlobalConfig` preset 则会按 object id 走 `sui_getObject` 自动补全 shared object 元数据。如果你已经知道对象元数据，CLI 也可以直接本地构造 PTB object input；缺字段时才回退 RPC。这对 Cetus 这类大量使用 fixed shared config/pool object 的协议更实用，因为 CLI 不再要求你先手工查 `initialSharedVersion` 再自己拼 PTB JSON。
+这些 preset 现在既能用于 `select:{"kind":"object_preset",...}` 事务参数，也能直接用于对象读取/发现命令。`clock` 等价于 shared `0x6` + `initialSharedVersion:1`；Cetus 的 `GlobalConfig` preset 则会按 object id 走 `sui_getObject` 自动补全 shared object 元数据。如果你已经知道对象元数据，CLI 也可以直接本地构造 PTB object input；缺字段时才回退 RPC。这对 Cetus 这类大量使用 fixed shared config/pool object 的协议更实用，因为 CLI 不再要求你先手工查 `initialSharedVersion` 再自己拼 PTB JSON。
 
 ## 目录
 

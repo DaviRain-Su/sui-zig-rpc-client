@@ -3,6 +3,7 @@ const std = @import("std");
 const transport = @import("./transport.zig");
 const tx_builder = @import("../../tx_builder.zig");
 const keystore = @import("../../keystore.zig");
+const object_preset = @import("../../object_preset.zig");
 const tx_request_builder = @import("../../tx_request_builder.zig");
 const ptb_bytes_builder = @import("../../ptb_bytes_builder.zig");
 const inspect_result = @import("../../inspect_result.zig");
@@ -477,11 +478,7 @@ pub const ObjectInputKind = enum {
     shared,
 };
 
-pub const ObjectPresetKind = enum {
-    clock,
-    cetus_clmm_global_config_mainnet,
-    cetus_clmm_global_config_testnet,
-};
+pub const ObjectPresetKind = object_preset.Kind;
 
 pub const SelectedArgumentDslBuilder = struct {
     client: *SuiRpcClient,
@@ -2608,18 +2605,18 @@ pub const SuiRpcClient = struct {
     fn objectInputPreset(kind: ObjectPresetKind) ObjectInputPreset {
         return switch (kind) {
             .clock => .{
-                .object_id = "0x6",
+                .object_id = object_preset.objectId(.clock),
                 .input_kind = .shared,
                 .mutable = false,
                 .initial_shared_version = 1,
             },
             .cetus_clmm_global_config_mainnet => .{
-                .object_id = "0xdaa46292632c3c4d8f31f23ea0f9b36a28ff3677e9684980e4438403a67a3d8f",
+                .object_id = object_preset.objectId(.cetus_clmm_global_config_mainnet),
                 .input_kind = .shared,
                 .mutable = false,
             },
             .cetus_clmm_global_config_testnet => .{
-                .object_id = "0xc6273f844b4bc258952c4e477697aa12c918c8e08106fac6b934811298c9820a",
+                .object_id = object_preset.objectId(.cetus_clmm_global_config_testnet),
                 .input_kind = .shared,
                 .mutable = false,
             },
@@ -9864,25 +9861,7 @@ pub const SuiRpcClient = struct {
     }
 
     fn parseObjectPresetKind(raw: []const u8) !ObjectPresetKind {
-        if (std.mem.eql(u8, raw, "clock") or
-            std.mem.eql(u8, raw, "sui_clock") or
-            std.mem.eql(u8, raw, "system_clock"))
-        {
-            return .clock;
-        }
-        if (std.mem.eql(u8, raw, "cetus_clmm_global_config_mainnet") or
-            std.mem.eql(u8, raw, "cetus_global_config_mainnet") or
-            std.mem.eql(u8, raw, "cetus.mainnet.clmm.global_config"))
-        {
-            return .cetus_clmm_global_config_mainnet;
-        }
-        if (std.mem.eql(u8, raw, "cetus_clmm_global_config_testnet") or
-            std.mem.eql(u8, raw, "cetus_global_config_testnet") or
-            std.mem.eql(u8, raw, "cetus.testnet.clmm.global_config"))
-        {
-            return .cetus_clmm_global_config_testnet;
-        }
-        return error.InvalidCli;
+        return object_preset.resolveKind(raw) orelse error.InvalidCli;
     }
 
     fn selectedRequestTokenJsonText(token: []const u8) ?[]const u8 {
@@ -24053,7 +24032,6 @@ test "executeCommandsAndConfirmAndSummarizeFromDefaultKeystore extracts signer-b
     try testing.expectEqual(@as(?i128, -10), insights.balance_changes[0].amount);
 }
 
-
 test "runPlan supports execute summarize actions with default keystore providers" {
     const testing = std.testing;
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -24641,7 +24619,7 @@ test "inspectDslBuilderAndSummarize extracts structured inspect insights" {
     var builder = tx_request_builder.ProgrammaticDslBuilder.init(allocator);
     defer builder.deinit();
     _ = try builder.appendTransferObjectsAndGetValueFromValues(
-        &.{ .{ .object_id = "0xcoin" } },
+        &.{.{ .object_id = "0xcoin" }},
         .{ .address = "0xreceiver" },
     );
     builder.setSender("0xdsl");

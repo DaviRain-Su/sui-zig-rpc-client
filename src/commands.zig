@@ -2306,7 +2306,7 @@ pub fn runCommandWithProgrammaticProvider(
                 }
             } else {
                 const payload =
-                try buildExecutePayloadFromArgs(allocator, args, signatures, null);
+                    try buildExecutePayloadFromArgs(allocator, args, signatures, null);
                 defer allocator.free(payload);
                 if (args.tx_send_summarize) {
                     var summarized = try rpc.summarizeArtifact(allocator, .execute_payload, payload);
@@ -3204,6 +3204,62 @@ test "runCommand object get with typed option flags and --summarize prints struc
     try testing.expectEqualStrings("address_owner", parsed.value.object.get("owner_kind").?.string);
 }
 
+test "runCommand object get resolves object preset aliases before issuing RPC" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var method_ok = false;
+    var params_ok = false;
+
+    const MockContext = struct {
+        method_ok: *bool,
+        params_ok: *bool,
+    };
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const ctx = @as(*MockContext, @ptrCast(@alignCast(context)));
+            ctx.method_ok.* = std.mem.eql(u8, req.method, "sui_getObject");
+            ctx.params_ok.* = std.mem.indexOf(u8, req.params_json, "\"0x6\"") != null;
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":{\"objectId\":\"0x6\",\"version\":\"1\",\"digest\":\"digest-clock\",\"owner\":{\"Shared\":{\"initial_shared_version\":1}}}}}",
+            );
+        }
+    }.call;
+
+    const argv = [_][]const u8{
+        "object",
+        "get",
+        "clock",
+        "--summarize",
+    };
+    var args = try cli.parseCliArgs(allocator, &argv);
+    defer args.deinit(allocator);
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    var ctx = MockContext{
+        .method_ok = &method_ok,
+        .params_ok = &params_ok,
+    };
+    rpc.request_sender = .{
+        .context = &ctx,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    try testing.expect(method_ok);
+    try testing.expect(params_ok);
+}
+
 test "runCommand object dynamic-fields with --all prints aggregated summaries" {
     const testing = std.testing;
 
@@ -3309,6 +3365,68 @@ test "runCommand object dynamic-fields with --summarize prints structured page s
     try testing.expectEqualStrings("0xchild", parsed.value.object.get("entries").?.array.items[0].object.get("object_id").?.string);
 }
 
+test "runCommand object dynamic-fields resolves object preset aliases before issuing RPC" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var method_ok = false;
+    var params_ok = false;
+
+    const MockContext = struct {
+        method_ok: *bool,
+        params_ok: *bool,
+    };
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const ctx = @as(*MockContext, @ptrCast(@alignCast(context)));
+            ctx.method_ok.* = std.mem.eql(u8, req.method, "suix_getDynamicFields");
+            ctx.params_ok.* = std.mem.indexOf(
+                u8,
+                req.params_json,
+                "\"0xdaa46292632c3c4d8f31f23ea0f9b36a28ff3677e9684980e4438403a67a3d8f\"",
+            ) != null;
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    const argv = [_][]const u8{
+        "object",
+        "dynamic-fields",
+        "preset:cetus.mainnet.clmm.global_config",
+        "--limit",
+        "1",
+        "--summarize",
+    };
+    var args = try cli.parseCliArgs(allocator, &argv);
+    defer args.deinit(allocator);
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    var ctx = MockContext{
+        .method_ok = &method_ok,
+        .params_ok = &params_ok,
+    };
+    rpc.request_sender = .{
+        .context = &ctx,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    try testing.expect(method_ok);
+    try testing.expect(params_ok);
+}
+
 test "runCommand object dynamic-field-object with --summarize prints structured object summaries" {
     const testing = std.testing;
 
@@ -3404,6 +3522,70 @@ test "runCommand object dynamic-field-object with typed name flags and --summari
     try testing.expectEqualStrings("0xparent", parsed.value.object.get("owner_value").?.string);
 }
 
+test "runCommand object dynamic-field-object resolves object preset aliases before issuing RPC" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var method_ok = false;
+    var params_ok = false;
+
+    const MockContext = struct {
+        method_ok: *bool,
+        params_ok: *bool,
+    };
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const ctx = @as(*MockContext, @ptrCast(@alignCast(context)));
+            ctx.method_ok.* = std.mem.eql(u8, req.method, "suix_getDynamicFieldObject");
+            ctx.params_ok.* = std.mem.indexOf(
+                u8,
+                req.params_json,
+                "\"0xdaa46292632c3c4d8f31f23ea0f9b36a28ff3677e9684980e4438403a67a3d8f\"",
+            ) != null;
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":{\"objectId\":\"0xchild\",\"version\":\"9\",\"digest\":\"digest-child\",\"type\":\"0x2::example::Field\",\"owner\":{\"ObjectOwner\":\"0xparent\"}}}}",
+            );
+        }
+    }.call;
+
+    const argv = [_][]const u8{
+        "object",
+        "dynamic-field-object",
+        "cetus_clmm_global_config_mainnet",
+        "--name-type",
+        "address",
+        "--name-value",
+        "\"0xowner\"",
+        "--summarize",
+    };
+    var args = try cli.parseCliArgs(allocator, &argv);
+    defer args.deinit(allocator);
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    var ctx = MockContext{
+        .method_ok = &method_ok,
+        .params_ok = &params_ok,
+    };
+    rpc.request_sender = .{
+        .context = &ctx,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    try testing.expect(method_ok);
+    try testing.expect(params_ok);
+}
+
 test "buildExecutePayload includes signatures and optional options" {
     const testing = std.testing;
 
@@ -3469,7 +3651,7 @@ test "buildProgrammaticTxExecutePayload includes programmatic tx metadata" {
         "0xabc",
         1200,
         9,
-        &.{ "sig-a" },
+        &.{"sig-a"},
         "{\"skipChecks\":true}",
     );
     defer allocator.free(payload);
@@ -5104,8 +5286,7 @@ test "runCommand tx_payload commands with from-keystore resolves selected tokens
     var args = cli.ParsedArgs{
         .command = .tx_payload,
         .has_command = true,
-        .tx_build_commands =
-            "[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"arguments\":[\"select:{\\\"kind\\\":\\\"owned_object_struct_type\\\",\\\"structType\\\":\\\"0x2::example::Thing\\\"}\",7]},{\"kind\":\"TransferObjects\",\"objects\":[\"select:{\\\"kind\\\":\\\"owned_object_struct_type\\\",\\\"structType\\\":\\\"0x2::example::OtherThing\\\"}\"],\"address\":\"0xreceiver\"}]",
+        .tx_build_commands = "[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"arguments\":[\"select:{\\\"kind\\\":\\\"owned_object_struct_type\\\",\\\"structType\\\":\\\"0x2::example::Thing\\\"}\",7]},{\"kind\":\"TransferObjects\",\"objects\":[\"select:{\\\"kind\\\":\\\"owned_object_struct_type\\\",\\\"structType\\\":\\\"0x2::example::OtherThing\\\"}\"],\"address\":\"0xreceiver\"}]",
         .tx_build_gas_budget = 1200,
         .tx_build_gas_payment = "select:{\"kind\":\"gas_coin\",\"minBalance\":1}",
         .from_keystore = true,
@@ -5238,8 +5419,7 @@ test "runCommand tx_send commands with from-keystore falls back to unsafe batch 
     var args = cli.ParsedArgs{
         .command = .tx_send,
         .has_command = true,
-        .tx_build_commands =
-            "[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"arguments\":[\"0xabc\",7]},{\"kind\":\"TransferObjects\",\"objects\":[\"0xcoin\"],\"address\":\"0x1111111111111111111111111111111111111111111111111111111111111111\"}]",
+        .tx_build_commands = "[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"arguments\":[\"0xabc\",7]},{\"kind\":\"TransferObjects\",\"objects\":[\"0xcoin\"],\"address\":\"0x1111111111111111111111111111111111111111111111111111111111111111\"}]",
         .tx_build_gas_budget = 1200,
         .tx_build_gas_payment = "[{\"objectId\":\"0xgas\",\"version\":\"1\",\"digest\":\"digest-gas\"}]",
         .from_keystore = true,
@@ -7066,8 +7246,7 @@ test "runCommand tx_payload commands with direct signatures and selected argumen
     var args = cli.ParsedArgs{
         .command = .tx_payload,
         .has_command = true,
-        .tx_build_commands =
-            "[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"arguments\":[\"select:{\\\"kind\\\":\\\"owned_object_struct_type\\\",\\\"owner\\\":\\\"0x123\\\",\\\"structType\\\":\\\"0x2::example::Thing\\\"}\",7]},{\"kind\":\"TransferObjects\",\"objects\":[\"select:{\\\"kind\\\":\\\"owned_object_struct_type\\\",\\\"owner\\\":\\\"0x123\\\",\\\"structType\\\":\\\"0x2::example::OtherThing\\\"}\"],\"address\":\"0xdef\"}]",
+        .tx_build_commands = "[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"arguments\":[\"select:{\\\"kind\\\":\\\"owned_object_struct_type\\\",\\\"owner\\\":\\\"0x123\\\",\\\"structType\\\":\\\"0x2::example::Thing\\\"}\",7]},{\"kind\":\"TransferObjects\",\"objects\":[\"select:{\\\"kind\\\":\\\"owned_object_struct_type\\\",\\\"owner\\\":\\\"0x123\\\",\\\"structType\\\":\\\"0x2::example::OtherThing\\\"}\"],\"address\":\"0xdef\"}]",
         .tx_build_gas_budget = 1200,
         .tx_build_gas_payment = "[{\"objectId\":\"0x999\",\"version\":\"1\",\"digest\":\"0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"}]",
         .tx_build_sender = "0x123",
@@ -10125,7 +10304,6 @@ test "runCommandWithProgrammaticProvider tx_payload programmable publish and upg
     try testing.expect(std.mem.indexOf(u8, output.items, "\"account_address\":\"0x123\"") != null);
     try testing.expect(std.mem.indexOf(u8, output.items, "\"challenge\"") != null);
 }
-
 
 test "runCommandWithProgrammaticProvider tx_payload programmable publish and upgrade applies local builder challenge response" {
     const testing = std.testing;

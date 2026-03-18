@@ -19,3 +19,4 @@ pub const tx_request_builder = @import("./tx_request_builder.zig");
 pub const ptb_bytes_builder = @import("./ptb_bytes_builder.zig");
 pub const keystore = @import("./keystore.zig");
 pub const package_preset = @import("./package_preset.zig");
+pub const object_preset = @import("./object_preset.zig");

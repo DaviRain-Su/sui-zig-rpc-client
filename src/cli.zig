@@ -1,5 +1,6 @@
 const std = @import("std");
 const sui = @import("sui_client_zig");
+const object_preset = sui.object_preset;
 const package_preset = sui.package_preset;
 const tx_builder = sui.tx_builder;
 const tx_request_builder = sui.tx_request_builder;
@@ -122,6 +123,8 @@ pub const ParsedArgs = struct {
     owned_tx_session_response: ?[]const u8 = null,
     owned_account_objects_filter: ?[]const u8 = null,
     owned_account_objects_package: ?[]const u8 = null,
+    owned_object_id: ?[]const u8 = null,
+    owned_object_parent_id: ?[]const u8 = null,
     owned_object_dynamic_field_name: ?[]const u8 = null,
     owned_object_dynamic_field_name_value: ?[]const u8 = null,
     owned_object_options: ?[]const u8 = null,
@@ -155,6 +158,8 @@ pub const ParsedArgs = struct {
         if (self.owned_tx_session_response) |value| allocator.free(value);
         if (self.owned_account_objects_filter) |value| allocator.free(value);
         if (self.owned_account_objects_package) |value| allocator.free(value);
+        if (self.owned_object_id) |value| allocator.free(value);
+        if (self.owned_object_parent_id) |value| allocator.free(value);
         if (self.owned_object_dynamic_field_name) |value| allocator.free(value);
         if (self.owned_object_dynamic_field_name_value) |value| allocator.free(value);
         if (self.owned_object_options) |value| allocator.free(value);
@@ -290,6 +295,18 @@ fn maybeLoadFileValue(allocator: std.mem.Allocator, value: []const u8) !LoadedAr
 fn maybeLoadPackageValue(allocator: std.mem.Allocator, raw: []const u8) !LoadedArg {
     const loaded = try maybeLoadFileValue(allocator, raw);
     if (package_preset.resolvePackageIdAlias(loaded.value)) |resolved| {
+        if (loaded.owned) allocator.free(loaded.value);
+        return .{
+            .value = try allocator.dupe(u8, resolved),
+            .owned = true,
+        };
+    }
+    return loaded;
+}
+
+fn maybeLoadObjectIdValue(allocator: std.mem.Allocator, raw: []const u8) !LoadedArg {
+    const loaded = try maybeLoadFileValue(allocator, raw);
+    if (object_preset.resolveObjectIdAlias(loaded.value)) |resolved| {
         if (loaded.owned) allocator.free(loaded.value);
         return .{
             .value = try allocator.dupe(u8, resolved),
@@ -1583,6 +1600,23 @@ fn setOptionalPackageArg(
     value_slot.* = loaded.value;
 }
 
+fn setOptionalObjectIdArg(
+    allocator: std.mem.Allocator,
+    _: *ParsedArgs,
+    raw: []const u8,
+    owned_slot: *?[]const u8,
+    value_slot: *?[]const u8,
+) !void {
+    if (owned_slot.*) |old| {
+        allocator.free(old);
+        owned_slot.* = null;
+    }
+
+    const loaded = try maybeLoadObjectIdValue(allocator, raw);
+    if (loaded.owned) owned_slot.* = loaded.value;
+    value_slot.* = loaded.value;
+}
+
 fn setOwnedRpcUrl(
     allocator: std.mem.Allocator,
     parsed: *ParsedArgs,
@@ -1935,7 +1969,13 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
                     if (i + 2 >= args.len) return error.InvalidCli;
                     parsed.command = .object_get;
                     parsed.has_command = true;
-                    parsed.object_id = args[i + 2];
+                    try setOptionalObjectIdArg(
+                        allocator,
+                        &parsed,
+                        args[i + 2],
+                        &parsed.owned_object_id,
+                        &parsed.object_id,
+                    );
                     i += 3;
                     continue;
                 }
@@ -1943,7 +1983,13 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
                     if (i + 2 >= args.len) return error.InvalidCli;
                     parsed.command = .object_dynamic_fields;
                     parsed.has_command = true;
-                    parsed.object_parent_id = args[i + 2];
+                    try setOptionalObjectIdArg(
+                        allocator,
+                        &parsed,
+                        args[i + 2],
+                        &parsed.owned_object_parent_id,
+                        &parsed.object_parent_id,
+                    );
                     i += 3;
                     continue;
                 }
@@ -1951,7 +1997,13 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
                     if (i + 2 >= args.len) return error.InvalidCli;
                     parsed.command = .object_dynamic_field_object;
                     parsed.has_command = true;
-                    parsed.object_parent_id = args[i + 2];
+                    try setOptionalObjectIdArg(
+                        allocator,
+                        &parsed,
+                        args[i + 2],
+                        &parsed.owned_object_parent_id,
+                        &parsed.object_parent_id,
+                    );
                     if (i + 3 < args.len and !std.mem.startsWith(u8, args[i + 3], "--")) {
                         try setOptionalFileBackedArg(
                             allocator,
@@ -3184,219 +3236,218 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
 }
 
 pub fn printUsage(writer: anytype) !void {
-    try writer.print(
-        "Usage: sui-zig-rpc-client [global options] <command> [options]\n\n" ++
-            "Commands:\n" ++
-            "  help                                Show this help\n" ++
-            "  version                             Print version\n" ++
-            "  rpc <method> [params-json]          Send a raw JSON-RPC request\n" ++
-            "  object get <object-id>               Call sui_getObject\n" ++
-            "    --options <json|@file>              object read options\n" ++
-            "    --show-type|--show-owner|--show-content|--show-bcs\n" ++
-            "    --show-display|--show-storage-rebate|--show-previous-transaction\n" ++
-            "                                       typed object read options; do not mix with --options\n" ++
-            "    --summarize                         Print structured object summary instead of raw response\n" ++
-            "  object dynamic-fields <object-id>    Call suix_getDynamicFields\n" ++
-            "    --cursor <cursor>                   pagination cursor\n" ++
-            "    --limit <n>                         page size\n" ++
-            "    --all                               aggregate all pages and print structured results\n" ++
-            "    --summarize                         Print structured page summary for a single page\n" ++
-            "  object dynamic-field-object <object-id> <name-json|@file>\n" ++
-            "                                       Call suix_getDynamicFieldObject\n" ++
-            "    --name-type <type> --name-value <json|@file>\n" ++
-            "                                       typed dynamic-field name input; do not mix with positional name-json\n" ++
-            "    --summarize                         Print structured object summary instead of raw response\n" ++
-            "  tx build move-call                    Build move-call transaction instruction\n" ++
-            "  tx build programmable [options]        Build arbitrary programmable transaction block\n" ++
-            "    --package <package-id-or-alias>     Move package id\n" ++
-            "    --module <module-name>              Move module name\n" ++
-            "    --function <function-name>          Move function name\n" ++
-            "    --type-args <json|@file>            Optional JSON array\n" ++
-            "    --type-arg <type>                   Repeatable Move type argument\n" ++
-            "    --args <json|@file>                 Optional JSON array\n" ++
-            "    --arg <json|bare|@file>             Repeatable Move argument; bare values become JSON strings\n" ++
-            "    --sender <address|selector>         Optional sender address or keystore selector/index\n" ++
-            "    --signer <alias|address|key>         Optional signer selector/index; first address-compatible signer is used as sender\n" ++
-            "    --commands <json-array|@file>        JSON array of command objects\n" ++
-            "    --command <json-array|json-object|@file> (repeatable) command fragment\n" ++
-            "    --move-call <package> <module> <function> [<type-args-json|@file> <args-json|@file>]\n" ++
-            "    --move-call-type-arg <type>         Repeatable typed command MoveCall type argument\n" ++
-            "    --move-call-arg <json|bare|@file>   Repeatable typed command MoveCall argument\n" ++
-            "    --summarize                         Print structured build-artifact summary instead of raw JSON\n" ++
-            "    --transfer-objects [<objects-json|@file> <address-json|@file>] append TransferObjects command\n" ++
-            "    --transfer-object <json|bare|@file> repeatable TransferObjects input object\n" ++
-            "    --transfer-address <json|bare|@file> TransferObjects destination value\n" ++
-            "    --split-coins [<coin-json|@file> <amounts-json|@file>]        append SplitCoins command\n" ++
-            "    --split-coin <json|bare|@file>     SplitCoins source coin value\n" ++
-            "    --split-amount <json|bare|@file>   repeatable SplitCoins amount\n" ++
-            "    --merge-coins [<destination-json|@file> <sources-json|@file>] append MergeCoins command\n" ++
-            "    --merge-destination <json|bare|@file> MergeCoins destination value\n" ++
-            "    --merge-source <json|bare|@file>   repeatable MergeCoins source\n" ++
-            "    --gas-budget <gas>                 Optional gas budget\n" ++
-            "    --gas-price <gas>                  Optional gas price\n" ++
-            "    --emit-tx-block                    Build programmable transaction block JSON\n" ++
-            "    typed arg tokens: @0x... addr:0x... obj:0x... bytes:0x... bool:true u64:7 u128:... ptb:name:<alias>[:idx]\n" ++
-            "                      <alias>[.<idx>] vec:[...] vector[...] option:some:<json> some(...) option:none\n" ++
-            "    selected request tokens: select:{{\"kind\":\"owned_object_struct_type\",...}} select:{{\"kind\":\"object_preset\",\"name\":\"clock\"}} select:{{\"kind\":\"object_input\",\"objectId\":\"0x...\",\"inputKind\":\"shared\",\"mutable\":true,\"initialSharedVersion\":1}}\n" ++
-            "                      bare values still fall back to string/JSON parsing\n" ++
-            "  account list                        List local keystore accounts\n" ++
-            "  tx simulate [params-json]            Call sui_devInspectTransactionBlock\n" ++
-            "    --package <package-id-or-alias>     Move package id\n" ++
-            "    --module <module-name>              Move module name\n" ++
-            "    --function <function-name>          Move function name\n" ++
-            "    --type-args <json|@file>            Optional JSON array\n" ++
-            "    --type-arg <type>                   Repeatable Move type argument\n" ++
-            "    --args <json|@file>                 Optional JSON array\n" ++
-            "    --arg <json|bare|@file>             Repeatable Move argument; bare values become JSON strings\n" ++
-            "    --commands <json-array|@file>        JSON array for programmable transaction commands\n" ++
-            "    --command <json-array|json-object|@file> (repeatable) command fragment\n" ++
-            "    --move-call <package> <module> <function> [<type-args-json|@file> <args-json|@file>]\n" ++
-            "    --move-call-type-arg <type>         Repeatable typed command MoveCall type argument\n" ++
-            "    --move-call-arg <json|bare|@file>   Repeatable typed command MoveCall argument\n" ++
-            "    --transfer-objects [<objects-json|@file> <address-json|@file>] append TransferObjects command\n" ++
-            "    --transfer-object <json|bare|@file> repeatable TransferObjects input object\n" ++
-            "    --transfer-address <json|bare|@file> TransferObjects destination value\n" ++
-            "    --split-coins [<coin-json|@file> <amounts-json|@file>]        append SplitCoins command\n" ++
-            "    --split-coin <json|bare|@file>     SplitCoins source coin value\n" ++
-            "    --split-amount <json|bare|@file>   repeatable SplitCoins amount\n" ++
-            "    --merge-coins [<destination-json|@file> <sources-json|@file>] append MergeCoins command\n" ++
-            "    --merge-destination <json|bare|@file> MergeCoins destination value\n" ++
-            "    --merge-source <json|bare|@file>   repeatable MergeCoins source\n" ++
-            "    --sender <address|selector>         Optional sender address or keystore selector/index\n" ++
-            "    --gas-budget <gas>                 Optional gas budget\n" ++
-            "    --gas-price <gas>                  Optional gas price\n" ++
-            "    --signer <name|address|key>         Optional signer selector/index; first address-compatible signer is used as sender\n" ++
-            "    --options <json|@file>              optional inspect options\n" ++
-            "  tx send [params-json]                Call sui_executeTransactionBlock\n" ++
-            "    --package <package-id-or-alias>     Move package id\n" ++
-            "    --module <module-name>              Move module name\n" ++
-            "    --function <function-name>          Move function name\n" ++
-            "    --type-args <json|@file>            Optional JSON array\n" ++
-            "    --type-arg <type>                   Repeatable Move type argument\n" ++
-            "    --args <json|@file>                 Optional JSON array\n" ++
-            "    --arg <json|bare|@file>             Repeatable Move argument; bare values become JSON strings\n" ++
-            "    --commands <json-array|@file>        JSON array for programmable transaction commands\n" ++
-            "    --command <json-array|json-object|@file> (repeatable) command fragment\n" ++
-            "    --move-call <package> <module> <function> [<type-args-json|@file> <args-json|@file>]\n" ++
-            "    --move-call-type-arg <type>         Repeatable typed command MoveCall type argument\n" ++
-            "    --move-call-arg <json|bare|@file>   Repeatable typed command MoveCall argument\n" ++
-            "    --transfer-objects [<objects-json|@file> <address-json|@file>] append TransferObjects command\n" ++
-            "    --transfer-object <json|bare|@file> repeatable TransferObjects input object\n" ++
-            "    --transfer-address <json|bare|@file> TransferObjects destination value\n" ++
-            "    --split-coins [<coin-json|@file> <amounts-json|@file>]        append SplitCoins command\n" ++
-            "    --split-coin <json|bare|@file>     SplitCoins source coin value\n" ++
-            "    --split-amount <json|bare|@file>   repeatable SplitCoins amount\n" ++
-            "    --merge-coins [<destination-json|@file> <sources-json|@file>] append MergeCoins command\n" ++
-            "    --merge-destination <json|bare|@file> MergeCoins destination value\n" ++
-            "    --merge-source <json|bare|@file>   repeatable MergeCoins source\n" ++
-            "    --sender <address|selector>         Optional sender address or keystore selector/index\n" ++
-            "    --gas-budget <gas>                  Optional gas budget\n" ++
-            "    --gas-price <gas>                   Optional gas price\n" ++
-            "    --signature <sig>                   (repeatable) signatures list\n" ++
-            "    --signature-file <path>                  Load signature from file\n" ++
-            "    --signer <name|address|key>         Select key from keystore\n" ++
-            "    --from-keystore                     Append first key from keystore when signatures are missing\n" ++
-            "    --session-response <json|@file>     Apply a provider challenge response when continuing a prompted send\n" ++
-            "    --options <json|@file>              optional execute options\n" ++
-            "  tx payload                           Build execute params from tx bytes/signatures/options\n" ++
-            "    --tx-bytes <base64>                 (required) tx_bytes input\n" ++
-            "    --package <package-id-or-alias>     Move package id\n" ++
-            "    --module <module-name>              Move module name\n" ++
-            "    --function <function-name>          Move function name\n" ++
-            "    --type-args <json|@file>            Optional JSON array\n" ++
-            "    --type-arg <type>                   Repeatable Move type argument\n" ++
-            "    --args <json|@file>                 Optional JSON array\n" ++
-            "    --arg <json|bare|@file>             Repeatable Move argument; bare values become JSON strings\n" ++
-            "    --commands <json-array|@file>        JSON array for programmable transaction commands\n" ++
-            "    --command <json-array|json-object|@file> (repeatable) command fragment\n" ++
-            "    --move-call <package> <module> <function> [<type-args-json|@file> <args-json|@file>]\n" ++
-            "    --move-call-type-arg <type>         Repeatable typed command MoveCall type argument\n" ++
-            "    --move-call-arg <json|bare|@file>   Repeatable typed command MoveCall argument\n" ++
-            "    --transfer-objects [<objects-json|@file> <address-json|@file>] append TransferObjects command\n" ++
-            "    --transfer-object <json|bare|@file> repeatable TransferObjects input object\n" ++
-            "    --transfer-address <json|bare|@file> TransferObjects destination value\n" ++
-            "    --split-coins [<coin-json|@file> <amounts-json|@file>]        append SplitCoins command\n" ++
-            "    --split-coin <json|bare|@file>     SplitCoins source coin value\n" ++
-            "    --split-amount <json|bare|@file>   repeatable SplitCoins amount\n" ++
-            "    --merge-coins [<destination-json|@file> <sources-json|@file>] append MergeCoins command\n" ++
-            "    --merge-destination <json|bare|@file> MergeCoins destination value\n" ++
-            "    --merge-source <json|bare|@file>   repeatable MergeCoins source\n" ++
-            "    --sender <address|selector>         Optional sender address or keystore selector/index\n" ++
-            "    --gas-budget <gas>                  Optional gas budget\n" ++
-            "    --gas-price <gas>                   Optional gas price\n" ++
-            "    --signature <sig>                   (repeatable) signatures list\n" ++
-            "    --signature-file <path>                  Load signature from file\n" ++
-            "    --signer <name|address|key>         Select key from keystore\n" ++
-            "    --from-keystore                     Append first key from keystore when signatures are missing\n" ++
-            "    --session-response <json|@file>     Apply a provider challenge response when continuing a prompted build\n" ++
-            "    --summarize                         Print structured execute-payload summary instead of raw payload\n" ++
-            "    --options <json|@file>              optional execute options\n" ++
-            "  tx status <digest>                   Query sui_getTransactionBlock once\n" ++
-            "    --summarize                         Print structured execution summary instead of raw response\n" ++
-            "    --observe                           Print digest + confirmed response + summary\n" ++
-            "  tx confirm|wait <digest>             Poll sui_getTransactionBlock until found\n" ++
-            "    --summarize                         Print structured execution summary instead of raw response\n" ++
-            "    --observe                           Print digest + confirmed response + summary\n" ++
-            "  account list                         List local keystore accounts\n" ++
-            "    --json                               Emit machine-readable account JSON\n" ++
-            "  account info <selector>               Show keystore entry by selector/index\n" ++
-            "    --json                               Emit machine-readable account JSON\n" ++
-            "  account coins <selector|0xaddress>    List coins for a local selector or address\n" ++
-            "    --coin-type <type>                    Filter by coin type\n" ++
-            "    --cursor <cursor>                     Page from a specific cursor\n" ++
-            "    --limit <n>                           Page size\n" ++
-            "    --all                                 Aggregate all pages\n" ++
-            "    --json                                Emit raw RPC JSON instead of summarized output\n" ++
-            "  account objects <selector|0xaddress>  List owned objects for a local selector or address\n" ++
-            "    --filter <json|@file>                 Optional Sui object filter\n" ++
-            "    --struct-type <type>                  Typed filter: StructType\n" ++
-            "    --object-id <id>                      Typed filter: ObjectId\n" ++
-            "    --package <package-id-or-alias>       Typed filter: Package\n" ++
-            "    --module <module-name>                Typed filter: MoveModule (requires --package)\n" ++
-            "    --options <json|@file>                Optional object data options\n" ++
-            "    --show-type                           Typed option: include object type\n" ++
-            "    --show-owner                          Typed option: include owner\n" ++
-            "    --show-previous-transaction           Typed option: include previous transaction\n" ++
-            "    --show-display                        Typed option: include display\n" ++
-            "    --show-content                        Typed option: include content\n" ++
-            "    --show-bcs                            Typed option: include BCS\n" ++
-            "    --show-storage-rebate                 Typed option: include storage rebate\n" ++
-            "    --cursor <cursor>                     Page from a specific cursor\n" ++
-            "    --limit <n>                           Page size\n" ++
-            "    --all                                 Aggregate all pages\n" ++
-            "    --json                                Emit raw RPC JSON instead of summarized output\n" ++
-            "  account resources <selector|0xaddress> List coins and owned objects for a local selector or address\n" ++
-            "    --coin-type <type>                    Filter coin discovery by coin type\n" ++
-            "    --filter <json|@file>                 Optional owned-object filter\n" ++
-            "    --struct-type <type>                  Typed owned-object StructType filter\n" ++
-            "    --object-id <id>                      Typed owned-object ObjectId filter\n" ++
-            "    --package <package-id-or-alias>       Typed owned-object Package filter\n" ++
-            "    --module <module-name>                Typed owned-object MoveModule filter (requires --package)\n" ++
-            "    --options <json|@file>                Optional owned-object data options\n" ++
-            "    --show-type                           Typed option: include object type\n" ++
-            "    --show-owner                          Typed option: include owner\n" ++
-            "    --show-previous-transaction           Typed option: include previous transaction\n" ++
-            "    --show-display                        Typed option: include display\n" ++
-            "    --show-content                        Typed option: include content\n" ++
-            "    --show-bcs                            Typed option: include BCS\n" ++
-            "    --show-storage-rebate                 Typed option: include storage rebate\n" ++
-            "    --limit <n>                           Shared page size for coins and owned objects\n" ++
-            "    --all                                 Aggregate all pages for both resources\n" ++
-            "    --json                                Emit raw combined JSON instead of summarized output\n\n" ++
-            "Global options:\n" ++
-            "  --rpc <url>                          RPC endpoint (default: {s})\n" ++
-            "                                       Environment precedence: --rpc > SUI_RPC_URL > SUI_CONFIG\n" ++
-            "  SUI_RPC_URL=<url>                    Override rpc endpoint when --rpc is not provided\n" ++
-            "  --timeout-ms <ms>                    HTTP request timeout\n" ++
-            "  --confirm-timeout-ms <ms>             Confirm timeout\n" ++
-            "  --poll-ms <ms>                       Polling interval for tx confirm\n" ++
-            "  --pretty                             Pretty-print response JSON\n" ++
-            "  SUI_CONFIG=<path>                    Path to config file (default: ~/.sui/sui_config/client.yaml)\n" ++
-            "                                       Supports rpc_url/json_rpc_url and Sui yaml envs format\n" ++
-            "  SUI_KEYSTORE=<path>                  Path to keystore file (default: ~/.sui/sui_config/sui.keystore)\n" ++
-            "  --help, -h                           Show this usage\n" ++
-            "  --version                            Print version\n", .{ default_rpc_url }
-    );
+    try writer.print("Usage: sui-zig-rpc-client [global options] <command> [options]\n\n" ++
+        "Commands:\n" ++
+        "  help                                Show this help\n" ++
+        "  version                             Print version\n" ++
+        "  rpc <method> [params-json]          Send a raw JSON-RPC request\n" ++
+        "  object get <object-id-or-alias>      Call sui_getObject\n" ++
+        "    --options <json|@file>              object read options\n" ++
+        "    --show-type|--show-owner|--show-content|--show-bcs\n" ++
+        "    --show-display|--show-storage-rebate|--show-previous-transaction\n" ++
+        "                                       typed object read options; do not mix with --options\n" ++
+        "    --summarize                         Print structured object summary instead of raw response\n" ++
+        "  object dynamic-fields <object-id-or-alias>\n" ++
+        "                                       Call suix_getDynamicFields\n" ++
+        "    --cursor <cursor>                   pagination cursor\n" ++
+        "    --limit <n>                         page size\n" ++
+        "    --all                               aggregate all pages and print structured results\n" ++
+        "    --summarize                         Print structured page summary for a single page\n" ++
+        "  object dynamic-field-object <object-id-or-alias> <name-json|@file>\n" ++
+        "                                       Call suix_getDynamicFieldObject\n" ++
+        "    --name-type <type> --name-value <json|@file>\n" ++
+        "                                       typed dynamic-field name input; do not mix with positional name-json\n" ++
+        "    --summarize                         Print structured object summary instead of raw response\n" ++
+        "  tx build move-call                    Build move-call transaction instruction\n" ++
+        "  tx build programmable [options]        Build arbitrary programmable transaction block\n" ++
+        "    --package <package-id-or-alias>     Move package id\n" ++
+        "    --module <module-name>              Move module name\n" ++
+        "    --function <function-name>          Move function name\n" ++
+        "    --type-args <json|@file>            Optional JSON array\n" ++
+        "    --type-arg <type>                   Repeatable Move type argument\n" ++
+        "    --args <json|@file>                 Optional JSON array\n" ++
+        "    --arg <json|bare|@file>             Repeatable Move argument; bare values become JSON strings\n" ++
+        "    --sender <address|selector>         Optional sender address or keystore selector/index\n" ++
+        "    --signer <alias|address|key>         Optional signer selector/index; first address-compatible signer is used as sender\n" ++
+        "    --commands <json-array|@file>        JSON array of command objects\n" ++
+        "    --command <json-array|json-object|@file> (repeatable) command fragment\n" ++
+        "    --move-call <package> <module> <function> [<type-args-json|@file> <args-json|@file>]\n" ++
+        "    --move-call-type-arg <type>         Repeatable typed command MoveCall type argument\n" ++
+        "    --move-call-arg <json|bare|@file>   Repeatable typed command MoveCall argument\n" ++
+        "    --summarize                         Print structured build-artifact summary instead of raw JSON\n" ++
+        "    --transfer-objects [<objects-json|@file> <address-json|@file>] append TransferObjects command\n" ++
+        "    --transfer-object <json|bare|@file> repeatable TransferObjects input object\n" ++
+        "    --transfer-address <json|bare|@file> TransferObjects destination value\n" ++
+        "    --split-coins [<coin-json|@file> <amounts-json|@file>]        append SplitCoins command\n" ++
+        "    --split-coin <json|bare|@file>     SplitCoins source coin value\n" ++
+        "    --split-amount <json|bare|@file>   repeatable SplitCoins amount\n" ++
+        "    --merge-coins [<destination-json|@file> <sources-json|@file>] append MergeCoins command\n" ++
+        "    --merge-destination <json|bare|@file> MergeCoins destination value\n" ++
+        "    --merge-source <json|bare|@file>   repeatable MergeCoins source\n" ++
+        "    --gas-budget <gas>                 Optional gas budget\n" ++
+        "    --gas-price <gas>                  Optional gas price\n" ++
+        "    --emit-tx-block                    Build programmable transaction block JSON\n" ++
+        "    typed arg tokens: @0x... addr:0x... obj:0x... bytes:0x... bool:true u64:7 u128:... ptb:name:<alias>[:idx]\n" ++
+        "                      <alias>[.<idx>] vec:[...] vector[...] option:some:<json> some(...) option:none\n" ++
+        "    selected request tokens: select:{{\"kind\":\"owned_object_struct_type\",...}} select:{{\"kind\":\"object_preset\",\"name\":\"clock\"}} select:{{\"kind\":\"object_input\",\"objectId\":\"0x...\",\"inputKind\":\"shared\",\"mutable\":true,\"initialSharedVersion\":1}}\n" ++
+        "                      bare values still fall back to string/JSON parsing\n" ++
+        "  account list                        List local keystore accounts\n" ++
+        "  tx simulate [params-json]            Call sui_devInspectTransactionBlock\n" ++
+        "    --package <package-id-or-alias>     Move package id\n" ++
+        "    --module <module-name>              Move module name\n" ++
+        "    --function <function-name>          Move function name\n" ++
+        "    --type-args <json|@file>            Optional JSON array\n" ++
+        "    --type-arg <type>                   Repeatable Move type argument\n" ++
+        "    --args <json|@file>                 Optional JSON array\n" ++
+        "    --arg <json|bare|@file>             Repeatable Move argument; bare values become JSON strings\n" ++
+        "    --commands <json-array|@file>        JSON array for programmable transaction commands\n" ++
+        "    --command <json-array|json-object|@file> (repeatable) command fragment\n" ++
+        "    --move-call <package> <module> <function> [<type-args-json|@file> <args-json|@file>]\n" ++
+        "    --move-call-type-arg <type>         Repeatable typed command MoveCall type argument\n" ++
+        "    --move-call-arg <json|bare|@file>   Repeatable typed command MoveCall argument\n" ++
+        "    --transfer-objects [<objects-json|@file> <address-json|@file>] append TransferObjects command\n" ++
+        "    --transfer-object <json|bare|@file> repeatable TransferObjects input object\n" ++
+        "    --transfer-address <json|bare|@file> TransferObjects destination value\n" ++
+        "    --split-coins [<coin-json|@file> <amounts-json|@file>]        append SplitCoins command\n" ++
+        "    --split-coin <json|bare|@file>     SplitCoins source coin value\n" ++
+        "    --split-amount <json|bare|@file>   repeatable SplitCoins amount\n" ++
+        "    --merge-coins [<destination-json|@file> <sources-json|@file>] append MergeCoins command\n" ++
+        "    --merge-destination <json|bare|@file> MergeCoins destination value\n" ++
+        "    --merge-source <json|bare|@file>   repeatable MergeCoins source\n" ++
+        "    --sender <address|selector>         Optional sender address or keystore selector/index\n" ++
+        "    --gas-budget <gas>                 Optional gas budget\n" ++
+        "    --gas-price <gas>                  Optional gas price\n" ++
+        "    --signer <name|address|key>         Optional signer selector/index; first address-compatible signer is used as sender\n" ++
+        "    --options <json|@file>              optional inspect options\n" ++
+        "  tx send [params-json]                Call sui_executeTransactionBlock\n" ++
+        "    --package <package-id-or-alias>     Move package id\n" ++
+        "    --module <module-name>              Move module name\n" ++
+        "    --function <function-name>          Move function name\n" ++
+        "    --type-args <json|@file>            Optional JSON array\n" ++
+        "    --type-arg <type>                   Repeatable Move type argument\n" ++
+        "    --args <json|@file>                 Optional JSON array\n" ++
+        "    --arg <json|bare|@file>             Repeatable Move argument; bare values become JSON strings\n" ++
+        "    --commands <json-array|@file>        JSON array for programmable transaction commands\n" ++
+        "    --command <json-array|json-object|@file> (repeatable) command fragment\n" ++
+        "    --move-call <package> <module> <function> [<type-args-json|@file> <args-json|@file>]\n" ++
+        "    --move-call-type-arg <type>         Repeatable typed command MoveCall type argument\n" ++
+        "    --move-call-arg <json|bare|@file>   Repeatable typed command MoveCall argument\n" ++
+        "    --transfer-objects [<objects-json|@file> <address-json|@file>] append TransferObjects command\n" ++
+        "    --transfer-object <json|bare|@file> repeatable TransferObjects input object\n" ++
+        "    --transfer-address <json|bare|@file> TransferObjects destination value\n" ++
+        "    --split-coins [<coin-json|@file> <amounts-json|@file>]        append SplitCoins command\n" ++
+        "    --split-coin <json|bare|@file>     SplitCoins source coin value\n" ++
+        "    --split-amount <json|bare|@file>   repeatable SplitCoins amount\n" ++
+        "    --merge-coins [<destination-json|@file> <sources-json|@file>] append MergeCoins command\n" ++
+        "    --merge-destination <json|bare|@file> MergeCoins destination value\n" ++
+        "    --merge-source <json|bare|@file>   repeatable MergeCoins source\n" ++
+        "    --sender <address|selector>         Optional sender address or keystore selector/index\n" ++
+        "    --gas-budget <gas>                  Optional gas budget\n" ++
+        "    --gas-price <gas>                   Optional gas price\n" ++
+        "    --signature <sig>                   (repeatable) signatures list\n" ++
+        "    --signature-file <path>                  Load signature from file\n" ++
+        "    --signer <name|address|key>         Select key from keystore\n" ++
+        "    --from-keystore                     Append first key from keystore when signatures are missing\n" ++
+        "    --session-response <json|@file>     Apply a provider challenge response when continuing a prompted send\n" ++
+        "    --options <json|@file>              optional execute options\n" ++
+        "  tx payload                           Build execute params from tx bytes/signatures/options\n" ++
+        "    --tx-bytes <base64>                 (required) tx_bytes input\n" ++
+        "    --package <package-id-or-alias>     Move package id\n" ++
+        "    --module <module-name>              Move module name\n" ++
+        "    --function <function-name>          Move function name\n" ++
+        "    --type-args <json|@file>            Optional JSON array\n" ++
+        "    --type-arg <type>                   Repeatable Move type argument\n" ++
+        "    --args <json|@file>                 Optional JSON array\n" ++
+        "    --arg <json|bare|@file>             Repeatable Move argument; bare values become JSON strings\n" ++
+        "    --commands <json-array|@file>        JSON array for programmable transaction commands\n" ++
+        "    --command <json-array|json-object|@file> (repeatable) command fragment\n" ++
+        "    --move-call <package> <module> <function> [<type-args-json|@file> <args-json|@file>]\n" ++
+        "    --move-call-type-arg <type>         Repeatable typed command MoveCall type argument\n" ++
+        "    --move-call-arg <json|bare|@file>   Repeatable typed command MoveCall argument\n" ++
+        "    --transfer-objects [<objects-json|@file> <address-json|@file>] append TransferObjects command\n" ++
+        "    --transfer-object <json|bare|@file> repeatable TransferObjects input object\n" ++
+        "    --transfer-address <json|bare|@file> TransferObjects destination value\n" ++
+        "    --split-coins [<coin-json|@file> <amounts-json|@file>]        append SplitCoins command\n" ++
+        "    --split-coin <json|bare|@file>     SplitCoins source coin value\n" ++
+        "    --split-amount <json|bare|@file>   repeatable SplitCoins amount\n" ++
+        "    --merge-coins [<destination-json|@file> <sources-json|@file>] append MergeCoins command\n" ++
+        "    --merge-destination <json|bare|@file> MergeCoins destination value\n" ++
+        "    --merge-source <json|bare|@file>   repeatable MergeCoins source\n" ++
+        "    --sender <address|selector>         Optional sender address or keystore selector/index\n" ++
+        "    --gas-budget <gas>                  Optional gas budget\n" ++
+        "    --gas-price <gas>                   Optional gas price\n" ++
+        "    --signature <sig>                   (repeatable) signatures list\n" ++
+        "    --signature-file <path>                  Load signature from file\n" ++
+        "    --signer <name|address|key>         Select key from keystore\n" ++
+        "    --from-keystore                     Append first key from keystore when signatures are missing\n" ++
+        "    --session-response <json|@file>     Apply a provider challenge response when continuing a prompted build\n" ++
+        "    --summarize                         Print structured execute-payload summary instead of raw payload\n" ++
+        "    --options <json|@file>              optional execute options\n" ++
+        "  tx status <digest>                   Query sui_getTransactionBlock once\n" ++
+        "    --summarize                         Print structured execution summary instead of raw response\n" ++
+        "    --observe                           Print digest + confirmed response + summary\n" ++
+        "  tx confirm|wait <digest>             Poll sui_getTransactionBlock until found\n" ++
+        "    --summarize                         Print structured execution summary instead of raw response\n" ++
+        "    --observe                           Print digest + confirmed response + summary\n" ++
+        "  account list                         List local keystore accounts\n" ++
+        "    --json                               Emit machine-readable account JSON\n" ++
+        "  account info <selector>               Show keystore entry by selector/index\n" ++
+        "    --json                               Emit machine-readable account JSON\n" ++
+        "  account coins <selector|0xaddress>    List coins for a local selector or address\n" ++
+        "    --coin-type <type>                    Filter by coin type\n" ++
+        "    --cursor <cursor>                     Page from a specific cursor\n" ++
+        "    --limit <n>                           Page size\n" ++
+        "    --all                                 Aggregate all pages\n" ++
+        "    --json                                Emit raw RPC JSON instead of summarized output\n" ++
+        "  account objects <selector|0xaddress>  List owned objects for a local selector or address\n" ++
+        "    --filter <json|@file>                 Optional Sui object filter\n" ++
+        "    --struct-type <type>                  Typed filter: StructType\n" ++
+        "    --object-id <id>                      Typed filter: ObjectId\n" ++
+        "    --package <package-id-or-alias>       Typed filter: Package\n" ++
+        "    --module <module-name>                Typed filter: MoveModule (requires --package)\n" ++
+        "    --options <json|@file>                Optional object data options\n" ++
+        "    --show-type                           Typed option: include object type\n" ++
+        "    --show-owner                          Typed option: include owner\n" ++
+        "    --show-previous-transaction           Typed option: include previous transaction\n" ++
+        "    --show-display                        Typed option: include display\n" ++
+        "    --show-content                        Typed option: include content\n" ++
+        "    --show-bcs                            Typed option: include BCS\n" ++
+        "    --show-storage-rebate                 Typed option: include storage rebate\n" ++
+        "    --cursor <cursor>                     Page from a specific cursor\n" ++
+        "    --limit <n>                           Page size\n" ++
+        "    --all                                 Aggregate all pages\n" ++
+        "    --json                                Emit raw RPC JSON instead of summarized output\n" ++
+        "  account resources <selector|0xaddress> List coins and owned objects for a local selector or address\n" ++
+        "    --coin-type <type>                    Filter coin discovery by coin type\n" ++
+        "    --filter <json|@file>                 Optional owned-object filter\n" ++
+        "    --struct-type <type>                  Typed owned-object StructType filter\n" ++
+        "    --object-id <id>                      Typed owned-object ObjectId filter\n" ++
+        "    --package <package-id-or-alias>       Typed owned-object Package filter\n" ++
+        "    --module <module-name>                Typed owned-object MoveModule filter (requires --package)\n" ++
+        "    --options <json|@file>                Optional owned-object data options\n" ++
+        "    --show-type                           Typed option: include object type\n" ++
+        "    --show-owner                          Typed option: include owner\n" ++
+        "    --show-previous-transaction           Typed option: include previous transaction\n" ++
+        "    --show-display                        Typed option: include display\n" ++
+        "    --show-content                        Typed option: include content\n" ++
+        "    --show-bcs                            Typed option: include BCS\n" ++
+        "    --show-storage-rebate                 Typed option: include storage rebate\n" ++
+        "    --limit <n>                           Shared page size for coins and owned objects\n" ++
+        "    --all                                 Aggregate all pages for both resources\n" ++
+        "    --json                                Emit raw combined JSON instead of summarized output\n\n" ++
+        "Global options:\n" ++
+        "  --rpc <url>                          RPC endpoint (default: {s})\n" ++
+        "                                       Environment precedence: --rpc > SUI_RPC_URL > SUI_CONFIG\n" ++
+        "  SUI_RPC_URL=<url>                    Override rpc endpoint when --rpc is not provided\n" ++
+        "  --timeout-ms <ms>                    HTTP request timeout\n" ++
+        "  --confirm-timeout-ms <ms>             Confirm timeout\n" ++
+        "  --poll-ms <ms>                       Polling interval for tx confirm\n" ++
+        "  --pretty                             Pretty-print response JSON\n" ++
+        "  SUI_CONFIG=<path>                    Path to config file (default: ~/.sui/sui_config/client.yaml)\n" ++
+        "                                       Supports rpc_url/json_rpc_url and Sui yaml envs format\n" ++
+        "  SUI_KEYSTORE=<path>                  Path to keystore file (default: ~/.sui/sui_config/sui.keystore)\n" ++
+        "  --help, -h                           Show this usage\n" ++
+        "  --version                            Print version\n", .{default_rpc_url});
 }
 
 test "parseCliArgs default usage with empty args" {
@@ -5711,6 +5762,26 @@ test "parseCliArgs parses object get typed option flags" {
     try testing.expect(parsed.tx_send_summarize);
 }
 
+test "parseCliArgs resolves object preset aliases for object get" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "object",
+        "get",
+        "clock",
+        "--show-type",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.object_get, parsed.command);
+    try testing.expectEqualStrings(object_preset.clock, parsed.object_id.?);
+    try testing.expect(parsed.object_show_type);
+}
+
 test "parseCliArgs rejects object get raw options mixed with typed flags" {
     const testing = std.testing;
 
@@ -5749,6 +5820,30 @@ test "parseCliArgs parses object dynamic-fields options" {
     try testing.expectEqualStrings("0xparent", parsed.object_parent_id.?);
     try testing.expectEqual(@as(?u64, 25), parsed.object_dynamic_fields_limit);
     try testing.expect(parsed.object_dynamic_fields_all);
+}
+
+test "parseCliArgs resolves object preset aliases for object dynamic-fields" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "object",
+        "dynamic-fields",
+        "preset:cetus.mainnet.clmm.global_config",
+        "--limit",
+        "1",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.object_dynamic_fields, parsed.command);
+    try testing.expectEqualStrings(
+        object_preset.cetus_clmm_global_config_mainnet,
+        parsed.object_parent_id.?,
+    );
+    try testing.expectEqual(@as(?u64, 1), parsed.object_dynamic_fields_limit);
 }
 
 test "parseCliArgs parses object dynamic-field-object summarize" {
@@ -5797,6 +5892,33 @@ test "parseCliArgs parses object dynamic-field-object typed name inputs" {
     try testing.expectEqualStrings("address", parsed.object_dynamic_field_name_type.?);
     try testing.expectEqualStrings("\"0xowner\"", parsed.object_dynamic_field_name_value.?);
     try testing.expect(parsed.tx_send_summarize);
+}
+
+test "parseCliArgs resolves object preset aliases for object dynamic-field-object" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "object",
+        "dynamic-field-object",
+        "cetus_clmm_global_config_mainnet",
+        "--name-type",
+        "address",
+        "--name-value",
+        "\"0xowner\"",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.object_dynamic_field_object, parsed.command);
+    try testing.expectEqualStrings(
+        object_preset.cetus_clmm_global_config_mainnet,
+        parsed.object_parent_id.?,
+    );
+    try testing.expectEqualStrings("address", parsed.object_dynamic_field_name_type.?);
+    try testing.expectEqualStrings("\"0xowner\"", parsed.object_dynamic_field_name_value.?);
 }
 
 test "parseCliArgs rejects object dynamic-field-object mixed raw and typed names" {
