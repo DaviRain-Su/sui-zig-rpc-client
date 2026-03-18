@@ -1945,6 +1945,10 @@ fn moveQueryFromArgs(
                 .function_name = args.move_function orelse return error.InvalidCli,
                 .type_arguments_json = args.tx_build_type_args,
                 .owner_address = try resolvedTxBuildSenderFromArgs(allocator, args),
+                .signer_selector = if (args.signers.items.len == 0)
+                    null
+                else
+                    try allocator.dupe(u8, args.signers.items[0]),
             },
         },
         else => return error.InvalidCli,
@@ -3163,6 +3167,133 @@ test "runCommand move function with --summarize fills owner context into owned o
     );
 }
 
+test "runCommand move function with --summarize carries sender and signer context into call templates" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                std.debug.assert(std.mem.eql(u8, req.params_json, "[\"0x2\",\"pool\",\"swap\"]"));
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"visibility\":\"Public\",\"isEntry\":true,\"typeParameters\":[],\"parameters\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"pool\",\"name\":\"Pool\",\"typeParams\":[]}},\"U64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[]}}",
+                );
+            }
+
+            std.debug.assert(std.mem.eql(u8, req.method, "suix_getOwnedObjects"));
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0xowner\"") != null);
+            return alloc.dupe(u8, "{\"result\":{\"data\":[],\"hasNextPage\":false}}");
+        }
+    }.call;
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "move",
+        "function",
+        "0x2",
+        "pool",
+        "swap",
+        "--sender",
+        "0xowner",
+        "--signer",
+        "builder",
+        "--from-keystore",
+        "--summarize",
+    });
+    defer args.deinit(allocator);
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    const template = parsed.value.object.get("call_template").?.object;
+    try testing.expectEqualStrings(
+        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"pool\",\"function\":\"swap\",\"typeArguments\":[],\"arguments\":[\"<arg0-object-id-or-select-token>\",0]}],\"sender\":\"0xowner\",\"gasBudget\":100000000,\"gasPrice\":1000,\"summarize\":true}",
+        template.get("tx_dry_run_request_json").?.string,
+    );
+    try testing.expectEqualStrings(
+        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"pool\",\"function\":\"swap\",\"typeArguments\":[],\"arguments\":[\"<arg0-object-id-or-select-token>\",0]}],\"fromKeystore\":true,\"signer\":\"builder\",\"gasBudget\":100000000,\"autoGasPayment\":true,\"wait\":true,\"summarize\":true}",
+        template.get("tx_send_from_keystore_request_json").?.string,
+    );
+    const dry_run_argv = template.get("tx_dry_run_argv").?.array.items;
+    try testing.expectEqualStrings("--sender", dry_run_argv[12].string);
+    try testing.expectEqualStrings("0xowner", dry_run_argv[13].string);
+    const send_argv = template.get("tx_send_from_keystore_argv").?.array.items;
+    try testing.expectEqualStrings("--signer", send_argv[13].string);
+    try testing.expectEqualStrings("builder", send_argv[14].string);
+}
+
+test "runCommand move function with --summarize falls back to sender address for keystore signer template" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                std.debug.assert(std.mem.eql(u8, req.params_json, "[\"0x2\",\"pool\",\"swap\"]"));
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"visibility\":\"Public\",\"isEntry\":true,\"typeParameters\":[],\"parameters\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"pool\",\"name\":\"Pool\",\"typeParams\":[]}},\"U64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[]}}",
+                );
+            }
+
+            std.debug.assert(std.mem.eql(u8, req.method, "suix_getOwnedObjects"));
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0xowner\"") != null);
+            return alloc.dupe(u8, "{\"result\":{\"data\":[],\"hasNextPage\":false}}");
+        }
+    }.call;
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "move",
+        "function",
+        "0x2",
+        "pool",
+        "swap",
+        "--sender",
+        "0xowner",
+        "--summarize",
+    });
+    defer args.deinit(allocator);
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    const template = parsed.value.object.get("call_template").?.object;
+    try testing.expectEqualStrings(
+        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"pool\",\"function\":\"swap\",\"typeArguments\":[],\"arguments\":[\"<arg0-object-id-or-select-token>\",0]}],\"fromKeystore\":true,\"signer\":\"0xowner\",\"gasBudget\":100000000,\"autoGasPayment\":true,\"wait\":true,\"summarize\":true}",
+        template.get("tx_send_from_keystore_request_json").?.string,
+    );
+    const send_argv = template.get("tx_send_from_keystore_argv").?.array.items;
+    try testing.expectEqualStrings("0xowner", send_argv[14].string);
+}
+
 test "runCommand move function with --summarize adds shared object event discovery templates and candidates" {
     const testing = std.testing;
 
@@ -3515,7 +3646,7 @@ test "runCommand move function with --summarize fills owner context into vector 
         parsed.value.object.get("call_template").?.object.get("preferred_args_json").?.string,
     );
     try testing.expectEqualStrings(
-        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"router\",\"function\":\"deposit_many\",\"typeArguments\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"sui\",\"name\":\"SUI\",\"typeParams\":[]}}],\"arguments\":[[\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xcoin1\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":9,\\\"digest\\\":\\\"coin-digest-1\\\"}\",\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xcoin2\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":10,\\\"digest\\\":\\\"coin-digest-2\\\"}\"]]}],\"fromKeystore\":true,\"signer\":\"<alias-or-address>\",\"gasBudget\":100000000,\"autoGasPayment\":true,\"wait\":true,\"summarize\":true}",
+        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"router\",\"function\":\"deposit_many\",\"typeArguments\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"sui\",\"name\":\"SUI\",\"typeParams\":[]}}],\"arguments\":[[\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xcoin1\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":9,\\\"digest\\\":\\\"coin-digest-1\\\"}\",\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xcoin2\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":10,\\\"digest\\\":\\\"coin-digest-2\\\"}\"]]}],\"fromKeystore\":true,\"signer\":\"0xowner\",\"gasBudget\":100000000,\"autoGasPayment\":true,\"wait\":true,\"summarize\":true}",
         parsed.value.object.get("call_template").?.object.get("preferred_tx_send_from_keystore_request_json").?.string,
     );
 }

@@ -907,7 +907,9 @@ zig build run -- tx dry-run --request @dry-run-request.json
 zig build run -- tx send --request @send-request.json
 ```
 
-真正执行时，你仍然需要自己补 sender、signer、gas 和具体 object id / select token。
+如果你在 `move function --summarize` 时已经给了 `--sender` 或 `--signer`，这些值现在会直接回填到 `call_template.tx_dry_run_*` 和 `call_template.tx_send_from_keystore_*`。当只有 `--sender` 时，`tx send --from-keystore` 模板会回退用这个 sender 地址作为 address-compatible signer selector。
+
+真正执行时，你仍然需要自己补 gas 和具体 object id / select token；如果 summary 阶段没有给 sender / signer，上述模板里仍然会保留占位符。
 
 如果你给了 `move function --type-arg/--type-args`，summary 还会带：
 - `applied_type_args_json`

@@ -1714,6 +1714,7 @@ pub const MoveQuery = union(enum) {
         function_name: []const u8,
         type_arguments_json: ?[]const u8 = null,
         owner_address: ?[]const u8 = null,
+        signer_selector: ?[]const u8 = null,
     },
     module: struct {
         package_id: []const u8,
@@ -1727,6 +1728,7 @@ pub const MoveQuery = union(enum) {
         switch (self.*) {
             .function => |*value| {
                 if (value.owner_address) |owner| allocator.free(owner);
+                if (value.signer_selector) |signer| allocator.free(signer);
             },
             else => {},
         }
@@ -4294,22 +4296,32 @@ pub const SuiRpcClient = struct {
     fn buildMoveFunctionTxDryRunRequestJson(
         allocator: std.mem.Allocator,
         commands_json: []const u8,
+        sender: ?[]const u8,
     ) ![]u8 {
         return try std.fmt.allocPrint(
             allocator,
-            "{{\"commands\":{s},\"sender\":\"0x<sender>\",\"gasBudget\":100000000,\"gasPrice\":1000,\"summarize\":true}}",
-            .{commands_json},
+            "{{\"commands\":{s},\"sender\":{f},\"gasBudget\":100000000,\"gasPrice\":1000,\"summarize\":true}}",
+            .{
+                commands_json,
+                std.json.fmt(sender orelse "0x<sender>", .{}),
+            },
         );
     }
 
     fn buildMoveFunctionTxSendFromKeystoreRequestJson(
         allocator: std.mem.Allocator,
         commands_json: []const u8,
+        signer_selector: ?[]const u8,
+        sender: ?[]const u8,
     ) ![]u8 {
+        const signer_value = signer_selector orelse sender orelse "<alias-or-address>";
         return try std.fmt.allocPrint(
             allocator,
-            "{{\"commands\":{s},\"fromKeystore\":true,\"signer\":\"<alias-or-address>\",\"gasBudget\":100000000,\"autoGasPayment\":true,\"wait\":true,\"summarize\":true}}",
-            .{commands_json},
+            "{{\"commands\":{s},\"fromKeystore\":true,\"signer\":{f},\"gasBudget\":100000000,\"autoGasPayment\":true,\"wait\":true,\"summarize\":true}}",
+            .{
+                commands_json,
+                std.json.fmt(signer_value, .{}),
+            },
         );
     }
 
@@ -4318,6 +4330,7 @@ pub const SuiRpcClient = struct {
         summary: move_result.OwnedMoveFunctionSummary,
         type_args_json: []const u8,
         args_json: []const u8,
+        sender: ?[]const u8,
     ) ![][]u8 {
         const package_id = summary.package_id orelse return error.InvalidResponse;
         const module_name = summary.module_name orelse return error.InvalidResponse;
@@ -4352,7 +4365,7 @@ pub const SuiRpcClient = struct {
         errdefer allocator.free(argv[11]);
         argv[12] = try allocator.dupe(u8, "--sender");
         errdefer allocator.free(argv[12]);
-        argv[13] = try allocator.dupe(u8, "0x<sender>");
+        argv[13] = try allocator.dupe(u8, sender orelse "0x<sender>");
         errdefer allocator.free(argv[13]);
         argv[14] = try allocator.dupe(u8, "--gas-budget");
         errdefer allocator.free(argv[14]);
@@ -4373,6 +4386,8 @@ pub const SuiRpcClient = struct {
         summary: move_result.OwnedMoveFunctionSummary,
         type_args_json: []const u8,
         args_json: []const u8,
+        signer_selector: ?[]const u8,
+        sender: ?[]const u8,
     ) ![][]u8 {
         const package_id = summary.package_id orelse return error.InvalidResponse;
         const module_name = summary.module_name orelse return error.InvalidResponse;
@@ -4409,7 +4424,7 @@ pub const SuiRpcClient = struct {
         errdefer allocator.free(argv[12]);
         argv[13] = try allocator.dupe(u8, "--signer");
         errdefer allocator.free(argv[13]);
-        argv[14] = try allocator.dupe(u8, "<alias-or-address>");
+        argv[14] = try allocator.dupe(u8, signer_selector orelse sender orelse "<alias-or-address>");
         errdefer allocator.free(argv[14]);
         argv[15] = try allocator.dupe(u8, "--gas-budget");
         errdefer allocator.free(argv[15]);
@@ -4477,6 +4492,7 @@ pub const SuiRpcClient = struct {
         parameter_allows_owned_discovery: []const bool,
         concrete_type_arguments_json: ?[]const u8,
         owner_address: ?[]const u8,
+        signer_selector: ?[]const u8,
     ) !void {
         for (summary.parameters, 0..) |*parameter, index| {
             parameter.placeholder_json = try placeholderJsonForMoveParameter(allocator, parameter.*, index);
@@ -4612,11 +4628,17 @@ pub const SuiRpcClient = struct {
         errdefer allocator.free(move_call_command_json);
         const commands_json = try buildMoveFunctionCommandsTemplateJson(allocator, move_call_command_json);
         errdefer allocator.free(commands_json);
-        const tx_dry_run_request_json = try buildMoveFunctionTxDryRunRequestJson(allocator, commands_json);
+        const tx_dry_run_request_json = try buildMoveFunctionTxDryRunRequestJson(
+            allocator,
+            commands_json,
+            owner_address,
+        );
         errdefer allocator.free(tx_dry_run_request_json);
         const tx_send_from_keystore_request_json = try buildMoveFunctionTxSendFromKeystoreRequestJson(
             allocator,
             commands_json,
+            signer_selector,
+            owner_address,
         );
         errdefer allocator.free(tx_send_from_keystore_request_json);
         const tx_dry_run_argv = try buildMoveFunctionTxDryRunArgv(
@@ -4624,6 +4646,7 @@ pub const SuiRpcClient = struct {
             summary.*,
             type_args_json,
             args_json,
+            owner_address,
         );
         errdefer {
             for (tx_dry_run_argv) |value| allocator.free(value);
@@ -4634,6 +4657,8 @@ pub const SuiRpcClient = struct {
             summary.*,
             type_args_json,
             args_json,
+            signer_selector,
+            owner_address,
         );
         errdefer {
             for (tx_send_from_keystore_argv) |value| allocator.free(value);
@@ -4658,12 +4683,17 @@ pub const SuiRpcClient = struct {
         if (preferred_move_call_command_json) |value| allocator.free(value);
         errdefer if (preferred_commands_json) |value| allocator.free(value);
         const preferred_tx_dry_run_request_json = if (preferred_commands_json) |value|
-            try buildMoveFunctionTxDryRunRequestJson(allocator, value)
+            try buildMoveFunctionTxDryRunRequestJson(allocator, value, owner_address)
         else
             null;
         errdefer if (preferred_tx_dry_run_request_json) |value| allocator.free(value);
         const preferred_tx_send_from_keystore_request_json = if (preferred_commands_json) |value|
-            try buildMoveFunctionTxSendFromKeystoreRequestJson(allocator, value)
+            try buildMoveFunctionTxSendFromKeystoreRequestJson(
+                allocator,
+                value,
+                signer_selector,
+                owner_address,
+            )
         else
             null;
         errdefer if (preferred_tx_send_from_keystore_request_json) |value| allocator.free(value);
@@ -4673,6 +4703,7 @@ pub const SuiRpcClient = struct {
                 summary.*,
                 type_args_json,
                 preferred_args_json,
+                owner_address,
             )
         else
             null;
@@ -4686,6 +4717,8 @@ pub const SuiRpcClient = struct {
                 summary.*,
                 type_args_json,
                 preferred_args_json,
+                signer_selector,
+                owner_address,
             )
         else
             null;
@@ -4724,6 +4757,7 @@ pub const SuiRpcClient = struct {
         response_json: []const u8,
         type_arguments_json: ?[]const u8,
         owner_address: ?[]const u8,
+        signer_selector: ?[]const u8,
     ) !move_result.OwnedMoveFunctionSummary {
         var summary = try move_result.extractMoveFunctionSummary(
             allocator,
@@ -4779,6 +4813,7 @@ pub const SuiRpcClient = struct {
             parameter_allows_owned_discovery,
             resolved_type_arguments_json,
             owner_address,
+            signer_selector,
         );
 
         return summary;
@@ -12112,6 +12147,7 @@ fn buildOwnedObjectsFilterJson(
                         response,
                         spec.type_arguments_json,
                         spec.owner_address,
+                        spec.signer_selector,
                     ),
                 };
             },
