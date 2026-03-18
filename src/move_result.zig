@@ -5,10 +5,17 @@ pub const OwnedMoveParameterSummary = struct {
     lowering_kind: ?[]const u8 = null,
     placeholder_json: ?[]u8 = null,
     omitted_from_explicit_args: bool = false,
+    owned_object_select_token: ?[]u8 = null,
+    owned_object_query_argv: ?[][]u8 = null,
 
     pub fn deinit(self: *OwnedMoveParameterSummary, allocator: std.mem.Allocator) void {
         allocator.free(self.signature);
         if (self.placeholder_json) |value| allocator.free(value);
+        if (self.owned_object_select_token) |value| allocator.free(value);
+        if (self.owned_object_query_argv) |argv| {
+            for (argv) |value| allocator.free(value);
+            allocator.free(argv);
+        }
     }
 };
 

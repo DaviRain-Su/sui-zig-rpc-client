@@ -3617,6 +3617,54 @@ pub const SuiRpcClient = struct {
         return try std.fmt.allocPrint(allocator, "\"<arg{d}-manual-json-or-token>\"", .{index});
     }
 
+    fn trimMoveReferenceSignature(signature: []const u8) []const u8 {
+        const trimmed = std.mem.trim(u8, signature, " \t\r\n");
+        if (std.mem.startsWith(u8, trimmed, "&mut ")) return trimmed["&mut ".len..];
+        if (std.mem.startsWith(u8, trimmed, "&")) return trimmed[1..];
+        return trimmed;
+    }
+
+    fn concreteObjectStructTypeFromSignature(signature: []const u8) ?[]const u8 {
+        const trimmed = trimMoveReferenceSignature(signature);
+        if (std.mem.indexOf(u8, trimmed, "::") == null) return null;
+        if (std.mem.indexOfScalar(u8, trimmed, '<') != null) return null;
+        return trimmed;
+    }
+
+    fn buildOwnedObjectSelectToken(
+        allocator: std.mem.Allocator,
+        struct_type: []const u8,
+    ) ![]u8 {
+        return try std.fmt.allocPrint(
+            allocator,
+            "select:{{\"kind\":\"owned_object_struct_type\",\"structType\":{f}}}",
+            .{std.json.fmt(struct_type, .{})},
+        );
+    }
+
+    fn buildOwnedObjectQueryArgv(
+        allocator: std.mem.Allocator,
+        struct_type: []const u8,
+    ) ![][]u8 {
+        const argv = try allocator.alloc([]u8, 6);
+        errdefer allocator.free(argv);
+
+        argv[0] = try allocator.dupe(u8, "account");
+        errdefer allocator.free(argv[0]);
+        argv[1] = try allocator.dupe(u8, "objects");
+        errdefer allocator.free(argv[1]);
+        argv[2] = try allocator.dupe(u8, "0x<owner>");
+        errdefer allocator.free(argv[2]);
+        argv[3] = try allocator.dupe(u8, "--struct-type");
+        errdefer allocator.free(argv[3]);
+        argv[4] = try allocator.dupe(u8, struct_type);
+        errdefer allocator.free(argv[4]);
+        argv[5] = try allocator.dupe(u8, "--summarize");
+        errdefer allocator.free(argv[5]);
+
+        return argv;
+    }
+
     fn buildMoveFunctionTypeArgsTemplateJson(
         allocator: std.mem.Allocator,
         type_parameter_count: usize,
@@ -3800,6 +3848,14 @@ pub const SuiRpcClient = struct {
         for (summary.parameters, 0..) |*parameter, index| {
             parameter.placeholder_json = try placeholderJsonForMoveParameter(allocator, parameter.*, index);
             parameter.omitted_from_explicit_args = parameter.placeholder_json == null;
+
+            if (parameter.omitted_from_explicit_args) continue;
+            const lowering_kind = parameter.lowering_kind orelse continue;
+            if (!std.mem.eql(u8, lowering_kind, "object")) continue;
+            if (object_preset.inferKindFromTypeSignature(parameter.signature) != null) continue;
+            const struct_type = concreteObjectStructTypeFromSignature(parameter.signature) orelse continue;
+            parameter.owned_object_select_token = try buildOwnedObjectSelectToken(allocator, struct_type);
+            parameter.owned_object_query_argv = try buildOwnedObjectQueryArgv(allocator, struct_type);
         }
 
         const type_args_json = try buildMoveFunctionTypeArgsTemplateJson(allocator, summary.type_parameters.len);
@@ -20218,8 +20274,13 @@ test "runReadQueryAction dispatches summarized move function queries" {
                     try testing.expectEqual(@as(usize, 3), value.parameters.len);
                     try testing.expectEqualStrings("object", value.parameters[0].lowering_kind.?);
                     try testing.expectEqualStrings("\"<arg0-object-id-or-select-token>\"", value.parameters[0].placeholder_json.?);
+                    try testing.expectEqualStrings(
+                        "select:{\"kind\":\"owned_object_struct_type\",\"structType\":\"0x2::pool::Pool\"}",
+                        value.parameters[0].owned_object_select_token.?,
+                    );
                     try testing.expectEqualStrings("u64", value.parameters[1].lowering_kind.?);
                     try testing.expectEqualStrings("0", value.parameters[1].placeholder_json.?);
+                    try testing.expect(value.parameters[1].owned_object_select_token == null);
                     try testing.expectEqualStrings("runtime", value.parameters[2].lowering_kind.?);
                     try testing.expect(value.parameters[2].placeholder_json == null);
                     try testing.expect(value.parameters[2].omitted_from_explicit_args);

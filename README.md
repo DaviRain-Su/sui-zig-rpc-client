@@ -813,6 +813,8 @@ zig build run -- move function cetus_clmm_mainnet pool swap --summarize
 同一个 summary 里现在还会带两层调用模板：
 - `parameters[*].placeholder_json`: 这个参数建议放进 `--args` JSON 的占位片段
 - `parameters[*].omitted_from_explicit_args`: `true` 表示这是 runtime 注入参数，比如 `TxContext`，不需要你手工传
+- `parameters[*].owned_object_select_token`: 如果参数类型是 concrete object struct，CLI 会额外给一个 `owned_object_struct_type` 选择 token 候选
+- `parameters[*].owned_object_query_argv`: 对应的 `account objects --struct-type` 查询模板
 - `call_template.type_args_json`: 直接可改的 `--type-args` JSON 模板
 - `call_template.args_json`: 直接可改的 `--args` JSON 模板
 - `call_template.move_call_command_json`: 直接可放进 `--commands` / `--command` 的 raw `MoveCall` command 模板
@@ -824,6 +826,12 @@ zig build run -- move function cetus_clmm_mainnet pool swap --summarize
 如果参数类型能映射到现有 object preset，`placeholder_json` 现在会直接优先生成 preset token，而不是泛泛的 object id 占位符。例如：
 - `&0x2::clock::Clock` -> `select:{"kind":"object_preset","name":"clock"}`
 - Cetus mainnet `&config::GlobalConfig` -> `select:{"kind":"object_preset","name":"cetus_clmm_global_config_mainnet"}`
+
+对于没法直接映射成 preset、但类型已经是 concrete struct 的 object 参数，CLI 现在还会额外给 discovery 候选。例如 `Position` 一类 owned object 会带出：
+- `parameters[*].owned_object_select_token`
+- `parameters[*].owned_object_query_argv`
+
+这两个字段是“可能的 owned-object 发现路径”，不是 ownership 断言。像 shared object 这种情况，你仍然需要自己提供 object id 或协议侧固定对象信息。
 
 当 ABI 显示参数是非 `vector<u8>` 的 `vector<T>` 时，CLI 现在会在本地 programmable builder 路径里自动插入 `MakeMoveVec`。这对 Cetus 一类需要 `vector<Coin<_>>` 的调用很重要，因为你可以直接传：
 

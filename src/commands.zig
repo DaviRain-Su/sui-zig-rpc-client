@@ -2844,6 +2844,73 @@ test "runCommand move function with --summarize prefers known object preset toke
     );
 }
 
+test "runCommand move function with --summarize adds owned object discovery templates for concrete object types" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            std.debug.assert(std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction"));
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\"") != null);
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"pool\"") != null);
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"add_liquidity_fix_coin\"") != null);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"visibility\":\"Public\",\"isEntry\":false,\"typeParameters\":[[],[]],\"parameters\":[{\"MutableReference\":{\"Struct\":{\"address\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb\",\"module\":\"pool\",\"name\":\"Pool\",\"typeParams\":[{\"TypeParameter\":0},{\"TypeParameter\":1}]}}},{\"MutableReference\":{\"Struct\":{\"address\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb\",\"module\":\"position\",\"name\":\"Position\",\"typeParams\":[]}}}],\"return\":[]}}",
+            );
+        }
+    }.call;
+
+    var args = cli.ParsedArgs{
+        .command = .move_function,
+        .has_command = true,
+        .move_package = client.package_preset.cetus_clmm_mainnet,
+        .move_module = "pool",
+        .move_function = "add_liquidity_fix_coin",
+        .tx_send_summarize = true,
+    };
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    try testing.expectEqual(
+        std.json.Value.null,
+        parsed.value.object.get("parameters").?.array.items[0].object.get("owned_object_select_token").?,
+    );
+    try testing.expectEqual(
+        std.json.Value.null,
+        parsed.value.object.get("parameters").?.array.items[0].object.get("owned_object_query_argv").?,
+    );
+    try testing.expectEqualStrings(
+        "select:{\"kind\":\"owned_object_struct_type\",\"structType\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb::position::Position\"}",
+        parsed.value.object.get("parameters").?.array.items[1].object.get("owned_object_select_token").?.string,
+    );
+    const position_query_argv = parsed.value.object.get("parameters").?.array.items[1].object.get("owned_object_query_argv").?.array.items;
+    try testing.expectEqual(@as(usize, 6), position_query_argv.len);
+    try testing.expectEqualStrings("account", position_query_argv[0].string);
+    try testing.expectEqualStrings("objects", position_query_argv[1].string);
+    try testing.expectEqualStrings("0x<owner>", position_query_argv[2].string);
+    try testing.expectEqualStrings("--struct-type", position_query_argv[3].string);
+    try testing.expectEqualStrings(
+        "0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb::position::Position",
+        position_query_argv[4].string,
+    );
+}
+
 test "runCommand move package resolves aliases before issuing RPC" {
     const testing = std.testing;
 
