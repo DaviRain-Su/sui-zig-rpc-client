@@ -70,7 +70,7 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
   transaction.
 - [ ] Make the final automatic choice deterministic when multiple valid
   combinations exist.
-- [ ] Expose the winning combination clearly in preferred summaries and request
+- [x] Expose the winning combination clearly in preferred summaries and request
   artifacts.
 
 ### 2. Dual-coin and multi-coin automatic arrangement

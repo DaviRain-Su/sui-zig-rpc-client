@@ -891,6 +891,7 @@ zig build run -- events \
 - `call_template.type_args_json`: 直接可改的 `--type-args` JSON 模板
 - `call_template.args_json`: 直接可改的 `--args` JSON 模板
 - `call_template.preferred_args_json`: 在保留原始模板的同时，优先把 CLI 已经能自动选出的参数回填进去
+- `call_template.preferred_resolution`: 结构化展示每个参数当前是 `explicit`、`auto_selected`、`placeholder` 还是 `runtime_omitted`，并给出 `is_executable`、`candidate_count` / `top_selection_score` / `unresolved_parameter_indices`，方便直接看出 CLI 认为的“当前最佳组合”，以及还剩哪些参数位会真正阻塞执行
 - `call_template.move_call_command_json`: 直接可放进 `--commands` / `--command` 的 raw `MoveCall` command 模板
 - `call_template.commands_json`: 直接可放进 `--commands` 的 commands array 模板
 - `call_template.preferred_commands_json`: 如果存在 auto-selected candidate，则给一份优先回填 candidate 的 commands array 模板
@@ -902,6 +903,8 @@ zig build run -- events \
 - `call_template.preferred_tx_send_from_keystore_request_json`: 如果存在 auto-selected candidate，则给一份优先回填 candidate 的 `tx send --from-keystore` request artifact
 - `call_template.tx_send_from_keystore_argv`: 直接可改的 `tx send --from-keystore` argv 模板
 - `call_template.preferred_tx_send_from_keystore_argv`: 如果存在 auto-selected candidate，则给一条更接近可执行的 `tx send --from-keystore` argv 模板
+
+当存在 preferred request artifact 时，CLI 现在也会把同一份结构化结果嵌进 request JSON 的 `preferredResolution` 字段。这样你即使只消费 `--emit-template preferred-dry-run-request` / `preferred-send-request`，也能直接看到当前自动选中的参数组合和剩余 unresolved 参数位。
 
 如果你在 `move function --summarize` 时给的显式参数少于总参数个数，CLI 会优先把这些值按“非 object 参数位”做稀疏回填，而不是强行占掉前面的 object 参数位。这样像 `Coin<T>, u64, TxContext` 这类常见签名里，只传 `--arg 13` 就会优先落到 `u64` 金额参数上；同时前一个 `Coin<T>` 的 `coin_with_min_balance_select_token` 会把 `minBalance` 自动抬到 `13`。
 

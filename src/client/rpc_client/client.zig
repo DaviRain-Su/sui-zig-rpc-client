@@ -4504,6 +4504,156 @@ pub const SuiRpcClient = struct {
         return parameter.explicit_arg_json orelse parameter.auto_selected_arg_json orelse parameter.placeholder_json;
     }
 
+    const MoveParameterCandidateStats = struct {
+        kind: ?[]const u8 = null,
+        count: usize = 0,
+        top_selection_score: usize = 0,
+    };
+
+    fn moveParameterCandidateStats(
+        parameter: move_result.OwnedMoveParameterSummary,
+    ) MoveParameterCandidateStats {
+        if (parameter.shared_object_candidates) |candidates| {
+            return .{
+                .kind = "shared_object",
+                .count = candidates.len,
+                .top_selection_score = if (candidates.len == 0) 0 else candidates[0].selection_score,
+            };
+        }
+        if (parameter.owned_object_candidates) |candidates| {
+            return .{
+                .kind = "owned_object",
+                .count = candidates.len,
+                .top_selection_score = if (candidates.len == 0) 0 else candidates[0].selection_score,
+            };
+        }
+        if (parameter.vector_item_owned_object_candidates) |candidates| {
+            return .{
+                .kind = "vector_owned_object",
+                .count = candidates.len,
+                .top_selection_score = if (candidates.len == 0) 0 else candidates[0].selection_score,
+            };
+        }
+        return .{};
+    }
+
+    fn moveParameterPreferredResolutionKind(
+        parameter: move_result.OwnedMoveParameterSummary,
+    ) []const u8 {
+        if (parameter.omitted_from_explicit_args) return "runtime_omitted";
+        if (parameter.explicit_arg_json != null) return "explicit";
+        if (parameter.auto_selected_arg_json != null) return "auto_selected";
+        if (parameter.placeholder_json != null) return "placeholder";
+        return "unresolved";
+    }
+
+    fn moveFunctionResolutionStringContainsPlaceholder(
+        text: []const u8,
+    ) bool {
+        return std.mem.indexOf(u8, text, "<arg") != null or
+            std.mem.indexOf(u8, text, "0x<") != null or
+            std.mem.eql(u8, text, "<alias-or-address>");
+    }
+
+    fn moveFunctionResolutionJsonContainsPlaceholder(
+        value: std.json.Value,
+    ) bool {
+        return switch (value) {
+            .string => |text| moveFunctionResolutionStringContainsPlaceholder(text),
+            .array => |items| blk: {
+                for (items.items) |item| {
+                    if (moveFunctionResolutionJsonContainsPlaceholder(item)) break :blk true;
+                }
+                break :blk false;
+            },
+            .object => |object| blk: {
+                var iterator = object.iterator();
+                while (iterator.next()) |entry| {
+                    if (moveFunctionResolutionJsonContainsPlaceholder(entry.value_ptr.*)) break :blk true;
+                }
+                break :blk false;
+            },
+            else => false,
+        };
+    }
+
+    fn moveFunctionPreferredArgJsonIsExecutable(
+        allocator: std.mem.Allocator,
+        arg_json: []const u8,
+    ) bool {
+        const parsed = std.json.parseFromSlice(std.json.Value, allocator, arg_json, .{}) catch {
+            return !moveFunctionResolutionStringContainsPlaceholder(arg_json);
+        };
+        defer parsed.deinit();
+        return !moveFunctionResolutionJsonContainsPlaceholder(parsed.value);
+    }
+
+    fn buildMoveFunctionPreferredResolution(
+        allocator: std.mem.Allocator,
+        parameters: []const move_result.OwnedMoveParameterSummary,
+    ) !move_result.OwnedMoveFunctionCallTemplate.PreferredResolution {
+        const resolution_parameters = try allocator.alloc(
+            move_result.OwnedMoveFunctionCallTemplate.PreferredResolutionParameter,
+            parameters.len,
+        );
+        errdefer allocator.free(resolution_parameters);
+
+        var unresolved_indices = std.ArrayList(usize){};
+        errdefer unresolved_indices.deinit(allocator);
+
+        var is_fully_resolved = true;
+        for (parameters, 0..) |parameter, index| {
+            const stats = moveParameterCandidateStats(parameter);
+            const resolution_kind = moveParameterPreferredResolutionKind(parameter);
+            const preferred_arg_json = moveParameterPreferredArgJson(parameter);
+            const resolved_arg_json = if (parameter.omitted_from_explicit_args)
+                null
+            else if (preferred_arg_json) |value|
+                try allocator.dupe(u8, value)
+            else
+                null;
+            const is_executable = if (parameter.omitted_from_explicit_args)
+                true
+            else if (preferred_arg_json) |value|
+                moveFunctionPreferredArgJsonIsExecutable(allocator, value)
+            else
+                false;
+
+            resolution_parameters[index] = .{
+                .parameter_index = index,
+                .signature = try allocator.dupe(u8, parameter.signature),
+                .resolution_kind = resolution_kind,
+                .is_executable = is_executable,
+                .resolved_arg_json = resolved_arg_json,
+                .candidate_kind = stats.kind,
+                .candidate_count = stats.count,
+                .top_selection_score = stats.top_selection_score,
+            };
+
+            if (!is_executable) {
+                is_fully_resolved = false;
+                try unresolved_indices.append(allocator, index);
+            }
+        }
+
+        return .{
+            .is_fully_resolved = is_fully_resolved,
+            .unresolved_parameter_indices = try unresolved_indices.toOwnedSlice(allocator),
+            .parameters = resolution_parameters,
+        };
+    }
+
+    fn buildMoveFunctionPreferredResolutionJson(
+        allocator: std.mem.Allocator,
+        preferred_resolution: move_result.OwnedMoveFunctionCallTemplate.PreferredResolution,
+    ) ![]u8 {
+        return try std.fmt.allocPrint(
+            allocator,
+            "{f}",
+            .{std.json.fmt(preferred_resolution, .{})},
+        );
+    }
+
     fn appendUniqueMoveSelectedObjectId(
         allocator: std.mem.Allocator,
         collected: *std.ArrayList([]u8),
@@ -5747,7 +5897,19 @@ pub const SuiRpcClient = struct {
         allocator: std.mem.Allocator,
         commands_json: []const u8,
         sender: ?[]const u8,
+        preferred_resolution_json: ?[]const u8,
     ) ![]u8 {
+        if (preferred_resolution_json) |value| {
+            return try std.fmt.allocPrint(
+                allocator,
+                "{{\"commands\":{s},\"sender\":{f},\"gasBudget\":100000000,\"gasPrice\":1000,\"autoGasPayment\":true,\"autoGasBudget\":true,\"summarize\":true,\"preferredResolution\":{s}}}",
+                .{
+                    commands_json,
+                    std.json.fmt(sender orelse "0x<sender>", .{}),
+                    value,
+                },
+            );
+        }
         return try std.fmt.allocPrint(
             allocator,
             "{{\"commands\":{s},\"sender\":{f},\"gasBudget\":100000000,\"gasPrice\":1000,\"autoGasPayment\":true,\"autoGasBudget\":true,\"summarize\":true}}",
@@ -5763,8 +5925,20 @@ pub const SuiRpcClient = struct {
         commands_json: []const u8,
         signer_selector: ?[]const u8,
         sender: ?[]const u8,
+        preferred_resolution_json: ?[]const u8,
     ) ![]u8 {
         const signer_value = signer_selector orelse sender orelse "<alias-or-address>";
+        if (preferred_resolution_json) |value| {
+            return try std.fmt.allocPrint(
+                allocator,
+                "{{\"commands\":{s},\"fromKeystore\":true,\"signer\":{f},\"gasBudget\":100000000,\"autoGasPayment\":true,\"autoGasBudget\":true,\"wait\":true,\"summarize\":true,\"preferredResolution\":{s}}}",
+                .{
+                    commands_json,
+                    std.json.fmt(signer_value, .{}),
+                    value,
+                },
+            );
+        }
         return try std.fmt.allocPrint(
             allocator,
             "{{\"commands\":{s},\"fromKeystore\":true,\"signer\":{f},\"gasBudget\":100000000,\"autoGasPayment\":true,\"autoGasBudget\":true,\"wait\":true,\"summarize\":true}}",
@@ -6229,6 +6403,14 @@ pub const SuiRpcClient = struct {
         errdefer allocator.free(args_json);
         const preferred_args_json = try buildMoveFunctionArgsJson(allocator, summary.parameters, true);
         errdefer allocator.free(preferred_args_json);
+        var preferred_resolution = try buildMoveFunctionPreferredResolution(allocator, summary.parameters);
+        errdefer preferred_resolution.deinit(allocator);
+        const preferred_resolution_json = try buildMoveFunctionPreferredResolutionJson(
+            allocator,
+            preferred_resolution,
+        );
+        errdefer allocator.free(preferred_resolution_json);
+        defer allocator.free(preferred_resolution_json);
         const move_call_command_json = try buildMoveFunctionCommandTemplateJson(
             allocator,
             summary.*,
@@ -6242,6 +6424,7 @@ pub const SuiRpcClient = struct {
             allocator,
             commands_json,
             owner_address,
+            null,
         );
         errdefer allocator.free(tx_dry_run_request_json);
         const tx_send_from_keystore_request_json = try buildMoveFunctionTxSendFromKeystoreRequestJson(
@@ -6249,6 +6432,7 @@ pub const SuiRpcClient = struct {
             commands_json,
             signer_selector,
             owner_address,
+            null,
         );
         errdefer allocator.free(tx_send_from_keystore_request_json);
         const tx_dry_run_argv = try buildMoveFunctionTxDryRunArgv(
@@ -6311,7 +6495,7 @@ pub const SuiRpcClient = struct {
             break :blk preferred_commands_json;
         };
         const preferred_tx_dry_run_request_json = if (final_preferred_commands_json) |value|
-            try buildMoveFunctionTxDryRunRequestJson(allocator, value, owner_address)
+            try buildMoveFunctionTxDryRunRequestJson(allocator, value, owner_address, preferred_resolution_json)
         else
             null;
         errdefer if (preferred_tx_dry_run_request_json) |value| allocator.free(value);
@@ -6321,6 +6505,7 @@ pub const SuiRpcClient = struct {
                 value,
                 signer_selector,
                 owner_address,
+                preferred_resolution_json,
             )
         else
             null;
@@ -6375,6 +6560,7 @@ pub const SuiRpcClient = struct {
                 allocator.free(preferred_args_json);
                 break :blk null;
             } else preferred_args_json,
+            .preferred_resolution = preferred_resolution,
             .move_call_command_json = move_call_command_json,
             .commands_json = commands_json,
             .preferred_commands_json = final_preferred_commands_json,

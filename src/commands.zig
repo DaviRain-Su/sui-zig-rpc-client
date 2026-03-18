@@ -164,6 +164,7 @@ fn jsonValueContainsUnresolvedMoveFunctionPlaceholder(value: std.json.Value) boo
         .object => |object| blk: {
             var iterator = object.iterator();
             while (iterator.next()) |entry| {
+                if (std.mem.eql(u8, entry.key_ptr.*, "preferredResolution")) continue;
                 if (jsonValueContainsUnresolvedMoveFunctionPlaceholder(entry.value_ptr.*)) break :blk true;
             }
             break :blk false;
@@ -4160,6 +4161,24 @@ test "runCommand move function with --summarize carries sender and signer contex
         "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"pool\",\"function\":\"swap\",\"typeArguments\":[],\"arguments\":[\"<arg0-object-id-or-select-token>\",0]}],\"fromKeystore\":true,\"signer\":\"builder\",\"gasBudget\":100000000,\"autoGasPayment\":true,\"autoGasBudget\":true,\"wait\":true,\"summarize\":true}",
         template.get("tx_send_from_keystore_request_json").?.string,
     );
+    const preferred_resolution = template.get("preferred_resolution").?.object;
+    try testing.expect(!preferred_resolution.get("is_fully_resolved").?.bool);
+    const unresolved = preferred_resolution.get("unresolved_parameter_indices").?.array.items;
+    try testing.expectEqual(@as(usize, 1), unresolved.len);
+    try testing.expectEqual(@as(i64, 0), unresolved[0].integer);
+    const resolution_parameters = preferred_resolution.get("parameters").?.array.items;
+    try testing.expectEqualStrings("placeholder", resolution_parameters[0].object.get("resolution_kind").?.string);
+    try testing.expect(!resolution_parameters[0].object.get("is_executable").?.bool);
+    try testing.expectEqualStrings(
+        "\"<arg0-object-id-or-select-token>\"",
+        resolution_parameters[0].object.get("resolved_arg_json").?.string,
+    );
+    try testing.expectEqualStrings("placeholder", resolution_parameters[1].object.get("resolution_kind").?.string);
+    try testing.expect(resolution_parameters[1].object.get("is_executable").?.bool);
+    try testing.expectEqualStrings("0", resolution_parameters[1].object.get("resolved_arg_json").?.string);
+    try testing.expectEqualStrings("runtime_omitted", resolution_parameters[2].object.get("resolution_kind").?.string);
+    try testing.expect(resolution_parameters[2].object.get("is_executable").?.bool);
+    try testing.expectEqual(std.json.Value.null, resolution_parameters[2].object.get("resolved_arg_json").?);
     const dry_run_argv = template.get("tx_dry_run_argv").?.array.items;
     try testing.expectEqualStrings("--sender", dry_run_argv[12].string);
     try testing.expectEqualStrings("0xowner", dry_run_argv[13].string);
@@ -4279,9 +4298,17 @@ test "runCommand move function with --emit-template prints preferred dry-run req
 
     try runCommand(allocator, &rpc, &args, output.writer(allocator));
 
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    try testing.expectEqualStrings("0x<sender>", parsed.value.object.get("sender").?.string);
+    try testing.expect(parsed.value.object.get("autoGasPayment").?.bool);
+    try testing.expect(parsed.value.object.get("autoGasBudget").?.bool);
+    const resolution = parsed.value.object.get("preferredResolution").?.object;
+    try testing.expect(resolution.get("is_fully_resolved").?.bool);
+    try testing.expectEqual(@as(usize, 0), resolution.get("unresolved_parameter_indices").?.array.items.len);
     try testing.expectEqualStrings(
-        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"module\":\"pool\",\"function\":\"swap\",\"typeArguments\":[],\"arguments\":[\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xpool1\\\",\\\"inputKind\\\":\\\"shared\\\",\\\"initialSharedVersion\\\":7,\\\"mutable\\\":true}\"]}],\"sender\":\"0x<sender>\",\"gasBudget\":100000000,\"gasPrice\":1000,\"autoGasPayment\":true,\"autoGasBudget\":true,\"summarize\":true}\n",
-        output.items,
+        "auto_selected",
+        resolution.get("parameters").?.array.items[0].object.get("resolution_kind").?.string,
     );
 }
 
@@ -4836,10 +4863,22 @@ test "runCommand move function with --summarize uses queried package for shared 
         "[{\"kind\":\"MoveCall\",\"package\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"module\":\"pool\",\"function\":\"swap\",\"typeArguments\":[],\"arguments\":[\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xpool1\\\",\\\"inputKind\\\":\\\"shared\\\",\\\"initialSharedVersion\\\":7,\\\"mutable\\\":true}\"]}]",
         parsed.value.object.get("call_template").?.object.get("preferred_commands_json").?.string,
     );
-    try testing.expectEqualStrings(
-        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"module\":\"pool\",\"function\":\"swap\",\"typeArguments\":[],\"arguments\":[\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xpool1\\\",\\\"inputKind\\\":\\\"shared\\\",\\\"initialSharedVersion\\\":7,\\\"mutable\\\":true}\"]}],\"sender\":\"0x<sender>\",\"gasBudget\":100000000,\"gasPrice\":1000,\"autoGasPayment\":true,\"autoGasBudget\":true,\"summarize\":true}",
+    const preferred_request = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
         parsed.value.object.get("call_template").?.object.get("preferred_tx_dry_run_request_json").?.string,
+        .{},
     );
+    defer preferred_request.deinit();
+    try testing.expectEqualStrings("0x<sender>", preferred_request.value.object.get("sender").?.string);
+    const preferred_resolution = preferred_request.value.object.get("preferredResolution").?.object;
+    try testing.expect(preferred_resolution.get("is_fully_resolved").?.bool);
+    try testing.expectEqual(@as(usize, 0), preferred_resolution.get("unresolved_parameter_indices").?.array.items.len);
+    try testing.expectEqualStrings(
+        "auto_selected",
+        preferred_resolution.get("parameters").?.array.items[0].object.get("resolution_kind").?.string,
+    );
+    try testing.expect(preferred_resolution.get("parameters").?.array.items[0].object.get("is_executable").?.bool);
 }
 
 test "runCommand move function with --emit-template falls back to base send request output" {
@@ -5146,10 +5185,22 @@ test "runCommand move function with --summarize fills owner context into vector 
         "[[\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xcoin1\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":9,\\\"digest\\\":\\\"coin-digest-1\\\"}\",\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xcoin2\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":10,\\\"digest\\\":\\\"coin-digest-2\\\"}\"]]",
         parsed.value.object.get("call_template").?.object.get("preferred_args_json").?.string,
     );
-    try testing.expectEqualStrings(
-        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"router\",\"function\":\"deposit_many\",\"typeArguments\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"sui\",\"name\":\"SUI\",\"typeParams\":[]}}],\"arguments\":[[\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xcoin1\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":9,\\\"digest\\\":\\\"coin-digest-1\\\"}\",\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xcoin2\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":10,\\\"digest\\\":\\\"coin-digest-2\\\"}\"]]}],\"fromKeystore\":true,\"signer\":\"0xowner\",\"gasBudget\":100000000,\"autoGasPayment\":true,\"autoGasBudget\":true,\"wait\":true,\"summarize\":true}",
+    const preferred_request = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
         parsed.value.object.get("call_template").?.object.get("preferred_tx_send_from_keystore_request_json").?.string,
+        .{},
     );
+    defer preferred_request.deinit();
+    try testing.expect(preferred_request.value.object.get("fromKeystore").?.bool);
+    try testing.expectEqualStrings("0xowner", preferred_request.value.object.get("signer").?.string);
+    const preferred_resolution = preferred_request.value.object.get("preferredResolution").?.object;
+    try testing.expect(preferred_resolution.get("is_fully_resolved").?.bool);
+    try testing.expectEqualStrings(
+        "auto_selected",
+        preferred_resolution.get("parameters").?.array.items[0].object.get("resolution_kind").?.string,
+    );
+    try testing.expect(preferred_resolution.get("parameters").?.array.items[0].object.get("is_executable").?.bool);
 }
 
 test "runCommand move function with --summarize chooses covering vector coin candidates from explicit amount" {

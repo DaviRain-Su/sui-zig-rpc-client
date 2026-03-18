@@ -146,9 +146,38 @@ pub const OwnedMoveFunctionSummary = struct {
 };
 
 pub const OwnedMoveFunctionCallTemplate = struct {
+    pub const PreferredResolutionParameter = struct {
+        parameter_index: usize,
+        signature: []u8,
+        resolution_kind: []const u8,
+        is_executable: bool,
+        resolved_arg_json: ?[]u8 = null,
+        candidate_kind: ?[]const u8 = null,
+        candidate_count: usize = 0,
+        top_selection_score: usize = 0,
+
+        pub fn deinit(self: *PreferredResolutionParameter, allocator: std.mem.Allocator) void {
+            allocator.free(self.signature);
+            if (self.resolved_arg_json) |value| allocator.free(value);
+        }
+    };
+
+    pub const PreferredResolution = struct {
+        is_fully_resolved: bool,
+        unresolved_parameter_indices: []usize,
+        parameters: []PreferredResolutionParameter,
+
+        pub fn deinit(self: *PreferredResolution, allocator: std.mem.Allocator) void {
+            allocator.free(self.unresolved_parameter_indices);
+            for (self.parameters) |*value| value.deinit(allocator);
+            allocator.free(self.parameters);
+        }
+    };
+
     type_args_json: []u8,
     args_json: []u8,
     preferred_args_json: ?[]u8 = null,
+    preferred_resolution: PreferredResolution,
     move_call_command_json: []u8,
     commands_json: []u8,
     preferred_commands_json: ?[]u8 = null,
@@ -165,6 +194,7 @@ pub const OwnedMoveFunctionCallTemplate = struct {
         allocator.free(self.type_args_json);
         allocator.free(self.args_json);
         if (self.preferred_args_json) |value| allocator.free(value);
+        self.preferred_resolution.deinit(allocator);
         allocator.free(self.move_call_command_json);
         allocator.free(self.commands_json);
         if (self.preferred_commands_json) |value| allocator.free(value);
