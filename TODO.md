@@ -52,6 +52,8 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
 - [x] Avoid reusing selected business coins as auto gas payment.
 - [x] Auto `SplitCoins` for scalar `Coin<T>, amount` preferred templates.
 - [x] Auto `MergeCoins + SplitCoins` for covering scalar coin templates.
+- [x] Ordered pairing of multiple trailing amount args to multiple scalar coin
+  parameters for preferred split planning.
 
 ## Highest Priority Remaining Work
 

@@ -5089,50 +5089,60 @@ pub const SuiRpcClient = struct {
         parameters: []move_result.OwnedMoveParameterSummary,
         owner_address: ?[]const u8,
     ) !void {
-        var previous_explicit_index: ?usize = null;
+        var paired_coin_indices = try allocator.alloc(bool, parameters.len);
+        defer allocator.free(paired_coin_indices);
+        @memset(paired_coin_indices, false);
+
         for (parameters, 0..) |parameter, index| {
             if (parameter.omitted_from_explicit_args) continue;
-            if (previous_explicit_index) |previous_index| {
-                const min_balance = parseExplicitCoinBalanceArgJson(allocator, parameter) orelse {
-                    previous_explicit_index = index;
-                    continue;
-                };
-                const previous = &parameters[previous_index];
+            const min_balance = parseExplicitCoinBalanceArgJson(allocator, parameter) orelse continue;
 
-                if (previous.explicit_arg_json == null) {
-                    if (coinTypeFromMoveSignature(previous.signature)) |coin_type| {
-                        if (previous.coin_with_min_balance_select_token) |old_token| allocator.free(old_token);
-                        previous.coin_with_min_balance_select_token = try buildCoinWithMinBalanceSelectToken(
-                            allocator,
-                            owner_address,
-                            coin_type,
-                            min_balance,
-                        );
-                        if (previous.placeholder_json) |old_placeholder| allocator.free(old_placeholder);
-                        previous.placeholder_json = try buildAutoSelectedScalarArgJson(
-                            allocator,
-                            previous.coin_with_min_balance_select_token.?,
-                        );
-                    } else if (vectorElementTypeSignature(previous.signature)) |element_signature| {
-                        if (coinTypeFromCoinStructType(element_signature)) |coin_type| {
-                            if (previous.vector_item_coin_with_min_balance_select_token) |old_token| allocator.free(old_token);
-                            previous.vector_item_coin_with_min_balance_select_token = try buildCoinWithMinBalanceSelectToken(
-                                allocator,
-                                owner_address,
-                                coin_type,
-                                min_balance,
-                            );
-                            if (previous.placeholder_json) |old_placeholder| allocator.free(old_placeholder);
-                            previous.placeholder_json = try std.fmt.allocPrint(
-                                allocator,
-                                "[{f}]",
-                                .{std.json.fmt(previous.vector_item_coin_with_min_balance_select_token.?, .{})},
-                            );
-                        }
+            const target_index = blk: {
+                for (parameters[0..index], 0..) |candidate, candidate_index| {
+                    if (paired_coin_indices[candidate_index]) continue;
+                    if (candidate.omitted_from_explicit_args) continue;
+                    if (candidate.explicit_arg_json != null) continue;
+                    if (coinTypeFromMoveSignature(candidate.signature) != null) break :blk candidate_index;
+                    if (vectorElementTypeSignature(candidate.signature)) |element_signature| {
+                        if (coinTypeFromCoinStructType(element_signature) != null) break :blk candidate_index;
                     }
                 }
+                break :blk null;
+            } orelse continue;
+
+            paired_coin_indices[target_index] = true;
+            const target = &parameters[target_index];
+
+            if (coinTypeFromMoveSignature(target.signature)) |coin_type| {
+                if (target.coin_with_min_balance_select_token) |old_token| allocator.free(old_token);
+                target.coin_with_min_balance_select_token = try buildCoinWithMinBalanceSelectToken(
+                    allocator,
+                    owner_address,
+                    coin_type,
+                    min_balance,
+                );
+                if (target.placeholder_json) |old_placeholder| allocator.free(old_placeholder);
+                target.placeholder_json = try buildAutoSelectedScalarArgJson(
+                    allocator,
+                    target.coin_with_min_balance_select_token.?,
+                );
+            } else if (vectorElementTypeSignature(target.signature)) |element_signature| {
+                if (coinTypeFromCoinStructType(element_signature)) |coin_type| {
+                    if (target.vector_item_coin_with_min_balance_select_token) |old_token| allocator.free(old_token);
+                    target.vector_item_coin_with_min_balance_select_token = try buildCoinWithMinBalanceSelectToken(
+                        allocator,
+                        owner_address,
+                        coin_type,
+                        min_balance,
+                    );
+                    if (target.placeholder_json) |old_placeholder| allocator.free(old_placeholder);
+                    target.placeholder_json = try std.fmt.allocPrint(
+                        allocator,
+                        "[{f}]",
+                        .{std.json.fmt(target.vector_item_coin_with_min_balance_select_token.?, .{})},
+                    );
+                }
             }
-            previous_explicit_index = index;
         }
     }
 
@@ -5149,42 +5159,50 @@ pub const SuiRpcClient = struct {
         allocator: std.mem.Allocator,
         parameters: []move_result.OwnedMoveParameterSummary,
     ) !void {
-        var previous_explicit_index: ?usize = null;
+        var paired_coin_indices = try allocator.alloc(bool, parameters.len);
+        defer allocator.free(paired_coin_indices);
+        @memset(paired_coin_indices, false);
+
         for (parameters, 0..) |parameter, index| {
             if (parameter.omitted_from_explicit_args) continue;
-            if (previous_explicit_index) |previous_index| {
-                const min_balance = parseExplicitCoinBalanceArgJson(allocator, parameter) orelse {
-                    previous_explicit_index = index;
-                    continue;
-                };
-                const previous = &parameters[previous_index];
-                if (previous.explicit_arg_json != null) {
-                    previous_explicit_index = index;
-                    continue;
-                }
+            const min_balance = parseExplicitCoinBalanceArgJson(allocator, parameter) orelse continue;
 
-                if (coinTypeFromMoveSignature(previous.signature) != null) {
-                    if (previous.owned_object_candidates) |candidates| {
-                        const selected_value = if (selectSmallestSufficientCoinCandidateToken(candidates, min_balance)) |token|
-                            try buildAutoSelectedScalarArgJson(allocator, token)
-                        else
-                            null;
-                        replaceMoveParameterAutoSelectedArgJson(allocator, previous, selected_value);
+            const target_index = blk: {
+                for (parameters[0..index], 0..) |candidate, candidate_index| {
+                    if (paired_coin_indices[candidate_index]) continue;
+                    if (candidate.omitted_from_explicit_args) continue;
+                    if (candidate.explicit_arg_json != null) continue;
+                    if (coinTypeFromMoveSignature(candidate.signature) != null) break :blk candidate_index;
+                    if (vectorElementTypeSignature(candidate.signature)) |element_signature| {
+                        if (coinTypeFromCoinStructType(element_signature) != null) break :blk candidate_index;
                     }
-                } else if (vectorElementTypeSignature(previous.signature)) |element_signature| {
-                    if (coinTypeFromCoinStructType(element_signature) != null) {
-                        if (previous.vector_item_owned_object_candidates) |candidates| {
-                            const selected_value = try buildCoveringCoinVectorArgJson(
-                                allocator,
-                                candidates,
-                                min_balance,
-                            );
-                            replaceMoveParameterAutoSelectedArgJson(allocator, previous, selected_value);
-                        }
+                }
+                break :blk null;
+            } orelse continue;
+
+            paired_coin_indices[target_index] = true;
+            const target = &parameters[target_index];
+
+            if (coinTypeFromMoveSignature(target.signature) != null) {
+                if (target.owned_object_candidates) |candidates| {
+                    const selected_value = if (selectSmallestSufficientCoinCandidateToken(candidates, min_balance)) |token|
+                        try buildAutoSelectedScalarArgJson(allocator, token)
+                    else
+                        null;
+                    replaceMoveParameterAutoSelectedArgJson(allocator, target, selected_value);
+                }
+            } else if (vectorElementTypeSignature(target.signature)) |element_signature| {
+                if (coinTypeFromCoinStructType(element_signature) != null) {
+                    if (target.vector_item_owned_object_candidates) |candidates| {
+                        const selected_value = try buildCoveringCoinVectorArgJson(
+                            allocator,
+                            candidates,
+                            min_balance,
+                        );
+                        replaceMoveParameterAutoSelectedArgJson(allocator, target, selected_value);
                     }
                 }
             }
-            previous_explicit_index = index;
         }
     }
 
@@ -5309,33 +5327,31 @@ pub const SuiRpcClient = struct {
         var split_amount_values = try allocator.alloc(?u64, summary.parameters.len);
         defer allocator.free(split_amount_values);
         for (split_amount_values) |*slot| slot.* = null;
-
-        var previous_explicit_index: ?usize = null;
+        var paired_coin_indices = try allocator.alloc(bool, summary.parameters.len);
+        defer allocator.free(paired_coin_indices);
+        @memset(paired_coin_indices, false);
         var needs_split = false;
         for (summary.parameters, 0..) |parameter, index| {
             if (parameter.omitted_from_explicit_args) continue;
-            if (previous_explicit_index) |previous_index| {
-                const min_balance = parseExplicitCoinBalanceArgJson(allocator, parameter) orelse {
-                    previous_explicit_index = index;
-                    continue;
-                };
-                if (moveParameterSplitSourceArgJson(summary.parameters[previous_index])) |_| {
-                    split_amount_jsons[previous_index] = parameter.explicit_arg_json orelse return error.InvalidCli;
-                    split_amount_values[previous_index] = min_balance;
-                    needs_split = true;
-                } else {
-                    const previous = summary.parameters[previous_index];
-                    if (previous.explicit_arg_json == null and
-                        coinTypeFromMoveSignature(previous.signature) != null and
-                        previous.owned_object_candidates != null)
-                    {
-                        split_amount_jsons[previous_index] = parameter.explicit_arg_json orelse return error.InvalidCli;
-                        split_amount_values[previous_index] = min_balance;
-                        needs_split = true;
+            const min_balance = parseExplicitCoinBalanceArgJson(allocator, parameter) orelse continue;
+
+            const target_index = blk: {
+                for (summary.parameters[0..index], 0..) |candidate, candidate_index| {
+                    if (paired_coin_indices[candidate_index]) continue;
+                    if (candidate.omitted_from_explicit_args) continue;
+                    if (coinTypeFromMoveSignature(candidate.signature) == null) continue;
+                    if (moveParameterSplitSourceArgJson(candidate)) |_| break :blk candidate_index;
+                    if (candidate.explicit_arg_json == null and candidate.owned_object_candidates != null) {
+                        break :blk candidate_index;
                     }
                 }
-            }
-            previous_explicit_index = index;
+                break :blk null;
+            } orelse continue;
+
+            paired_coin_indices[target_index] = true;
+            split_amount_jsons[target_index] = parameter.explicit_arg_json orelse return error.InvalidCli;
+            split_amount_values[target_index] = min_balance;
+            needs_split = true;
         }
 
         if (!needs_split) return null;
