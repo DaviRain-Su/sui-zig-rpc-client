@@ -389,206 +389,13 @@ fn applyKeystoreSignature(allocator: Allocator, parsed: *cli.ParsedArgs) !void {
     try parsed.owned_signatures.append(allocator, key);
 }
 
-fn keystoreStringField(obj: std.json.ObjectMap, key_name: []const u8) ?[]const u8 {
-    if (obj.get(key_name)) |value| {
+fn keystoreAddressField(obj: std.json.ObjectMap) ?[]const u8 {
+    if (obj.get("address")) |value| {
         if (value == .string and value.string.len > 0) return value.string;
     }
-    return null;
-}
-
-fn keystoreSelectorFromObject(obj: std.json.ObjectMap) ?[]const u8 {
-    if (keystoreStringField(obj, "privateKey")) |value| return value;
-    if (keystoreStringField(obj, "key")) |value| return value;
-    if (keystoreStringField(obj, "value")) |value| return value;
-    return null;
-}
-
-fn printKeystoreEntry(writer: anytype, index: usize, entry: std.json.Value) !void {
-    switch (entry) {
-        .string => |value| {
-            try writer.print("[{d}] selector={s}\n", .{ index, value });
-            return;
-        },
-        .object => |obj| {
-            const selector = keystoreSelectorFromObject(obj);
-            try writer.print("[{d}] selector=", .{ index });
-            if (selector) |selector_value| {
-                try writer.print("{s}", .{selector_value});
-            } else {
-                try writer.print("<missing>", .{});
-            }
-            if (keystoreStringField(obj, "alias")) |alias| {
-                try writer.print(" alias={s}", .{alias});
-            }
-            if (keystoreStringField(obj, "name")) |name| {
-                try writer.print(" name={s}", .{name});
-            }
-            if (keystoreStringField(obj, "address")) |address| {
-                try writer.print(" address={s}", .{address});
-            }
-            if (keystoreStringField(obj, "suiAddress")) |sui_address| {
-                try writer.print(" suiAddress={s}", .{sui_address});
-            }
-            if (keystoreStringField(obj, "publicKey")) |public_key| {
-                try writer.print(" publicKey={s}", .{public_key});
-            }
-            try writer.print("\n", .{});
-            return;
-        },
-        else => {
-            try writer.print("[{d}] selector=<unsupported>\n", .{index});
-            return;
-        },
+    if (obj.get("suiAddress")) |value| {
+        if (value == .string and value.string.len > 0) return value.string;
     }
-}
-
-fn printKeystoreEntries(allocator: Allocator, writer: anytype, contents: []const u8) !void {
-    const trimmed = std.mem.trim(u8, contents, " \n\r\t");
-    if (trimmed.len == 0) {
-        try writer.print("No accounts found in keystore\n", .{});
-        return;
-    }
-
-    const parsed = std.json.parseFromSlice(std.json.Value, allocator, trimmed, .{}) catch return error.InvalidCli;
-    defer parsed.deinit();
-
-    if (parsed.value != .array) return error.InvalidCli;
-    if (parsed.value.array.items.len == 0) {
-        try writer.print("No accounts found in keystore\n", .{});
-        return;
-    }
-
-    for (parsed.value.array.items, 0..) |entry, index| {
-        try printKeystoreEntry(writer, index, entry);
-    }
-}
-
-fn printKeystoreEntriesJson(writer: anytype, entries: []const std.json.Value) !void {
-    try writer.writeAll("{\"accounts\":[");
-    var first = true;
-
-    for (entries, 0..) |entry, index| {
-        if (!first) try writer.writeAll(",");
-        first = false;
-
-        const selector = switch (entry) {
-            .string => entry.string,
-            .object => keystoreSelectorFromObject(entry.object) orelse "<missing>",
-            else => "<unsupported>",
-        };
-
-        try writer.print("{{\"index\":{},\"selector\":{f}", .{ index, std.json.fmt(selector, .{}) });
-        switch (entry) {
-            .object => |obj| {
-            if (keystoreStringField(obj, "alias")) |alias| {
-                try writer.print(",\"alias\":{f}", .{std.json.fmt(alias, .{})});
-            }
-            if (keystoreStringField(obj, "name")) |name| {
-                try writer.print(",\"name\":{f}", .{std.json.fmt(name, .{})});
-            }
-            if (keystoreStringField(obj, "address")) |address| {
-                try writer.print(",\"address\":{f}", .{std.json.fmt(address, .{})});
-            }
-            if (keystoreStringField(obj, "suiAddress")) |sui_address| {
-                try writer.print(",\"suiAddress\":{f}", .{std.json.fmt(sui_address, .{})});
-            }
-            if (keystoreStringField(obj, "publicKey")) |public_key| {
-                try writer.print(",\"publicKey\":{f}", .{std.json.fmt(public_key, .{})});
-            }
-            },
-            else => {},
-        }
-        try writer.writeAll("}");
-    }
-
-    try writer.writeAll("]}\n");
-}
-
-fn printKeystoreEntryJson(writer: anytype, index: usize, entry: std.json.Value) !void {
-    const selector = switch (entry) {
-        .string => entry.string,
-        .object => keystoreSelectorFromObject(entry.object) orelse "<missing>",
-        else => "<unsupported>",
-    };
-
-    try writer.print("{{\"index\":{},\"selector\":{f}", .{ index, std.json.fmt(selector, .{}) });
-    switch (entry) {
-        .object => |obj| {
-            if (keystoreStringField(obj, "alias")) |alias| {
-                try writer.print(",\"alias\":{f}", .{std.json.fmt(alias, .{})});
-            }
-            if (keystoreStringField(obj, "name")) |name| {
-                try writer.print(",\"name\":{f}", .{std.json.fmt(name, .{})});
-            }
-            if (keystoreStringField(obj, "address")) |address| {
-                try writer.print(",\"address\":{f}", .{std.json.fmt(address, .{})});
-            }
-            if (keystoreStringField(obj, "suiAddress")) |sui_address| {
-                try writer.print(",\"suiAddress\":{f}", .{std.json.fmt(sui_address, .{})});
-            }
-            if (keystoreStringField(obj, "publicKey")) |public_key| {
-                try writer.print(",\"publicKey\":{f}", .{std.json.fmt(public_key, .{})});
-            }
-        },
-        else => {},
-    }
-    try writer.writeAll("}");
-}
-
-fn findKeystoreEntryBySelector(entries: []const std.json.Value, selector: []const u8) ?struct {
-    index: usize,
-    entry: std.json.Value,
-} {
-    const index_selector = std.fmt.parseInt(usize, selector, 10) catch null;
-    if (index_selector) |target| {
-        if (target >= entries.len) return null;
-        return .{ .index = target, .entry = entries[target] };
-    }
-
-    for (entries, 0..) |entry, index| {
-        switch (entry) {
-            .string => |value| {
-                if (std.mem.eql(u8, value, selector)) {
-                    return .{ .index = index, .entry = entry };
-                }
-            },
-            .object => |obj| {
-                if (keystoreSelectorFromObject(obj)) |selector_value| {
-                    if (std.mem.eql(u8, selector_value, selector)) {
-                        return .{ .index = index, .entry = entry };
-                    }
-                }
-                if (keystoreStringField(obj, "alias")) |alias| {
-                    if (std.mem.eql(u8, alias, selector)) {
-                        return .{ .index = index, .entry = entry };
-                    }
-                }
-                if (keystoreStringField(obj, "name")) |name| {
-                    if (std.mem.eql(u8, name, selector)) {
-                        return .{ .index = index, .entry = entry };
-                    }
-                }
-                if (keystoreStringField(obj, "address")) |address| {
-                    if (std.mem.eql(u8, address, selector)) {
-                        return .{ .index = index, .entry = entry };
-                    }
-                }
-                if (keystoreStringField(obj, "suiAddress")) |sui_address| {
-                    if (std.mem.eql(u8, sui_address, selector)) {
-                        return .{ .index = index, .entry = entry };
-                    }
-                }
-            },
-            else => {},
-        }
-    }
-
-    return null;
-}
-
-fn keystoreAddressField(obj: std.json.ObjectMap) ?[]const u8 {
-    if (keystoreStringField(obj, "address")) |value| return value;
-    if (keystoreStringField(obj, "suiAddress")) |value| return value;
     return null;
 }
 
@@ -655,76 +462,6 @@ fn applyTxBuildSenderFromKeystore(
     if (has_resolver_input) return error.InvalidCli;
 }
 
-fn runAccountInfo(allocator: Allocator, writer: anytype, selector: []const u8, as_json: bool) !u8 {
-    const keystore_path = try resolveSuiKeystorePath(allocator);
-    if (keystore_path == null) return error.InvalidCli;
-    defer allocator.free(keystore_path.?);
-
-    const contents = std.fs.cwd().readFileAlloc(allocator, keystore_path.?, 2 * 1024 * 1024) catch |err| switch (err) {
-        error.FileNotFound => return error.InvalidCli,
-        else => return err,
-    };
-    defer allocator.free(contents);
-
-    const trimmed = std.mem.trim(u8, contents, " \n\r\t");
-    if (trimmed.len == 0) return error.InvalidCli;
-
-    const parsed = std.json.parseFromSlice(std.json.Value, allocator, trimmed, .{}) catch return error.InvalidCli;
-    defer parsed.deinit();
-    if (parsed.value != .array) return error.InvalidCli;
-    if (parsed.value.array.items.len == 0) return error.InvalidCli;
-
-    const found = findKeystoreEntryBySelector(parsed.value.array.items, selector) orelse return error.InvalidCli;
-    if (as_json) {
-        try writer.writeAll("{\"entry\":");
-        try printKeystoreEntryJson(writer, found.index, found.entry);
-        try writer.writeAll("}\n");
-        return 0;
-    }
-
-    try printKeystoreEntry(writer, found.index, found.entry);
-    return 0;
-}
-
-fn runAccountList(
-    allocator: Allocator,
-    writer: anytype,
-    as_json: bool,
-) !u8 {
-    const keystore_path = try resolveSuiKeystorePath(allocator);
-    if (keystore_path == null) return error.InvalidCli;
-    defer allocator.free(keystore_path.?);
-
-    const contents = std.fs.cwd().readFileAlloc(allocator, keystore_path.?, 2 * 1024 * 1024) catch |err| switch (err) {
-        error.FileNotFound => return error.InvalidCli,
-        else => return err,
-    };
-    defer allocator.free(contents);
-
-    if (as_json) {
-        const trimmed = std.mem.trim(u8, contents, " \n\r\t");
-        if (trimmed.len == 0) {
-            try writer.writeAll("{\"accounts\":[]}\n");
-            return 0;
-        }
-
-        const parsed = std.json.parseFromSlice(std.json.Value, allocator, trimmed, .{}) catch return error.InvalidCli;
-        defer parsed.deinit();
-        if (parsed.value != .array) return error.InvalidCli;
-
-        if (parsed.value.array.items.len == 0) {
-            try writer.writeAll("{\"accounts\":[]}\n");
-            return 0;
-        }
-
-        try printKeystoreEntriesJson(writer, parsed.value.array.items);
-        return 0;
-    }
-
-    try printKeystoreEntries(allocator, writer, contents);
-    return 0;
-}
-
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const allocator = gpa.allocator();
@@ -755,29 +492,6 @@ pub fn main() !void {
     if (parsed.show_usage and parsed.command == .help) {
         const stdout = std.fs.File.stdout().deprecatedWriter();
         try cli.printUsage(stdout);
-        return;
-    }
-
-    if (parsed.command == .account_list) {
-        const stdout = std.fs.File.stdout().deprecatedWriter();
-        const status = runAccountList(allocator, stdout, parsed.account_list_json) catch |err| switch (err) {
-            error.InvalidCli => printCliError("error: invalid arguments\n"),
-            error.OutOfMemory => printCliError("error: out of memory\n"),
-            else => printUnhandledError(err),
-        };
-        if (status != 0) std.process.exit(status);
-        return;
-    }
-
-    if (parsed.command == .account_info) {
-        const selector = parsed.account_selector orelse return;
-        const stdout = std.fs.File.stdout().deprecatedWriter();
-        const status = runAccountInfo(allocator, stdout, selector, parsed.account_info_json) catch |err| switch (err) {
-            error.InvalidCli => printCliError("error: invalid arguments\n"),
-            error.OutOfMemory => printCliError("error: out of memory\n"),
-            else => printUnhandledError(err),
-        };
-        if (status != 0) std.process.exit(status);
         return;
     }
 
@@ -1814,49 +1528,14 @@ test "cli parse + helper resolution maps tx_send signer to sender and signature"
     try testing.expect(parsed.signers.items.len == 1);
 }
 
-test "printKeystoreEntries prints selector and metadata" {
+test "listAccountEntriesFromContents returns invalid cli on non-array data" {
     const testing = std.testing;
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const contents = "[\"sk_raw\",{\"alias\":\"main\",\"privateKey\":\"sk_obj\",\"name\":\"Alice\",\"address\":\"0x123\",\"suiAddress\":\"0x123abc\",\"publicKey\":\"pk\"}]";
-    var output = std.ArrayList(u8){};
-    defer output.deinit(allocator);
-
-    try printKeystoreEntries(allocator, output.writer(allocator), contents);
-    try testing.expectEqualStrings(
-        "[0] selector=sk_raw\n[1] selector=sk_obj alias=main name=Alice address=0x123 suiAddress=0x123abc publicKey=pk\n",
-        output.items,
-    );
-}
-
-test "printKeystoreEntries prints message for empty keystore" {
-    const testing = std.testing;
-
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
-    var output = std.ArrayList(u8){};
-    defer output.deinit(allocator);
-
-    try printKeystoreEntries(allocator, output.writer(allocator), "[]");
-    try testing.expectEqualStrings("No accounts found in keystore\n", output.items);
-}
-
-test "printKeystoreEntries returns invalid cli on non-array data" {
-    const testing = std.testing;
-
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
-    var output = std.ArrayList(u8){};
-    defer output.deinit(allocator);
-
-    try testing.expectError(error.InvalidCli, printKeystoreEntries(allocator, output.writer(allocator), "{}"));
+    try testing.expectError(error.InvalidCli, keystore.listAccountEntriesFromContents(allocator, "{}"));
 }
 
 test "parseRpcUrlFromConfigContent returns null for empty config" {

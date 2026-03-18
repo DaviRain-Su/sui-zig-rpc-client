@@ -4,6 +4,14 @@ const transport = @import("./transport.zig");
 const tx_builder = @import("../../tx_builder.zig");
 const keystore = @import("../../keystore.zig");
 const tx_request_builder = @import("../../tx_request_builder.zig");
+const ptb_bytes_builder = @import("../../ptb_bytes_builder.zig");
+const inspect_result = @import("../../inspect_result.zig");
+const tx_result = @import("../../tx_result.zig");
+const artifact_result = @import("../../artifact_result.zig");
+const object_result = @import("../../object_result.zig");
+const owned_object_result = @import("../../owned_object_result.zig");
+const dynamic_field_result = @import("../../dynamic_field_result.zig");
+const coin_result = @import("../../coin_result.zig");
 
 pub const ClientError = error{
     Timeout,
@@ -238,27 +246,58 @@ pub const ArtifactOrChallengePromptResult = union(enum) {
 pub const ProgrammaticClientAction = union(enum) {
     authorize,
     inspect,
+    inspect_summarize,
     execute,
+    execute_summarize,
     execute_confirm: struct {
         timeout_ms: u64,
         poll_ms: u64,
     },
+    execute_confirm_summarize: struct {
+        timeout_ms: u64,
+        poll_ms: u64,
+    },
+    execute_confirm_observe: struct {
+        timeout_ms: u64,
+        poll_ms: u64,
+    },
     build_artifact: tx_request_builder.ProgrammaticArtifactKind,
+    build_artifact_summarize: tx_request_builder.ProgrammaticArtifactKind,
 };
 
 pub const ProgrammaticClientActionResult = union(enum) {
     authorized: tx_request_builder.AuthorizedPreparedRequest,
     inspected: []u8,
+    inspect_summarized: inspect_result.OwnedInspectInsights,
     executed: []u8,
+    summarized: tx_result.OwnedExecutionInsights,
+    observed: ObservedExecutionSummary,
     artifact: []u8,
+    artifact_summarized: artifact_result.OwnedProgrammaticArtifactSummary,
 
     pub fn deinit(self: *ProgrammaticClientActionResult, allocator: std.mem.Allocator) void {
         switch (self.*) {
             .authorized => |*value| value.deinit(allocator),
             .inspected => |value| allocator.free(value),
+            .inspect_summarized => |*value| value.deinit(allocator),
             .executed => |value| allocator.free(value),
+            .summarized => |*value| value.deinit(allocator),
+            .observed => |*value| value.deinit(allocator),
             .artifact => |value| allocator.free(value),
+            .artifact_summarized => |*value| value.deinit(allocator),
         }
+    }
+};
+
+pub const ObservedExecutionSummary = struct {
+    digest: []u8,
+    confirmed_response: []u8,
+    insights: tx_result.OwnedExecutionInsights,
+
+    pub fn deinit(self: *ObservedExecutionSummary, allocator: std.mem.Allocator) void {
+        allocator.free(self.digest);
+        allocator.free(self.confirmed_response);
+        self.insights.deinit(allocator);
     }
 };
 
@@ -273,6 +312,1600 @@ pub const ProgrammaticClientActionOrChallengePromptResult = union(enum) {
         }
     }
 };
+
+pub const ObjectDataOptions = struct {
+    show_type: bool = false,
+    show_owner: bool = false,
+    show_previous_transaction: bool = false,
+    show_display: bool = false,
+    show_content: bool = false,
+    show_bcs: bool = false,
+    show_storage_rebate: bool = false,
+
+    pub fn isEmpty(self: ObjectDataOptions) bool {
+        return !self.show_type and
+            !self.show_owner and
+            !self.show_previous_transaction and
+            !self.show_display and
+            !self.show_content and
+            !self.show_bcs and
+            !self.show_storage_rebate;
+    }
+};
+
+pub const DynamicFieldName = struct {
+    type_name: []const u8,
+    value_json: []const u8,
+};
+
+pub const DynamicFieldPageRequest = struct {
+    cursor: ?[]const u8 = null,
+    limit: ?u64 = null,
+};
+
+pub const CoinPageRequest = struct {
+    coin_type: ?[]const u8 = null,
+    cursor: ?[]const u8 = null,
+    limit: ?u64 = null,
+};
+
+pub const default_sui_coin_type = "0x2::sui::SUI";
+
+pub const OwnedSelectedArgumentValue = struct {
+    value: tx_request_builder.ArgumentValue,
+    owned_text: ?[]const u8 = null,
+
+    pub fn deinit(self: *OwnedSelectedArgumentValue, allocator: std.mem.Allocator) void {
+        if (self.owned_text) |value| allocator.free(value);
+        self.owned_text = null;
+    }
+
+    pub fn initObjectId(
+        allocator: std.mem.Allocator,
+        object_id: []const u8,
+    ) !OwnedSelectedArgumentValue {
+        const owned = try allocator.dupe(u8, object_id);
+        return .{
+            .value = .{ .object_id = owned },
+            .owned_text = owned,
+        };
+    }
+
+    pub fn initOwnedRawJson(
+        owned_json: []u8,
+    ) OwnedSelectedArgumentValue {
+        return .{
+            .value = .{ .raw_json = owned_json },
+            .owned_text = owned_json,
+        };
+    }
+};
+
+pub const OwnedSelectedArgumentValues = struct {
+    items: std.ArrayListUnmanaged(tx_request_builder.ArgumentValue) = .{},
+    owned_texts: std.ArrayListUnmanaged([]const u8) = .{},
+
+    pub fn deinit(self: *OwnedSelectedArgumentValues, allocator: std.mem.Allocator) void {
+        for (self.owned_texts.items) |value| allocator.free(value);
+        self.items.deinit(allocator);
+        self.owned_texts.deinit(allocator);
+    }
+
+    pub fn slice(self: *const OwnedSelectedArgumentValues) []const tx_request_builder.ArgumentValue {
+        return self.items.items;
+    }
+
+    pub fn appendOwned(
+        self: *OwnedSelectedArgumentValues,
+        allocator: std.mem.Allocator,
+        value: OwnedSelectedArgumentValue,
+    ) !void {
+        if (value.owned_text) |owned_text| try self.owned_texts.append(allocator, owned_text);
+        try self.items.append(allocator, value.value);
+    }
+
+    pub fn appendResolved(
+        self: *OwnedSelectedArgumentValues,
+        allocator: std.mem.Allocator,
+        value: tx_request_builder.ArgumentValue,
+        owned_text: ?[]const u8,
+    ) !void {
+        if (owned_text) |text| try self.owned_texts.append(allocator, text);
+        try self.items.append(allocator, value);
+    }
+};
+
+pub const OwnedSelectedArgumentRequest = struct {
+    value: SelectedArgumentRequest,
+    owned_texts: std.ArrayListUnmanaged([]u8) = .{},
+
+    pub fn deinit(self: *OwnedSelectedArgumentRequest, allocator: std.mem.Allocator) void {
+        for (self.owned_texts.items) |value| allocator.free(value);
+        self.owned_texts.deinit(allocator);
+    }
+
+    fn dupeAndTrack(self: *OwnedSelectedArgumentRequest, allocator: std.mem.Allocator, value: []const u8) ![]const u8 {
+        const owned = try allocator.dupe(u8, value);
+        try self.owned_texts.append(allocator, owned);
+        return owned;
+    }
+};
+
+pub const SelectedArgumentRequest = union(enum) {
+    object_preset: struct {
+        preset: ObjectPresetKind,
+    },
+    object_input: struct {
+        object_id: []const u8,
+        input_kind: ObjectInputKind,
+        mutable: bool = false,
+        version: ?u64 = null,
+        digest: ?[]const u8 = null,
+        initial_shared_version: ?u64 = null,
+    },
+    gas_coin: struct {
+        owner: []const u8,
+        min_balance: u64,
+    },
+    coin_with_min_balance: struct {
+        owner: []const u8,
+        request: CoinPageRequest = .{},
+        min_balance: u64,
+    },
+    owned_object: struct {
+        owner: []const u8,
+        request: OwnedObjectsPageRequest = .{},
+    },
+    owned_object_struct_type: struct {
+        owner: []const u8,
+        struct_type: []const u8,
+    },
+    owned_object_object_id: struct {
+        owner: []const u8,
+        object_id: []const u8,
+    },
+    owned_object_module: struct {
+        owner: []const u8,
+        package: []const u8,
+        module: []const u8,
+    },
+};
+
+pub const ObjectInputKind = enum {
+    imm_or_owned,
+    receiving,
+    shared,
+};
+
+pub const ObjectPresetKind = enum {
+    clock,
+    cetus_clmm_global_config_mainnet,
+    cetus_clmm_global_config_testnet,
+};
+
+pub const SelectedArgumentDslBuilder = struct {
+    client: *SuiRpcClient,
+    allocator: std.mem.Allocator,
+    builder: tx_request_builder.ProgrammaticDslBuilder,
+    owned_json_values: std.ArrayListUnmanaged([]const u8) = .{},
+
+    pub fn init(client: *SuiRpcClient, allocator: std.mem.Allocator) SelectedArgumentDslBuilder {
+        return .{
+            .client = client,
+            .allocator = allocator,
+            .builder = tx_request_builder.ProgrammaticDslBuilder.init(allocator),
+        };
+    }
+
+    pub fn deinit(self: *SelectedArgumentDslBuilder) void {
+        self.builder.deinit();
+        for (self.owned_json_values.items) |value| self.allocator.free(value);
+        self.owned_json_values.deinit(self.allocator);
+    }
+
+    pub fn dslBuilder(self: *SelectedArgumentDslBuilder) *tx_request_builder.ProgrammaticDslBuilder {
+        return &self.builder;
+    }
+
+    pub fn setSender(self: *SelectedArgumentDslBuilder, sender: ?[]const u8) void {
+        self.builder.setSender(sender);
+    }
+
+    pub fn setGasBudget(self: *SelectedArgumentDslBuilder, gas_budget: ?u64) void {
+        self.builder.setGasBudget(gas_budget);
+    }
+
+    pub fn setGasPrice(self: *SelectedArgumentDslBuilder, gas_price: ?u64) void {
+        self.builder.setGasPrice(gas_price);
+    }
+
+    pub fn setGasPaymentJson(self: *SelectedArgumentDslBuilder, gas_payment_json: ?[]const u8) void {
+        self.builder.setGasPaymentJson(gas_payment_json);
+    }
+
+    pub fn setSignatures(self: *SelectedArgumentDslBuilder, signatures: []const []const u8) void {
+        self.builder.setSignatures(signatures);
+    }
+
+    pub fn setOptionsJson(self: *SelectedArgumentDslBuilder, options_json: ?[]const u8) void {
+        self.builder.setOptionsJson(options_json);
+    }
+
+    fn rememberOwnedJson(self: *SelectedArgumentDslBuilder, value: []const u8) !void {
+        try self.owned_json_values.append(self.allocator, value);
+    }
+
+    pub fn selectGasPayment(
+        self: *SelectedArgumentDslBuilder,
+        owner: []const u8,
+        min_balance: u64,
+    ) !void {
+        const gas_payment_json = try self.client.selectGasPaymentJson(self.allocator, owner, min_balance) orelse return error.SelectionNotFound;
+        try self.rememberOwnedJson(gas_payment_json);
+        self.builder.setGasPaymentJson(gas_payment_json);
+    }
+
+    pub fn selectGasPaymentWithRequest(
+        self: *SelectedArgumentDslBuilder,
+        owner: []const u8,
+        request: CoinPageRequest,
+        min_balance: u64,
+    ) !void {
+        const gas_payment_json = try self.client.selectGasPaymentJsonWithMinBalance(self.allocator, owner, request, min_balance) orelse return error.SelectionNotFound;
+        try self.rememberOwnedJson(gas_payment_json);
+        self.builder.setGasPaymentJson(gas_payment_json);
+    }
+
+    pub fn finish(self: *SelectedArgumentDslBuilder) !tx_request_builder.OwnedProgrammaticRequestOptions {
+        return try self.builder.finish();
+    }
+
+    pub fn appendMoveCallFromSelectedArguments(
+        self: *SelectedArgumentDslBuilder,
+        package_id: []const u8,
+        module: []const u8,
+        function_name: []const u8,
+        type_arg_items: []const []const u8,
+        requests: []const SelectedArgumentRequest,
+    ) !void {
+        try self.client.appendMoveCallFromSelectedArguments(
+            self.allocator,
+            &self.builder,
+            package_id,
+            module,
+            function_name,
+            type_arg_items,
+            requests,
+        );
+    }
+
+    pub fn appendMoveCallFromSelectedArgumentTokens(
+        self: *SelectedArgumentDslBuilder,
+        package_id: []const u8,
+        module: []const u8,
+        function_name: []const u8,
+        type_arg_items: []const []const u8,
+        tokens: []const []const u8,
+    ) !void {
+        var values = try self.client.resolveArgumentValuesFromTokensWithDefaultOwner(self.allocator, tokens, self.builder.sender);
+        defer values.deinit(self.allocator);
+        try self.builder.appendMoveCallFromValues(package_id, module, function_name, type_arg_items, values.slice());
+    }
+
+    pub fn appendMoveCallFromArgumentTokens(
+        self: *SelectedArgumentDslBuilder,
+        package_id: []const u8,
+        module: []const u8,
+        function_name: []const u8,
+        type_arg_items: []const []const u8,
+        tokens: []const []const u8,
+    ) !void {
+        try self.appendMoveCallFromSelectedArgumentTokens(
+            package_id,
+            module,
+            function_name,
+            type_arg_items,
+            tokens,
+        );
+    }
+
+    pub fn appendMoveCallAndGetValueFromArgumentTokens(
+        self: *SelectedArgumentDslBuilder,
+        package_id: []const u8,
+        module: []const u8,
+        function_name: []const u8,
+        type_arg_items: []const []const u8,
+        tokens: []const []const u8,
+    ) !tx_request_builder.ArgumentValue {
+        var values = try self.client.resolveArgumentValuesFromTokensWithDefaultOwner(self.allocator, tokens, self.builder.sender);
+        defer values.deinit(self.allocator);
+        return try self.builder.appendMoveCallAndGetValueFromValues(
+            package_id,
+            module,
+            function_name,
+            type_arg_items,
+            values.slice(),
+        );
+    }
+
+    pub fn appendSplitCoinsFromArgumentTokens(
+        self: *SelectedArgumentDslBuilder,
+        coin_token: []const u8,
+        amount_tokens: []const []const u8,
+    ) !void {
+        var coin = try self.client.resolveArgumentValueTokenWithDefaultOwner(self.allocator, coin_token, self.builder.sender);
+        defer coin.deinit(self.allocator);
+        var amounts = try self.client.resolveArgumentValuesFromTokensWithDefaultOwner(self.allocator, amount_tokens, self.builder.sender);
+        defer amounts.deinit(self.allocator);
+        try self.builder.appendSplitCoinsFromValues(coin.value, amounts.slice());
+    }
+
+    pub fn appendSplitCoinsAndGetValueFromArgumentTokens(
+        self: *SelectedArgumentDslBuilder,
+        coin_token: []const u8,
+        amount_tokens: []const []const u8,
+    ) !tx_request_builder.ArgumentValue {
+        var coin = try self.client.resolveArgumentValueTokenWithDefaultOwner(self.allocator, coin_token, self.builder.sender);
+        defer coin.deinit(self.allocator);
+        var amounts = try self.client.resolveArgumentValuesFromTokensWithDefaultOwner(self.allocator, amount_tokens, self.builder.sender);
+        defer amounts.deinit(self.allocator);
+        return try self.builder.appendSplitCoinsAndGetValueFromValues(coin.value, amounts.slice());
+    }
+
+    pub fn appendMakeMoveVecFromArgumentTokens(
+        self: *SelectedArgumentDslBuilder,
+        type_value: ?[]const u8,
+        element_tokens: []const []const u8,
+    ) !void {
+        var elements = try self.client.resolveArgumentValuesFromTokensWithDefaultOwner(self.allocator, element_tokens, self.builder.sender);
+        defer elements.deinit(self.allocator);
+        try self.builder.appendMakeMoveVecFromValues(type_value, elements.slice());
+    }
+
+    pub fn appendMakeMoveVecAndGetValueFromArgumentTokens(
+        self: *SelectedArgumentDslBuilder,
+        type_value: ?[]const u8,
+        element_tokens: []const []const u8,
+    ) !tx_request_builder.ArgumentValue {
+        var elements = try self.client.resolveArgumentValuesFromTokensWithDefaultOwner(self.allocator, element_tokens, self.builder.sender);
+        defer elements.deinit(self.allocator);
+        return try self.builder.appendMakeMoveVecAndGetValueFromValues(type_value, elements.slice());
+    }
+
+    pub fn appendTransferObjectsFromArgumentTokens(
+        self: *SelectedArgumentDslBuilder,
+        object_tokens: []const []const u8,
+        address_token: []const u8,
+    ) !void {
+        var objects = try self.client.resolveArgumentValuesFromTokensWithDefaultOwner(self.allocator, object_tokens, self.builder.sender);
+        defer objects.deinit(self.allocator);
+        var address = try self.client.resolveArgumentValueTokenWithDefaultOwner(self.allocator, address_token, self.builder.sender);
+        defer address.deinit(self.allocator);
+        try self.builder.appendTransferObjectsFromValues(objects.slice(), address.value);
+    }
+
+    pub fn appendTransferObjectsAndGetValueFromArgumentTokens(
+        self: *SelectedArgumentDslBuilder,
+        object_tokens: []const []const u8,
+        address_token: []const u8,
+    ) !tx_request_builder.ArgumentValue {
+        var objects = try self.client.resolveArgumentValuesFromTokensWithDefaultOwner(self.allocator, object_tokens, self.builder.sender);
+        defer objects.deinit(self.allocator);
+        var address = try self.client.resolveArgumentValueTokenWithDefaultOwner(self.allocator, address_token, self.builder.sender);
+        defer address.deinit(self.allocator);
+        return try self.builder.appendTransferObjectsAndGetValueFromValues(objects.slice(), address.value);
+    }
+
+    pub fn appendMergeCoinsFromArgumentTokens(
+        self: *SelectedArgumentDslBuilder,
+        destination_token: []const u8,
+        source_tokens: []const []const u8,
+    ) !void {
+        var destination = try self.client.resolveArgumentValueTokenWithDefaultOwner(self.allocator, destination_token, self.builder.sender);
+        defer destination.deinit(self.allocator);
+        var sources = try self.client.resolveArgumentValuesFromTokensWithDefaultOwner(self.allocator, source_tokens, self.builder.sender);
+        defer sources.deinit(self.allocator);
+        try self.builder.appendMergeCoinsFromValues(destination.value, sources.slice());
+    }
+
+    pub fn appendMergeCoinsAndGetValueFromArgumentTokens(
+        self: *SelectedArgumentDslBuilder,
+        destination_token: []const u8,
+        source_tokens: []const []const u8,
+    ) !tx_request_builder.ArgumentValue {
+        var destination = try self.client.resolveArgumentValueTokenWithDefaultOwner(self.allocator, destination_token, self.builder.sender);
+        defer destination.deinit(self.allocator);
+        var sources = try self.client.resolveArgumentValuesFromTokensWithDefaultOwner(self.allocator, source_tokens, self.builder.sender);
+        defer sources.deinit(self.allocator);
+        return try self.builder.appendMergeCoinsAndGetValueFromValues(destination.value, sources.slice());
+    }
+
+    pub fn appendUpgradeFromArgumentToken(
+        self: *SelectedArgumentDslBuilder,
+        modules_json: []const u8,
+        dependencies_json: []const u8,
+        package_id: []const u8,
+        ticket_token: []const u8,
+    ) !void {
+        var ticket = try self.client.resolveArgumentValueTokenWithDefaultOwner(self.allocator, ticket_token, self.builder.sender);
+        defer ticket.deinit(self.allocator);
+        try self.builder.appendUpgradeFromValue(modules_json, dependencies_json, package_id, ticket.value);
+    }
+
+    pub fn appendUpgradeAndGetValueFromArgumentToken(
+        self: *SelectedArgumentDslBuilder,
+        modules_json: []const u8,
+        dependencies_json: []const u8,
+        package_id: []const u8,
+        ticket_token: []const u8,
+    ) !tx_request_builder.ArgumentValue {
+        var ticket = try self.client.resolveArgumentValueTokenWithDefaultOwner(self.allocator, ticket_token, self.builder.sender);
+        defer ticket.deinit(self.allocator);
+        return try self.builder.appendUpgradeAndGetValueFromValue(modules_json, dependencies_json, package_id, ticket.value);
+    }
+
+    pub fn appendSplitCoinsFromSelectedArgument(
+        self: *SelectedArgumentDslBuilder,
+        coin_request: SelectedArgumentRequest,
+        amounts: []const tx_request_builder.ArgumentValue,
+    ) !void {
+        try self.client.appendSplitCoinsFromSelectedArgument(
+            self.allocator,
+            &self.builder,
+            coin_request,
+            amounts,
+        );
+    }
+
+    pub fn appendMakeMoveVecFromSelectedArguments(
+        self: *SelectedArgumentDslBuilder,
+        type_value: ?[]const u8,
+        requests: []const SelectedArgumentRequest,
+    ) !void {
+        try self.client.appendMakeMoveVecFromSelectedArguments(
+            self.allocator,
+            &self.builder,
+            type_value,
+            requests,
+        );
+    }
+
+    pub fn appendTransferObjectsFromSelectedArguments(
+        self: *SelectedArgumentDslBuilder,
+        object_requests: []const SelectedArgumentRequest,
+        address: tx_request_builder.ArgumentValue,
+    ) !void {
+        try self.client.appendTransferObjectsFromSelectedArguments(
+            self.allocator,
+            &self.builder,
+            object_requests,
+            address,
+        );
+    }
+
+    pub fn appendMergeCoinsFromSelectedArguments(
+        self: *SelectedArgumentDslBuilder,
+        destination_request: SelectedArgumentRequest,
+        source_requests: []const SelectedArgumentRequest,
+    ) !void {
+        try self.client.appendMergeCoinsFromSelectedArguments(
+            self.allocator,
+            &self.builder,
+            destination_request,
+            source_requests,
+        );
+    }
+
+    pub fn appendUpgradeFromSelectedArgument(
+        self: *SelectedArgumentDslBuilder,
+        modules_json: []const u8,
+        dependencies_json: []const u8,
+        package_id: []const u8,
+        ticket_request: SelectedArgumentRequest,
+    ) !void {
+        try self.client.appendUpgradeFromSelectedArgument(
+            self.allocator,
+            &self.builder,
+            modules_json,
+            dependencies_json,
+            package_id,
+            ticket_request,
+        );
+    }
+
+    pub fn run(
+        self: *SelectedArgumentDslBuilder,
+        provider: tx_request_builder.AccountProvider,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionResult {
+        return try self.client.runDslBuilder(self.allocator, &self.builder, provider, action);
+    }
+
+    pub fn runWithAutoGasPayment(
+        self: *SelectedArgumentDslBuilder,
+        provider: tx_request_builder.AccountProvider,
+        min_balance_override: ?u64,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionResult {
+        return try self.client.runDslBuilderWithAutoGasPayment(
+            self.allocator,
+            &self.builder,
+            provider,
+            min_balance_override,
+            action,
+        );
+    }
+
+    pub fn runFromDefaultKeystore(
+        self: *SelectedArgumentDslBuilder,
+        preparation: keystore.SignerPreparation,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionResult {
+        return try self.client.runDslBuilderFromDefaultKeystore(
+            self.allocator,
+            &self.builder,
+            preparation,
+            action,
+        );
+    }
+
+    pub fn runWithAutoGasPaymentFromDefaultKeystore(
+        self: *SelectedArgumentDslBuilder,
+        preparation: keystore.SignerPreparation,
+        min_balance_override: ?u64,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionResult {
+        return try self.client.runDslBuilderWithAutoGasPaymentFromDefaultKeystore(
+            self.allocator,
+            &self.builder,
+            preparation,
+            min_balance_override,
+            action,
+        );
+    }
+
+    pub fn runOrChallengePrompt(
+        self: *SelectedArgumentDslBuilder,
+        provider: tx_request_builder.AccountProvider,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionOrChallengePromptResult {
+        return try self.client.runDslBuilderOrChallengePrompt(self.allocator, &self.builder, provider, action);
+    }
+
+    pub fn runWithAutoGasPaymentOrChallengePrompt(
+        self: *SelectedArgumentDslBuilder,
+        provider: tx_request_builder.AccountProvider,
+        min_balance_override: ?u64,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionOrChallengePromptResult {
+        return try self.client.runDslBuilderWithAutoGasPaymentOrChallengePrompt(
+            self.allocator,
+            &self.builder,
+            provider,
+            min_balance_override,
+            action,
+        );
+    }
+
+    pub fn runOrChallengePromptFromDefaultKeystore(
+        self: *SelectedArgumentDslBuilder,
+        preparation: keystore.SignerPreparation,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionOrChallengePromptResult {
+        return try self.client.runDslBuilderOrChallengePromptFromDefaultKeystore(
+            self.allocator,
+            &self.builder,
+            preparation,
+            action,
+        );
+    }
+
+    pub fn runWithAutoGasPaymentOrChallengePromptFromDefaultKeystore(
+        self: *SelectedArgumentDslBuilder,
+        preparation: keystore.SignerPreparation,
+        min_balance_override: ?u64,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionOrChallengePromptResult {
+        return try self.client.runDslBuilderWithAutoGasPaymentOrChallengePromptFromDefaultKeystore(
+            self.allocator,
+            &self.builder,
+            preparation,
+            min_balance_override,
+            action,
+        );
+    }
+
+    pub fn runWithChallengeResponse(
+        self: *SelectedArgumentDslBuilder,
+        provider: tx_request_builder.AccountProvider,
+        response: tx_request_builder.SessionChallengeResponse,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionResult {
+        return try self.client.runDslBuilderWithChallengeResponse(
+            self.allocator,
+            &self.builder,
+            provider,
+            response,
+            action,
+        );
+    }
+
+    pub fn runWithAutoGasPaymentWithChallengeResponse(
+        self: *SelectedArgumentDslBuilder,
+        provider: tx_request_builder.AccountProvider,
+        min_balance_override: ?u64,
+        response: tx_request_builder.SessionChallengeResponse,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionResult {
+        return try self.client.runDslBuilderWithAutoGasPaymentWithChallengeResponse(
+            self.allocator,
+            &self.builder,
+            provider,
+            min_balance_override,
+            response,
+            action,
+        );
+    }
+
+    pub fn runWithChallengeResponseFromDefaultKeystore(
+        self: *SelectedArgumentDslBuilder,
+        preparation: keystore.SignerPreparation,
+        response: tx_request_builder.SessionChallengeResponse,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionResult {
+        return try self.client.runDslBuilderWithChallengeResponseFromDefaultKeystore(
+            self.allocator,
+            &self.builder,
+            preparation,
+            response,
+            action,
+        );
+    }
+
+    pub fn runWithAutoGasPaymentWithChallengeResponseFromDefaultKeystore(
+        self: *SelectedArgumentDslBuilder,
+        preparation: keystore.SignerPreparation,
+        min_balance_override: ?u64,
+        response: tx_request_builder.SessionChallengeResponse,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionResult {
+        return try self.client.runDslBuilderWithAutoGasPaymentWithChallengeResponseFromDefaultKeystore(
+            self.allocator,
+            &self.builder,
+            preparation,
+            min_balance_override,
+            response,
+            action,
+        );
+    }
+
+    pub fn authorizeOrChallengePrompt(
+        self: *SelectedArgumentDslBuilder,
+        provider: tx_request_builder.AccountProvider,
+    ) !AuthorizeOrChallengePromptResult {
+        return try self.client.authorizeDslBuilderOrChallengePrompt(self.allocator, &self.builder, provider);
+    }
+
+    pub fn authorizeOrChallengePromptFromDefaultKeystore(
+        self: *SelectedArgumentDslBuilder,
+        preparation: keystore.SignerPreparation,
+    ) !AuthorizeOrChallengePromptResult {
+        return try self.client.authorizeDslBuilderOrChallengePromptFromDefaultKeystore(
+            self.allocator,
+            &self.builder,
+            preparation,
+        );
+    }
+
+    pub fn authorizeFromDefaultKeystore(
+        self: *SelectedArgumentDslBuilder,
+        preparation: keystore.SignerPreparation,
+    ) !tx_request_builder.AuthorizedPreparedRequest {
+        return try self.client.authorizeDslBuilderFromDefaultKeystore(
+            self.allocator,
+            &self.builder,
+            preparation,
+        );
+    }
+
+    pub fn buildArtifactOrChallengePrompt(
+        self: *SelectedArgumentDslBuilder,
+        provider: tx_request_builder.AccountProvider,
+        kind: tx_request_builder.ProgrammaticArtifactKind,
+    ) !ArtifactOrChallengePromptResult {
+        return try self.client.buildDslBuilderArtifactOrChallengePrompt(
+            self.allocator,
+            &self.builder,
+            provider,
+            kind,
+        );
+    }
+
+    pub fn buildArtifactOrChallengePromptFromDefaultKeystore(
+        self: *SelectedArgumentDslBuilder,
+        preparation: keystore.SignerPreparation,
+        kind: tx_request_builder.ProgrammaticArtifactKind,
+    ) !ArtifactOrChallengePromptResult {
+        return try self.client.buildDslBuilderArtifactOrChallengePromptFromDefaultKeystore(
+            self.allocator,
+            &self.builder,
+            preparation,
+            kind,
+        );
+    }
+
+    pub fn buildArtifactFromDefaultKeystore(
+        self: *SelectedArgumentDslBuilder,
+        preparation: keystore.SignerPreparation,
+        kind: tx_request_builder.ProgrammaticArtifactKind,
+    ) ![]u8 {
+        return try self.client.buildDslBuilderArtifactFromDefaultKeystore(
+            self.allocator,
+            &self.builder,
+            preparation,
+            kind,
+        );
+    }
+
+    pub fn inspectOrChallengePrompt(
+        self: *SelectedArgumentDslBuilder,
+        provider: tx_request_builder.AccountProvider,
+    ) !InspectOrChallengePromptResult {
+        return try self.client.inspectDslBuilderOrChallengePrompt(self.allocator, &self.builder, provider);
+    }
+
+    pub fn inspectOrChallengePromptFromDefaultKeystore(
+        self: *SelectedArgumentDslBuilder,
+        preparation: keystore.SignerPreparation,
+    ) !InspectOrChallengePromptResult {
+        return try self.client.inspectDslBuilderOrChallengePromptFromDefaultKeystore(
+            self.allocator,
+            &self.builder,
+            preparation,
+        );
+    }
+
+    pub fn inspectFromDefaultKeystore(
+        self: *SelectedArgumentDslBuilder,
+        preparation: keystore.SignerPreparation,
+    ) ![]u8 {
+        return try self.client.inspectDslBuilderFromDefaultKeystore(
+            self.allocator,
+            &self.builder,
+            preparation,
+        );
+    }
+
+    pub fn executeOrChallengePrompt(
+        self: *SelectedArgumentDslBuilder,
+        provider: tx_request_builder.AccountProvider,
+    ) !ExecuteOrChallengePromptResult {
+        return try self.client.executeDslBuilderOrChallengePrompt(self.allocator, &self.builder, provider);
+    }
+
+    pub fn executeOrChallengePromptFromDefaultKeystore(
+        self: *SelectedArgumentDslBuilder,
+        preparation: keystore.SignerPreparation,
+    ) !ExecuteOrChallengePromptResult {
+        return try self.client.executeDslBuilderOrChallengePromptFromDefaultKeystore(
+            self.allocator,
+            &self.builder,
+            preparation,
+        );
+    }
+
+    pub fn executeFromDefaultKeystore(
+        self: *SelectedArgumentDslBuilder,
+        preparation: keystore.SignerPreparation,
+    ) ![]u8 {
+        return try self.client.executeDslBuilderFromDefaultKeystore(
+            self.allocator,
+            &self.builder,
+            preparation,
+        );
+    }
+
+    pub fn executeOrChallengePromptAndConfirm(
+        self: *SelectedArgumentDslBuilder,
+        provider: tx_request_builder.AccountProvider,
+        timeout_ms: u64,
+        poll_ms: u64,
+    ) !ExecuteOrChallengePromptResult {
+        return try self.client.executeDslBuilderOrChallengePromptAndConfirm(
+            self.allocator,
+            &self.builder,
+            provider,
+            timeout_ms,
+            poll_ms,
+        );
+    }
+
+    pub fn executeOrChallengePromptAndConfirmFromDefaultKeystore(
+        self: *SelectedArgumentDslBuilder,
+        preparation: keystore.SignerPreparation,
+        timeout_ms: u64,
+        poll_ms: u64,
+    ) !ExecuteOrChallengePromptResult {
+        return try self.client.executeDslBuilderOrChallengePromptAndConfirmFromDefaultKeystore(
+            self.allocator,
+            &self.builder,
+            preparation,
+            timeout_ms,
+            poll_ms,
+        );
+    }
+
+    pub fn executeAndConfirmFromDefaultKeystore(
+        self: *SelectedArgumentDslBuilder,
+        preparation: keystore.SignerPreparation,
+        timeout_ms: u64,
+        poll_ms: u64,
+    ) ![]u8 {
+        return try self.client.executeDslBuilderAndConfirmFromDefaultKeystore(
+            self.allocator,
+            &self.builder,
+            preparation,
+            timeout_ms,
+            poll_ms,
+        );
+    }
+
+    pub fn inspectAndSummarize(
+        self: *SelectedArgumentDslBuilder,
+        provider: tx_request_builder.AccountProvider,
+    ) !inspect_result.OwnedInspectInsights {
+        return try self.client.inspectDslBuilderAndSummarize(self.allocator, &self.builder, provider);
+    }
+
+    pub fn inspectAndSummarizeWithAutoGasPayment(
+        self: *SelectedArgumentDslBuilder,
+        provider: tx_request_builder.AccountProvider,
+        min_balance_override: ?u64,
+    ) !inspect_result.OwnedInspectInsights {
+        return try self.client.inspectDslBuilderWithAutoGasPaymentAndSummarize(
+            self.allocator,
+            &self.builder,
+            provider,
+            min_balance_override,
+        );
+    }
+
+    pub fn inspectAndSummarizeFromDefaultKeystore(
+        self: *SelectedArgumentDslBuilder,
+        preparation: keystore.SignerPreparation,
+    ) !inspect_result.OwnedInspectInsights {
+        var result = try self.runFromDefaultKeystore(preparation, .inspect_summarize);
+        errdefer result.deinit(self.allocator);
+        return switch (result) {
+            .inspect_summarized => |value| value,
+            else => error.InvalidResponse,
+        };
+    }
+
+    pub fn inspectAndSummarizeWithAutoGasPaymentFromDefaultKeystore(
+        self: *SelectedArgumentDslBuilder,
+        preparation: keystore.SignerPreparation,
+        min_balance_override: ?u64,
+    ) !inspect_result.OwnedInspectInsights {
+        return try self.client.inspectDslBuilderWithAutoGasPaymentAndSummarizeFromDefaultKeystore(
+            self.allocator,
+            &self.builder,
+            preparation,
+            min_balance_override,
+        );
+    }
+
+    pub fn inspectOrChallengePromptAndSummarizeWithAutoGasPayment(
+        self: *SelectedArgumentDslBuilder,
+        provider: tx_request_builder.AccountProvider,
+        min_balance_override: ?u64,
+    ) !ProgrammaticClientActionOrChallengePromptResult {
+        return try self.client.inspectDslBuilderWithAutoGasPaymentOrChallengePromptAndSummarize(
+            self.allocator,
+            &self.builder,
+            provider,
+            min_balance_override,
+        );
+    }
+
+    pub fn inspectOrChallengePromptAndSummarize(
+        self: *SelectedArgumentDslBuilder,
+        provider: tx_request_builder.AccountProvider,
+    ) !ProgrammaticClientActionOrChallengePromptResult {
+        return try self.client.inspectDslBuilderOrChallengePromptAndSummarize(
+            self.allocator,
+            &self.builder,
+            provider,
+        );
+    }
+
+    pub fn inspectWithChallengeResponseAndSummarize(
+        self: *SelectedArgumentDslBuilder,
+        provider: tx_request_builder.AccountProvider,
+        response: tx_request_builder.SessionChallengeResponse,
+    ) !inspect_result.OwnedInspectInsights {
+        return try self.client.inspectDslBuilderWithChallengeResponseAndSummarize(
+            self.allocator,
+            &self.builder,
+            provider,
+            response,
+        );
+    }
+
+    pub fn inspectWithChallengeResponseAndSummarizeWithAutoGasPayment(
+        self: *SelectedArgumentDslBuilder,
+        provider: tx_request_builder.AccountProvider,
+        min_balance_override: ?u64,
+        response: tx_request_builder.SessionChallengeResponse,
+    ) !inspect_result.OwnedInspectInsights {
+        return try self.client.inspectDslBuilderWithAutoGasPaymentWithChallengeResponseAndSummarize(
+            self.allocator,
+            &self.builder,
+            provider,
+            min_balance_override,
+            response,
+        );
+    }
+
+    pub fn buildArtifactAndSummarize(
+        self: *SelectedArgumentDslBuilder,
+        provider: tx_request_builder.AccountProvider,
+        kind: tx_request_builder.ProgrammaticArtifactKind,
+    ) !artifact_result.OwnedProgrammaticArtifactSummary {
+        return try self.client.buildDslBuilderArtifactAndSummarize(
+            self.allocator,
+            &self.builder,
+            provider,
+            kind,
+        );
+    }
+
+    pub fn buildArtifactAndSummarizeWithAutoGasPayment(
+        self: *SelectedArgumentDslBuilder,
+        provider: tx_request_builder.AccountProvider,
+        min_balance_override: ?u64,
+        kind: tx_request_builder.ProgrammaticArtifactKind,
+    ) !artifact_result.OwnedProgrammaticArtifactSummary {
+        return try self.client.buildDslBuilderArtifactWithAutoGasPaymentAndSummarize(
+            self.allocator,
+            &self.builder,
+            provider,
+            min_balance_override,
+            kind,
+        );
+    }
+
+    pub fn buildArtifactAndSummarizeFromDefaultKeystore(
+        self: *SelectedArgumentDslBuilder,
+        preparation: keystore.SignerPreparation,
+        kind: tx_request_builder.ProgrammaticArtifactKind,
+    ) !artifact_result.OwnedProgrammaticArtifactSummary {
+        var result = try self.runFromDefaultKeystore(preparation, .{ .build_artifact_summarize = kind });
+        errdefer result.deinit(self.allocator);
+        return switch (result) {
+            .artifact_summarized => |value| value,
+            else => error.InvalidResponse,
+        };
+    }
+
+    pub fn buildArtifactAndSummarizeWithAutoGasPaymentFromDefaultKeystore(
+        self: *SelectedArgumentDslBuilder,
+        preparation: keystore.SignerPreparation,
+        min_balance_override: ?u64,
+        kind: tx_request_builder.ProgrammaticArtifactKind,
+    ) !artifact_result.OwnedProgrammaticArtifactSummary {
+        return try self.client.buildDslBuilderArtifactWithAutoGasPaymentAndSummarizeFromDefaultKeystore(
+            self.allocator,
+            &self.builder,
+            preparation,
+            min_balance_override,
+            kind,
+        );
+    }
+
+    pub fn buildArtifactOrChallengePromptAndSummarizeWithAutoGasPayment(
+        self: *SelectedArgumentDslBuilder,
+        provider: tx_request_builder.AccountProvider,
+        min_balance_override: ?u64,
+        kind: tx_request_builder.ProgrammaticArtifactKind,
+    ) !ProgrammaticClientActionOrChallengePromptResult {
+        return try self.client.buildDslBuilderArtifactWithAutoGasPaymentOrChallengePromptAndSummarize(
+            self.allocator,
+            &self.builder,
+            provider,
+            min_balance_override,
+            kind,
+        );
+    }
+
+    pub fn buildArtifactWithChallengeResponseAndSummarize(
+        self: *SelectedArgumentDslBuilder,
+        provider: tx_request_builder.AccountProvider,
+        response: tx_request_builder.SessionChallengeResponse,
+        kind: tx_request_builder.ProgrammaticArtifactKind,
+    ) !artifact_result.OwnedProgrammaticArtifactSummary {
+        var result = try self.runWithChallengeResponse(provider, response, .{ .build_artifact_summarize = kind });
+        errdefer result.deinit(self.allocator);
+        return switch (result) {
+            .artifact_summarized => |value| value,
+            else => error.InvalidResponse,
+        };
+    }
+
+    pub fn buildArtifactWithChallengeResponseAndSummarizeWithAutoGasPayment(
+        self: *SelectedArgumentDslBuilder,
+        provider: tx_request_builder.AccountProvider,
+        min_balance_override: ?u64,
+        response: tx_request_builder.SessionChallengeResponse,
+        kind: tx_request_builder.ProgrammaticArtifactKind,
+    ) !artifact_result.OwnedProgrammaticArtifactSummary {
+        return try self.client.buildDslBuilderArtifactWithAutoGasPaymentWithChallengeResponseAndSummarize(
+            self.allocator,
+            &self.builder,
+            provider,
+            min_balance_override,
+            response,
+            kind,
+        );
+    }
+
+    pub fn executeAndObserve(
+        self: *SelectedArgumentDslBuilder,
+        provider: tx_request_builder.AccountProvider,
+        timeout_ms: u64,
+        poll_ms: u64,
+    ) !ObservedExecutionSummary {
+        var result = try self.run(provider, .{
+            .execute_confirm_observe = .{
+                .timeout_ms = timeout_ms,
+                .poll_ms = poll_ms,
+            },
+        });
+        errdefer result.deinit(self.allocator);
+        return switch (result) {
+            .observed => |value| value,
+            else => error.InvalidResponse,
+        };
+    }
+
+    pub fn executeAndObserveWithAutoGasPayment(
+        self: *SelectedArgumentDslBuilder,
+        provider: tx_request_builder.AccountProvider,
+        min_balance_override: ?u64,
+        timeout_ms: u64,
+        poll_ms: u64,
+    ) !ObservedExecutionSummary {
+        return try self.client.executeDslBuilderWithAutoGasPaymentAndObserve(
+            self.allocator,
+            &self.builder,
+            provider,
+            min_balance_override,
+            timeout_ms,
+            poll_ms,
+        );
+    }
+
+    pub fn executeAndObserveFromDefaultKeystore(
+        self: *SelectedArgumentDslBuilder,
+        preparation: keystore.SignerPreparation,
+        timeout_ms: u64,
+        poll_ms: u64,
+    ) !ObservedExecutionSummary {
+        var result = try self.runFromDefaultKeystore(preparation, .{
+            .execute_confirm_observe = .{
+                .timeout_ms = timeout_ms,
+                .poll_ms = poll_ms,
+            },
+        });
+        errdefer result.deinit(self.allocator);
+        return switch (result) {
+            .observed => |value| value,
+            else => error.InvalidResponse,
+        };
+    }
+
+    pub fn executeAndObserveWithAutoGasPaymentFromDefaultKeystore(
+        self: *SelectedArgumentDslBuilder,
+        preparation: keystore.SignerPreparation,
+        min_balance_override: ?u64,
+        timeout_ms: u64,
+        poll_ms: u64,
+    ) !ObservedExecutionSummary {
+        return try self.client.executeDslBuilderWithAutoGasPaymentAndObserveFromDefaultKeystore(
+            self.allocator,
+            &self.builder,
+            preparation,
+            min_balance_override,
+            timeout_ms,
+            poll_ms,
+        );
+    }
+
+    pub fn executeOrChallengePromptAndObserveWithAutoGasPayment(
+        self: *SelectedArgumentDslBuilder,
+        provider: tx_request_builder.AccountProvider,
+        min_balance_override: ?u64,
+        timeout_ms: u64,
+        poll_ms: u64,
+    ) !ProgrammaticClientActionOrChallengePromptResult {
+        return try self.client.executeDslBuilderWithAutoGasPaymentOrChallengePromptAndObserve(
+            self.allocator,
+            &self.builder,
+            provider,
+            min_balance_override,
+            timeout_ms,
+            poll_ms,
+        );
+    }
+
+    pub fn executeAndConfirmAndSummarize(
+        self: *SelectedArgumentDslBuilder,
+        provider: tx_request_builder.AccountProvider,
+        timeout_ms: u64,
+        poll_ms: u64,
+    ) !tx_result.OwnedExecutionInsights {
+        return try self.client.executeDslBuilderAndConfirmAndSummarize(
+            self.allocator,
+            &self.builder,
+            provider,
+            timeout_ms,
+            poll_ms,
+        );
+    }
+
+    pub fn executeAndConfirmAndSummarizeWithAutoGasPayment(
+        self: *SelectedArgumentDslBuilder,
+        provider: tx_request_builder.AccountProvider,
+        min_balance_override: ?u64,
+        timeout_ms: u64,
+        poll_ms: u64,
+    ) !tx_result.OwnedExecutionInsights {
+        return try self.client.executeDslBuilderWithAutoGasPaymentAndConfirmAndSummarize(
+            self.allocator,
+            &self.builder,
+            provider,
+            min_balance_override,
+            timeout_ms,
+            poll_ms,
+        );
+    }
+
+    pub fn executeAndConfirmAndSummarizeFromDefaultKeystore(
+        self: *SelectedArgumentDslBuilder,
+        preparation: keystore.SignerPreparation,
+        timeout_ms: u64,
+        poll_ms: u64,
+    ) !tx_result.OwnedExecutionInsights {
+        return try self.client.executeDslBuilderAndConfirmAndSummarizeFromDefaultKeystore(
+            self.allocator,
+            &self.builder,
+            preparation,
+            timeout_ms,
+            poll_ms,
+        );
+    }
+
+    pub fn executeAndConfirmAndSummarizeWithAutoGasPaymentFromDefaultKeystore(
+        self: *SelectedArgumentDslBuilder,
+        preparation: keystore.SignerPreparation,
+        min_balance_override: ?u64,
+        timeout_ms: u64,
+        poll_ms: u64,
+    ) !tx_result.OwnedExecutionInsights {
+        return try self.client.executeDslBuilderWithAutoGasPaymentAndConfirmAndSummarizeFromDefaultKeystore(
+            self.allocator,
+            &self.builder,
+            preparation,
+            min_balance_override,
+            timeout_ms,
+            poll_ms,
+        );
+    }
+
+    pub fn executeOrChallengePromptAndConfirmAndSummarizeWithAutoGasPayment(
+        self: *SelectedArgumentDslBuilder,
+        provider: tx_request_builder.AccountProvider,
+        min_balance_override: ?u64,
+        timeout_ms: u64,
+        poll_ms: u64,
+    ) !ProgrammaticClientActionOrChallengePromptResult {
+        return try self.client.executeDslBuilderWithAutoGasPaymentOrChallengePromptAndConfirmAndSummarize(
+            self.allocator,
+            &self.builder,
+            provider,
+            min_balance_override,
+            timeout_ms,
+            poll_ms,
+        );
+    }
+
+    pub fn executeWithChallengeResponseAndObserve(
+        self: *SelectedArgumentDslBuilder,
+        provider: tx_request_builder.AccountProvider,
+        response: tx_request_builder.SessionChallengeResponse,
+        timeout_ms: u64,
+        poll_ms: u64,
+    ) !ObservedExecutionSummary {
+        var result = try self.runWithChallengeResponse(provider, response, .{
+            .execute_confirm_observe = .{
+                .timeout_ms = timeout_ms,
+                .poll_ms = poll_ms,
+            },
+        });
+        errdefer result.deinit(self.allocator);
+        return switch (result) {
+            .observed => |value| value,
+            else => error.InvalidResponse,
+        };
+    }
+
+    pub fn executeWithChallengeResponseAndObserveWithAutoGasPayment(
+        self: *SelectedArgumentDslBuilder,
+        provider: tx_request_builder.AccountProvider,
+        min_balance_override: ?u64,
+        response: tx_request_builder.SessionChallengeResponse,
+        timeout_ms: u64,
+        poll_ms: u64,
+    ) !ObservedExecutionSummary {
+        return try self.client.executeDslBuilderWithAutoGasPaymentWithChallengeResponseAndObserve(
+            self.allocator,
+            &self.builder,
+            provider,
+            min_balance_override,
+            response,
+            timeout_ms,
+            poll_ms,
+        );
+    }
+
+    pub fn executeWithChallengeResponseAndConfirmAndSummarize(
+        self: *SelectedArgumentDslBuilder,
+        provider: tx_request_builder.AccountProvider,
+        response: tx_request_builder.SessionChallengeResponse,
+        timeout_ms: u64,
+        poll_ms: u64,
+    ) !tx_result.OwnedExecutionInsights {
+        var result = try self.runWithChallengeResponse(provider, response, .{
+            .execute_confirm_summarize = .{
+                .timeout_ms = timeout_ms,
+                .poll_ms = poll_ms,
+            },
+        });
+        errdefer result.deinit(self.allocator);
+        return switch (result) {
+            .summarized => |value| value,
+            else => error.InvalidResponse,
+        };
+    }
+
+    pub fn executeWithChallengeResponseAndConfirmAndSummarizeWithAutoGasPayment(
+        self: *SelectedArgumentDslBuilder,
+        provider: tx_request_builder.AccountProvider,
+        min_balance_override: ?u64,
+        response: tx_request_builder.SessionChallengeResponse,
+        timeout_ms: u64,
+        poll_ms: u64,
+    ) !tx_result.OwnedExecutionInsights {
+        return try self.client.executeDslBuilderWithAutoGasPaymentWithChallengeResponseAndConfirmAndSummarize(
+            self.allocator,
+            &self.builder,
+            provider,
+            min_balance_override,
+            response,
+            timeout_ms,
+            poll_ms,
+        );
+    }
+};
+
+pub const OwnedObjectsFilter = union(enum) {
+    none,
+    json: []const u8,
+    struct_type: []const u8,
+    object_id: []const u8,
+    package: []const u8,
+    move_module: struct {
+        package: []const u8,
+        module: []const u8,
+    },
+};
+
+pub const OwnedObjectsPageRequest = struct {
+    filter: OwnedObjectsFilter = .none,
+    options: ObjectReadOptions = .none,
+    cursor: ?[]const u8 = null,
+    limit: ?u64 = null,
+};
+
+pub const ObjectReadOptions = union(enum) {
+    none,
+    json: []const u8,
+    typed: ObjectDataOptions,
+};
+
+pub const DynamicFieldLookupName = union(enum) {
+    json: []const u8,
+    typed: DynamicFieldName,
+};
+
+pub const ObjectQuery = union(enum) {
+    get: struct {
+        object_id: []const u8,
+        options: ObjectReadOptions = .none,
+    },
+    dynamic_fields_page: struct {
+        parent_object_id: []const u8,
+        request: DynamicFieldPageRequest = .{},
+    },
+    dynamic_fields_all: struct {
+        parent_object_id: []const u8,
+        request: DynamicFieldPageRequest = .{},
+    },
+    dynamic_field_object: struct {
+        parent_object_id: []const u8,
+        name: DynamicFieldLookupName,
+    },
+};
+
+pub const CoinQuery = union(enum) {
+    page: struct {
+        owner: []const u8,
+        request: CoinPageRequest = .{},
+    },
+    all: struct {
+        owner: []const u8,
+        request: CoinPageRequest = .{},
+    },
+};
+
+pub const OwnedObjectsQuery = union(enum) {
+    page: struct {
+        owner: []const u8,
+        request: OwnedObjectsPageRequest = .{},
+    },
+    all: struct {
+        owner: []const u8,
+        request: OwnedObjectsPageRequest = .{},
+    },
+};
+
+pub const ResourceQuery = union(enum) {
+    coins: CoinQuery,
+    owned_objects: OwnedObjectsQuery,
+};
+
+pub const ResourceDiscoveryQuery = struct {
+    coins: ?CoinQuery = null,
+    owned_objects: ?OwnedObjectsQuery = null,
+};
+
+pub const ObjectQuerySummary = union(enum) {
+    object: object_result.OwnedObjectSummary,
+    dynamic_fields: dynamic_field_result.OwnedDynamicFieldPage,
+
+    pub fn deinit(self: *ObjectQuerySummary, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .object => |*value| value.deinit(allocator),
+            .dynamic_fields => |*value| value.deinit(allocator),
+        }
+    }
+};
+
+pub const ResourceQuerySummary = union(enum) {
+    coins: coin_result.OwnedCoinPage,
+    owned_objects: owned_object_result.OwnedObjectPage,
+
+    pub fn deinit(self: *ResourceQuerySummary, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .coins => |*value| value.deinit(allocator),
+            .owned_objects => |*value| value.deinit(allocator),
+        }
+    }
+};
+
+pub const ResourceDiscoverySummary = struct {
+    coins: ?coin_result.OwnedCoinPage = null,
+    owned_objects: ?owned_object_result.OwnedObjectPage = null,
+
+    pub fn deinit(self: *ResourceDiscoverySummary, allocator: std.mem.Allocator) void {
+        if (self.coins) |*value| value.deinit(allocator);
+        if (self.owned_objects) |*value| value.deinit(allocator);
+    }
+};
+
+pub const ObjectQueryAction = enum {
+    raw,
+    summarize,
+};
+
+pub const ResourceQueryAction = enum {
+    raw,
+    summarize,
+};
+
+pub const ObjectQueryActionResult = union(enum) {
+    raw: []u8,
+    summarized: ObjectQuerySummary,
+
+    pub fn deinit(self: *ObjectQueryActionResult, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .raw => |value| allocator.free(value),
+            .summarized => |*value| value.deinit(allocator),
+        }
+    }
+};
+
+pub const ResourceQueryActionResult = union(enum) {
+    raw: []u8,
+    summarized: ResourceQuerySummary,
+
+    pub fn deinit(self: *ResourceQueryActionResult, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .raw => |value| allocator.free(value),
+            .summarized => |*value| value.deinit(allocator),
+        }
+    }
+};
+
+pub const ResourceDiscoveryActionResult = union(enum) {
+    raw: []u8,
+    summarized: ResourceDiscoverySummary,
+
+    pub fn deinit(self: *ResourceDiscoveryActionResult, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .raw => |value| allocator.free(value),
+            .summarized => |*value| value.deinit(allocator),
+        }
+    }
+};
+
+pub const CoinQueryActionResult = union(enum) {
+    raw: []u8,
+    summarized: coin_result.OwnedCoinPage,
+
+    pub fn deinit(self: *CoinQueryActionResult, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .raw => |value| allocator.free(value),
+            .summarized => |*value| value.deinit(allocator),
+        }
+    }
+};
+
+pub const OwnedObjectsQueryActionResult = union(enum) {
+    raw: []u8,
+    summarized: owned_object_result.OwnedObjectPage,
+
+    pub fn deinit(self: *OwnedObjectsQueryActionResult, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .raw => |value| allocator.free(value),
+            .summarized => |*value| value.deinit(allocator),
+        }
+    }
+};
+
+pub const ReadQuery = union(enum) {
+    account: keystore.AccountQuery,
+    resources: ResourceDiscoveryQuery,
+    coins: CoinQuery,
+    owned_objects: OwnedObjectsQuery,
+    object: ObjectQuery,
+    transaction_status: struct {
+        digest: []const u8,
+    },
+    transaction_confirm: struct {
+        digest: []const u8,
+        timeout_ms: u64,
+        poll_ms: u64,
+    },
+};
+
+pub const ReadQueryAction = enum {
+    raw,
+    summarize,
+    observe,
+};
+
+pub const ReadQuerySummary = union(enum) {
+    account: keystore.AccountQueryResult,
+    resources: ResourceDiscoverySummary,
+    coins: coin_result.OwnedCoinPage,
+    owned_objects: owned_object_result.OwnedObjectPage,
+    object: ObjectQuerySummary,
+    transaction: tx_result.OwnedExecutionInsights,
+
+    pub fn deinit(self: *ReadQuerySummary, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .account => |*value| value.deinit(allocator),
+            .resources => |*value| value.deinit(allocator),
+            .coins => |*value| value.deinit(allocator),
+            .owned_objects => |*value| value.deinit(allocator),
+            .object => |*value| value.deinit(allocator),
+            .transaction => |*value| value.deinit(allocator),
+        }
+    }
+};
+
+pub const ReadQueryActionResult = union(enum) {
+    raw: []u8,
+    summarized: ReadQuerySummary,
+    observed: ObservedExecutionSummary,
+
+    pub fn deinit(self: *ReadQueryActionResult, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .raw => |value| allocator.free(value),
+            .summarized => |*value| value.deinit(allocator),
+            .observed => |*value| value.deinit(allocator),
+        }
+    }
+};
+
+fn writeAccountEntryJson(writer: anytype, entry: keystore.OwnedAccountEntry) !void {
+    try writer.print("{{\"index\":{}", .{entry.index});
+    if (entry.selector) |selector| {
+        try writer.print(",\"selector\":{f}", .{std.json.fmt(selector, .{})});
+    }
+    if (entry.alias) |alias| {
+        try writer.print(",\"alias\":{f}", .{std.json.fmt(alias, .{})});
+    }
+    if (entry.name) |name| {
+        try writer.print(",\"name\":{f}", .{std.json.fmt(name, .{})});
+    }
+    if (entry.address) |address| {
+        try writer.print(",\"address\":{f}", .{std.json.fmt(address, .{})});
+    }
+    if (entry.sui_address) |sui_address| {
+        try writer.print(",\"suiAddress\":{f}", .{std.json.fmt(sui_address, .{})});
+    }
+    if (entry.public_key) |public_key| {
+        try writer.print(",\"publicKey\":{f}", .{std.json.fmt(public_key, .{})});
+    }
+    try writer.writeAll("}");
+}
+
+fn accountQueryResultToJson(
+    allocator: std.mem.Allocator,
+    result: keystore.AccountQueryResult,
+) ![]u8 {
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    const writer = output.writer(allocator);
+    switch (result) {
+        .list => |list| {
+            try writer.writeAll("{\"accounts\":[");
+            for (list.accounts, 0..) |entry, index| {
+                if (index != 0) try writer.writeAll(",");
+                try writeAccountEntryJson(writer, entry);
+            }
+            try writer.writeAll("]}");
+        },
+        .info => |entry| {
+            try writer.writeAll("{\"entry\":");
+            try writeAccountEntryJson(writer, entry);
+            try writer.writeAll("}");
+        },
+    }
+    return try output.toOwnedSlice(allocator);
+}
+
+fn dupeOwnedJsonResponse(
+    source_allocator: std.mem.Allocator,
+    target_allocator: std.mem.Allocator,
+    response: []const u8,
+) ![]u8 {
+    defer source_allocator.free(response);
+    return try target_allocator.dupe(u8, response);
+}
+
+fn appendObjectOptionEntry(
+    writer: anytype,
+    has_output: *bool,
+    key: []const u8,
+) !void {
+    if (has_output.*) try writer.writeAll(",");
+    try writer.print("\"{s}\":true", .{key});
+    has_output.* = true;
+}
 
 pub const SuiRpcClient = struct {
     allocator: std.mem.Allocator,
@@ -390,8 +2023,4021 @@ pub const SuiRpcClient = struct {
         return try self.call("sui_executeTransactionBlock", params_json);
     }
 
+    pub fn getReferenceGasPrice(self: *SuiRpcClient) !u64 {
+        const response = try self.call("suix_getReferenceGasPrice", "[]");
+        defer self.allocator.free(response);
+
+        const parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, response, .{});
+        defer parsed.deinit();
+        if (parsed.value != .object) return error.InvalidResponse;
+        const result = parsed.value.object.get("result") orelse return error.InvalidResponse;
+        return switch (result) {
+            .integer => |number| blk: {
+                if (number < 0) return error.InvalidResponse;
+                break :blk @as(u64, @intCast(number));
+            },
+            .string => |text| try std.fmt.parseInt(u64, text, 10),
+            else => error.InvalidResponse,
+        };
+    }
+
+    pub fn resolveEffectiveGasPrice(
+        self: *SuiRpcClient,
+        explicit_gas_price: ?u64,
+        allow_reference_fallback: bool,
+    ) !?u64 {
+        if (explicit_gas_price) |value| return value;
+        if (!allow_reference_fallback) return null;
+        return try self.getReferenceGasPrice();
+    }
+
+    pub fn ownResolvedGasPaymentJsonWithDefaultOwner(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        gas_payment_json: ?[]const u8,
+        default_owner: []const u8,
+        auto_gas_payment_min_balance: ?u64,
+    ) !?[]u8 {
+        if (try self.resolveSelectedGasPaymentJsonWithDefaultOwner(
+            allocator,
+            gas_payment_json,
+            default_owner,
+        )) |resolved_gas_payment_json| {
+            return resolved_gas_payment_json;
+        }
+
+        if (auto_gas_payment_min_balance) |min_balance| {
+            return try self.selectGasPaymentJson(
+                allocator,
+                default_owner,
+                min_balance,
+            ) orelse error.SelectionNotFound;
+        }
+
+        if (gas_payment_json) |value| {
+            return try allocator.dupe(u8, value);
+        }
+
+        return null;
+    }
+
+    test "getReferenceGasPrice parses string results" {
+        const testing = std.testing;
+
+        var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+        defer _ = gpa.deinit();
+        const allocator = gpa.allocator();
+
+        var rpc = try SuiRpcClient.init(allocator, "http://example.local");
+        defer rpc.deinit();
+
+        var dummy: u8 = 0;
+
+        const callback = struct {
+            fn call(_: *anyopaque, alloc: std.mem.Allocator, req: struct {
+                id: u64,
+                method: []const u8,
+                params_json: []const u8,
+                request_body: []const u8,
+            }) ![]u8 {
+                _ = req.id;
+                _ = req.request_body;
+                try testing.expectEqualStrings("suix_getReferenceGasPrice", req.method);
+                try testing.expectEqualStrings("[]", req.params_json);
+                return alloc.dupe(u8, "{\"result\":\"7\"}");
+            }
+        }.call;
+        rpc.request_sender = .{
+            .context = &dummy,
+            .callback = callback,
+        };
+
+        try testing.expectEqual(@as(u64, 7), try rpc.getReferenceGasPrice());
+    }
+
+    test "resolveEffectiveGasPrice falls back to reference gas price" {
+        const testing = std.testing;
+
+        var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+        defer _ = gpa.deinit();
+        const allocator = gpa.allocator();
+
+        var rpc = try SuiRpcClient.init(allocator, "http://example.local");
+        defer rpc.deinit();
+
+        var dummy: u8 = 0;
+        const callback = struct {
+            fn call(_: *anyopaque, alloc: std.mem.Allocator, req: struct {
+                id: u64,
+                method: []const u8,
+                params_json: []const u8,
+                request_body: []const u8,
+            }) ![]u8 {
+                _ = req.id;
+                _ = req.request_body;
+                try testing.expectEqualStrings("suix_getReferenceGasPrice", req.method);
+                try testing.expectEqualStrings("[]", req.params_json);
+                return alloc.dupe(u8, "{\"result\":9}");
+            }
+        }.call;
+        rpc.request_sender = .{
+            .context = &dummy,
+            .callback = callback,
+        };
+
+        try testing.expectEqual(@as(?u64, 9), try rpc.resolveEffectiveGasPrice(null, true));
+        try testing.expectEqual(@as(?u64, 11), try rpc.resolveEffectiveGasPrice(11, true));
+        try testing.expectEqual(@as(?u64, null), try rpc.resolveEffectiveGasPrice(null, false));
+    }
+
+    fn extractTxBytesFromBuilderResponse(
+        allocator: std.mem.Allocator,
+        response: []const u8,
+    ) ![]u8 {
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, response, .{});
+        defer parsed.deinit();
+        if (parsed.value != .object) return error.InvalidResponse;
+        const result = parsed.value.object.get("result") orelse return error.InvalidResponse;
+        if (result != .object) return error.InvalidResponse;
+        const tx_bytes = result.object.get("txBytes") orelse return error.InvalidResponse;
+        if (tx_bytes != .string or tx_bytes.string.len == 0) return error.InvalidResponse;
+        return try allocator.dupe(u8, tx_bytes.string);
+    }
+
+    fn buildUnsafeBatchTransactionParamsJson(
+        allocator: std.mem.Allocator,
+        commands_json: []const u8,
+    ) ![]u8 {
+        const trimmed = std.mem.trim(u8, commands_json, " \n\r\t");
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, trimmed, .{});
+        defer parsed.deinit();
+        if (parsed.value != .array or parsed.value.array.items.len == 0) return error.InvalidCli;
+
+        var out = std.ArrayList(u8){};
+        errdefer out.deinit(allocator);
+        const writer = out.writer(allocator);
+
+        try writer.writeAll("[");
+        var has_output = false;
+
+        for (parsed.value.array.items) |entry| {
+            if (entry != .object) return error.InvalidCli;
+            const kind = entry.object.get("kind") orelse return error.InvalidCli;
+            if (kind != .string or kind.string.len == 0) return error.InvalidCli;
+
+            if (std.mem.eql(u8, kind.string, "MoveCall")) {
+                const package_id = entry.object.get("package") orelse return error.InvalidCli;
+                const module = entry.object.get("module") orelse return error.InvalidCli;
+                const function_name = entry.object.get("function") orelse return error.InvalidCli;
+                if (package_id != .string or package_id.string.len == 0) return error.InvalidCli;
+                if (module != .string or module.string.len == 0) return error.InvalidCli;
+                if (function_name != .string or function_name.string.len == 0) return error.InvalidCli;
+
+                const type_arguments = entry.object.get("typeArguments");
+                if (type_arguments) |value| {
+                    if (value != .array) return error.InvalidCli;
+                }
+                const arguments = entry.object.get("arguments");
+                if (arguments) |value| {
+                    if (value != .array) return error.InvalidCli;
+                }
+
+                if (has_output) try writer.writeAll(",");
+                try writer.writeAll("{\"moveCallRequestParams\":{");
+                try writer.print(
+                    "\"packageObjectId\":{f},\"module\":{f},\"function\":{f},\"arguments\":",
+                    .{
+                        std.json.fmt(package_id.string, .{}),
+                        std.json.fmt(module.string, .{}),
+                        std.json.fmt(function_name.string, .{}),
+                    },
+                );
+                if (arguments) |value| {
+                    try writer.print("{f}", .{std.json.fmt(value, .{})});
+                } else {
+                    try writer.writeAll("[]");
+                }
+                try writer.writeAll(",\"typeArguments\":");
+                if (type_arguments) |value| {
+                    try writer.print("{f}", .{std.json.fmt(value, .{})});
+                } else {
+                    try writer.writeAll("[]");
+                }
+                try writer.writeAll("}}");
+                has_output = true;
+                continue;
+            }
+
+            if (std.mem.eql(u8, kind.string, "TransferObjects")) {
+                const objects = entry.object.get("objects") orelse return error.InvalidCli;
+                const address = entry.object.get("address") orelse return error.InvalidCli;
+                if (objects != .array or objects.array.items.len == 0) return error.InvalidCli;
+                if (address != .string or address.string.len == 0) return error.InvalidCli;
+
+                for (objects.array.items) |object_id| {
+                    if (object_id != .string or object_id.string.len == 0) return error.InvalidCli;
+                    if (has_output) try writer.writeAll(",");
+                    try writer.print(
+                        "{{\"transferObjectRequestParams\":{{\"recipient\":{f},\"objectId\":{f}}}}}",
+                        .{
+                            std.json.fmt(address.string, .{}),
+                            std.json.fmt(object_id.string, .{}),
+                        },
+                    );
+                    has_output = true;
+                }
+                continue;
+            }
+
+            return error.InvalidCli;
+        }
+
+        if (!has_output) return error.InvalidCli;
+        try writer.writeAll("]");
+        return try out.toOwnedSlice(allocator);
+    }
+
+    pub fn commandSourceSupportsUnsafeBatchTransaction(
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+    ) !bool {
+        const commands_json = try tx_builder.resolveCommands(allocator, source);
+        defer allocator.free(commands_json);
+
+        const params_json = buildUnsafeBatchTransactionParamsJson(allocator, commands_json) catch |err| switch (err) {
+            error.InvalidCli => return false,
+            else => return err,
+        };
+        defer allocator.free(params_json);
+        return true;
+    }
+
+    pub fn commandSourceSupportsUnsafeTransactionBuilder(
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+    ) !bool {
+        if (source.move_call != null and source.command_items.len == 0 and source.commands_json == null) {
+            return true;
+        }
+        return try commandSourceSupportsUnsafeBatchTransaction(allocator, source);
+    }
+
+    pub fn buildMoveCallTxBytes(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        signer: []const u8,
+        package_id: []const u8,
+        module: []const u8,
+        function_name: []const u8,
+        type_args_json: ?[]const u8,
+        arguments_json: ?[]const u8,
+        gas_object_id: ?[]const u8,
+        gas_budget: u64,
+    ) ![]u8 {
+        const normalized_type_args = blk: {
+            const raw = type_args_json orelse "[]";
+            const trimmed = std.mem.trim(u8, raw, " \n\r\t");
+            const parsed = try std.json.parseFromSlice(std.json.Value, allocator, trimmed, .{});
+            defer parsed.deinit();
+            if (parsed.value != .array) return error.InvalidCli;
+            break :blk try allocator.dupe(u8, trimmed);
+        };
+        defer allocator.free(normalized_type_args);
+
+        const normalized_arguments = blk: {
+            const raw = arguments_json orelse "[]";
+            const trimmed = std.mem.trim(u8, raw, " \n\r\t");
+            const parsed = try std.json.parseFromSlice(std.json.Value, allocator, trimmed, .{});
+            defer parsed.deinit();
+            if (parsed.value != .array) return error.InvalidCli;
+            break :blk try allocator.dupe(u8, trimmed);
+        };
+        defer allocator.free(normalized_arguments);
+
+        var params = std.ArrayList(u8){};
+        defer params.deinit(allocator);
+
+        const writer = params.writer(allocator);
+        try writer.writeAll("[");
+        try writer.print("{f}", .{std.json.fmt(signer, .{})});
+        try writer.writeAll(",");
+        try writer.print("{f}", .{std.json.fmt(package_id, .{})});
+        try writer.writeAll(",");
+        try writer.print("{f}", .{std.json.fmt(module, .{})});
+        try writer.writeAll(",");
+        try writer.print("{f}", .{std.json.fmt(function_name, .{})});
+        try writer.writeAll(",");
+        try writer.writeAll(normalized_type_args);
+        try writer.writeAll(",");
+        try writer.writeAll(normalized_arguments);
+        try writer.writeAll(",");
+        if (gas_object_id) |value| {
+            try writer.print("{f}", .{std.json.fmt(value, .{})});
+        } else {
+            try writer.writeAll("null");
+        }
+        try writer.print(",\"{}\",\"Commit\"]", .{gas_budget});
+
+        const response = try self.call("unsafe_moveCall", params.items);
+        defer self.allocator.free(response);
+
+        return try extractTxBytesFromBuilderResponse(allocator, response);
+    }
+
+    pub fn buildBatchTransactionTxBytes(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        signer: []const u8,
+        commands_json: []const u8,
+        gas_object_id: ?[]const u8,
+        gas_budget: u64,
+    ) ![]u8 {
+        const single_transaction_params = try buildUnsafeBatchTransactionParamsJson(allocator, commands_json);
+        defer allocator.free(single_transaction_params);
+
+        var params = std.ArrayList(u8){};
+        defer params.deinit(allocator);
+
+        const writer = params.writer(allocator);
+        try writer.writeAll("[");
+        try writer.print("{f}", .{std.json.fmt(signer, .{})});
+        try writer.writeAll(",");
+        try writer.writeAll(single_transaction_params);
+        try writer.writeAll(",");
+        if (gas_object_id) |value| {
+            try writer.print("{f}", .{std.json.fmt(value, .{})});
+        } else {
+            try writer.writeAll("null");
+        }
+        try writer.print(",\"{}\",\"Commit\"]", .{gas_budget});
+
+        const response = try self.call("unsafe_batchTransaction", params.items);
+        defer self.allocator.free(response);
+
+        return try extractTxBytesFromBuilderResponse(allocator, response);
+    }
+
+    pub fn buildCommandSourceTxBytes(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        signer: []const u8,
+        source: tx_builder.CommandSource,
+        gas_object_id: ?[]const u8,
+        gas_budget: u64,
+    ) ![]u8 {
+        if (source.move_call) |move_call| {
+            if (source.command_items.len != 0 or source.commands_json != null) return error.InvalidCli;
+            return try self.buildMoveCallTxBytes(
+                allocator,
+                signer,
+                move_call.package_id,
+                move_call.module,
+                move_call.function_name,
+                move_call.type_args,
+                move_call.arguments,
+                gas_object_id,
+                gas_budget,
+            );
+        }
+
+        const commands_json = try tx_builder.resolveCommands(allocator, source);
+        defer allocator.free(commands_json);
+        return try self.buildBatchTransactionTxBytes(
+            allocator,
+            signer,
+            commands_json,
+            gas_object_id,
+            gas_budget,
+        );
+    }
+
+    const LocalObjectReference = struct {
+        object_id: []u8,
+        version: u64,
+        digest: []u8,
+        shared_initial_version: ?u64 = null,
+
+        fn deinit(self: *LocalObjectReference, allocator: std.mem.Allocator) void {
+            allocator.free(self.object_id);
+            allocator.free(self.digest);
+        }
+    };
+
+    fn parseUnsignedJsonValue(value: std.json.Value) !u64 {
+        return switch (value) {
+            .integer => |integer| blk: {
+                if (integer < 0) return error.InvalidCli;
+                break :blk @intCast(integer);
+            },
+            .number_string => |digits| try std.fmt.parseInt(u64, digits, 10),
+            .string => |digits| try std.fmt.parseInt(u64, digits, 10),
+            else => error.InvalidCli,
+        };
+    }
+
+    fn resolveLocalObjectReference(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        object_id: []const u8,
+    ) !LocalObjectReference {
+        const params = try std.fmt.allocPrint(
+            allocator,
+            "[{f},{{\"showOwner\":true}}]",
+            .{std.json.fmt(object_id, .{})},
+        );
+        defer allocator.free(params);
+
+        const response = try self.call("sui_getObject", params);
+        defer self.allocator.free(response);
+
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, response, .{});
+        defer parsed.deinit();
+
+        if (parsed.value != .object) return error.InvalidResponse;
+        const result_value = parsed.value.object.get("result") orelse return error.InvalidResponse;
+        if (result_value != .object) return error.InvalidResponse;
+        const data_value = result_value.object.get("data") orelse return error.InvalidResponse;
+        if (data_value != .object) return error.InvalidResponse;
+
+        const response_object_id = data_value.object.get("objectId") orelse return error.InvalidResponse;
+        const version_value = data_value.object.get("version") orelse return error.InvalidResponse;
+        const digest_value = data_value.object.get("digest") orelse return error.InvalidResponse;
+
+        if (response_object_id != .string or digest_value != .string) return error.InvalidResponse;
+
+        var resolved = LocalObjectReference{
+            .object_id = try allocator.dupe(u8, response_object_id.string),
+            .version = try parseUnsignedJsonValue(version_value),
+            .digest = try allocator.dupe(u8, digest_value.string),
+        };
+        errdefer resolved.deinit(allocator);
+
+        if (data_value.object.get("owner")) |owner_value| {
+            if (owner_value == .object) {
+                if (owner_value.object.get("Shared")) |shared_value| {
+                    if (shared_value != .object) return error.InvalidResponse;
+                    if (shared_value.object.get("initial_shared_version")) |initial_shared_version| {
+                        resolved.shared_initial_version = try parseUnsignedJsonValue(initial_shared_version);
+                    } else if (shared_value.object.get("initialSharedVersion")) |initial_shared_version| {
+                        resolved.shared_initial_version = try parseUnsignedJsonValue(initial_shared_version);
+                    } else {
+                        return error.InvalidResponse;
+                    }
+                }
+            }
+        }
+
+        return resolved;
+    }
+
+    pub fn resolveImmOrOwnedObjectInputJson(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        object_id: []const u8,
+    ) ![]u8 {
+        var resolved = try self.resolveLocalObjectReference(allocator, object_id);
+        defer resolved.deinit(allocator);
+
+        if (resolved.shared_initial_version != null) return error.InvalidCli;
+
+        return try buildImmOrOwnedObjectInputJson(
+            allocator,
+            resolved.object_id,
+            resolved.version,
+            resolved.digest,
+        );
+    }
+
+    fn buildImmOrOwnedObjectInputJson(
+        allocator: std.mem.Allocator,
+        object_id: []const u8,
+        version: u64,
+        digest: []const u8,
+    ) ![]u8 {
+        return try std.fmt.allocPrint(
+            allocator,
+            "{{\"Object\":{{\"ImmOrOwnedObject\":{{\"objectId\":{f},\"version\":{},\"digest\":{f}}}}}}}",
+            .{
+                std.json.fmt(object_id, .{}),
+                version,
+                std.json.fmt(digest, .{}),
+            },
+        );
+    }
+
+    pub fn resolveReceivingObjectInputJson(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        object_id: []const u8,
+    ) ![]u8 {
+        var resolved = try self.resolveLocalObjectReference(allocator, object_id);
+        defer resolved.deinit(allocator);
+
+        if (resolved.shared_initial_version != null) return error.InvalidCli;
+
+        return try buildReceivingObjectInputJson(
+            allocator,
+            resolved.object_id,
+            resolved.version,
+            resolved.digest,
+        );
+    }
+
+    fn buildReceivingObjectInputJson(
+        allocator: std.mem.Allocator,
+        object_id: []const u8,
+        version: u64,
+        digest: []const u8,
+    ) ![]u8 {
+        return try std.fmt.allocPrint(
+            allocator,
+            "{{\"Object\":{{\"Receiving\":{{\"objectId\":{f},\"version\":{},\"digest\":{f}}}}}}}",
+            .{
+                std.json.fmt(object_id, .{}),
+                version,
+                std.json.fmt(digest, .{}),
+            },
+        );
+    }
+
+    pub fn resolveSharedObjectInputJson(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        object_id: []const u8,
+        mutable: bool,
+    ) ![]u8 {
+        var resolved = try self.resolveLocalObjectReference(allocator, object_id);
+        defer resolved.deinit(allocator);
+
+        const initial_shared_version = resolved.shared_initial_version orelse return error.InvalidCli;
+
+        return try buildSharedObjectInputJson(
+            allocator,
+            resolved.object_id,
+            initial_shared_version,
+            mutable,
+        );
+    }
+
+    fn buildSharedObjectInputJson(
+        allocator: std.mem.Allocator,
+        object_id: []const u8,
+        initial_shared_version: u64,
+        mutable: bool,
+    ) ![]u8 {
+        return try std.fmt.allocPrint(
+            allocator,
+            "{{\"Object\":{{\"SharedObject\":{{\"objectId\":{f},\"initialSharedVersion\":{},\"mutable\":{}}}}}}}",
+            .{
+                std.json.fmt(object_id, .{}),
+                initial_shared_version,
+                mutable,
+            },
+        );
+    }
+
+    const ObjectInputPreset = struct {
+        object_id: []const u8,
+        input_kind: ObjectInputKind,
+        mutable: bool = false,
+        version: ?u64 = null,
+        digest: ?[]const u8 = null,
+        initial_shared_version: ?u64 = null,
+    };
+
+    fn objectInputPreset(kind: ObjectPresetKind) ObjectInputPreset {
+        return switch (kind) {
+            .clock => .{
+                .object_id = "0x6",
+                .input_kind = .shared,
+                .mutable = false,
+                .initial_shared_version = 1,
+            },
+            .cetus_clmm_global_config_mainnet => .{
+                .object_id = "0xdaa46292632c3c4d8f31f23ea0f9b36a28ff3677e9684980e4438403a67a3d8f",
+                .input_kind = .shared,
+                .mutable = false,
+            },
+            .cetus_clmm_global_config_testnet => .{
+                .object_id = "0xc6273f844b4bc258952c4e477697aa12c918c8e08106fac6b934811298c9820a",
+                .input_kind = .shared,
+                .mutable = false,
+            },
+        };
+    }
+
+    pub fn buildGasDataJson(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        owner: []const u8,
+        gas_payment_json: []const u8,
+        gas_price: u64,
+        gas_budget: u64,
+    ) ![]u8 {
+        _ = self;
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, gas_payment_json, .{});
+        defer parsed.deinit();
+
+        if (parsed.value != .array or parsed.value.array.items.len == 0) return error.InvalidCli;
+        for (parsed.value.array.items) |entry| {
+            if (entry != .object) return error.InvalidCli;
+            const object_id = entry.object.get("objectId") orelse return error.InvalidCli;
+            const version = entry.object.get("version") orelse return error.InvalidCli;
+            const digest = entry.object.get("digest") orelse return error.InvalidCli;
+            if (object_id != .string or digest != .string) return error.InvalidCli;
+            _ = try parseUnsignedJsonValue(version);
+        }
+
+        return try std.fmt.allocPrint(
+            allocator,
+            "{{\"payment\":{f},\"owner\":{f},\"price\":{},\"budget\":{}}}",
+            .{
+                std.json.fmt(parsed.value, .{}),
+                std.json.fmt(owner, .{}),
+                gas_price,
+                gas_budget,
+            },
+        );
+    }
+
+    pub const OwnedLocalProgrammableTransactionParts = struct {
+        inputs_json: []u8,
+        commands_json: []u8,
+        sender: []u8,
+        gas_data_json: []u8,
+        expiration_json: ?[]u8 = null,
+
+        pub fn deinit(self: *OwnedLocalProgrammableTransactionParts, allocator: std.mem.Allocator) void {
+            allocator.free(self.inputs_json);
+            allocator.free(self.commands_json);
+            allocator.free(self.sender);
+            allocator.free(self.gas_data_json);
+            if (self.expiration_json) |value| allocator.free(value);
+        }
+    };
+
+    fn stringifyJsonValueAlloc(
+        allocator: std.mem.Allocator,
+        value: std.json.Value,
+    ) ![]u8 {
+        var out = std.ArrayList(u8){};
+        errdefer out.deinit(allocator);
+        try out.writer(allocator).print("{f}", .{std.json.fmt(value, .{})});
+        return try out.toOwnedSlice(allocator);
+    }
+
+    fn buildPureBytesInputJson(
+        allocator: std.mem.Allocator,
+        bytes: []const u8,
+    ) ![]u8 {
+        const encoded_len = std.base64.standard.Encoder.calcSize(bytes.len);
+        const encoded = try allocator.alloc(u8, encoded_len);
+        defer allocator.free(encoded);
+        _ = std.base64.standard.Encoder.encode(encoded, bytes);
+        return try std.fmt.allocPrint(
+            allocator,
+            "{{\"Pure\":{f}}}",
+            .{std.json.fmt(encoded, .{})},
+        );
+    }
+
+    fn buildPureAddressInputJson(
+        allocator: std.mem.Allocator,
+        address: []const u8,
+    ) ![]u8 {
+        const parsed = try ptb_bytes_builder.parseHexAddress32(address);
+        return try buildPureBytesInputJson(allocator, &parsed);
+    }
+
+    fn buildPureU64InputJson(
+        allocator: std.mem.Allocator,
+        value: u64,
+    ) ![]u8 {
+        var bytes: [8]u8 = undefined;
+        std.mem.writeInt(u64, &bytes, value, .little);
+        return try buildPureBytesInputJson(allocator, &bytes);
+    }
+
+    fn parseUnsignedJsonValueAs(
+        comptime T: type,
+        value: std.json.Value,
+    ) !T {
+        return switch (value) {
+            .integer => |integer| blk: {
+                if (integer < 0) return error.InvalidCli;
+                if (integer > std.math.maxInt(T)) return error.InvalidCli;
+                break :blk @intCast(integer);
+            },
+            .number_string => |digits| try std.fmt.parseInt(T, digits, 10),
+            .string => |digits| try std.fmt.parseInt(T, digits, 10),
+            else => error.InvalidCli,
+        };
+    }
+
+    fn buildPureUnsignedInputJson(
+        comptime T: type,
+        allocator: std.mem.Allocator,
+        value: T,
+    ) ![]u8 {
+        var bytes: [@sizeOf(T)]u8 = undefined;
+        std.mem.writeInt(T, &bytes, value, .little);
+        return try buildPureBytesInputJson(allocator, &bytes);
+    }
+
+    fn buildPureBoolInputJson(
+        allocator: std.mem.Allocator,
+        value: bool,
+    ) ![]u8 {
+        return try buildPureBytesInputJson(allocator, &.{if (value) 1 else 0});
+    }
+
+    pub const LocalMoveCallParameterKind = enum {
+        object,
+        address,
+        signer,
+        boolean,
+        u8,
+        u16,
+        u32,
+        u64,
+        u128,
+        u256,
+        vector_u8,
+        unsupported,
+    };
+
+    fn classifyNormalizedMoveType(
+        allocator: std.mem.Allocator,
+        value: std.json.Value,
+    ) !?LocalMoveCallParameterKind {
+        switch (value) {
+            .string => |name| {
+                if (std.ascii.eqlIgnoreCase(name, "address")) return .address;
+                if (std.ascii.eqlIgnoreCase(name, "signer")) return .signer;
+                if (std.ascii.eqlIgnoreCase(name, "bool")) return .boolean;
+                if (std.ascii.eqlIgnoreCase(name, "u8")) return .u8;
+                if (std.ascii.eqlIgnoreCase(name, "u16")) return .u16;
+                if (std.ascii.eqlIgnoreCase(name, "u32")) return .u32;
+                if (std.ascii.eqlIgnoreCase(name, "u64")) return .u64;
+                if (std.ascii.eqlIgnoreCase(name, "u128")) return .u128;
+                if (std.ascii.eqlIgnoreCase(name, "u256")) return .u256;
+                return .unsupported;
+            },
+            .object => |object| {
+                if (object.get("Reference")) |inner| {
+                    return try classifyNormalizedMoveType(allocator, inner);
+                }
+                if (object.get("MutableReference")) |inner| {
+                    return try classifyNormalizedMoveType(allocator, inner);
+                }
+                if (object.get("Vector")) |inner| {
+                    const nested = try classifyNormalizedMoveType(allocator, inner);
+                    if (nested == .u8) return .vector_u8;
+                    return .unsupported;
+                }
+                if (object.get("Struct")) |struct_value| {
+                    if (struct_value != .object) return .unsupported;
+                    const address_value = struct_value.object.get("address") orelse return .unsupported;
+                    const module_value = struct_value.object.get("module") orelse return .unsupported;
+                    const name_value = struct_value.object.get("name") orelse return .unsupported;
+                    if (address_value != .string or module_value != .string or name_value != .string) return .unsupported;
+                    const tx_context_address = try ptb_bytes_builder.parseHexAddress32("0x2");
+                    const candidate_address = ptb_bytes_builder.parseHexAddress32(address_value.string) catch return .object;
+                    if (std.mem.eql(u8, &candidate_address, &tx_context_address) and
+                        std.mem.eql(u8, module_value.string, "tx_context") and
+                        std.mem.eql(u8, name_value.string, "TxContext"))
+                    {
+                        return null;
+                    }
+                    return .object;
+                }
+                return .unsupported;
+            },
+            else => return .unsupported,
+        }
+    }
+
+    pub fn getMoveCallUserParameterKinds(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        package_id: []const u8,
+        module: []const u8,
+        function_name: []const u8,
+    ) ![]LocalMoveCallParameterKind {
+        const params = try std.fmt.allocPrint(
+            allocator,
+            "[{f},{f},{f}]",
+            .{
+                std.json.fmt(package_id, .{}),
+                std.json.fmt(module, .{}),
+                std.json.fmt(function_name, .{}),
+            },
+        );
+        defer allocator.free(params);
+
+        const response = try self.call("sui_getNormalizedMoveFunction", params);
+        defer self.allocator.free(response);
+
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, response, .{});
+        defer parsed.deinit();
+
+        if (parsed.value != .object) return error.InvalidResponse;
+        const result = parsed.value.object.get("result") orelse return error.InvalidResponse;
+        if (result != .object) return error.InvalidResponse;
+        const parameters = result.object.get("parameters") orelse return error.InvalidResponse;
+        if (parameters != .array) return error.InvalidResponse;
+
+        var kinds = std.ArrayList(LocalMoveCallParameterKind){};
+        defer kinds.deinit(allocator);
+        for (parameters.array.items) |parameter| {
+            const classified = try classifyNormalizedMoveType(allocator, parameter);
+            if (classified == null) continue;
+            try kinds.append(allocator, classified.?);
+        }
+
+        return try kinds.toOwnedSlice(allocator);
+    }
+
+    pub fn commandSourceSupportsLocalProgrammableTransactionBuilder(
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+    ) !bool {
+        const commands_json = try tx_builder.resolveCommands(allocator, source);
+        defer allocator.free(commands_json);
+
+        const parsed = std.json.parseFromSlice(std.json.Value, allocator, commands_json, .{}) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return false,
+        };
+        defer parsed.deinit();
+
+        if (parsed.value != .array) return false;
+        for (parsed.value.array.items) |command| {
+            if (command != .object) return false;
+            const kind = command.object.get("kind") orelse return false;
+            if (kind != .string) return false;
+            if (!std.mem.eql(u8, kind.string, "MoveCall") and
+                !std.mem.eql(u8, kind.string, "TransferObjects") and
+                !std.mem.eql(u8, kind.string, "SplitCoins") and
+                !std.mem.eql(u8, kind.string, "MergeCoins") and
+                !std.mem.eql(u8, kind.string, "MakeMoveVec") and
+                !std.mem.eql(u8, kind.string, "Publish") and
+                !std.mem.eql(u8, kind.string, "Upgrade"))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    pub fn ownLocalProgrammableTransactionPartsFromCommandSource(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        sender: []const u8,
+        gas_payment_json: []const u8,
+        gas_price: u64,
+        gas_budget: u64,
+        expiration_json: ?[]const u8,
+    ) !OwnedLocalProgrammableTransactionParts {
+        const commands_json = try tx_builder.resolveCommands(allocator, source);
+        defer allocator.free(commands_json);
+
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, commands_json, .{});
+        defer parsed.deinit();
+        if (parsed.value != .array) return error.InvalidCli;
+
+        const LoweringContext = struct {
+            rpc: *SuiRpcClient,
+            allocator: std.mem.Allocator,
+            inputs: std.ArrayListUnmanaged([]u8) = .{},
+            commands: std.ArrayListUnmanaged([]u8) = .{},
+
+            fn deinit(ctx: *@This()) void {
+                for (ctx.inputs.items) |item| ctx.allocator.free(item);
+                for (ctx.commands.items) |item| ctx.allocator.free(item);
+                ctx.inputs.deinit(ctx.allocator);
+                ctx.commands.deinit(ctx.allocator);
+            }
+
+            fn appendInput(ctx: *@This(), input_json: []u8) !u16 {
+                try ctx.inputs.append(ctx.allocator, input_json);
+                const index = ctx.inputs.items.len - 1;
+                if (index > std.math.maxInt(u16)) return error.InvalidCli;
+                return @intCast(index);
+            }
+
+            fn buildInputRefJson(ctx: *@This(), input_index: u16) ![]u8 {
+                return try std.fmt.allocPrint(ctx.allocator, "{{\"Input\":{}}}", .{input_index});
+            }
+
+            fn normalizePtbRefOrAddExplicitInput(
+                ctx: *@This(),
+                value: std.json.Value,
+                allow_existing_input: bool,
+            ) ![]u8 {
+                switch (value) {
+                    .string => |string_value| {
+                        if (std.mem.eql(u8, string_value, "GasCoin")) {
+                            return try ctx.allocator.dupe(u8, "\"GasCoin\"");
+                        }
+                        return error.InvalidCli;
+                    },
+                    .object => |object| {
+                        if (object.get("Result") != null or object.get("NestedResult") != null) {
+                            return try stringifyJsonValueAlloc(ctx.allocator, value);
+                        }
+                        if (object.get("Input") != null) {
+                            if (!allow_existing_input) return error.InvalidCli;
+                            return try stringifyJsonValueAlloc(ctx.allocator, value);
+                        }
+                        if (object.get("Pure") != null or object.get("Object") != null) {
+                            const input_json = try stringifyJsonValueAlloc(ctx.allocator, value);
+                            errdefer ctx.allocator.free(input_json);
+                            const input_index = try ctx.appendInput(input_json);
+                            return try ctx.buildInputRefJson(input_index);
+                        }
+                        return error.InvalidCli;
+                    },
+                    else => return error.InvalidCli,
+                }
+            }
+
+            fn lowerObjectArgument(
+                ctx: *@This(),
+                value: std.json.Value,
+            ) ![]u8 {
+                switch (value) {
+                    .string => |object_id| {
+                        if (std.mem.eql(u8, object_id, "GasCoin")) {
+                            return try ctx.allocator.dupe(u8, "\"GasCoin\"");
+                        }
+                        const input_json = try ctx.rpc.resolveImmOrOwnedObjectInputJson(ctx.allocator, object_id);
+                        errdefer ctx.allocator.free(input_json);
+                        const input_index = try ctx.appendInput(input_json);
+                        return try ctx.buildInputRefJson(input_index);
+                    },
+                    .object => return try ctx.normalizePtbRefOrAddExplicitInput(value, false),
+                    else => return error.InvalidCli,
+                }
+            }
+
+            fn lowerMoveCallArgument(
+                ctx: *@This(),
+                value: std.json.Value,
+            ) ![]u8 {
+                return try ctx.normalizePtbRefOrAddExplicitInput(value, false);
+            }
+
+            fn lowerMoveCallArgumentForKind(
+                ctx: *@This(),
+                value: std.json.Value,
+                kind: LocalMoveCallParameterKind,
+            ) ![]u8 {
+                switch (kind) {
+                    .object => return try ctx.lowerObjectArgument(value),
+                    .address, .signer => return switch (value) {
+                        .string => |address| blk: {
+                            const input_json = try buildPureAddressInputJson(ctx.allocator, address);
+                            errdefer ctx.allocator.free(input_json);
+                            const input_index = try ctx.appendInput(input_json);
+                            break :blk try ctx.buildInputRefJson(input_index);
+                        },
+                        .object => |object| blk: {
+                            if (object.get("Object") != null) return error.InvalidCli;
+                            break :blk try ctx.normalizePtbRefOrAddExplicitInput(value, false);
+                        },
+                        else => error.InvalidCli,
+                    },
+                    .boolean => return switch (value) {
+                        .bool => |boolean| blk: {
+                            const input_json = try buildPureBoolInputJson(ctx.allocator, boolean);
+                            errdefer ctx.allocator.free(input_json);
+                            const input_index = try ctx.appendInput(input_json);
+                            break :blk try ctx.buildInputRefJson(input_index);
+                        },
+                        .object => |object| blk: {
+                            if (object.get("Object") != null) return error.InvalidCli;
+                            break :blk try ctx.normalizePtbRefOrAddExplicitInput(value, false);
+                        },
+                        else => error.InvalidCli,
+                    },
+                    .u8 => return switch (value) {
+                        .integer, .number_string, .string => blk: {
+                            const input_json = try buildPureUnsignedInputJson(u8, ctx.allocator, try parseUnsignedJsonValueAs(u8, value));
+                            errdefer ctx.allocator.free(input_json);
+                            const input_index = try ctx.appendInput(input_json);
+                            break :blk try ctx.buildInputRefJson(input_index);
+                        },
+                        .object => |object| blk: {
+                            if (object.get("Object") != null) return error.InvalidCli;
+                            break :blk try ctx.normalizePtbRefOrAddExplicitInput(value, false);
+                        },
+                        else => error.InvalidCli,
+                    },
+                    .u16 => return switch (value) {
+                        .integer, .number_string, .string => blk: {
+                            const input_json = try buildPureUnsignedInputJson(u16, ctx.allocator, try parseUnsignedJsonValueAs(u16, value));
+                            errdefer ctx.allocator.free(input_json);
+                            const input_index = try ctx.appendInput(input_json);
+                            break :blk try ctx.buildInputRefJson(input_index);
+                        },
+                        .object => |object| blk: {
+                            if (object.get("Object") != null) return error.InvalidCli;
+                            break :blk try ctx.normalizePtbRefOrAddExplicitInput(value, false);
+                        },
+                        else => error.InvalidCli,
+                    },
+                    .u32 => return switch (value) {
+                        .integer, .number_string, .string => blk: {
+                            const input_json = try buildPureUnsignedInputJson(u32, ctx.allocator, try parseUnsignedJsonValueAs(u32, value));
+                            errdefer ctx.allocator.free(input_json);
+                            const input_index = try ctx.appendInput(input_json);
+                            break :blk try ctx.buildInputRefJson(input_index);
+                        },
+                        .object => |object| blk: {
+                            if (object.get("Object") != null) return error.InvalidCli;
+                            break :blk try ctx.normalizePtbRefOrAddExplicitInput(value, false);
+                        },
+                        else => error.InvalidCli,
+                    },
+                    .u64 => return switch (value) {
+                        .integer, .number_string, .string => blk: {
+                            const input_json = try buildPureUnsignedInputJson(u64, ctx.allocator, try parseUnsignedJsonValueAs(u64, value));
+                            errdefer ctx.allocator.free(input_json);
+                            const input_index = try ctx.appendInput(input_json);
+                            break :blk try ctx.buildInputRefJson(input_index);
+                        },
+                        .object => |object| blk: {
+                            if (object.get("Object") != null) return error.InvalidCli;
+                            break :blk try ctx.normalizePtbRefOrAddExplicitInput(value, false);
+                        },
+                        else => error.InvalidCli,
+                    },
+                    .u128 => return switch (value) {
+                        .integer, .number_string, .string => blk: {
+                            const input_json = try buildPureUnsignedInputJson(u128, ctx.allocator, try parseUnsignedJsonValueAs(u128, value));
+                            errdefer ctx.allocator.free(input_json);
+                            const input_index = try ctx.appendInput(input_json);
+                            break :blk try ctx.buildInputRefJson(input_index);
+                        },
+                        .object => |object| blk: {
+                            if (object.get("Object") != null) return error.InvalidCli;
+                            break :blk try ctx.normalizePtbRefOrAddExplicitInput(value, false);
+                        },
+                        else => error.InvalidCli,
+                    },
+                    .u256 => return switch (value) {
+                        .integer, .number_string, .string => blk: {
+                            const input_json = try buildPureUnsignedInputJson(u256, ctx.allocator, try parseUnsignedJsonValueAs(u256, value));
+                            errdefer ctx.allocator.free(input_json);
+                            const input_index = try ctx.appendInput(input_json);
+                            break :blk try ctx.buildInputRefJson(input_index);
+                        },
+                        .object => |object| blk: {
+                            if (object.get("Object") != null) return error.InvalidCli;
+                            break :blk try ctx.normalizePtbRefOrAddExplicitInput(value, false);
+                        },
+                        else => error.InvalidCli,
+                    },
+                    .vector_u8 => return switch (value) {
+                        .string, .array => blk: {
+                            const bytes = try ptb_bytes_builder.parseRawBytesJsonValue(ctx.allocator, value);
+                            defer ctx.allocator.free(bytes);
+                            const input_json = try buildPureBytesInputJson(ctx.allocator, bytes);
+                            errdefer ctx.allocator.free(input_json);
+                            const input_index = try ctx.appendInput(input_json);
+                            break :blk try ctx.buildInputRefJson(input_index);
+                        },
+                        .object => |object| blk: {
+                            if (object.get("Object") != null) return error.InvalidCli;
+                            break :blk try ctx.normalizePtbRefOrAddExplicitInput(value, false);
+                        },
+                        else => error.InvalidCli,
+                    },
+                    .unsupported => return switch (value) {
+                        .object => |object| blk: {
+                            if (object.get("Input") != null or object.get("Result") != null or object.get("NestedResult") != null or object.get("Pure") != null or object.get("Object") != null) {
+                                break :blk try ctx.normalizePtbRefOrAddExplicitInput(value, false);
+                            }
+                            return error.InvalidCli;
+                        },
+                        .string => |string_value| if (std.mem.eql(u8, string_value, "GasCoin"))
+                            try ctx.normalizePtbRefOrAddExplicitInput(value, false)
+                        else
+                            error.InvalidCli,
+                        else => error.InvalidCli,
+                    },
+                }
+            }
+
+            fn lowerAddressArgument(
+                ctx: *@This(),
+                value: std.json.Value,
+            ) ![]u8 {
+                switch (value) {
+                    .string => |address| {
+                        const input_json = try buildPureAddressInputJson(ctx.allocator, address);
+                        errdefer ctx.allocator.free(input_json);
+                        const input_index = try ctx.appendInput(input_json);
+                        return try ctx.buildInputRefJson(input_index);
+                    },
+                    .object => return try ctx.normalizePtbRefOrAddExplicitInput(value, false),
+                    else => return error.InvalidCli,
+                }
+            }
+
+            fn lowerU64Argument(
+                ctx: *@This(),
+                value: std.json.Value,
+            ) ![]u8 {
+                switch (value) {
+                    .integer, .number_string, .string => {
+                        if (value == .string and std.mem.eql(u8, value.string, "GasCoin")) return error.InvalidCli;
+                        const input_json = try buildPureU64InputJson(ctx.allocator, try parseUnsignedJsonValue(value));
+                        errdefer ctx.allocator.free(input_json);
+                        const input_index = try ctx.appendInput(input_json);
+                        return try ctx.buildInputRefJson(input_index);
+                    },
+                    .object => return try ctx.normalizePtbRefOrAddExplicitInput(value, false),
+                    else => return error.InvalidCli,
+                }
+            }
+
+            fn appendJsonArray(
+                ctx: *@This(),
+                items: []const []const u8,
+            ) ![]u8 {
+                var out = std.ArrayList(u8){};
+                errdefer out.deinit(ctx.allocator);
+                const writer = out.writer(ctx.allocator);
+                try writer.writeAll("[");
+                for (items, 0..) |item, index| {
+                    if (index != 0) try writer.writeAll(",");
+                    try writer.writeAll(item);
+                }
+                try writer.writeAll("]");
+                return try out.toOwnedSlice(ctx.allocator);
+            }
+
+            fn buildInputsJson(ctx: *@This()) ![]u8 {
+                return try ctx.appendJsonArray(ctx.inputs.items);
+            }
+
+            fn buildCommandsJson(ctx: *@This()) ![]u8 {
+                return try ctx.appendJsonArray(ctx.commands.items);
+            }
+
+            fn lowerMoveCallCommand(
+                ctx: *@This(),
+                command: std.json.Value,
+            ) ![]u8 {
+                const object = command.object;
+                const package_id = object.get("package") orelse return error.InvalidCli;
+                const module = object.get("module") orelse return error.InvalidCli;
+                const function_name = object.get("function") orelse return error.InvalidCli;
+                if (package_id != .string or module != .string or function_name != .string) return error.InvalidCli;
+
+                const parameter_kinds = try ctx.rpc.getMoveCallUserParameterKinds(
+                    ctx.allocator,
+                    package_id.string,
+                    module.string,
+                    function_name.string,
+                );
+                defer ctx.allocator.free(parameter_kinds);
+
+                var lowered_arguments = std.ArrayListUnmanaged([]u8){};
+                defer {
+                    for (lowered_arguments.items) |item| ctx.allocator.free(item);
+                    lowered_arguments.deinit(ctx.allocator);
+                }
+
+                const arguments = if (object.get("arguments")) |raw_arguments| blk: {
+                    if (raw_arguments != .array) return error.InvalidCli;
+                    break :blk raw_arguments.array.items;
+                } else &.{};
+                if (arguments.len != parameter_kinds.len) return error.InvalidCli;
+                for (arguments) |argument| {
+                    const index = lowered_arguments.items.len;
+                    try lowered_arguments.append(
+                        ctx.allocator,
+                        try ctx.lowerMoveCallArgumentForKind(argument, parameter_kinds[index]),
+                    );
+                }
+                const arguments_json = try ctx.appendJsonArray(lowered_arguments.items);
+                defer ctx.allocator.free(arguments_json);
+
+                const type_arguments_json = if (object.get("typeArguments")) |raw_type_arguments|
+                    try stringifyJsonValueAlloc(ctx.allocator, raw_type_arguments)
+                else
+                    try ctx.allocator.dupe(u8, "[]");
+                defer ctx.allocator.free(type_arguments_json);
+
+                return try std.fmt.allocPrint(
+                    ctx.allocator,
+                    "{{\"kind\":\"MoveCall\",\"package\":{f},\"module\":{f},\"function\":{f},\"typeArguments\":{s},\"arguments\":{s}}}",
+                    .{
+                        std.json.fmt(package_id.string, .{}),
+                        std.json.fmt(module.string, .{}),
+                        std.json.fmt(function_name.string, .{}),
+                        type_arguments_json,
+                        arguments_json,
+                    },
+                );
+            }
+
+            fn lowerTransferObjectsCommand(
+                ctx: *@This(),
+                command: std.json.Value,
+            ) ![]u8 {
+                const object = command.object;
+                const objects_value = object.get("objects") orelse return error.InvalidCli;
+                const address_value = object.get("address") orelse return error.InvalidCli;
+                if (objects_value != .array) return error.InvalidCli;
+
+                var lowered_objects = std.ArrayListUnmanaged([]u8){};
+                defer {
+                    for (lowered_objects.items) |item| ctx.allocator.free(item);
+                    lowered_objects.deinit(ctx.allocator);
+                }
+
+                for (objects_value.array.items) |entry| {
+                    try lowered_objects.append(ctx.allocator, try ctx.lowerObjectArgument(entry));
+                }
+
+                const objects_json = try ctx.appendJsonArray(lowered_objects.items);
+                defer ctx.allocator.free(objects_json);
+                const address_json = try ctx.lowerAddressArgument(address_value);
+                defer ctx.allocator.free(address_json);
+
+                return try std.fmt.allocPrint(
+                    ctx.allocator,
+                    "{{\"kind\":\"TransferObjects\",\"objects\":{s},\"address\":{s}}}",
+                    .{ objects_json, address_json },
+                );
+            }
+
+            fn lowerSplitCoinsCommand(
+                ctx: *@This(),
+                command: std.json.Value,
+            ) ![]u8 {
+                const object = command.object;
+                const coin_value = object.get("coin") orelse return error.InvalidCli;
+                const amounts_value = object.get("amounts") orelse return error.InvalidCli;
+                if (amounts_value != .array) return error.InvalidCli;
+
+                const coin_json = try ctx.lowerObjectArgument(coin_value);
+                defer ctx.allocator.free(coin_json);
+
+                var lowered_amounts = std.ArrayListUnmanaged([]u8){};
+                defer {
+                    for (lowered_amounts.items) |item| ctx.allocator.free(item);
+                    lowered_amounts.deinit(ctx.allocator);
+                }
+
+                for (amounts_value.array.items) |entry| {
+                    try lowered_amounts.append(ctx.allocator, try ctx.lowerU64Argument(entry));
+                }
+
+                const amounts_json = try ctx.appendJsonArray(lowered_amounts.items);
+                defer ctx.allocator.free(amounts_json);
+
+                return try std.fmt.allocPrint(
+                    ctx.allocator,
+                    "{{\"kind\":\"SplitCoins\",\"coin\":{s},\"amounts\":{s}}}",
+                    .{ coin_json, amounts_json },
+                );
+            }
+
+            fn lowerMergeCoinsCommand(
+                ctx: *@This(),
+                command: std.json.Value,
+            ) ![]u8 {
+                const object = command.object;
+                const destination_value = object.get("destination") orelse return error.InvalidCli;
+                const sources_value = object.get("sources") orelse return error.InvalidCli;
+                if (sources_value != .array) return error.InvalidCli;
+
+                const destination_json = try ctx.lowerObjectArgument(destination_value);
+                defer ctx.allocator.free(destination_json);
+
+                var lowered_sources = std.ArrayListUnmanaged([]u8){};
+                defer {
+                    for (lowered_sources.items) |item| ctx.allocator.free(item);
+                    lowered_sources.deinit(ctx.allocator);
+                }
+
+                for (sources_value.array.items) |entry| {
+                    try lowered_sources.append(ctx.allocator, try ctx.lowerObjectArgument(entry));
+                }
+
+                const sources_json = try ctx.appendJsonArray(lowered_sources.items);
+                defer ctx.allocator.free(sources_json);
+
+                return try std.fmt.allocPrint(
+                    ctx.allocator,
+                    "{{\"kind\":\"MergeCoins\",\"destination\":{s},\"sources\":{s}}}",
+                    .{ destination_json, sources_json },
+                );
+            }
+
+            fn lowerMakeMoveVecElement(
+                ctx: *@This(),
+                value: std.json.Value,
+            ) ![]u8 {
+                return switch (value) {
+                    .string => try ctx.lowerObjectArgument(value),
+                    .object => try ctx.normalizePtbRefOrAddExplicitInput(value, false),
+                    else => error.InvalidCli,
+                };
+            }
+
+            fn classifyMakeMoveVecElementKind(
+                ctx: *@This(),
+                value: ?std.json.Value,
+            ) !LocalMoveCallParameterKind {
+                const raw = value orelse return .object;
+                if (raw == .null) return .object;
+                return switch ((try classifyNormalizedMoveType(ctx.allocator, raw)) orelse .object) {
+                    .signer => .unsupported,
+                    else => |kind| kind,
+                };
+            }
+
+            fn lowerMakeMoveVecElementForKind(
+                ctx: *@This(),
+                value: std.json.Value,
+                kind: LocalMoveCallParameterKind,
+            ) ![]u8 {
+                return switch (kind) {
+                    .object => try ctx.lowerMakeMoveVecElement(value),
+                    .address => try ctx.lowerMoveCallArgumentForKind(value, .address),
+                    .boolean => try ctx.lowerMoveCallArgumentForKind(value, .boolean),
+                    .u8 => try ctx.lowerMoveCallArgumentForKind(value, .u8),
+                    .u16 => try ctx.lowerMoveCallArgumentForKind(value, .u16),
+                    .u32 => try ctx.lowerMoveCallArgumentForKind(value, .u32),
+                    .u64 => try ctx.lowerMoveCallArgumentForKind(value, .u64),
+                    .u128 => try ctx.lowerMoveCallArgumentForKind(value, .u128),
+                    .u256 => try ctx.lowerMoveCallArgumentForKind(value, .u256),
+                    .vector_u8 => try ctx.lowerMoveCallArgumentForKind(value, .vector_u8),
+                    .signer, .unsupported => error.InvalidCli,
+                };
+            }
+
+            fn lowerMakeMoveVecCommand(
+                ctx: *@This(),
+                command: std.json.Value,
+            ) ![]u8 {
+                const object = command.object;
+                const elements_value = object.get("elements") orelse return error.InvalidCli;
+                if (elements_value != .array) return error.InvalidCli;
+                const element_kind = try ctx.classifyMakeMoveVecElementKind(object.get("type"));
+
+                const type_json = if (object.get("type")) |raw_type|
+                    try stringifyJsonValueAlloc(ctx.allocator, raw_type)
+                else
+                    try ctx.allocator.dupe(u8, "null");
+                defer ctx.allocator.free(type_json);
+
+                var lowered_elements = std.ArrayListUnmanaged([]u8){};
+                defer {
+                    for (lowered_elements.items) |item| ctx.allocator.free(item);
+                    lowered_elements.deinit(ctx.allocator);
+                }
+
+                for (elements_value.array.items) |entry| {
+                    try lowered_elements.append(ctx.allocator, try ctx.lowerMakeMoveVecElementForKind(entry, element_kind));
+                }
+
+                const elements_json = try ctx.appendJsonArray(lowered_elements.items);
+                defer ctx.allocator.free(elements_json);
+
+                return try std.fmt.allocPrint(
+                    ctx.allocator,
+                    "{{\"kind\":\"MakeMoveVec\",\"type\":{s},\"elements\":{s}}}",
+                    .{ type_json, elements_json },
+                );
+            }
+
+            fn lowerPublishCommand(
+                ctx: *@This(),
+                command: std.json.Value,
+            ) ![]u8 {
+                const object = command.object;
+                const modules_value = object.get("modules") orelse return error.InvalidCli;
+                const dependencies_value = object.get("dependencies") orelse return error.InvalidCli;
+                if (modules_value != .array or dependencies_value != .array) return error.InvalidCli;
+
+                const modules_json = try stringifyJsonValueAlloc(ctx.allocator, modules_value);
+                defer ctx.allocator.free(modules_json);
+                const dependencies_json = try stringifyJsonValueAlloc(ctx.allocator, dependencies_value);
+                defer ctx.allocator.free(dependencies_json);
+
+                return try std.fmt.allocPrint(
+                    ctx.allocator,
+                    "{{\"kind\":\"Publish\",\"modules\":{s},\"dependencies\":{s}}}",
+                    .{ modules_json, dependencies_json },
+                );
+            }
+
+            fn lowerUpgradeCommand(
+                ctx: *@This(),
+                command: std.json.Value,
+            ) ![]u8 {
+                const object = command.object;
+                const modules_value = object.get("modules") orelse return error.InvalidCli;
+                const dependencies_value = object.get("dependencies") orelse return error.InvalidCli;
+                const package_value = object.get("package") orelse return error.InvalidCli;
+                const ticket_value = object.get("ticket") orelse return error.InvalidCli;
+                if (modules_value != .array or dependencies_value != .array or package_value != .string) return error.InvalidCli;
+
+                const modules_json = try stringifyJsonValueAlloc(ctx.allocator, modules_value);
+                defer ctx.allocator.free(modules_json);
+                const dependencies_json = try stringifyJsonValueAlloc(ctx.allocator, dependencies_value);
+                defer ctx.allocator.free(dependencies_json);
+                const ticket_json = try ctx.lowerObjectArgument(ticket_value);
+                defer ctx.allocator.free(ticket_json);
+
+                return try std.fmt.allocPrint(
+                    ctx.allocator,
+                    "{{\"kind\":\"Upgrade\",\"modules\":{s},\"dependencies\":{s},\"package\":{f},\"ticket\":{s}}}",
+                    .{
+                        modules_json,
+                        dependencies_json,
+                        std.json.fmt(package_value.string, .{}),
+                        ticket_json,
+                    },
+                );
+            }
+
+            fn lowerCommand(
+                ctx: *@This(),
+                command: std.json.Value,
+            ) ![]u8 {
+                if (command != .object) return error.InvalidCli;
+                const kind = command.object.get("kind") orelse return error.InvalidCli;
+                if (kind != .string) return error.InvalidCli;
+
+                if (std.mem.eql(u8, kind.string, "MoveCall")) {
+                    return try ctx.lowerMoveCallCommand(command);
+                }
+                if (std.mem.eql(u8, kind.string, "TransferObjects")) {
+                    return try ctx.lowerTransferObjectsCommand(command);
+                }
+                if (std.mem.eql(u8, kind.string, "SplitCoins")) {
+                    return try ctx.lowerSplitCoinsCommand(command);
+                }
+                if (std.mem.eql(u8, kind.string, "MergeCoins")) {
+                    return try ctx.lowerMergeCoinsCommand(command);
+                }
+                if (std.mem.eql(u8, kind.string, "MakeMoveVec")) {
+                    return try ctx.lowerMakeMoveVecCommand(command);
+                }
+                if (std.mem.eql(u8, kind.string, "Publish")) {
+                    return try ctx.lowerPublishCommand(command);
+                }
+                if (std.mem.eql(u8, kind.string, "Upgrade")) {
+                    return try ctx.lowerUpgradeCommand(command);
+                }
+                return error.InvalidCli;
+            }
+        };
+
+        var lowering = LoweringContext{
+            .rpc = self,
+            .allocator = allocator,
+        };
+        defer lowering.deinit();
+
+        for (parsed.value.array.items) |command| {
+            try lowering.commands.append(allocator, try lowering.lowerCommand(command));
+        }
+
+        var owned = OwnedLocalProgrammableTransactionParts{
+            .inputs_json = try lowering.buildInputsJson(),
+            .commands_json = try lowering.buildCommandsJson(),
+            .sender = try allocator.dupe(u8, sender),
+            .gas_data_json = try self.buildGasDataJson(
+                allocator,
+                sender,
+                gas_payment_json,
+                gas_price,
+                gas_budget,
+            ),
+            .expiration_json = if (expiration_json) |value| try allocator.dupe(u8, value) else null,
+        };
+        errdefer owned.deinit(allocator);
+        return owned;
+    }
+
+    pub fn buildLocalProgrammableTransactionTxBytesFromCommandSource(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        sender: []const u8,
+        gas_payment_json: []const u8,
+        gas_price: u64,
+        gas_budget: u64,
+        expiration_json: ?[]const u8,
+    ) ![]u8 {
+        var parts = try self.ownLocalProgrammableTransactionPartsFromCommandSource(
+            allocator,
+            source,
+            sender,
+            gas_payment_json,
+            gas_price,
+            gas_budget,
+            expiration_json,
+        );
+        defer parts.deinit(allocator);
+
+        return try self.buildLocalProgrammableTransactionTxBytesFromParts(
+            allocator,
+            parts.inputs_json,
+            parts.commands_json,
+            parts.sender,
+            parts.gas_data_json,
+            parts.expiration_json,
+        );
+    }
+
+    pub fn buildLocalProgrammableTransactionExecutePayloadFromCommandSourceWithSignatures(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        sender: []const u8,
+        gas_payment_json: []const u8,
+        gas_price: u64,
+        gas_budget: u64,
+        expiration_json: ?[]const u8,
+        signatures: []const []const u8,
+        options_json: ?[]const u8,
+    ) ![]u8 {
+        var parts = try self.ownLocalProgrammableTransactionPartsFromCommandSource(
+            allocator,
+            source,
+            sender,
+            gas_payment_json,
+            gas_price,
+            gas_budget,
+            expiration_json,
+        );
+        defer parts.deinit(allocator);
+
+        return try self.buildLocalProgrammableTransactionExecutePayloadFromPartsWithSignatures(
+            allocator,
+            parts.inputs_json,
+            parts.commands_json,
+            parts.sender,
+            parts.gas_data_json,
+            parts.expiration_json,
+            signatures,
+            options_json,
+        );
+    }
+
+    pub fn buildLocalProgrammableTransactionExecutePayloadFromCommandSourceFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        sender: []const u8,
+        gas_payment_json: []const u8,
+        gas_price: u64,
+        gas_budget: u64,
+        expiration_json: ?[]const u8,
+        options_json: ?[]const u8,
+        preparation: keystore.SignerPreparation,
+    ) ![]u8 {
+        var parts = try self.ownLocalProgrammableTransactionPartsFromCommandSource(
+            allocator,
+            source,
+            sender,
+            gas_payment_json,
+            gas_price,
+            gas_budget,
+            expiration_json,
+        );
+        defer parts.deinit(allocator);
+
+        return try self.buildLocalProgrammableTransactionExecutePayloadFromPartsFromDefaultKeystore(
+            allocator,
+            parts.inputs_json,
+            parts.commands_json,
+            parts.sender,
+            parts.gas_data_json,
+            parts.expiration_json,
+            options_json,
+            preparation,
+        );
+    }
+
+    pub fn buildLocalProgrammableTransactionExecutePayloadFromCommandSourceWithAccountProvider(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        sender: []const u8,
+        gas_payment_json: []const u8,
+        gas_price: u64,
+        gas_budget: u64,
+        expiration_json: ?[]const u8,
+        options_json: ?[]const u8,
+        provider: tx_request_builder.AccountProvider,
+    ) ![]u8 {
+        var parts = try self.ownLocalProgrammableTransactionPartsFromCommandSource(
+            allocator,
+            source,
+            sender,
+            gas_payment_json,
+            gas_price,
+            gas_budget,
+            expiration_json,
+        );
+        defer parts.deinit(allocator);
+
+        const tx_bytes = try self.buildLocalProgrammableTransactionTxBytesFromParts(
+            allocator,
+            parts.inputs_json,
+            parts.commands_json,
+            parts.sender,
+            parts.gas_data_json,
+            parts.expiration_json,
+        );
+        defer allocator.free(tx_bytes);
+        return try self.buildExecutePayloadFromTxBytesWithAccountProvider(
+            allocator,
+            tx_bytes,
+            .{
+                .source = .{ .commands_json = parts.commands_json },
+                .sender = sender,
+                .gas_budget = gas_budget,
+                .gas_price = gas_price,
+                .gas_payment_json = gas_payment_json,
+                .options_json = options_json,
+            },
+            provider,
+        );
+    }
+
+    pub fn runLocalProgrammableTransactionFromCommandSourceOrChallengePromptWithAccountProvider(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        sender: []const u8,
+        gas_payment_json: []const u8,
+        gas_price: u64,
+        gas_budget: u64,
+        expiration_json: ?[]const u8,
+        options_json: ?[]const u8,
+        provider: tx_request_builder.AccountProvider,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionOrChallengePromptResult {
+        var parts = try self.ownLocalProgrammableTransactionPartsFromCommandSource(
+            allocator,
+            source,
+            sender,
+            gas_payment_json,
+            gas_price,
+            gas_budget,
+            expiration_json,
+        );
+        defer parts.deinit(allocator);
+
+        const options: tx_request_builder.ProgrammaticRequestOptions = .{
+            .source = .{ .commands_json = parts.commands_json },
+            .sender = sender,
+            .gas_budget = gas_budget,
+            .gas_price = gas_price,
+            .gas_payment_json = gas_payment_json,
+            .options_json = options_json,
+        };
+        if (try self.getOwnedSessionChallengePrompt(allocator, options, provider)) |prompt| {
+            return .{ .challenge_required = prompt };
+        }
+
+        const tx_bytes = try self.buildLocalProgrammableTransactionTxBytesFromParts(
+            allocator,
+            parts.inputs_json,
+            parts.commands_json,
+            parts.sender,
+            parts.gas_data_json,
+            parts.expiration_json,
+        );
+        defer allocator.free(tx_bytes);
+
+        const payload = try self.buildExecutePayloadFromTxBytesWithAccountProvider(
+            allocator,
+            tx_bytes,
+            options,
+            provider,
+        );
+        defer allocator.free(payload);
+        return .{ .completed = try self.runExecutePayloadAction(allocator, payload, action) };
+    }
+
+    pub fn runLocalProgrammableTransactionFromCommandSourceWithChallengeResponseWithAccountProvider(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        sender: []const u8,
+        gas_payment_json: []const u8,
+        gas_price: u64,
+        gas_budget: u64,
+        expiration_json: ?[]const u8,
+        options_json: ?[]const u8,
+        provider: tx_request_builder.AccountProvider,
+        response: tx_request_builder.SessionChallengeResponse,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionResult {
+        const updated_provider = try self.applySessionChallengeResponse(provider, response);
+        const payload = try self.buildLocalProgrammableTransactionExecutePayloadFromCommandSourceWithAccountProvider(
+            allocator,
+            source,
+            sender,
+            gas_payment_json,
+            gas_price,
+            gas_budget,
+            expiration_json,
+            options_json,
+            updated_provider,
+        );
+        defer allocator.free(payload);
+        return try self.runExecutePayloadAction(allocator, payload, action);
+    }
+
+    pub fn buildLocalProgrammableTransactionBlockFromCommandSource(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        sender: []const u8,
+        gas_payment_json: []const u8,
+        gas_price: u64,
+        gas_budget: u64,
+        expiration_json: ?[]const u8,
+    ) ![]u8 {
+        var parts = try self.ownLocalProgrammableTransactionPartsFromCommandSource(
+            allocator,
+            source,
+            sender,
+            gas_payment_json,
+            gas_price,
+            gas_budget,
+            expiration_json,
+        );
+        defer parts.deinit(allocator);
+
+        var out = std.ArrayList(u8){};
+        errdefer out.deinit(allocator);
+        const writer = out.writer(allocator);
+
+        try writer.writeAll("{\"kind\":\"ProgrammableTransaction\",\"inputs\":");
+        try writer.writeAll(parts.inputs_json);
+        try writer.writeAll(",\"commands\":");
+        try writer.writeAll(parts.commands_json);
+        try writer.writeAll(",\"sender\":");
+        try writer.print("{f}", .{std.json.fmt(parts.sender, .{})});
+        try writer.print(",\"gasBudget\":{}", .{gas_budget});
+        try writer.print(",\"gasPrice\":{}", .{gas_price});
+        try writer.writeAll(",\"gasPayment\":");
+        try writer.writeAll(gas_payment_json);
+        try writer.writeAll(",\"gasData\":");
+        try writer.writeAll(parts.gas_data_json);
+        if (parts.expiration_json) |value| {
+            try writer.writeAll(",\"expiration\":");
+            try writer.writeAll(value);
+        }
+        try writer.writeAll("}");
+
+        return try out.toOwnedSlice(allocator);
+    }
+
+    pub fn buildLocalProgrammableTransactionInspectPayloadFromCommandSource(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        sender: []const u8,
+        gas_payment_json: []const u8,
+        gas_price: u64,
+        gas_budget: u64,
+        expiration_json: ?[]const u8,
+        options_json: ?[]const u8,
+    ) ![]u8 {
+        const tx_block = try self.buildLocalProgrammableTransactionBlockFromCommandSource(
+            allocator,
+            source,
+            sender,
+            gas_payment_json,
+            gas_price,
+            gas_budget,
+            expiration_json,
+        );
+        defer allocator.free(tx_block);
+
+        return try tx_builder.buildProgrammaticTxSimulatePayloadFromTransactionBlock(
+            allocator,
+            tx_block,
+            sender,
+            gas_budget,
+            gas_price,
+            options_json,
+        );
+    }
+
+    pub fn buildLocalProgrammableTransactionTxBytes(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        transaction: ptb_bytes_builder.TransactionDataV1,
+    ) ![]u8 {
+        _ = self;
+        return try ptb_bytes_builder.buildTransactionDataV1Base64(allocator, transaction);
+    }
+
+    pub fn buildLocalProgrammableTransactionTxBytesFromJson(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        transaction_json: []const u8,
+    ) ![]u8 {
+        _ = self;
+        return try ptb_bytes_builder.buildTransactionDataV1Base64FromJson(
+            allocator,
+            transaction_json,
+        );
+    }
+
+    pub fn buildLocalProgrammableTransactionTxBytesFromParts(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        inputs_json: []const u8,
+        commands_json: []const u8,
+        sender: []const u8,
+        gas_data_json: []const u8,
+        expiration_json: ?[]const u8,
+    ) ![]u8 {
+        _ = self;
+        return try ptb_bytes_builder.buildTransactionDataV1Base64FromParts(
+            allocator,
+            inputs_json,
+            commands_json,
+            sender,
+            gas_data_json,
+            expiration_json,
+        );
+    }
+
+    pub fn buildLocalProgrammableTransactionTxBytesFromCommandSourceParts(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        inputs_json: []const u8,
+        sender: []const u8,
+        gas_data_json: []const u8,
+        expiration_json: ?[]const u8,
+    ) ![]u8 {
+        const commands_json = try tx_builder.resolveCommands(allocator, source);
+        defer allocator.free(commands_json);
+        return try self.buildLocalProgrammableTransactionTxBytesFromParts(
+            allocator,
+            inputs_json,
+            commands_json,
+            sender,
+            gas_data_json,
+            expiration_json,
+        );
+    }
+
+    pub fn buildLocalProgrammableTransactionExecutePayloadWithSignatures(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        transaction: ptb_bytes_builder.TransactionDataV1,
+        signatures: []const []const u8,
+        options_json: ?[]const u8,
+    ) ![]u8 {
+        const tx_bytes = try self.buildLocalProgrammableTransactionTxBytes(
+            allocator,
+            transaction,
+        );
+        defer allocator.free(tx_bytes);
+        return try buildExecutePayloadFromTxBytesWithRealBuilder(
+            allocator,
+            tx_bytes,
+            options_json,
+            .{ .direct_signatures = signatures },
+        );
+    }
+
+    pub fn buildLocalProgrammableTransactionExecutePayloadFromJsonWithSignatures(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        transaction_json: []const u8,
+        signatures: []const []const u8,
+        options_json: ?[]const u8,
+    ) ![]u8 {
+        const tx_bytes = try self.buildLocalProgrammableTransactionTxBytesFromJson(
+            allocator,
+            transaction_json,
+        );
+        defer allocator.free(tx_bytes);
+        return try buildExecutePayloadFromTxBytesWithRealBuilder(
+            allocator,
+            tx_bytes,
+            options_json,
+            .{ .direct_signatures = signatures },
+        );
+    }
+
+    pub fn buildLocalProgrammableTransactionExecutePayloadFromPartsWithSignatures(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        inputs_json: []const u8,
+        commands_json: []const u8,
+        sender: []const u8,
+        gas_data_json: []const u8,
+        expiration_json: ?[]const u8,
+        signatures: []const []const u8,
+        options_json: ?[]const u8,
+    ) ![]u8 {
+        const tx_bytes = try self.buildLocalProgrammableTransactionTxBytesFromParts(
+            allocator,
+            inputs_json,
+            commands_json,
+            sender,
+            gas_data_json,
+            expiration_json,
+        );
+        defer allocator.free(tx_bytes);
+        return try buildExecutePayloadFromTxBytesWithRealBuilder(
+            allocator,
+            tx_bytes,
+            options_json,
+            .{ .direct_signatures = signatures },
+        );
+    }
+
+    pub fn buildLocalProgrammableTransactionExecutePayloadFromCommandSourcePartsWithSignatures(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        inputs_json: []const u8,
+        sender: []const u8,
+        gas_data_json: []const u8,
+        expiration_json: ?[]const u8,
+        signatures: []const []const u8,
+        options_json: ?[]const u8,
+    ) ![]u8 {
+        const tx_bytes = try self.buildLocalProgrammableTransactionTxBytesFromCommandSourceParts(
+            allocator,
+            source,
+            inputs_json,
+            sender,
+            gas_data_json,
+            expiration_json,
+        );
+        defer allocator.free(tx_bytes);
+        return try buildExecutePayloadFromTxBytesWithRealBuilder(
+            allocator,
+            tx_bytes,
+            options_json,
+            .{ .direct_signatures = signatures },
+        );
+    }
+
+    pub fn buildLocalProgrammableTransactionExecutePayloadFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        transaction: ptb_bytes_builder.TransactionDataV1,
+        options_json: ?[]const u8,
+        preparation: keystore.SignerPreparation,
+    ) ![]u8 {
+        const tx_bytes = try self.buildLocalProgrammableTransactionTxBytes(
+            allocator,
+            transaction,
+        );
+        defer allocator.free(tx_bytes);
+        return try buildExecutePayloadFromTxBytesWithRealBuilder(
+            allocator,
+            tx_bytes,
+            options_json,
+            .{ .default_keystore = preparation },
+        );
+    }
+
+    pub fn buildLocalProgrammableTransactionExecutePayloadFromJsonFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        transaction_json: []const u8,
+        options_json: ?[]const u8,
+        preparation: keystore.SignerPreparation,
+    ) ![]u8 {
+        const tx_bytes = try self.buildLocalProgrammableTransactionTxBytesFromJson(
+            allocator,
+            transaction_json,
+        );
+        defer allocator.free(tx_bytes);
+        return try buildExecutePayloadFromTxBytesWithRealBuilder(
+            allocator,
+            tx_bytes,
+            options_json,
+            .{ .default_keystore = preparation },
+        );
+    }
+
+    pub fn buildLocalProgrammableTransactionExecutePayloadFromPartsFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        inputs_json: []const u8,
+        commands_json: []const u8,
+        sender: []const u8,
+        gas_data_json: []const u8,
+        expiration_json: ?[]const u8,
+        options_json: ?[]const u8,
+        preparation: keystore.SignerPreparation,
+    ) ![]u8 {
+        const tx_bytes = try self.buildLocalProgrammableTransactionTxBytesFromParts(
+            allocator,
+            inputs_json,
+            commands_json,
+            sender,
+            gas_data_json,
+            expiration_json,
+        );
+        defer allocator.free(tx_bytes);
+        return try buildExecutePayloadFromTxBytesWithRealBuilder(
+            allocator,
+            tx_bytes,
+            options_json,
+            .{ .default_keystore = preparation },
+        );
+    }
+
+    pub fn buildLocalProgrammableTransactionExecutePayloadFromCommandSourcePartsFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        inputs_json: []const u8,
+        sender: []const u8,
+        gas_data_json: []const u8,
+        expiration_json: ?[]const u8,
+        options_json: ?[]const u8,
+        preparation: keystore.SignerPreparation,
+    ) ![]u8 {
+        const tx_bytes = try self.buildLocalProgrammableTransactionTxBytesFromCommandSourceParts(
+            allocator,
+            source,
+            inputs_json,
+            sender,
+            gas_data_json,
+            expiration_json,
+        );
+        defer allocator.free(tx_bytes);
+        return try buildExecutePayloadFromTxBytesWithRealBuilder(
+            allocator,
+            tx_bytes,
+            options_json,
+            .{ .default_keystore = preparation },
+        );
+    }
+
+    test "resolve local PTB object input helpers build owned shared and receiving inputs from sui_getObject" {
+        const testing = std.testing;
+
+        var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+        defer _ = gpa.deinit();
+        const allocator = gpa.allocator();
+
+        const State = struct {
+            calls: usize = 0,
+        };
+
+        var rpc = SuiRpcClient.init(allocator, "https://rpc.invalid");
+        defer rpc.deinit();
+
+        var state = State{};
+        rpc.request_sender = .{
+            .context = &state,
+            .callback = struct {
+                fn send(
+                    ctx: *anyopaque,
+                    alloc: std.mem.Allocator,
+                    req: RpcRequest,
+                ) error{OutOfMemory}![]u8 {
+                    const local_state: *State = @ptrCast(@alignCast(ctx));
+                    local_state.calls += 1;
+                    std.debug.assert(std.mem.eql(u8, req.method, "sui_getObject"));
+
+                    const parsed = std.json.parseFromSlice(std.json.Value, alloc, req.params_json, .{}) catch return error.OutOfMemory;
+                    defer parsed.deinit();
+                    std.debug.assert(parsed.value == .array);
+                    std.debug.assert(parsed.value.array.items.len == 2);
+                    std.debug.assert(parsed.value.array.items[1] == .object);
+                    std.debug.assert(parsed.value.array.items[1].object.get("showOwner") != null);
+
+                    const object_id = parsed.value.array.items[0].string;
+                    if (std.mem.eql(u8, object_id, "0xowned")) {
+                        return try alloc.dupe(
+                            u8,
+                            "{\"result\":{\"data\":{\"objectId\":\"0xowned\",\"version\":\"7\",\"digest\":\"owned-digest\",\"owner\":{\"AddressOwner\":\"0xabc\"}}}}",
+                        );
+                    }
+                    if (std.mem.eql(u8, object_id, "0xshared")) {
+                        return try alloc.dupe(
+                            u8,
+                            "{\"result\":{\"data\":{\"objectId\":\"0xshared\",\"version\":\"9\",\"digest\":\"shared-digest\",\"owner\":{\"Shared\":{\"initial_shared_version\":\"4\"}}}}}",
+                        );
+                    }
+                    return error.OutOfMemory;
+                }
+            }.send,
+        };
+
+        const owned_input = try rpc.resolveImmOrOwnedObjectInputJson(allocator, "0xowned");
+        defer allocator.free(owned_input);
+        const receiving_input = try rpc.resolveReceivingObjectInputJson(allocator, "0xowned");
+        defer allocator.free(receiving_input);
+        const shared_input = try rpc.resolveSharedObjectInputJson(allocator, "0xshared", false);
+        defer allocator.free(shared_input);
+
+        try testing.expectEqualStrings(
+            "{\"Object\":{\"ImmOrOwnedObject\":{\"objectId\":\"0xowned\",\"version\":7,\"digest\":\"owned-digest\"}}}",
+            owned_input,
+        );
+        try testing.expectEqualStrings(
+            "{\"Object\":{\"Receiving\":{\"objectId\":\"0xowned\",\"version\":7,\"digest\":\"owned-digest\"}}}",
+            receiving_input,
+        );
+        try testing.expectEqualStrings(
+            "{\"Object\":{\"SharedObject\":{\"objectId\":\"0xshared\",\"initialSharedVersion\":4,\"mutable\":false}}}",
+            shared_input,
+        );
+        try testing.expectEqual(@as(usize, 3), state.calls);
+    }
+
+    test "buildGasDataJson and local command-source parts payloads support explicit resolved inputs" {
+        const testing = std.testing;
+
+        var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+        defer _ = gpa.deinit();
+        const allocator = gpa.allocator();
+
+        var rpc = SuiRpcClient.init(allocator, "https://rpc.invalid");
+        defer rpc.deinit();
+
+        const gas_data_json = try rpc.buildGasDataJson(
+            allocator,
+            "0xsender",
+            "[{\"objectId\":\"0xgas\",\"version\":\"5\",\"digest\":\"gas-digest\"}]",
+            7,
+            1200,
+        );
+        defer allocator.free(gas_data_json);
+
+        try testing.expectEqualStrings(
+            "{\"payment\":[{\"objectId\":\"0xgas\",\"version\":\"5\",\"digest\":\"gas-digest\"}],\"owner\":\"0xsender\",\"price\":7,\"budget\":1200}",
+            gas_data_json,
+        );
+
+        const payload = try rpc.buildLocalProgrammableTransactionExecutePayloadFromCommandSourcePartsWithSignatures(
+            allocator,
+            .{
+                .command_items = &.{
+                    "{\"kind\":\"MergeCoins\",\"destination\":\"GasCoin\",\"sources\":[{\"Input\":0}]}",
+                },
+            },
+            "[{\"Object\":{\"ImmOrOwnedObject\":{\"objectId\":\"0xowned\",\"version\":7,\"digest\":\"owned-digest\"}}}]",
+            "0xsender",
+            gas_data_json,
+            null,
+            &.{"sig-a"},
+            "{\"showEffects\":true}",
+        );
+        defer allocator.free(payload);
+
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
+        defer parsed.deinit();
+
+        try testing.expect(parsed.value == .array);
+        try testing.expectEqual(@as(usize, 3), parsed.value.array.items.len);
+        try testing.expect(parsed.value.array.items[0] == .string);
+        try testing.expect(parsed.value.array.items[0].string.len != 0);
+        try testing.expectEqualStrings("sig-a", parsed.value.array.items[1].array.items[0].string);
+        try testing.expect(parsed.value.array.items[2] == .object);
+    }
+
+    test "ownLocalProgrammableTransactionPartsFromCommandSource lowers lowerable commands into explicit local PTB parts" {
+        const testing = std.testing;
+
+        var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+        defer _ = gpa.deinit();
+        const allocator = gpa.allocator();
+
+        const State = struct {
+            object_calls: usize = 0,
+        };
+
+        var rpc = SuiRpcClient.init(allocator, "https://rpc.invalid");
+        defer rpc.deinit();
+
+        var state = State{};
+        rpc.request_sender = .{
+            .context = &state,
+            .callback = struct {
+                fn send(
+                    ctx: *anyopaque,
+                    alloc: std.mem.Allocator,
+                    req: RpcRequest,
+                ) error{OutOfMemory}![]u8 {
+                    const local_state: *State = @ptrCast(@alignCast(ctx));
+                    std.debug.assert(std.mem.eql(u8, req.method, "sui_getObject"));
+                    local_state.object_calls += 1;
+
+                    const parsed = std.json.parseFromSlice(std.json.Value, alloc, req.params_json, .{}) catch return error.OutOfMemory;
+                    defer parsed.deinit();
+                    const object_id = parsed.value.array.items[0].string;
+                    if (std.mem.eql(u8, object_id, "0xdest")) {
+                        return try alloc.dupe(
+                            u8,
+                            "{\"result\":{\"data\":{\"objectId\":\"0xdest\",\"version\":\"7\",\"digest\":\"dest-digest\",\"owner\":{\"AddressOwner\":\"0xabc\"}}}}",
+                        );
+                    }
+                    if (std.mem.eql(u8, object_id, "0xsource")) {
+                        return try alloc.dupe(
+                            u8,
+                            "{\"result\":{\"data\":{\"objectId\":\"0xsource\",\"version\":\"8\",\"digest\":\"source-digest\",\"owner\":{\"AddressOwner\":\"0xabc\"}}}}",
+                        );
+                    }
+                    return error.OutOfMemory;
+                }
+            }.send,
+        };
+
+        var parts = try rpc.ownLocalProgrammableTransactionPartsFromCommandSource(
+            allocator,
+            .{
+                .command_items = &.{
+                    "{\"kind\":\"SplitCoins\",\"coin\":\"GasCoin\",\"amounts\":[7]}",
+                    "{\"kind\":\"TransferObjects\",\"objects\":[{\"NestedResult\":[0,0]}],\"address\":\"0xreceiver\"}",
+                    "{\"kind\":\"MergeCoins\",\"destination\":\"0xdest\",\"sources\":[\"0xsource\"]}",
+                },
+            },
+            "0xsender",
+            "[{\"objectId\":\"0xgas\",\"version\":\"5\",\"digest\":\"gas-digest\"}]",
+            7,
+            1200,
+            null,
+        );
+        defer parts.deinit(allocator);
+
+        const inputs = try std.json.parseFromSlice(std.json.Value, allocator, parts.inputs_json, .{});
+        defer inputs.deinit();
+        const commands = try std.json.parseFromSlice(std.json.Value, allocator, parts.commands_json, .{});
+        defer commands.deinit();
+
+        try testing.expect(inputs.value == .array);
+        try testing.expectEqual(@as(usize, 4), inputs.value.array.items.len);
+        try testing.expect(inputs.value.array.items[0].object.get("Pure") != null);
+        try testing.expect(inputs.value.array.items[1].object.get("Pure") != null);
+        try testing.expect(inputs.value.array.items[2].object.get("Object") != null);
+        try testing.expect(inputs.value.array.items[3].object.get("Object") != null);
+
+        try testing.expect(commands.value == .array);
+        try testing.expectEqualStrings("SplitCoins", commands.value.array.items[0].object.get("kind").?.string);
+        try testing.expectEqualStrings("TransferObjects", commands.value.array.items[1].object.get("kind").?.string);
+        try testing.expectEqualStrings("MergeCoins", commands.value.array.items[2].object.get("kind").?.string);
+        try testing.expectEqual(@as(i64, 0), commands.value.array.items[0].object.get("amounts").?.array.items[0].object.get("Input").?.integer);
+        try testing.expectEqual(@as(i64, 1), commands.value.array.items[1].object.get("address").?.object.get("Input").?.integer);
+        try testing.expectEqual(@as(i64, 2), commands.value.array.items[2].object.get("destination").?.object.get("Input").?.integer);
+        try testing.expectEqual(@as(i64, 3), commands.value.array.items[2].object.get("sources").?.array.items[0].object.get("Input").?.integer);
+        try testing.expectEqualStrings("0xsender", parts.sender);
+        try testing.expectEqualStrings(
+            "{\"payment\":[{\"objectId\":\"0xgas\",\"version\":\"5\",\"digest\":\"gas-digest\"}],\"owner\":\"0xsender\",\"price\":7,\"budget\":1200}",
+            parts.gas_data_json,
+        );
+        try testing.expectEqual(@as(usize, 2), state.object_calls);
+    }
+
+    test "commandSourceSupportsLocalProgrammableTransactionBuilder accepts make-move-vec publish and upgrade commands" {
+        const testing = std.testing;
+
+        var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+        defer _ = gpa.deinit();
+        const allocator = gpa.allocator();
+
+        try testing.expect(try SuiRpcClient.commandSourceSupportsLocalProgrammableTransactionBuilder(
+            allocator,
+            .{ .commands_json = "[{\"kind\":\"MakeMoveVec\",\"type\":null,\"elements\":[{\"Object\":{\"ImmOrOwnedObject\":{\"objectId\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"version\":\"1\",\"digest\":\"ERERERERERERERERERERERERERERERERERERERERERE=\"}}}]},{\"kind\":\"Publish\",\"modules\":[\"AQID\"],\"dependencies\":[\"0x2\"]},{\"kind\":\"Upgrade\",\"modules\":[\"BAUG\"],\"dependencies\":[\"0x2\"],\"package\":\"0x42\",\"ticket\":{\"Result\":0}}]" },
+        ));
+    }
+
+    test "ownLocalProgrammableTransactionPartsFromCommandSource lowers make-move-vec publish and upgrade commands" {
+        const testing = std.testing;
+
+        var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+        defer _ = gpa.deinit();
+        const allocator = gpa.allocator();
+
+        const State = struct {
+            object_calls: usize = 0,
+        };
+
+        var rpc = SuiRpcClient.init(allocator, "https://rpc.invalid");
+        defer rpc.deinit();
+
+        var state = State{};
+        rpc.request_sender = .{
+            .context = &state,
+            .callback = struct {
+                fn send(
+                    ctx: *anyopaque,
+                    alloc: std.mem.Allocator,
+                    req: RpcRequest,
+                ) error{OutOfMemory}![]u8 {
+                    const local_state: *State = @ptrCast(@alignCast(ctx));
+                    std.debug.assert(std.mem.eql(u8, req.method, "sui_getObject"));
+                    local_state.object_calls += 1;
+
+                    const parsed = std.json.parseFromSlice(std.json.Value, alloc, req.params_json, .{}) catch return error.OutOfMemory;
+                    defer parsed.deinit();
+                    const object_id = parsed.value.array.items[0].string;
+                    if (std.mem.eql(u8, object_id, "0x111")) {
+                        return try alloc.dupe(
+                            u8,
+                            "{\"result\":{\"data\":{\"objectId\":\"0x111\",\"version\":\"7\",\"digest\":\"vec-digest\",\"owner\":{\"AddressOwner\":\"0xabc\"}}}}",
+                        );
+                    }
+                    if (std.mem.eql(u8, object_id, "0x222")) {
+                        return try alloc.dupe(
+                            u8,
+                            "{\"result\":{\"data\":{\"objectId\":\"0x222\",\"version\":\"8\",\"digest\":\"upgrade-digest\",\"owner\":{\"AddressOwner\":\"0xabc\"}}}}",
+                        );
+                    }
+                    return error.OutOfMemory;
+                }
+            }.send,
+        };
+
+        var parts = try rpc.ownLocalProgrammableTransactionPartsFromCommandSource(
+            allocator,
+            .{
+                .commands_json =
+                \\[
+                \\  {"kind":"MakeMoveVec","type":null,"elements":["0x111"]},
+                \\  {"kind":"Publish","modules":["AQID"],"dependencies":["0x2"]},
+                \\  {"kind":"Upgrade","modules":["BAUG"],"dependencies":["0x2"],"package":"0x42","ticket":"0x222"}
+                \\]
+                ,
+            },
+            "0xabc",
+            "[{\"objectId\":\"0x999\",\"version\":\"3\",\"digest\":\"0x3333333333333333333333333333333333333333333333333333333333333333\"}]",
+            8,
+            1200,
+            null,
+        );
+        defer parts.deinit(allocator);
+
+        try testing.expectEqual(@as(usize, 2), state.object_calls);
+        try testing.expect(std.mem.indexOf(u8, parts.inputs_json, "0x111") != null);
+        try testing.expect(std.mem.indexOf(u8, parts.inputs_json, "0x222") != null);
+        try testing.expect(std.mem.indexOf(u8, parts.commands_json, "\"MakeMoveVec\"") != null);
+        try testing.expect(std.mem.indexOf(u8, parts.commands_json, "\"Publish\"") != null);
+        try testing.expect(std.mem.indexOf(u8, parts.commands_json, "\"Upgrade\"") != null);
+    }
+
+    test "ownLocalProgrammableTransactionPartsFromCommandSource lowers typed make-move-vec pure elements" {
+        const testing = std.testing;
+
+        var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+        defer _ = gpa.deinit();
+        const allocator = gpa.allocator();
+
+        var rpc = SuiRpcClient.init(allocator, "https://rpc.invalid");
+        defer rpc.deinit();
+
+        var parts = try rpc.ownLocalProgrammableTransactionPartsFromCommandSource(
+            allocator,
+            .{
+                .commands_json =
+                \\[
+                \\  {"kind":"MakeMoveVec","type":"address","elements":["0x111","0x222"]},
+                \\  {"kind":"MakeMoveVec","type":"u64","elements":[7,"8"]},
+                \\  {"kind":"MakeMoveVec","type":{"Vector":"u8"},"elements":["0x0102"]}
+                \\]
+                ,
+            },
+            "0xabc",
+            "[{\"objectId\":\"0x999\",\"version\":\"3\",\"digest\":\"0x3333333333333333333333333333333333333333333333333333333333333333\"}]",
+            8,
+            1200,
+            null,
+        );
+        defer parts.deinit(allocator);
+
+        const inputs = try std.json.parseFromSlice(std.json.Value, allocator, parts.inputs_json, .{});
+        defer inputs.deinit();
+        const commands = try std.json.parseFromSlice(std.json.Value, allocator, parts.commands_json, .{});
+        defer commands.deinit();
+
+        try testing.expect(inputs.value == .array);
+        try testing.expectEqual(@as(usize, 5), inputs.value.array.items.len);
+        try testing.expect(commands.value == .array);
+        try testing.expectEqual(@as(usize, 3), commands.value.array.items.len);
+        try testing.expectEqualStrings("MakeMoveVec", commands.value.array.items[0].object.get("kind").?.string);
+        try testing.expectEqualStrings("address", commands.value.array.items[0].object.get("type").?.string);
+        try testing.expectEqual(@as(i64, 0), commands.value.array.items[0].object.get("elements").?.array.items[0].object.get("Input").?.integer);
+        try testing.expectEqual(@as(i64, 1), commands.value.array.items[0].object.get("elements").?.array.items[1].object.get("Input").?.integer);
+        try testing.expectEqual(@as(i64, 2), commands.value.array.items[1].object.get("elements").?.array.items[0].object.get("Input").?.integer);
+        try testing.expectEqual(@as(i64, 3), commands.value.array.items[1].object.get("elements").?.array.items[1].object.get("Input").?.integer);
+        try testing.expectEqual(@as(i64, 4), commands.value.array.items[2].object.get("elements").?.array.items[0].object.get("Input").?.integer);
+    }
+
+    test "buildLocalProgrammableTransactionTxBytesFromCommandSource rejects unsupported move-call raw literals without explicit wrappers" {
+        const testing = std.testing;
+
+        var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+        defer _ = gpa.deinit();
+        const allocator = gpa.allocator();
+
+        var rpc = SuiRpcClient.init(allocator, "https://rpc.invalid");
+        defer rpc.deinit();
+
+        try testing.expectError(
+            error.InvalidCli,
+            rpc.buildLocalProgrammableTransactionTxBytesFromCommandSource(
+                allocator,
+                .{
+                    .move_call = .{
+                        .package_id = "0x2",
+                        .module = "counter",
+                        .function_name = "increment",
+                        .type_args = "[]",
+                        .arguments = "[7]",
+                    },
+                },
+                "0xsender",
+                "[{\"objectId\":\"0xgas\",\"version\":\"5\",\"digest\":\"gas-digest\"}]",
+                7,
+                1200,
+                null,
+            ),
+        );
+    }
+
+    test "getMoveCallUserParameterKinds and local move-call lowering use normalized function signatures" {
+        const testing = std.testing;
+
+        var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+        defer _ = gpa.deinit();
+        const allocator = gpa.allocator();
+
+        const State = struct {
+            normalized_calls: usize = 0,
+            object_calls: usize = 0,
+        };
+
+        var rpc = SuiRpcClient.init(allocator, "https://rpc.invalid");
+        defer rpc.deinit();
+
+        var state = State{};
+        rpc.request_sender = .{
+            .context = &state,
+            .callback = struct {
+                fn send(
+                    ctx: *anyopaque,
+                    alloc: std.mem.Allocator,
+                    req: RpcRequest,
+                ) error{OutOfMemory}![]u8 {
+                    const local_state: *State = @ptrCast(@alignCast(ctx));
+                    if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                        local_state.normalized_calls += 1;
+                        return try alloc.dupe(
+                            u8,
+                            "{\"result\":{\"parameters\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"pool\",\"name\":\"Pool\",\"typeParams\":[]}},\"U64\",\"Address\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[],\"typeParameters\":[],\"visibility\":\"Public\",\"isEntry\":true}}",
+                        );
+                    }
+                    if (std.mem.eql(u8, req.method, "sui_getObject")) {
+                        local_state.object_calls += 1;
+                        return try alloc.dupe(
+                            u8,
+                            "{\"result\":{\"data\":{\"objectId\":\"0xpool\",\"version\":\"7\",\"digest\":\"pool-digest\",\"owner\":{\"AddressOwner\":\"0xabc\"}}}}",
+                        );
+                    }
+                    return error.OutOfMemory;
+                }
+            }.send,
+        };
+
+        const kinds = try rpc.getMoveCallUserParameterKinds(allocator, "0x2", "pool", "swap");
+        defer allocator.free(kinds);
+        try testing.expectEqual(@as(usize, 3), kinds.len);
+        try testing.expectEqual(LocalMoveCallParameterKind.object, kinds[0]);
+        try testing.expectEqual(LocalMoveCallParameterKind.u64, kinds[1]);
+        try testing.expectEqual(LocalMoveCallParameterKind.address, kinds[2]);
+
+        var parts = try rpc.ownLocalProgrammableTransactionPartsFromCommandSource(
+            allocator,
+            .{
+                .move_call = .{
+                    .package_id = "0x2",
+                    .module = "pool",
+                    .function_name = "swap",
+                    .type_args = "[]",
+                    .arguments = "[\"0xpool\",7,\"0xreceiver\"]",
+                },
+            },
+            "0xsender",
+            "[{\"objectId\":\"0xgas\",\"version\":\"5\",\"digest\":\"gas-digest\"}]",
+            7,
+            1200,
+            null,
+        );
+        defer parts.deinit(allocator);
+
+        const inputs = try std.json.parseFromSlice(std.json.Value, allocator, parts.inputs_json, .{});
+        defer inputs.deinit();
+        const commands = try std.json.parseFromSlice(std.json.Value, allocator, parts.commands_json, .{});
+        defer commands.deinit();
+
+        try testing.expectEqual(@as(usize, 3), inputs.value.array.items.len);
+        try testing.expect(inputs.value.array.items[0].object.get("Object") != null);
+        try testing.expect(inputs.value.array.items[1].object.get("Pure") != null);
+        try testing.expect(inputs.value.array.items[2].object.get("Pure") != null);
+        try testing.expectEqual(@as(i64, 0), commands.value.array.items[0].object.get("arguments").?.array.items[0].object.get("Input").?.integer);
+        try testing.expectEqual(@as(i64, 1), commands.value.array.items[0].object.get("arguments").?.array.items[1].object.get("Input").?.integer);
+        try testing.expectEqual(@as(i64, 2), commands.value.array.items[0].object.get("arguments").?.array.items[2].object.get("Input").?.integer);
+        try testing.expectEqual(@as(usize, 2), state.normalized_calls);
+        try testing.expectEqual(@as(usize, 1), state.object_calls);
+    }
+
+    test "local move-call lowering supports bool and vector<u8> pure arguments from ABI" {
+        const testing = std.testing;
+
+        var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+        defer _ = gpa.deinit();
+        const allocator = gpa.allocator();
+
+        var rpc = SuiRpcClient.init(allocator, "https://rpc.invalid");
+        defer rpc.deinit();
+
+        rpc.request_sender = .{
+            .context = undefined,
+            .callback = struct {
+                fn send(
+                    _: *anyopaque,
+                    alloc: std.mem.Allocator,
+                    req: RpcRequest,
+                ) error{OutOfMemory}![]u8 {
+                    std.debug.assert(std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction"));
+                    return try alloc.dupe(
+                        u8,
+                        "{\"result\":{\"parameters\":[\"Bool\",{\"Vector\":\"U8\"}],\"return\":[],\"typeParameters\":[],\"visibility\":\"Public\",\"isEntry\":true}}",
+                    );
+                }
+            }.send,
+        };
+
+        var parts = try rpc.ownLocalProgrammableTransactionPartsFromCommandSource(
+            allocator,
+            .{
+                .move_call = .{
+                    .package_id = "0x2",
+                    .module = "bytes",
+                    .function_name = "emit",
+                    .type_args = "[]",
+                    .arguments = "[true,[1,2,3]]",
+                },
+            },
+            "0xsender",
+            "[{\"objectId\":\"0xgas\",\"version\":\"5\",\"digest\":\"gas-digest\"}]",
+            7,
+            1200,
+            null,
+        );
+        defer parts.deinit(allocator);
+
+        const inputs = try std.json.parseFromSlice(std.json.Value, allocator, parts.inputs_json, .{});
+        defer inputs.deinit();
+        try testing.expectEqual(@as(usize, 2), inputs.value.array.items.len);
+        try testing.expect(inputs.value.array.items[0].object.get("Pure") != null);
+        try testing.expect(inputs.value.array.items[1].object.get("Pure") != null);
+    }
+
+    pub const RealBuilderPayloadSigner = union(enum) {
+        direct_signatures: []const []const u8,
+        default_keystore: keystore.SignerPreparation,
+    };
+
+    fn buildExecutePayloadFromTxBytesWithRealBuilder(
+        allocator: std.mem.Allocator,
+        tx_bytes: []const u8,
+        options_json: ?[]const u8,
+        payload_signer: RealBuilderPayloadSigner,
+    ) ![]u8 {
+        return switch (payload_signer) {
+            .direct_signatures => |signatures| try tx_builder.buildExecutePayload(
+                allocator,
+                tx_bytes,
+                signatures,
+                options_json,
+            ),
+            .default_keystore => |preparation| blk: {
+                var signed = try keystore.signTransactionBytesFromDefaultKeystore(
+                    allocator,
+                    tx_bytes,
+                    preparation,
+                );
+                defer signed.deinit(allocator);
+                break :blk try tx_builder.buildExecutePayload(
+                    allocator,
+                    tx_bytes,
+                    signed.items,
+                    options_json,
+                );
+            },
+        };
+    }
+
+    fn buildExecutePayloadFromRemoteAuthorization(
+        allocator: std.mem.Allocator,
+        tx_bytes: []const u8,
+        options: tx_request_builder.ProgrammaticRequestOptions,
+        account_address: ?[]const u8,
+        account_session: tx_request_builder.AccountSession,
+        session_supports_execute: bool,
+        authorizer: tx_request_builder.RemoteAuthorizer,
+    ) ![]u8 {
+        const authorization = try authorizer.callback(
+            authorizer.context,
+            allocator,
+            .{
+                .options = options,
+                .account_address = account_address,
+                .account_session = account_session,
+                .tx_bytes_base64 = tx_bytes,
+            },
+        );
+
+        const sender = authorization.sender orelse account_address orelse options.sender orelse return error.InvalidCli;
+        if (options.sender) |expected_sender| {
+            if (!std.mem.eql(u8, expected_sender, sender)) return error.InvalidCli;
+        }
+        if (!session_supports_execute or !authorization.supports_execute) return error.UnsupportedAccountProvider;
+        if (authorization.signatures.len == 0) return error.UnsupportedAccountProvider;
+        return try tx_builder.buildExecutePayload(
+            allocator,
+            tx_bytes,
+            authorization.signatures,
+            options.options_json,
+        );
+    }
+
+    fn buildExecutePayloadFromTxBytesWithAccountProvider(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        tx_bytes: []const u8,
+        options: tx_request_builder.ProgrammaticRequestOptions,
+        provider: tx_request_builder.AccountProvider,
+    ) ![]u8 {
+        _ = self;
+        return switch (provider) {
+            .none => error.UnsupportedAccountProvider,
+            .direct_signatures => |account| blk: {
+                if (account.signatures.len == 0) return error.UnsupportedAccountProvider;
+                break :blk try tx_builder.buildExecutePayload(
+                    allocator,
+                    tx_bytes,
+                    account.signatures,
+                    options.options_json,
+                );
+            },
+            .keystore_contents => |account| blk: {
+                var signed = try keystore.signTransactionBytesFromContents(
+                    allocator,
+                    tx_bytes,
+                    account.contents,
+                    account.preparation,
+                );
+                defer signed.deinit(allocator);
+                break :blk try tx_builder.buildExecutePayload(
+                    allocator,
+                    tx_bytes,
+                    signed.items,
+                    options.options_json,
+                );
+            },
+            .default_keystore => |account| try buildExecutePayloadFromTxBytesWithRealBuilder(
+                allocator,
+                tx_bytes,
+                options.options_json,
+                .{ .default_keystore = account.preparation },
+            ),
+            .remote_signer => |account| try buildExecutePayloadFromRemoteAuthorization(
+                allocator,
+                tx_bytes,
+                options,
+                account.address,
+                account.session,
+                account.session_supports_execute,
+                account.authorizer,
+            ),
+            .zklogin => |account| blk: {
+                const authorizer = account.authorizer orelse return error.UnsupportedAccountProvider;
+                break :blk try buildExecutePayloadFromRemoteAuthorization(
+                    allocator,
+                    tx_bytes,
+                    options,
+                    account.address,
+                    account.session,
+                    account.session_supports_execute,
+                    authorizer,
+                );
+            },
+            .passkey => |account| blk: {
+                const authorizer = account.authorizer orelse return error.UnsupportedAccountProvider;
+                break :blk try buildExecutePayloadFromRemoteAuthorization(
+                    allocator,
+                    tx_bytes,
+                    options,
+                    account.address,
+                    account.session,
+                    account.session_supports_execute,
+                    authorizer,
+                );
+            },
+            .multisig => |account| blk: {
+                const authorizer = account.authorizer orelse return error.UnsupportedAccountProvider;
+                break :blk try buildExecutePayloadFromRemoteAuthorization(
+                    allocator,
+                    tx_bytes,
+                    options,
+                    account.address,
+                    account.session,
+                    account.session_supports_execute,
+                    authorizer,
+                );
+            },
+        };
+    }
+
+    pub fn buildCommandSourceExecutePayloadWithSignatures(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        signer: []const u8,
+        source: tx_builder.CommandSource,
+        gas_object_id: ?[]const u8,
+        gas_budget: u64,
+        signatures: []const []const u8,
+        options_json: ?[]const u8,
+    ) ![]u8 {
+        const tx_bytes = try self.buildCommandSourceTxBytes(
+            allocator,
+            signer,
+            source,
+            gas_object_id,
+            gas_budget,
+        );
+        defer allocator.free(tx_bytes);
+        return try buildExecutePayloadFromTxBytesWithRealBuilder(
+            allocator,
+            tx_bytes,
+            options_json,
+            .{ .direct_signatures = signatures },
+        );
+    }
+
+    pub fn buildCommandSourceExecutePayloadFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        signer: []const u8,
+        source: tx_builder.CommandSource,
+        gas_object_id: ?[]const u8,
+        gas_budget: u64,
+        options_json: ?[]const u8,
+        preparation: keystore.SignerPreparation,
+    ) ![]u8 {
+        const tx_bytes = try self.buildCommandSourceTxBytes(
+            allocator,
+            signer,
+            source,
+            gas_object_id,
+            gas_budget,
+        );
+        defer allocator.free(tx_bytes);
+        return try buildExecutePayloadFromTxBytesWithRealBuilder(
+            allocator,
+            tx_bytes,
+            options_json,
+            .{ .default_keystore = preparation },
+        );
+    }
+
+    fn extractGasObjectIdFromGasPaymentJson(
+        allocator: std.mem.Allocator,
+        gas_payment_json: []const u8,
+    ) !?[]u8 {
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, gas_payment_json, .{});
+        defer parsed.deinit();
+        if (parsed.value != .array or parsed.value.array.items.len == 0) return null;
+
+        const first = parsed.value.array.items[0];
+        if (first != .object) return null;
+        const object_id = first.object.get("objectId") orelse return null;
+        if (object_id != .string or object_id.string.len == 0) return null;
+        return try allocator.dupe(u8, object_id.string);
+    }
+
+    const OwnedTokenItems = struct {
+        items: std.ArrayListUnmanaged([]const u8) = .{},
+
+        fn deinit(self: *OwnedTokenItems, allocator: std.mem.Allocator) void {
+            for (self.items.items) |item| allocator.free(item);
+            self.items.deinit(allocator);
+        }
+    };
+
+    fn moveCallArgumentsUseSelectedTokens(raw_args: ?[]const u8) bool {
+        const raw = raw_args orelse return false;
+        return std.mem.indexOf(u8, raw, "select:") != null or std.mem.indexOf(u8, raw, "sel:") != null;
+    }
+
+    fn buildMoveCallArgumentTokens(
+        allocator: std.mem.Allocator,
+        raw_args: ?[]const u8,
+    ) !OwnedTokenItems {
+        var items = OwnedTokenItems{};
+        errdefer items.deinit(allocator);
+
+        const args_json = raw_args orelse return items;
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, args_json, .{});
+        defer parsed.deinit();
+        if (parsed.value != .array) return error.InvalidCli;
+
+        for (parsed.value.array.items) |entry| {
+            const token = switch (entry) {
+                .string => try allocator.dupe(u8, entry.string),
+                else => try std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(entry, .{})}),
+            };
+            try items.items.append(allocator, token);
+        }
+
+        return items;
+    }
+
+    const OwnedRealBuilderCommandSource = struct {
+        source: tx_builder.CommandSource,
+        owned_arguments_json: ?[]u8 = null,
+        owned_commands_json: ?[]u8 = null,
+
+        fn deinit(self: *OwnedRealBuilderCommandSource, allocator: std.mem.Allocator) void {
+            if (self.owned_arguments_json) |value| allocator.free(value);
+            if (self.owned_commands_json) |value| allocator.free(value);
+        }
+    };
+
+    fn resolveCommandSourceForRealBuilderWithDefaultOwner(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        default_owner: ?[]const u8,
+    ) !OwnedRealBuilderCommandSource {
+        if (source.move_call) |move_call| {
+            if (source.command_items.len == 0 and source.commands_json == null and moveCallArgumentsUseSelectedTokens(move_call.arguments)) {
+                var tokens = try buildMoveCallArgumentTokens(allocator, move_call.arguments);
+                defer tokens.deinit(allocator);
+
+                var values = try self.resolveArgumentValuesFromTokensWithDefaultOwner(
+                    allocator,
+                    tokens.items.items,
+                    default_owner,
+                );
+                defer values.deinit(allocator);
+
+                const arguments_json = try tx_request_builder.buildArgumentValueArray(allocator, values.slice());
+                return .{
+                    .source = .{
+                        .move_call = .{
+                            .package_id = move_call.package_id,
+                            .module = move_call.module,
+                            .function_name = move_call.function_name,
+                            .type_args = move_call.type_args,
+                            .arguments = arguments_json,
+                        },
+                    },
+                    .owned_arguments_json = arguments_json,
+                };
+            }
+        }
+
+        if (try self.resolveSelectedArgumentTokensInCommandSourceWithDefaultOwner(allocator, source, default_owner)) |resolved_commands_json| {
+            return .{
+                .source = .{ .commands_json = resolved_commands_json },
+                .owned_commands_json = resolved_commands_json,
+            };
+        }
+
+        return .{ .source = source };
+    }
+
+    fn buildCommandSourceExecutePayloadWithRealBuilderInternal(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        config: tx_request_builder.CommandRequestConfig,
+        payload_signer: RealBuilderPayloadSigner,
+        auto_gas_min_balance_override: ?u64,
+        resolve_selected_tokens: bool,
+    ) ![]u8 {
+        const base_options = tx_request_builder.optionsFromCommandSource(source, config);
+        const inferred_sender = if (config.sender == null)
+            try inferSelectedRequestOwnerFromOptions(allocator, base_options)
+        else
+            null;
+        defer if (inferred_sender) |value| allocator.free(value);
+
+        const sender = config.sender orelse inferred_sender orelse return error.InvalidCli;
+        const gas_budget = config.gas_budget orelse return error.InvalidCli;
+
+        var resolved_source: OwnedRealBuilderCommandSource = .{ .source = source };
+        if (resolve_selected_tokens or auto_gas_min_balance_override != null) {
+            resolved_source = try self.resolveCommandSourceForRealBuilderWithDefaultOwner(
+                allocator,
+                source,
+                sender,
+            );
+        }
+        defer resolved_source.deinit(allocator);
+
+        const owned_gas_payment_json = if (auto_gas_min_balance_override) |override|
+            try self.selectGasPaymentJson(
+                allocator,
+                sender,
+                override,
+            ) orelse return error.SelectionNotFound
+        else
+            try self.resolveSelectedGasPaymentJsonWithDefaultOwner(
+                allocator,
+                config.gas_payment_json,
+                sender,
+            );
+        defer if (owned_gas_payment_json) |value| allocator.free(value);
+
+        const effective_gas_payment_json = owned_gas_payment_json orelse config.gas_payment_json;
+        const gas_object_id = if (effective_gas_payment_json) |value|
+            try extractGasObjectIdFromGasPaymentJson(allocator, value)
+        else
+            null;
+        defer if (gas_object_id) |value| allocator.free(value);
+
+        return switch (payload_signer) {
+            .direct_signatures => |signatures| try self.buildCommandSourceExecutePayloadWithSignatures(
+                allocator,
+                sender,
+                resolved_source.source,
+                gas_object_id,
+                gas_budget,
+                signatures,
+                config.options_json,
+            ),
+            .default_keystore => |preparation| try self.buildCommandSourceExecutePayloadFromDefaultKeystore(
+                allocator,
+                sender,
+                resolved_source.source,
+                gas_object_id,
+                gas_budget,
+                config.options_json,
+                preparation,
+            ),
+        };
+    }
+
+    fn buildRealBuilderExecutePayloadFromOwnedOptions(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        options: tx_request_builder.OwnedProgrammaticRequestOptions,
+        payload_signer: RealBuilderPayloadSigner,
+    ) ![]u8 {
+        const sender = options.options.sender orelse return error.InvalidCli;
+        const gas_budget = options.options.gas_budget orelse return error.InvalidCli;
+        const gas_object_id = if (options.options.gas_payment_json) |value|
+            try extractGasObjectIdFromGasPaymentJson(allocator, value)
+        else
+            null;
+        defer if (gas_object_id) |value| allocator.free(value);
+
+        return switch (payload_signer) {
+            .direct_signatures => |signatures| try self.buildCommandSourceExecutePayloadWithSignatures(
+                allocator,
+                sender,
+                options.options.source,
+                gas_object_id,
+                gas_budget,
+                signatures,
+                options.options.options_json,
+            ),
+            .default_keystore => |preparation| try self.buildCommandSourceExecutePayloadFromDefaultKeystore(
+                allocator,
+                sender,
+                options.options.source,
+                gas_object_id,
+                gas_budget,
+                options.options.options_json,
+                preparation,
+            ),
+        };
+    }
+
+    fn buildRealBuilderExecutePayloadFromOwnedOptionsWithAccountProvider(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        options: tx_request_builder.OwnedProgrammaticRequestOptions,
+        provider: tx_request_builder.AccountProvider,
+    ) ![]u8 {
+        const sender = options.options.sender orelse return error.InvalidCli;
+        const gas_budget = options.options.gas_budget orelse return error.InvalidCli;
+        const gas_object_id = if (options.options.gas_payment_json) |value|
+            try extractGasObjectIdFromGasPaymentJson(allocator, value)
+        else
+            null;
+        defer if (gas_object_id) |value| allocator.free(value);
+
+        const tx_bytes = try self.buildCommandSourceTxBytes(
+            allocator,
+            sender,
+            options.options.source,
+            gas_object_id,
+            gas_budget,
+        );
+        defer allocator.free(tx_bytes);
+        return try self.buildExecutePayloadFromTxBytesWithAccountProvider(
+            allocator,
+            tx_bytes,
+            options.options,
+            provider,
+        );
+    }
+
+    pub fn buildCommandSourceExecutePayloadResolvingSelectedArgumentTokensWithSignatures(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        config: tx_request_builder.CommandRequestConfig,
+    ) ![]u8 {
+        return try self.buildCommandSourceExecutePayloadWithRealBuilderInternal(
+            allocator,
+            source,
+            config,
+            .{ .direct_signatures = config.signatures },
+            null,
+            true,
+        );
+    }
+
+    pub fn buildCommandSourceExecutePayloadResolvingSelectedArgumentTokensFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        config: tx_request_builder.CommandRequestConfig,
+        preparation: keystore.SignerPreparation,
+    ) ![]u8 {
+        return try self.buildCommandSourceExecutePayloadWithRealBuilderInternal(
+            allocator,
+            source,
+            config,
+            .{ .default_keystore = preparation },
+            null,
+            true,
+        );
+    }
+
+    pub fn buildCommandSourceExecutePayloadWithAutoGasPaymentWithSignatures(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        config: tx_request_builder.CommandRequestConfig,
+        min_balance_override: ?u64,
+    ) ![]u8 {
+        return try self.buildCommandSourceExecutePayloadWithRealBuilderInternal(
+            allocator,
+            source,
+            config,
+            .{ .direct_signatures = config.signatures },
+            min_balance_override orelse config.gas_budget orelse 1,
+            true,
+        );
+    }
+
+    pub fn buildCommandSourceExecutePayloadWithAutoGasPaymentFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        config: tx_request_builder.CommandRequestConfig,
+        min_balance_override: ?u64,
+        preparation: keystore.SignerPreparation,
+    ) ![]u8 {
+        return try self.buildCommandSourceExecutePayloadWithRealBuilderInternal(
+            allocator,
+            source,
+            config,
+            .{ .default_keystore = preparation },
+            min_balance_override orelse config.gas_budget orelse 1,
+            true,
+        );
+    }
+
+    pub fn runExecutePayloadAction(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        payload: []const u8,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionResult {
+        return switch (action) {
+            .build_artifact => |kind| switch (kind) {
+                .execute_payload => .{ .artifact = try allocator.dupe(u8, payload) },
+                else => error.InvalidCli,
+            },
+            .build_artifact_summarize => |kind| switch (kind) {
+                .execute_payload => .{ .artifact_summarized = try self.summarizeArtifact(allocator, .execute_payload, payload) },
+                else => error.InvalidCli,
+            },
+            .execute => blk: {
+                const response = try self.sendTxExecute(payload);
+                defer self.allocator.free(response);
+                break :blk .{ .executed = try allocator.dupe(u8, response) };
+            },
+            .execute_summarize => blk: {
+                const response = try self.sendTxExecute(payload);
+                defer self.allocator.free(response);
+                break :blk .{ .summarized = try self.summarizeExecutionResponse(allocator, response) };
+            },
+            .execute_confirm => |value| blk: {
+                const response = try self.executePayloadAndConfirm(payload, value.timeout_ms, value.poll_ms);
+                defer self.allocator.free(response);
+                break :blk .{ .executed = try allocator.dupe(u8, response) };
+            },
+            .execute_confirm_summarize => |value| blk: {
+                const response = try self.executePayloadAndConfirm(payload, value.timeout_ms, value.poll_ms);
+                defer self.allocator.free(response);
+                break :blk .{ .summarized = try self.summarizeExecutionResponse(allocator, response) };
+            },
+            .execute_confirm_observe => |value| blk: {
+                const response = try self.sendTxExecute(payload);
+                defer self.allocator.free(response);
+                break :blk .{ .observed = try self.observeConfirmedExecuteResponse(
+                    allocator,
+                    response,
+                    value.timeout_ms,
+                    value.poll_ms,
+                ) };
+            },
+            else => return error.InvalidCli,
+        };
+    }
+
+    pub fn runCommandSourceResolvingSelectedArgumentTokensWithSignatures(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        config: tx_request_builder.CommandRequestConfig,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionResult {
+        const payload = try self.buildCommandSourceExecutePayloadResolvingSelectedArgumentTokensWithSignatures(
+            allocator,
+            source,
+            config,
+        );
+        defer allocator.free(payload);
+        return try self.runExecutePayloadAction(allocator, payload, action);
+    }
+
+    pub fn runCommandSourceResolvingSelectedArgumentTokensFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        config: tx_request_builder.CommandRequestConfig,
+        preparation: keystore.SignerPreparation,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionResult {
+        const payload = try self.buildCommandSourceExecutePayloadResolvingSelectedArgumentTokensFromDefaultKeystore(
+            allocator,
+            source,
+            config,
+            preparation,
+        );
+        defer allocator.free(payload);
+        return try self.runExecutePayloadAction(allocator, payload, action);
+    }
+
+    pub fn runCommandSourceWithAutoGasPaymentWithSignatures(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        config: tx_request_builder.CommandRequestConfig,
+        min_balance_override: ?u64,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionResult {
+        const payload = try self.buildCommandSourceExecutePayloadWithAutoGasPaymentWithSignatures(
+            allocator,
+            source,
+            config,
+            min_balance_override,
+        );
+        defer allocator.free(payload);
+        return try self.runExecutePayloadAction(allocator, payload, action);
+    }
+
+    pub fn runCommandSourceWithAutoGasPaymentFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        config: tx_request_builder.CommandRequestConfig,
+        min_balance_override: ?u64,
+        preparation: keystore.SignerPreparation,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionResult {
+        const payload = try self.buildCommandSourceExecutePayloadWithAutoGasPaymentFromDefaultKeystore(
+            allocator,
+            source,
+            config,
+            min_balance_override,
+            preparation,
+        );
+        defer allocator.free(payload);
+        return try self.runExecutePayloadAction(allocator, payload, action);
+    }
+
+    pub fn runCommandSourceResolvingSelectedArgumentTokensWithAccountProvider(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        config: tx_request_builder.CommandRequestConfig,
+        provider: tx_request_builder.AccountProvider,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionResult {
+        var owned = try self.ownOptionsFromCommandSourceResolvingSelectedArgumentTokens(
+            allocator,
+            source,
+            config,
+        );
+        defer owned.deinit(allocator);
+
+        const payload = try self.buildRealBuilderExecutePayloadFromOwnedOptionsWithAccountProvider(
+            allocator,
+            owned,
+            provider,
+        );
+        defer allocator.free(payload);
+        return try self.runExecutePayloadAction(allocator, payload, action);
+    }
+
+    pub fn runCommandSourceWithAutoGasPaymentWithAccountProvider(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        config: tx_request_builder.CommandRequestConfig,
+        provider: tx_request_builder.AccountProvider,
+        min_balance_override: ?u64,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionResult {
+        var owned = try self.ownOptionsFromCommandSourceWithAutoGasPayment(
+            allocator,
+            source,
+            config,
+            min_balance_override,
+        );
+        defer owned.deinit(allocator);
+
+        const payload = try self.buildRealBuilderExecutePayloadFromOwnedOptionsWithAccountProvider(
+            allocator,
+            owned,
+            provider,
+        );
+        defer allocator.free(payload);
+        return try self.runExecutePayloadAction(allocator, payload, action);
+    }
+
+    pub fn runCommandSourceResolvingSelectedArgumentTokensOrChallengePromptWithAccountProvider(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        config: tx_request_builder.CommandRequestConfig,
+        provider: tx_request_builder.AccountProvider,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionOrChallengePromptResult {
+        var owned = try self.ownOptionsFromCommandSourceResolvingSelectedArgumentTokens(
+            allocator,
+            source,
+            config,
+        );
+        defer owned.deinit(allocator);
+
+        if (try self.getOwnedSessionChallengePrompt(allocator, owned.options, provider)) |prompt| {
+            return .{ .challenge_required = prompt };
+        }
+
+        const payload = try self.buildRealBuilderExecutePayloadFromOwnedOptionsWithAccountProvider(
+            allocator,
+            owned,
+            provider,
+        );
+        defer allocator.free(payload);
+        return .{ .completed = try self.runExecutePayloadAction(allocator, payload, action) };
+    }
+
+    pub fn runCommandSourceResolvingSelectedArgumentTokensWithChallengeResponseWithAccountProvider(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        config: tx_request_builder.CommandRequestConfig,
+        provider: tx_request_builder.AccountProvider,
+        response: tx_request_builder.SessionChallengeResponse,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionResult {
+        var owned = try self.ownOptionsFromCommandSourceResolvingSelectedArgumentTokens(
+            allocator,
+            source,
+            config,
+        );
+        defer owned.deinit(allocator);
+
+        const updated_provider = try self.applySessionChallengeResponse(provider, response);
+        const payload = try self.buildRealBuilderExecutePayloadFromOwnedOptionsWithAccountProvider(
+            allocator,
+            owned,
+            updated_provider,
+        );
+        defer allocator.free(payload);
+        return try self.runExecutePayloadAction(allocator, payload, action);
+    }
+
+    pub fn runCommandSourceWithAutoGasPaymentOrChallengePromptWithAccountProvider(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        config: tx_request_builder.CommandRequestConfig,
+        provider: tx_request_builder.AccountProvider,
+        min_balance_override: ?u64,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionOrChallengePromptResult {
+        var owned = try self.ownOptionsFromCommandSourceWithAutoGasPayment(
+            allocator,
+            source,
+            config,
+            min_balance_override,
+        );
+        defer owned.deinit(allocator);
+
+        if (try self.getOwnedSessionChallengePrompt(allocator, owned.options, provider)) |prompt| {
+            return .{ .challenge_required = prompt };
+        }
+
+        const payload = try self.buildRealBuilderExecutePayloadFromOwnedOptionsWithAccountProvider(
+            allocator,
+            owned,
+            provider,
+        );
+        defer allocator.free(payload);
+        return .{ .completed = try self.runExecutePayloadAction(allocator, payload, action) };
+    }
+
+    pub fn runCommandSourceWithAutoGasPaymentWithChallengeResponseWithAccountProvider(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        config: tx_request_builder.CommandRequestConfig,
+        provider: tx_request_builder.AccountProvider,
+        min_balance_override: ?u64,
+        response: tx_request_builder.SessionChallengeResponse,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionResult {
+        var owned = try self.ownOptionsFromCommandSourceWithAutoGasPayment(
+            allocator,
+            source,
+            config,
+            min_balance_override,
+        );
+        defer owned.deinit(allocator);
+
+        const updated_provider = try self.applySessionChallengeResponse(provider, response);
+        const payload = try self.buildRealBuilderExecutePayloadFromOwnedOptionsWithAccountProvider(
+            allocator,
+            owned,
+            updated_provider,
+        );
+        defer allocator.free(payload);
+        return try self.runExecutePayloadAction(allocator, payload, action);
+    }
+
+    pub fn executeCommandSourceResolvingSelectedArgumentTokensWithSignatures(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        config: tx_request_builder.CommandRequestConfig,
+    ) ![]u8 {
+        var result = try self.runCommandSourceResolvingSelectedArgumentTokensWithSignatures(
+            allocator,
+            source,
+            config,
+            .execute,
+        );
+        errdefer result.deinit(allocator);
+        return switch (result) {
+            .executed => |value| value,
+            else => error.InvalidResponse,
+        };
+    }
+
+    pub fn executeCommandSourceResolvingSelectedArgumentTokensFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        config: tx_request_builder.CommandRequestConfig,
+        preparation: keystore.SignerPreparation,
+    ) ![]u8 {
+        var result = try self.runCommandSourceResolvingSelectedArgumentTokensFromDefaultKeystore(
+            allocator,
+            source,
+            config,
+            preparation,
+            .execute,
+        );
+        errdefer result.deinit(allocator);
+        return switch (result) {
+            .executed => |value| value,
+            else => error.InvalidResponse,
+        };
+    }
+
+    pub fn executeCommandSourceResolvingSelectedArgumentTokensAndConfirmAndSummarizeWithSignatures(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        config: tx_request_builder.CommandRequestConfig,
+        timeout_ms: u64,
+        poll_ms: u64,
+    ) !tx_result.OwnedExecutionInsights {
+        var result = try self.runCommandSourceResolvingSelectedArgumentTokensWithSignatures(
+            allocator,
+            source,
+            config,
+            .{ .execute_confirm_summarize = .{ .timeout_ms = timeout_ms, .poll_ms = poll_ms } },
+        );
+        errdefer result.deinit(allocator);
+        return switch (result) {
+            .summarized => |value| value,
+            else => error.InvalidResponse,
+        };
+    }
+
+    pub fn executeCommandSourceResolvingSelectedArgumentTokensAndConfirmAndSummarizeFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        config: tx_request_builder.CommandRequestConfig,
+        preparation: keystore.SignerPreparation,
+        timeout_ms: u64,
+        poll_ms: u64,
+    ) !tx_result.OwnedExecutionInsights {
+        var result = try self.runCommandSourceResolvingSelectedArgumentTokensFromDefaultKeystore(
+            allocator,
+            source,
+            config,
+            preparation,
+            .{ .execute_confirm_summarize = .{ .timeout_ms = timeout_ms, .poll_ms = poll_ms } },
+        );
+        errdefer result.deinit(allocator);
+        return switch (result) {
+            .summarized => |value| value,
+            else => error.InvalidResponse,
+        };
+    }
+
+    pub fn executeCommandSourceResolvingSelectedArgumentTokensAndObserveWithSignatures(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        config: tx_request_builder.CommandRequestConfig,
+        timeout_ms: u64,
+        poll_ms: u64,
+    ) !ObservedExecutionSummary {
+        var result = try self.runCommandSourceResolvingSelectedArgumentTokensWithSignatures(
+            allocator,
+            source,
+            config,
+            .{ .execute_confirm_observe = .{ .timeout_ms = timeout_ms, .poll_ms = poll_ms } },
+        );
+        errdefer result.deinit(allocator);
+        return switch (result) {
+            .observed => |value| value,
+            else => error.InvalidResponse,
+        };
+    }
+
+    pub fn executeCommandSourceResolvingSelectedArgumentTokensAndObserveFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        config: tx_request_builder.CommandRequestConfig,
+        preparation: keystore.SignerPreparation,
+        timeout_ms: u64,
+        poll_ms: u64,
+    ) !ObservedExecutionSummary {
+        var result = try self.runCommandSourceResolvingSelectedArgumentTokensFromDefaultKeystore(
+            allocator,
+            source,
+            config,
+            preparation,
+            .{ .execute_confirm_observe = .{ .timeout_ms = timeout_ms, .poll_ms = poll_ms } },
+        );
+        errdefer result.deinit(allocator);
+        return switch (result) {
+            .observed => |value| value,
+            else => error.InvalidResponse,
+        };
+    }
+
+    pub fn executeCommandSourceWithAutoGasPaymentWithSignatures(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        config: tx_request_builder.CommandRequestConfig,
+        min_balance_override: ?u64,
+    ) ![]u8 {
+        var result = try self.runCommandSourceWithAutoGasPaymentWithSignatures(
+            allocator,
+            source,
+            config,
+            min_balance_override,
+            .execute,
+        );
+        errdefer result.deinit(allocator);
+        return switch (result) {
+            .executed => |value| value,
+            else => error.InvalidResponse,
+        };
+    }
+
+    pub fn executeCommandSourceWithAutoGasPaymentFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        config: tx_request_builder.CommandRequestConfig,
+        min_balance_override: ?u64,
+        preparation: keystore.SignerPreparation,
+    ) ![]u8 {
+        var result = try self.runCommandSourceWithAutoGasPaymentFromDefaultKeystore(
+            allocator,
+            source,
+            config,
+            min_balance_override,
+            preparation,
+            .execute,
+        );
+        errdefer result.deinit(allocator);
+        return switch (result) {
+            .executed => |value| value,
+            else => error.InvalidResponse,
+        };
+    }
+
+    pub fn executeCommandSourceWithAutoGasPaymentAndConfirmAndSummarizeWithSignatures(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        config: tx_request_builder.CommandRequestConfig,
+        min_balance_override: ?u64,
+        timeout_ms: u64,
+        poll_ms: u64,
+    ) !tx_result.OwnedExecutionInsights {
+        var result = try self.runCommandSourceWithAutoGasPaymentWithSignatures(
+            allocator,
+            source,
+            config,
+            min_balance_override,
+            .{ .execute_confirm_summarize = .{ .timeout_ms = timeout_ms, .poll_ms = poll_ms } },
+        );
+        errdefer result.deinit(allocator);
+        return switch (result) {
+            .summarized => |value| value,
+            else => error.InvalidResponse,
+        };
+    }
+
+    pub fn executeCommandSourceWithAutoGasPaymentAndConfirmAndSummarizeFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        config: tx_request_builder.CommandRequestConfig,
+        min_balance_override: ?u64,
+        preparation: keystore.SignerPreparation,
+        timeout_ms: u64,
+        poll_ms: u64,
+    ) !tx_result.OwnedExecutionInsights {
+        var result = try self.runCommandSourceWithAutoGasPaymentFromDefaultKeystore(
+            allocator,
+            source,
+            config,
+            min_balance_override,
+            preparation,
+            .{ .execute_confirm_summarize = .{ .timeout_ms = timeout_ms, .poll_ms = poll_ms } },
+        );
+        errdefer result.deinit(allocator);
+        return switch (result) {
+            .summarized => |value| value,
+            else => error.InvalidResponse,
+        };
+    }
+
+    pub fn executeCommandSourceWithAutoGasPaymentAndObserveWithSignatures(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        config: tx_request_builder.CommandRequestConfig,
+        min_balance_override: ?u64,
+        timeout_ms: u64,
+        poll_ms: u64,
+    ) !ObservedExecutionSummary {
+        var result = try self.runCommandSourceWithAutoGasPaymentWithSignatures(
+            allocator,
+            source,
+            config,
+            min_balance_override,
+            .{ .execute_confirm_observe = .{ .timeout_ms = timeout_ms, .poll_ms = poll_ms } },
+        );
+        errdefer result.deinit(allocator);
+        return switch (result) {
+            .observed => |value| value,
+            else => error.InvalidResponse,
+        };
+    }
+
+    pub fn executeCommandSourceWithAutoGasPaymentAndObserveFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        config: tx_request_builder.CommandRequestConfig,
+        min_balance_override: ?u64,
+        preparation: keystore.SignerPreparation,
+        timeout_ms: u64,
+        poll_ms: u64,
+    ) !ObservedExecutionSummary {
+        var result = try self.runCommandSourceWithAutoGasPaymentFromDefaultKeystore(
+            allocator,
+            source,
+            config,
+            min_balance_override,
+            preparation,
+            .{ .execute_confirm_observe = .{ .timeout_ms = timeout_ms, .poll_ms = poll_ms } },
+        );
+        errdefer result.deinit(allocator);
+        return switch (result) {
+            .observed => |value| value,
+            else => error.InvalidResponse,
+        };
+    }
+
     pub fn getTransactionBlock(self: *SuiRpcClient, params_json: []const u8) ![]u8 {
         return try self.call("sui_getTransactionBlock", params_json);
+    }
+
+    pub fn buildObjectOptionsJson(
+        allocator: std.mem.Allocator,
+        options: ObjectDataOptions,
+    ) !?[]u8 {
+        if (options.isEmpty()) return null;
+
+        var out = std.ArrayList(u8).empty;
+        errdefer out.deinit(allocator);
+        const writer = out.writer(allocator);
+
+        try writer.writeAll("{");
+        var has_output = false;
+
+        if (options.show_type) try appendObjectOptionEntry(writer, &has_output, "showType");
+        if (options.show_owner) try appendObjectOptionEntry(writer, &has_output, "showOwner");
+        if (options.show_previous_transaction) try appendObjectOptionEntry(writer, &has_output, "showPreviousTransaction");
+        if (options.show_display) try appendObjectOptionEntry(writer, &has_output, "showDisplay");
+        if (options.show_content) try appendObjectOptionEntry(writer, &has_output, "showContent");
+        if (options.show_bcs) try appendObjectOptionEntry(writer, &has_output, "showBcs");
+        if (options.show_storage_rebate) try appendObjectOptionEntry(writer, &has_output, "showStorageRebate");
+
+        try writer.writeAll("}");
+        return try out.toOwnedSlice(allocator);
+    }
+
+    pub fn buildDynamicFieldNameJson(
+        allocator: std.mem.Allocator,
+        name: DynamicFieldName,
+    ) ![]u8 {
+        return try std.fmt.allocPrint(
+            allocator,
+            "{{\"type\":\"{s}\",\"value\":{s}}}",
+            .{ name.type_name, name.value_json },
+        );
+    }
+
+    pub fn getObject(
+        self: *SuiRpcClient,
+        object_id: []const u8,
+        options_json: ?[]const u8,
+    ) ![]u8 {
+        const params_json = if (options_json) |options|
+            try std.fmt.allocPrint(self.allocator, "[\"{s}\",{s}]", .{ object_id, options })
+        else
+            try std.fmt.allocPrint(self.allocator, "[\"{s}\"]", .{object_id});
+        defer self.allocator.free(params_json);
+
+        return try self.call("sui_getObject", params_json);
+    }
+
+    pub fn getObjectWithOptions(
+        self: *SuiRpcClient,
+        object_id: []const u8,
+        options: ObjectDataOptions,
+    ) ![]u8 {
+        const options_json = try buildObjectOptionsJson(self.allocator, options);
+        defer if (options_json) |value| self.allocator.free(value);
+
+        return try self.getObject(object_id, options_json);
+    }
+
+    pub fn getDynamicFields(
+        self: *SuiRpcClient,
+        parent_object_id: []const u8,
+        cursor: ?[]const u8,
+        limit: ?u64,
+    ) ![]u8 {
+        const params_json = if (limit) |page_limit|
+            if (cursor) |page_cursor|
+                try std.fmt.allocPrint(self.allocator, "[\"{s}\",\"{s}\",{d}]", .{ parent_object_id, page_cursor, page_limit })
+            else
+                try std.fmt.allocPrint(self.allocator, "[\"{s}\",null,{d}]", .{ parent_object_id, page_limit })
+        else if (cursor) |page_cursor|
+            try std.fmt.allocPrint(self.allocator, "[\"{s}\",\"{s}\"]", .{ parent_object_id, page_cursor })
+        else
+            try std.fmt.allocPrint(self.allocator, "[\"{s}\"]", .{parent_object_id});
+        defer self.allocator.free(params_json);
+
+        return try self.call("suix_getDynamicFields", params_json);
+    }
+
+    pub fn getDynamicFieldsWithRequest(
+        self: *SuiRpcClient,
+        parent_object_id: []const u8,
+        request: DynamicFieldPageRequest,
+    ) ![]u8 {
+        return try self.getDynamicFields(parent_object_id, request.cursor, request.limit);
+    }
+
+    pub fn getCoins(
+        self: *SuiRpcClient,
+        owner: []const u8,
+        coin_type: ?[]const u8,
+        cursor: ?[]const u8,
+        limit: ?u64,
+    ) ![]u8 {
+        const params_json = if (limit) |page_limit|
+            if (cursor) |page_cursor|
+                if (coin_type) |resolved_coin_type|
+                    try std.fmt.allocPrint(self.allocator, "[\"{s}\",\"{s}\",\"{s}\",{d}]", .{ owner, resolved_coin_type, page_cursor, page_limit })
+                else
+                    try std.fmt.allocPrint(self.allocator, "[\"{s}\",null,\"{s}\",{d}]", .{ owner, page_cursor, page_limit })
+            else if (coin_type) |resolved_coin_type|
+                try std.fmt.allocPrint(self.allocator, "[\"{s}\",\"{s}\",null,{d}]", .{ owner, resolved_coin_type, page_limit })
+            else
+                try std.fmt.allocPrint(self.allocator, "[\"{s}\",null,null,{d}]", .{ owner, page_limit })
+        else if (cursor) |page_cursor|
+            if (coin_type) |resolved_coin_type|
+                try std.fmt.allocPrint(self.allocator, "[\"{s}\",\"{s}\",\"{s}\"]", .{ owner, resolved_coin_type, page_cursor })
+            else
+                try std.fmt.allocPrint(self.allocator, "[\"{s}\",null,\"{s}\"]", .{ owner, page_cursor })
+        else if (coin_type) |resolved_coin_type|
+            try std.fmt.allocPrint(self.allocator, "[\"{s}\",\"{s}\"]", .{ owner, resolved_coin_type })
+        else
+            try std.fmt.allocPrint(self.allocator, "[\"{s}\"]", .{owner});
+        defer self.allocator.free(params_json);
+
+        return try self.call("suix_getCoins", params_json);
+    }
+
+    pub fn getCoinsWithRequest(
+        self: *SuiRpcClient,
+        owner: []const u8,
+        request: CoinPageRequest,
+    ) ![]u8 {
+        return try self.getCoins(owner, request.coin_type, request.cursor, request.limit);
+    }
+
+    fn buildOwnedObjectsFilterJson(
+        allocator: std.mem.Allocator,
+        filter: OwnedObjectsFilter,
+    ) !?[]u8 {
+        return switch (filter) {
+            .none => null,
+            .json => |value| try allocator.dupe(u8, value),
+            .struct_type => |value| try std.fmt.allocPrint(
+                allocator,
+                "{{\"StructType\":{f}}}",
+                .{std.json.fmt(value, .{})},
+            ),
+            .object_id => |value| try std.fmt.allocPrint(
+                allocator,
+                "{{\"ObjectId\":{f}}}",
+                .{std.json.fmt(value, .{})},
+            ),
+            .package => |value| try std.fmt.allocPrint(
+                allocator,
+                "{{\"Package\":{f}}}",
+                .{std.json.fmt(value, .{})},
+            ),
+            .move_module => |value| try std.fmt.allocPrint(
+                allocator,
+                "{{\"MoveModule\":{{\"package\":{f},\"module\":{f}}}}}",
+                .{ std.json.fmt(value.package, .{}), std.json.fmt(value.module, .{}) },
+            ),
+        };
+    }
+
+    fn buildOwnedObjectsQueryJson(
+        allocator: std.mem.Allocator,
+        filter: OwnedObjectsFilter,
+        options_json: ?[]const u8,
+    ) !?[]u8 {
+        const filter_json = try buildOwnedObjectsFilterJson(allocator, filter);
+        defer if (filter_json) |value| allocator.free(value);
+
+        if (filter_json == null and options_json == null) return null;
+
+        var out = std.ArrayList(u8){};
+        defer out.deinit(allocator);
+
+        const writer = out.writer(allocator);
+        try writer.writeAll("{");
+        var has_output = false;
+        if (filter_json) |value| {
+            try writer.writeAll("\"filter\":");
+            try writer.writeAll(value);
+            has_output = true;
+        }
+        if (options_json) |value| {
+            if (has_output) try writer.writeAll(",");
+            try writer.writeAll("\"options\":");
+            try writer.writeAll(value);
+        }
+        try writer.writeAll("}");
+        return try out.toOwnedSlice(allocator);
+    }
+
+    pub fn getOwnedObjects(
+        self: *SuiRpcClient,
+        owner: []const u8,
+        filter_json: ?[]const u8,
+        options_json: ?[]const u8,
+        cursor: ?[]const u8,
+        limit: ?u64,
+    ) ![]u8 {
+        const query_json = try buildOwnedObjectsQueryJson(
+            self.allocator,
+            if (filter_json) |value| .{ .json = value } else .none,
+            options_json,
+        );
+        defer if (query_json) |value| self.allocator.free(value);
+
+        var out = std.ArrayList(u8){};
+        defer out.deinit(self.allocator);
+
+        const writer = out.writer(self.allocator);
+        try writer.writeAll("[");
+        try writer.print("\"{s}\"", .{owner});
+        if (query_json != null or cursor != null or limit != null) {
+            try writer.writeAll(",");
+            if (query_json) |value| {
+                try writer.writeAll(value);
+            } else {
+                try writer.writeAll("null");
+            }
+            if (cursor != null or limit != null) {
+                try writer.writeAll(",");
+                if (cursor) |value| {
+                    try writer.print("\"{s}\"", .{value});
+                } else {
+                    try writer.writeAll("null");
+                }
+                if (limit) |page_limit| {
+                    try writer.writeAll(",");
+                    try writer.print("{d}", .{page_limit});
+                }
+            }
+        }
+        try writer.writeAll("]");
+
+        return try self.call("suix_getOwnedObjects", out.items);
+    }
+
+    pub fn getOwnedObjectsWithRequest(
+        self: *SuiRpcClient,
+        owner: []const u8,
+        request: OwnedObjectsPageRequest,
+    ) ![]u8 {
+        const options_json = switch (request.options) {
+            .none => null,
+            .json => |value| value,
+            .typed => |options| try buildObjectOptionsJson(self.allocator, options),
+        };
+        defer switch (request.options) {
+            .typed => if (options_json) |value| self.allocator.free(value),
+            else => {},
+        };
+
+        const query_json = try buildOwnedObjectsQueryJson(self.allocator, request.filter, options_json);
+        defer if (query_json) |value| self.allocator.free(value);
+
+        var out = std.ArrayList(u8){};
+        defer out.deinit(self.allocator);
+
+        const writer = out.writer(self.allocator);
+        try writer.writeAll("[");
+        try writer.print("\"{s}\"", .{owner});
+        if (query_json != null or request.cursor != null or request.limit != null) {
+            try writer.writeAll(",");
+            if (query_json) |value| {
+                try writer.writeAll(value);
+            } else {
+                try writer.writeAll("null");
+            }
+            if (request.cursor != null or request.limit != null) {
+                try writer.writeAll(",");
+                if (request.cursor) |value| {
+                    try writer.print("\"{s}\"", .{value});
+                } else {
+                    try writer.writeAll("null");
+                }
+                if (request.limit) |page_limit| {
+                    try writer.writeAll(",");
+                    try writer.print("{d}", .{page_limit});
+                }
+            }
+        }
+        try writer.writeAll("]");
+
+        return try self.call("suix_getOwnedObjects", out.items);
+    }
+
+    pub fn getDynamicFieldObject(
+        self: *SuiRpcClient,
+        parent_object_id: []const u8,
+        name_json: []const u8,
+    ) ![]u8 {
+        const params_json = try std.fmt.allocPrint(self.allocator, "[\"{s}\",{s}]", .{ parent_object_id, name_json });
+        defer self.allocator.free(params_json);
+
+        return try self.call("suix_getDynamicFieldObject", params_json);
+    }
+
+    pub fn getDynamicFieldObjectWithName(
+        self: *SuiRpcClient,
+        parent_object_id: []const u8,
+        name: DynamicFieldName,
+    ) ![]u8 {
+        const name_json = try buildDynamicFieldNameJson(self.allocator, name);
+        defer self.allocator.free(name_json);
+
+        return try self.getDynamicFieldObject(parent_object_id, name_json);
+    }
+
+    pub fn summarizeDynamicFieldsResponse(
+        self: *const SuiRpcClient,
+        allocator: std.mem.Allocator,
+        response_json: []const u8,
+    ) !dynamic_field_result.OwnedDynamicFieldPage {
+        _ = self;
+        return try dynamic_field_result.extractDynamicFieldPage(allocator, response_json);
+    }
+
+    pub fn summarizeCoinsResponse(
+        self: *const SuiRpcClient,
+        allocator: std.mem.Allocator,
+        response_json: []const u8,
+    ) !coin_result.OwnedCoinPage {
+        _ = self;
+        return try coin_result.extractCoinPage(allocator, response_json);
+    }
+
+    pub fn summarizeOwnedObjectsResponse(
+        self: *const SuiRpcClient,
+        allocator: std.mem.Allocator,
+        response_json: []const u8,
+    ) !owned_object_result.OwnedObjectPage {
+        _ = self;
+        return try owned_object_result.extractOwnedObjectPage(allocator, response_json);
+    }
+
+    fn elapsedExceedsTimeout(elapsed_ms: i64, timeout_ms: u64) bool {
+        if (timeout_ms > std.math.maxInt(i64)) return false;
+        return elapsed_ms > @as(i64, @intCast(timeout_ms));
+    }
+
+    fn buildTransactionBlockSummaryParams(allocator: std.mem.Allocator, digest: []const u8) ![]u8 {
+        return try std.fmt.allocPrint(
+            allocator,
+            "[\"{s}\",{{\"showEffects\":true,\"showBalanceChanges\":true}}]",
+            .{digest},
+        );
     }
 
     pub fn waitForTransactionConfirmation(
@@ -403,7 +6049,7 @@ pub const SuiRpcClient = struct {
         const start_ts = std.time.milliTimestamp();
 
         while (true) {
-            const params = try std.fmt.allocPrint(self.allocator, "[\"{s}\"]", .{digest});
+            const params = try buildTransactionBlockSummaryParams(self.allocator, digest);
             defer self.allocator.free(params);
 
             const response = self.getTransactionBlock(params) catch |err| {
@@ -412,7 +6058,7 @@ pub const SuiRpcClient = struct {
                         if (last_error.code) |code| {
                             if (code == -32602 or code == -32603) {
                                 std.Thread.sleep(poll_ms * std.time.ns_per_ms);
-                                if (std.time.milliTimestamp() - start_ts > @as(i64, @intCast(timeout_ms))) {
+                                if (elapsedExceedsTimeout(std.time.milliTimestamp() - start_ts, timeout_ms)) {
                                     return error.Timeout;
                                 }
                                 continue;
@@ -429,7 +6075,7 @@ pub const SuiRpcClient = struct {
 
             self.allocator.free(response);
 
-            if (std.time.milliTimestamp() - start_ts > @as(i64, @intCast(timeout_ms))) {
+            if (elapsedExceedsTimeout(std.time.milliTimestamp() - start_ts, timeout_ms)) {
                 return error.Timeout;
             }
 
@@ -709,6 +6355,36 @@ pub const SuiRpcClient = struct {
         return try plan.buildArtifact(allocator, kind);
     }
 
+    pub fn summarizeArtifact(
+        self: *const SuiRpcClient,
+        allocator: std.mem.Allocator,
+        kind: tx_request_builder.ProgrammaticArtifactKind,
+        artifact_json: []const u8,
+    ) !artifact_result.OwnedProgrammaticArtifactSummary {
+        _ = self;
+        return try artifact_result.summarizeProgrammaticArtifact(allocator, kind, artifact_json);
+    }
+
+    pub fn summarizeBuildArtifact(
+        self: *const SuiRpcClient,
+        allocator: std.mem.Allocator,
+        artifact_json: []const u8,
+    ) !artifact_result.OwnedBuildArtifactSummary {
+        _ = self;
+        return try artifact_result.extractBuildArtifactSummary(allocator, artifact_json);
+    }
+
+    pub fn buildPlanArtifactAndSummarize(
+        self: *const SuiRpcClient,
+        allocator: std.mem.Allocator,
+        plan: tx_request_builder.AuthorizationPlan,
+        kind: tx_request_builder.ProgrammaticArtifactKind,
+    ) !artifact_result.OwnedProgrammaticArtifactSummary {
+        const artifact = try self.buildPlanArtifact(allocator, plan, kind);
+        defer allocator.free(artifact);
+        return try self.summarizeArtifact(allocator, kind, artifact);
+    }
+
     pub fn runPlan(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
@@ -718,11 +6394,32 @@ pub const SuiRpcClient = struct {
         return switch (action) {
             .authorize => .{ .authorized = try self.authorizePlan(allocator, plan) },
             .inspect => .{ .inspected = try self.inspectPlan(allocator, plan) },
+            .inspect_summarize => blk: {
+                const response = try self.inspectPlan(allocator, plan);
+                defer allocator.free(response);
+                break :blk .{ .inspect_summarized = try self.summarizeInspectResponse(allocator, response) };
+            },
             .execute => .{ .executed = try self.executePlan(allocator, plan) },
+            .execute_summarize => blk: {
+                const response = try self.executePlan(allocator, plan);
+                defer allocator.free(response);
+                break :blk .{ .summarized = try self.summarizeExecutionResponse(allocator, response) };
+            },
             .execute_confirm => |value| .{
                 .executed = try self.executePlanAndConfirm(allocator, plan, value.timeout_ms, value.poll_ms),
             },
+            .execute_confirm_summarize => |value| blk: {
+                const response = try self.executePlanAndConfirm(allocator, plan, value.timeout_ms, value.poll_ms);
+                defer allocator.free(response);
+                break :blk .{ .summarized = try self.summarizeExecutionResponse(allocator, response) };
+            },
+            .execute_confirm_observe => |value| blk: {
+                const response = try self.executePlan(allocator, plan);
+                defer allocator.free(response);
+                break :blk .{ .observed = try self.observeConfirmedExecuteResponse(allocator, response, value.timeout_ms, value.poll_ms) };
+            },
             .build_artifact => |kind| .{ .artifact = try self.buildPlanArtifact(allocator, plan, kind) },
+            .build_artifact_summarize => |kind| .{ .artifact_summarized = try self.buildPlanArtifactAndSummarize(allocator, plan, kind) },
         };
     }
 
@@ -780,6 +6477,14 @@ pub const SuiRpcClient = struct {
             return .{ .challenge_required = prompt };
         }
         return .{ .inspected = try self.inspectPlan(allocator, plan) };
+    }
+
+    pub fn inspectPlanOrChallengePromptAndSummarize(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        plan: tx_request_builder.AuthorizationPlan,
+    ) !ProgrammaticClientActionOrChallengePromptResult {
+        return try self.runPlanOrChallengePrompt(allocator, plan, .inspect_summarize);
     }
 
     pub fn executePlan(
@@ -892,6 +6597,15 @@ pub const SuiRpcClient = struct {
         return try self.inspectPlan(allocator, try plan.withChallengeResponse(response));
     }
 
+    pub fn inspectPlanWithChallengeResponseAndSummarize(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        plan: tx_request_builder.AuthorizationPlan,
+        response: tx_request_builder.SessionChallengeResponse,
+    ) !inspect_result.OwnedInspectInsights {
+        return try self.inspectPlanAndSummarize(allocator, try plan.withChallengeResponse(response));
+    }
+
     pub fn executePlanWithChallengeResponse(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
@@ -946,6 +6660,17 @@ pub const SuiRpcClient = struct {
         return try plan.buildArtifact(allocator, kind);
     }
 
+    pub fn buildOwnedPlanArtifactAndSummarize(
+        self: *const SuiRpcClient,
+        allocator: std.mem.Allocator,
+        plan: *const tx_request_builder.OwnedAuthorizationPlan,
+        kind: tx_request_builder.ProgrammaticArtifactKind,
+    ) !artifact_result.OwnedProgrammaticArtifactSummary {
+        const artifact = try self.buildOwnedPlanArtifact(allocator, plan, kind);
+        defer allocator.free(artifact);
+        return try self.summarizeArtifact(allocator, kind, artifact);
+    }
+
     pub fn runOwnedPlan(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
@@ -955,11 +6680,32 @@ pub const SuiRpcClient = struct {
         return switch (action) {
             .authorize => .{ .authorized = try self.authorizeOwnedPlan(allocator, plan) },
             .inspect => .{ .inspected = try self.inspectOwnedPlan(allocator, plan) },
+            .inspect_summarize => blk: {
+                const response = try self.inspectOwnedPlan(allocator, plan);
+                defer allocator.free(response);
+                break :blk .{ .inspect_summarized = try self.summarizeInspectResponse(allocator, response) };
+            },
             .execute => .{ .executed = try self.executeOwnedPlan(allocator, plan) },
+            .execute_summarize => blk: {
+                const response = try self.executeOwnedPlan(allocator, plan);
+                defer allocator.free(response);
+                break :blk .{ .summarized = try self.summarizeExecutionResponse(allocator, response) };
+            },
             .execute_confirm => |value| .{
                 .executed = try self.executeOwnedPlanAndConfirm(allocator, plan, value.timeout_ms, value.poll_ms),
             },
+            .execute_confirm_summarize => |value| blk: {
+                const response = try self.executeOwnedPlanAndConfirm(allocator, plan, value.timeout_ms, value.poll_ms);
+                defer allocator.free(response);
+                break :blk .{ .summarized = try self.summarizeExecutionResponse(allocator, response) };
+            },
+            .execute_confirm_observe => |value| blk: {
+                const response = try self.executeOwnedPlan(allocator, plan);
+                defer allocator.free(response);
+                break :blk .{ .observed = try self.observeConfirmedExecuteResponse(allocator, response, value.timeout_ms, value.poll_ms) };
+            },
             .build_artifact => |kind| .{ .artifact = try self.buildOwnedPlanArtifact(allocator, plan, kind) },
+            .build_artifact_summarize => |kind| .{ .artifact_summarized = try self.buildOwnedPlanArtifactAndSummarize(allocator, plan, kind) },
         };
     }
 
@@ -1007,6 +6753,14 @@ pub const SuiRpcClient = struct {
             return .{ .challenge_required = prompt };
         }
         return .{ .inspected = try self.inspectOwnedPlan(allocator, plan) };
+    }
+
+    pub fn inspectOwnedPlanOrChallengePromptAndSummarize(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        plan: *const tx_request_builder.OwnedAuthorizationPlan,
+    ) !ProgrammaticClientActionOrChallengePromptResult {
+        return try self.runOwnedPlanOrChallengePrompt(allocator, plan, .inspect_summarize);
     }
 
     pub fn executeOwnedPlan(
@@ -1101,6 +6855,16 @@ pub const SuiRpcClient = struct {
         return try self.inspectOwnedPlan(allocator, plan);
     }
 
+    pub fn inspectOwnedPlanWithChallengeResponseAndSummarize(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        plan: *tx_request_builder.OwnedAuthorizationPlan,
+        response: tx_request_builder.SessionChallengeResponse,
+    ) !inspect_result.OwnedInspectInsights {
+        try plan.withChallengeResponse(response);
+        return try self.inspectOwnedPlanAndSummarize(allocator, plan);
+    }
+
     pub fn executeOwnedPlanWithChallengeResponseAndConfirm(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
@@ -1155,6 +6919,19 @@ pub const SuiRpcClient = struct {
         return try builder.authorize(allocator, provider);
     }
 
+    pub fn authorizeDslBuilderFromDefaultKeystore(
+        self: *const SuiRpcClient,
+        allocator: std.mem.Allocator,
+        builder: *tx_request_builder.ProgrammaticDslBuilder,
+        preparation: keystore.SignerPreparation,
+    ) !tx_request_builder.AuthorizedPreparedRequest {
+        return try self.authorizeDslBuilder(
+            allocator,
+            builder,
+            .{ .default_keystore = .{ .preparation = preparation } },
+        );
+    }
+
     pub fn buildDslBuilderArtifact(
         self: *const SuiRpcClient,
         allocator: std.mem.Allocator,
@@ -1164,6 +6941,113 @@ pub const SuiRpcClient = struct {
     ) ![]u8 {
         _ = self;
         return try builder.buildArtifact(allocator, provider, kind);
+    }
+
+    pub fn buildDslBuilderArtifactFromDefaultKeystore(
+        self: *const SuiRpcClient,
+        allocator: std.mem.Allocator,
+        builder: *tx_request_builder.ProgrammaticDslBuilder,
+        preparation: keystore.SignerPreparation,
+        kind: tx_request_builder.ProgrammaticArtifactKind,
+    ) ![]u8 {
+        return try self.buildDslBuilderArtifact(
+            allocator,
+            builder,
+            .{ .default_keystore = .{ .preparation = preparation } },
+            kind,
+        );
+    }
+
+    pub fn buildDslBuilderArtifactAndSummarize(
+        self: *const SuiRpcClient,
+        allocator: std.mem.Allocator,
+        builder: *tx_request_builder.ProgrammaticDslBuilder,
+        provider: tx_request_builder.AccountProvider,
+        kind: tx_request_builder.ProgrammaticArtifactKind,
+    ) !artifact_result.OwnedProgrammaticArtifactSummary {
+        const artifact = try self.buildDslBuilderArtifact(allocator, builder, provider, kind);
+        defer allocator.free(artifact);
+        return try self.summarizeArtifact(allocator, kind, artifact);
+    }
+
+    pub fn buildDslBuilderArtifactWithAutoGasPaymentAndSummarize(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        builder: *tx_request_builder.ProgrammaticDslBuilder,
+        provider: tx_request_builder.AccountProvider,
+        min_balance_override: ?u64,
+        kind: tx_request_builder.ProgrammaticArtifactKind,
+    ) !artifact_result.OwnedProgrammaticArtifactSummary {
+        var result = try self.runDslBuilderWithAutoGasPayment(
+            allocator,
+            builder,
+            provider,
+            min_balance_override,
+            .{ .build_artifact_summarize = kind },
+        );
+        errdefer result.deinit(allocator);
+        return switch (result) {
+            .artifact_summarized => |value| value,
+            else => error.InvalidResponse,
+        };
+    }
+
+    pub fn buildDslBuilderArtifactWithAutoGasPaymentOrChallengePromptAndSummarize(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        builder: *tx_request_builder.ProgrammaticDslBuilder,
+        provider: tx_request_builder.AccountProvider,
+        min_balance_override: ?u64,
+        kind: tx_request_builder.ProgrammaticArtifactKind,
+    ) !ProgrammaticClientActionOrChallengePromptResult {
+        return try self.runDslBuilderWithAutoGasPaymentOrChallengePrompt(
+            allocator,
+            builder,
+            provider,
+            min_balance_override,
+            .{ .build_artifact_summarize = kind },
+        );
+    }
+
+    pub fn buildDslBuilderArtifactWithAutoGasPaymentWithChallengeResponseAndSummarize(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        builder: *tx_request_builder.ProgrammaticDslBuilder,
+        provider: tx_request_builder.AccountProvider,
+        min_balance_override: ?u64,
+        response: tx_request_builder.SessionChallengeResponse,
+        kind: tx_request_builder.ProgrammaticArtifactKind,
+    ) !artifact_result.OwnedProgrammaticArtifactSummary {
+        var result = try self.runDslBuilderWithAutoGasPaymentWithChallengeResponse(
+            allocator,
+            builder,
+            provider,
+            min_balance_override,
+            response,
+            .{ .build_artifact_summarize = kind },
+        );
+        errdefer result.deinit(allocator);
+        return switch (result) {
+            .artifact_summarized => |value| value,
+            else => error.InvalidResponse,
+        };
+    }
+
+    pub fn buildDslBuilderArtifactWithAutoGasPaymentAndSummarizeFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        builder: *tx_request_builder.ProgrammaticDslBuilder,
+        preparation: keystore.SignerPreparation,
+        min_balance_override: ?u64,
+        kind: tx_request_builder.ProgrammaticArtifactKind,
+    ) !artifact_result.OwnedProgrammaticArtifactSummary {
+        return try self.buildDslBuilderArtifactWithAutoGasPaymentAndSummarize(
+            allocator,
+            builder,
+            .{ .default_keystore = .{ .preparation = preparation } },
+            min_balance_override,
+            kind,
+        );
     }
 
     pub fn runDslBuilder(
@@ -1176,7 +7060,13 @@ pub const SuiRpcClient = struct {
         return switch (action) {
             .authorize => .{ .authorized = try self.authorizeDslBuilder(allocator, builder, provider) },
             .inspect => .{ .inspected = try self.inspectDslBuilder(allocator, builder, provider) },
+            .inspect_summarize => .{ .inspect_summarized = try self.inspectDslBuilderAndSummarize(allocator, builder, provider) },
             .execute => .{ .executed = try self.executeDslBuilder(allocator, builder, provider) },
+            .execute_summarize => blk: {
+                const response = try self.executeDslBuilder(allocator, builder, provider);
+                defer allocator.free(response);
+                break :blk .{ .summarized = try self.summarizeExecutionResponse(allocator, response) };
+            },
             .execute_confirm => |value| .{
                 .executed = try self.executeDslBuilderAndConfirm(
                     allocator,
@@ -1186,8 +7076,40 @@ pub const SuiRpcClient = struct {
                     value.poll_ms,
                 ),
             },
+            .execute_confirm_summarize => |value| blk: {
+                const response = try self.executeDslBuilderAndConfirm(
+                    allocator,
+                    builder,
+                    provider,
+                    value.timeout_ms,
+                    value.poll_ms,
+                );
+                defer allocator.free(response);
+                break :blk .{ .summarized = try self.summarizeExecutionResponse(allocator, response) };
+            },
+            .execute_confirm_observe => |value| blk: {
+                const response = try self.executeDslBuilder(allocator, builder, provider);
+                defer allocator.free(response);
+                break :blk .{ .observed = try self.observeConfirmedExecuteResponse(allocator, response, value.timeout_ms, value.poll_ms) };
+            },
             .build_artifact => |kind| .{ .artifact = try self.buildDslBuilderArtifact(allocator, builder, provider, kind) },
+            .build_artifact_summarize => |kind| .{ .artifact_summarized = try self.buildDslBuilderArtifactAndSummarize(allocator, builder, provider, kind) },
         };
+    }
+
+    pub fn runDslBuilderFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        builder: *tx_request_builder.ProgrammaticDslBuilder,
+        preparation: keystore.SignerPreparation,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionResult {
+        return try self.runDslBuilder(
+            allocator,
+            builder,
+            .{ .default_keystore = .{ .preparation = preparation } },
+            action,
+        );
     }
 
     pub fn authorizeDslBuilderOrChallengePrompt(
@@ -1199,6 +7121,19 @@ pub const SuiRpcClient = struct {
         var plan = try builder.finishAuthorizationPlan(provider);
         defer plan.deinit(allocator);
         return try self.authorizeOwnedPlanOrChallengePrompt(allocator, &plan);
+    }
+
+    pub fn authorizeDslBuilderOrChallengePromptFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        builder: *tx_request_builder.ProgrammaticDslBuilder,
+        preparation: keystore.SignerPreparation,
+    ) !AuthorizeOrChallengePromptResult {
+        return try self.authorizeDslBuilderOrChallengePrompt(
+            allocator,
+            builder,
+            .{ .default_keystore = .{ .preparation = preparation } },
+        );
     }
 
     pub fn buildDslBuilderArtifactOrChallengePrompt(
@@ -1213,6 +7148,21 @@ pub const SuiRpcClient = struct {
         return try self.buildOwnedPlanArtifactOrChallengePrompt(allocator, &plan, kind);
     }
 
+    pub fn buildDslBuilderArtifactOrChallengePromptFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        builder: *tx_request_builder.ProgrammaticDslBuilder,
+        preparation: keystore.SignerPreparation,
+        kind: tx_request_builder.ProgrammaticArtifactKind,
+    ) !ArtifactOrChallengePromptResult {
+        return try self.buildDslBuilderArtifactOrChallengePrompt(
+            allocator,
+            builder,
+            .{ .default_keystore = .{ .preparation = preparation } },
+            kind,
+        );
+    }
+
     pub fn runDslBuilderOrChallengePrompt(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
@@ -1223,6 +7173,93 @@ pub const SuiRpcClient = struct {
         var plan = try builder.finishAuthorizationPlan(provider);
         defer plan.deinit(allocator);
         return try self.runOwnedPlanOrChallengePrompt(allocator, &plan, action);
+    }
+
+    pub fn runDslBuilderOrChallengePromptFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        builder: *tx_request_builder.ProgrammaticDslBuilder,
+        preparation: keystore.SignerPreparation,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionOrChallengePromptResult {
+        return try self.runDslBuilderOrChallengePrompt(
+            allocator,
+            builder,
+            .{ .default_keystore = .{ .preparation = preparation } },
+            action,
+        );
+    }
+
+    pub fn runDslBuilderWithAutoGasPayment(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        builder: *tx_request_builder.ProgrammaticDslBuilder,
+        provider: tx_request_builder.AccountProvider,
+        min_balance_override: ?u64,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionResult {
+        var options = try builder.finish();
+        defer options.deinit(allocator);
+        return try self.runOptionsWithAutoGasPaymentWithAccountProvider(
+            allocator,
+            options.options,
+            provider,
+            min_balance_override,
+            action,
+        );
+    }
+
+    pub fn runDslBuilderWithAutoGasPaymentFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        builder: *tx_request_builder.ProgrammaticDslBuilder,
+        preparation: keystore.SignerPreparation,
+        min_balance_override: ?u64,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionResult {
+        return try self.runDslBuilderWithAutoGasPayment(
+            allocator,
+            builder,
+            .{ .default_keystore = .{ .preparation = preparation } },
+            min_balance_override,
+            action,
+        );
+    }
+
+    pub fn runDslBuilderWithAutoGasPaymentOrChallengePrompt(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        builder: *tx_request_builder.ProgrammaticDslBuilder,
+        provider: tx_request_builder.AccountProvider,
+        min_balance_override: ?u64,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionOrChallengePromptResult {
+        var options = try builder.finish();
+        defer options.deinit(allocator);
+        return try self.runOptionsWithAutoGasPaymentOrChallengePromptWithAccountProvider(
+            allocator,
+            options.options,
+            provider,
+            min_balance_override,
+            action,
+        );
+    }
+
+    pub fn runDslBuilderWithAutoGasPaymentOrChallengePromptFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        builder: *tx_request_builder.ProgrammaticDslBuilder,
+        preparation: keystore.SignerPreparation,
+        min_balance_override: ?u64,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionOrChallengePromptResult {
+        return try self.runDslBuilderWithAutoGasPaymentOrChallengePrompt(
+            allocator,
+            builder,
+            .{ .default_keystore = .{ .preparation = preparation } },
+            min_balance_override,
+            action,
+        );
     }
 
     pub fn inspectDslBuilder(
@@ -1236,6 +7273,19 @@ pub const SuiRpcClient = struct {
         return try self.inspectAuthorizedPreparedRequest(allocator, &prepared);
     }
 
+    pub fn inspectDslBuilderFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        builder: *tx_request_builder.ProgrammaticDslBuilder,
+        preparation: keystore.SignerPreparation,
+    ) ![]u8 {
+        return try self.inspectDslBuilder(
+            allocator,
+            builder,
+            .{ .default_keystore = .{ .preparation = preparation } },
+        );
+    }
+
     pub fn inspectDslBuilderOrChallengePrompt(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
@@ -1245,6 +7295,30 @@ pub const SuiRpcClient = struct {
         var plan = try builder.finishAuthorizationPlan(provider);
         defer plan.deinit(allocator);
         return try self.inspectOwnedPlanOrChallengePrompt(allocator, &plan);
+    }
+
+    pub fn inspectDslBuilderOrChallengePromptFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        builder: *tx_request_builder.ProgrammaticDslBuilder,
+        preparation: keystore.SignerPreparation,
+    ) !InspectOrChallengePromptResult {
+        return try self.inspectDslBuilderOrChallengePrompt(
+            allocator,
+            builder,
+            .{ .default_keystore = .{ .preparation = preparation } },
+        );
+    }
+
+    pub fn inspectDslBuilderOrChallengePromptAndSummarize(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        builder: *tx_request_builder.ProgrammaticDslBuilder,
+        provider: tx_request_builder.AccountProvider,
+    ) !ProgrammaticClientActionOrChallengePromptResult {
+        var plan = try builder.finishAuthorizationPlan(provider);
+        defer plan.deinit(allocator);
+        return try self.inspectOwnedPlanOrChallengePromptAndSummarize(allocator, &plan);
     }
 
     pub fn executeDslBuilder(
@@ -1258,6 +7332,19 @@ pub const SuiRpcClient = struct {
         return try self.executeAuthorizedPreparedRequest(allocator, &prepared);
     }
 
+    pub fn executeDslBuilderFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        builder: *tx_request_builder.ProgrammaticDslBuilder,
+        preparation: keystore.SignerPreparation,
+    ) ![]u8 {
+        return try self.executeDslBuilder(
+            allocator,
+            builder,
+            .{ .default_keystore = .{ .preparation = preparation } },
+        );
+    }
+
     pub fn executeDslBuilderAndConfirm(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
@@ -1269,6 +7356,229 @@ pub const SuiRpcClient = struct {
         var plan = try builder.finishAuthorizationPlan(provider);
         defer plan.deinit(allocator);
         return try self.executeOwnedPlanAndConfirm(allocator, &plan, timeout_ms, poll_ms);
+    }
+
+    pub fn executeDslBuilderAndConfirmFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        builder: *tx_request_builder.ProgrammaticDslBuilder,
+        preparation: keystore.SignerPreparation,
+        timeout_ms: u64,
+        poll_ms: u64,
+    ) ![]u8 {
+        return try self.executeDslBuilderAndConfirm(
+            allocator,
+            builder,
+            .{ .default_keystore = .{ .preparation = preparation } },
+            timeout_ms,
+            poll_ms,
+        );
+    }
+
+    pub fn executeDslBuilderAndConfirmAndSummarize(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        builder: *tx_request_builder.ProgrammaticDslBuilder,
+        provider: tx_request_builder.AccountProvider,
+        timeout_ms: u64,
+        poll_ms: u64,
+    ) !tx_result.OwnedExecutionInsights {
+        const response = try self.executeDslBuilderAndConfirm(
+            allocator,
+            builder,
+            provider,
+            timeout_ms,
+            poll_ms,
+        );
+        defer allocator.free(response);
+        return try self.summarizeExecutionResponse(allocator, response);
+    }
+
+    pub fn executeDslBuilderAndConfirmAndSummarizeFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        builder: *tx_request_builder.ProgrammaticDslBuilder,
+        preparation: keystore.SignerPreparation,
+        timeout_ms: u64,
+        poll_ms: u64,
+    ) !tx_result.OwnedExecutionInsights {
+        return try self.executeDslBuilderAndConfirmAndSummarize(
+            allocator,
+            builder,
+            .{ .default_keystore = .{ .preparation = preparation } },
+            timeout_ms,
+            poll_ms,
+        );
+    }
+
+    pub fn executeDslBuilderWithAutoGasPaymentAndObserve(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        builder: *tx_request_builder.ProgrammaticDslBuilder,
+        provider: tx_request_builder.AccountProvider,
+        min_balance_override: ?u64,
+        timeout_ms: u64,
+        poll_ms: u64,
+    ) !ObservedExecutionSummary {
+        var result = try self.runDslBuilderWithAutoGasPayment(
+            allocator,
+            builder,
+            provider,
+            min_balance_override,
+            .{ .execute_confirm_observe = .{ .timeout_ms = timeout_ms, .poll_ms = poll_ms } },
+        );
+        errdefer result.deinit(allocator);
+        return switch (result) {
+            .observed => |value| value,
+            else => error.InvalidResponse,
+        };
+    }
+
+    pub fn executeDslBuilderWithAutoGasPaymentOrChallengePromptAndObserve(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        builder: *tx_request_builder.ProgrammaticDslBuilder,
+        provider: tx_request_builder.AccountProvider,
+        min_balance_override: ?u64,
+        timeout_ms: u64,
+        poll_ms: u64,
+    ) !ProgrammaticClientActionOrChallengePromptResult {
+        return try self.runDslBuilderWithAutoGasPaymentOrChallengePrompt(
+            allocator,
+            builder,
+            provider,
+            min_balance_override,
+            .{ .execute_confirm_observe = .{ .timeout_ms = timeout_ms, .poll_ms = poll_ms } },
+        );
+    }
+
+    pub fn executeDslBuilderWithAutoGasPaymentWithChallengeResponseAndObserve(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        builder: *tx_request_builder.ProgrammaticDslBuilder,
+        provider: tx_request_builder.AccountProvider,
+        min_balance_override: ?u64,
+        response: tx_request_builder.SessionChallengeResponse,
+        timeout_ms: u64,
+        poll_ms: u64,
+    ) !ObservedExecutionSummary {
+        var result = try self.runDslBuilderWithAutoGasPaymentWithChallengeResponse(
+            allocator,
+            builder,
+            provider,
+            min_balance_override,
+            response,
+            .{ .execute_confirm_observe = .{ .timeout_ms = timeout_ms, .poll_ms = poll_ms } },
+        );
+        errdefer result.deinit(allocator);
+        return switch (result) {
+            .observed => |value| value,
+            else => error.InvalidResponse,
+        };
+    }
+
+    pub fn executeDslBuilderWithAutoGasPaymentAndObserveFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        builder: *tx_request_builder.ProgrammaticDslBuilder,
+        preparation: keystore.SignerPreparation,
+        min_balance_override: ?u64,
+        timeout_ms: u64,
+        poll_ms: u64,
+    ) !ObservedExecutionSummary {
+        return try self.executeDslBuilderWithAutoGasPaymentAndObserve(
+            allocator,
+            builder,
+            .{ .default_keystore = .{ .preparation = preparation } },
+            min_balance_override,
+            timeout_ms,
+            poll_ms,
+        );
+    }
+
+    pub fn executeDslBuilderWithAutoGasPaymentAndConfirmAndSummarize(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        builder: *tx_request_builder.ProgrammaticDslBuilder,
+        provider: tx_request_builder.AccountProvider,
+        min_balance_override: ?u64,
+        timeout_ms: u64,
+        poll_ms: u64,
+    ) !tx_result.OwnedExecutionInsights {
+        var result = try self.runDslBuilderWithAutoGasPayment(
+            allocator,
+            builder,
+            provider,
+            min_balance_override,
+            .{ .execute_confirm_summarize = .{ .timeout_ms = timeout_ms, .poll_ms = poll_ms } },
+        );
+        errdefer result.deinit(allocator);
+        return switch (result) {
+            .summarized => |value| value,
+            else => error.InvalidResponse,
+        };
+    }
+
+    pub fn executeDslBuilderWithAutoGasPaymentOrChallengePromptAndConfirmAndSummarize(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        builder: *tx_request_builder.ProgrammaticDslBuilder,
+        provider: tx_request_builder.AccountProvider,
+        min_balance_override: ?u64,
+        timeout_ms: u64,
+        poll_ms: u64,
+    ) !ProgrammaticClientActionOrChallengePromptResult {
+        return try self.runDslBuilderWithAutoGasPaymentOrChallengePrompt(
+            allocator,
+            builder,
+            provider,
+            min_balance_override,
+            .{ .execute_confirm_summarize = .{ .timeout_ms = timeout_ms, .poll_ms = poll_ms } },
+        );
+    }
+
+    pub fn executeDslBuilderWithAutoGasPaymentWithChallengeResponseAndConfirmAndSummarize(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        builder: *tx_request_builder.ProgrammaticDslBuilder,
+        provider: tx_request_builder.AccountProvider,
+        min_balance_override: ?u64,
+        response: tx_request_builder.SessionChallengeResponse,
+        timeout_ms: u64,
+        poll_ms: u64,
+    ) !tx_result.OwnedExecutionInsights {
+        var result = try self.runDslBuilderWithAutoGasPaymentWithChallengeResponse(
+            allocator,
+            builder,
+            provider,
+            min_balance_override,
+            response,
+            .{ .execute_confirm_summarize = .{ .timeout_ms = timeout_ms, .poll_ms = poll_ms } },
+        );
+        errdefer result.deinit(allocator);
+        return switch (result) {
+            .summarized => |value| value,
+            else => error.InvalidResponse,
+        };
+    }
+
+    pub fn executeDslBuilderWithAutoGasPaymentAndConfirmAndSummarizeFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        builder: *tx_request_builder.ProgrammaticDslBuilder,
+        preparation: keystore.SignerPreparation,
+        min_balance_override: ?u64,
+        timeout_ms: u64,
+        poll_ms: u64,
+    ) !tx_result.OwnedExecutionInsights {
+        return try self.executeDslBuilderWithAutoGasPaymentAndConfirmAndSummarize(
+            allocator,
+            builder,
+            .{ .default_keystore = .{ .preparation = preparation } },
+            min_balance_override,
+            timeout_ms,
+            poll_ms,
+        );
     }
 
     pub fn executeDslBuilderOrChallengeText(
@@ -1311,6 +7621,19 @@ pub const SuiRpcClient = struct {
         return try self.executeOwnedPlanOrChallengePrompt(allocator, &plan);
     }
 
+    pub fn executeDslBuilderOrChallengePromptFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        builder: *tx_request_builder.ProgrammaticDslBuilder,
+        preparation: keystore.SignerPreparation,
+    ) !ExecuteOrChallengePromptResult {
+        return try self.executeDslBuilderOrChallengePrompt(
+            allocator,
+            builder,
+            .{ .default_keystore = .{ .preparation = preparation } },
+        );
+    }
+
     pub fn executeDslBuilderOrChallengePromptAndConfirm(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
@@ -1324,6 +7647,23 @@ pub const SuiRpcClient = struct {
         return try self.executeOwnedPlanOrChallengePromptAndConfirm(
             allocator,
             &plan,
+            timeout_ms,
+            poll_ms,
+        );
+    }
+
+    pub fn executeDslBuilderOrChallengePromptAndConfirmFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        builder: *tx_request_builder.ProgrammaticDslBuilder,
+        preparation: keystore.SignerPreparation,
+        timeout_ms: u64,
+        poll_ms: u64,
+    ) !ExecuteOrChallengePromptResult {
+        return try self.executeDslBuilderOrChallengePromptAndConfirm(
+            allocator,
+            builder,
+            .{ .default_keystore = .{ .preparation = preparation } },
             timeout_ms,
             poll_ms,
         );
@@ -1351,6 +7691,18 @@ pub const SuiRpcClient = struct {
         var plan = try builder.finishAuthorizationPlan(provider);
         defer plan.deinit(allocator);
         return try self.inspectOwnedPlanWithChallengeResponse(allocator, &plan, response);
+    }
+
+    pub fn inspectDslBuilderWithChallengeResponseAndSummarize(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        builder: *tx_request_builder.ProgrammaticDslBuilder,
+        provider: tx_request_builder.AccountProvider,
+        response: tx_request_builder.SessionChallengeResponse,
+    ) !inspect_result.OwnedInspectInsights {
+        var plan = try builder.finishAuthorizationPlan(provider);
+        defer plan.deinit(allocator);
+        return try self.inspectOwnedPlanWithChallengeResponseAndSummarize(allocator, &plan, response);
     }
 
     pub fn authorizeDslBuilderWithChallengeResponse(
@@ -1389,6 +7741,63 @@ pub const SuiRpcClient = struct {
         var plan = try builder.finishAuthorizationPlan(provider);
         defer plan.deinit(allocator);
         return try self.runOwnedPlanWithChallengeResponse(allocator, &plan, response, action);
+    }
+
+    pub fn runDslBuilderWithChallengeResponseFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        builder: *tx_request_builder.ProgrammaticDslBuilder,
+        preparation: keystore.SignerPreparation,
+        response: tx_request_builder.SessionChallengeResponse,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionResult {
+        return try self.runDslBuilderWithChallengeResponse(
+            allocator,
+            builder,
+            .{ .default_keystore = .{ .preparation = preparation } },
+            response,
+            action,
+        );
+    }
+
+    pub fn runDslBuilderWithAutoGasPaymentWithChallengeResponse(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        builder: *tx_request_builder.ProgrammaticDslBuilder,
+        provider: tx_request_builder.AccountProvider,
+        min_balance_override: ?u64,
+        response: tx_request_builder.SessionChallengeResponse,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionResult {
+        var options = try builder.finish();
+        defer options.deinit(allocator);
+        return try self.runOptionsWithAutoGasPaymentWithChallengeResponseWithAccountProvider(
+            allocator,
+            options.options,
+            provider,
+            min_balance_override,
+            response,
+            action,
+        );
+    }
+
+    pub fn runDslBuilderWithAutoGasPaymentWithChallengeResponseFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        builder: *tx_request_builder.ProgrammaticDslBuilder,
+        preparation: keystore.SignerPreparation,
+        min_balance_override: ?u64,
+        response: tx_request_builder.SessionChallengeResponse,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionResult {
+        return try self.runDslBuilderWithAutoGasPaymentWithChallengeResponse(
+            allocator,
+            builder,
+            .{ .default_keystore = .{ .preparation = preparation } },
+            min_balance_override,
+            response,
+            action,
+        );
     }
 
     pub fn executeDslBuilderWithChallengeResponseAndConfirm(
@@ -1453,6 +7862,44 @@ pub const SuiRpcClient = struct {
         confirmed_options.confirm_timeout_ms = timeout_ms;
         confirmed_options.confirm_poll_ms = poll_ms;
         return try self.executeOptionsWithAccountProvider(allocator, confirmed_options, provider);
+    }
+
+    pub fn executeOptionsAndConfirmAndSummarizeWithAccountProvider(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        options: tx_request_builder.ProgrammaticRequestOptions,
+        provider: tx_request_builder.AccountProvider,
+        timeout_ms: u64,
+        poll_ms: u64,
+    ) !tx_result.OwnedExecutionInsights {
+        const response = try self.executeOptionsAndConfirmWithAccountProvider(
+            allocator,
+            options,
+            provider,
+            timeout_ms,
+            poll_ms,
+        );
+        defer allocator.free(response);
+        return try self.summarizeExecutionResponse(allocator, response);
+    }
+
+    pub fn executeOptionsAndConfirmAndSummarizeFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        options: tx_request_builder.ProgrammaticRequestOptions,
+        preparation: keystore.SignerPreparation,
+        timeout_ms: u64,
+        poll_ms: u64,
+    ) !tx_result.OwnedExecutionInsights {
+        const response = try self.executeOptionsAndConfirmFromDefaultKeystore(
+            allocator,
+            options,
+            preparation,
+            timeout_ms,
+            poll_ms,
+        );
+        defer allocator.free(response);
+        return try self.summarizeExecutionResponse(allocator, response);
     }
 
     pub fn executeRequestAndConfirm(
@@ -1549,6 +7996,20 @@ pub const SuiRpcClient = struct {
         );
     }
 
+    pub fn buildOptionsArtifactAndSummarizeWithAccountProvider(
+        self: *const SuiRpcClient,
+        allocator: std.mem.Allocator,
+        options: tx_request_builder.ProgrammaticRequestOptions,
+        provider: tx_request_builder.AccountProvider,
+        kind: tx_request_builder.ProgrammaticArtifactKind,
+    ) !artifact_result.OwnedProgrammaticArtifactSummary {
+        return try self.buildPlanArtifactAndSummarize(
+            allocator,
+            self.planOptionsWithAccountProvider(options, provider),
+            kind,
+        );
+    }
+
     pub fn buildOptionsArtifactOrChallengePromptWithAccountProvider(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
@@ -1603,6 +8064,18 @@ pub const SuiRpcClient = struct {
         );
     }
 
+    pub fn inspectOptionsOrChallengePromptAndSummarizeWithAccountProvider(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        options: tx_request_builder.ProgrammaticRequestOptions,
+        provider: tx_request_builder.AccountProvider,
+    ) !ProgrammaticClientActionOrChallengePromptResult {
+        return try self.inspectPlanOrChallengePromptAndSummarize(
+            allocator,
+            self.planOptionsWithAccountProvider(options, provider),
+        );
+    }
+
     pub fn inspectOptionsWithChallengeResponseWithAccountProvider(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
@@ -1611,6 +8084,20 @@ pub const SuiRpcClient = struct {
         response: tx_request_builder.SessionChallengeResponse,
     ) ![]u8 {
         return try self.inspectPlanWithChallengeResponse(
+            allocator,
+            self.planOptionsWithAccountProvider(options, provider),
+            response,
+        );
+    }
+
+    pub fn inspectOptionsWithChallengeResponseAndSummarizeWithAccountProvider(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        options: tx_request_builder.ProgrammaticRequestOptions,
+        provider: tx_request_builder.AccountProvider,
+        response: tx_request_builder.SessionChallengeResponse,
+    ) !inspect_result.OwnedInspectInsights {
+        return try self.inspectPlanWithChallengeResponseAndSummarize(
             allocator,
             self.planOptionsWithAccountProvider(options, provider),
             response,
@@ -1657,6 +8144,21 @@ pub const SuiRpcClient = struct {
         kind: tx_request_builder.ProgrammaticArtifactKind,
     ) ![]u8 {
         return try self.buildOptionsArtifactWithAccountProvider(
+            allocator,
+            options,
+            .{ .default_keystore = .{ .preparation = preparation } },
+            kind,
+        );
+    }
+
+    pub fn buildOptionsArtifactAndSummarizeFromDefaultKeystore(
+        self: *const SuiRpcClient,
+        allocator: std.mem.Allocator,
+        options: tx_request_builder.ProgrammaticRequestOptions,
+        preparation: keystore.SignerPreparation,
+        kind: tx_request_builder.ProgrammaticArtifactKind,
+    ) !artifact_result.OwnedProgrammaticArtifactSummary {
+        return try self.buildOptionsArtifactAndSummarizeWithAccountProvider(
             allocator,
             options,
             .{ .default_keystore = .{ .preparation = preparation } },
@@ -1716,6 +8218,17 @@ pub const SuiRpcClient = struct {
         preparation: keystore.SignerPreparation,
     ) !InspectOrChallengePromptResult {
         return try self.inspectOptionsOrChallengePromptWithAccountProvider(allocator, options, .{
+            .default_keystore = .{ .preparation = preparation },
+        });
+    }
+
+    pub fn inspectOptionsOrChallengePromptAndSummarizeFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        options: tx_request_builder.ProgrammaticRequestOptions,
+        preparation: keystore.SignerPreparation,
+    ) !ProgrammaticClientActionOrChallengePromptResult {
+        return try self.inspectOptionsOrChallengePromptAndSummarizeWithAccountProvider(allocator, options, .{
             .default_keystore = .{ .preparation = preparation },
         });
     }
@@ -1883,6 +8396,20 @@ pub const SuiRpcClient = struct {
         );
     }
 
+    pub fn buildRequestArtifactAndSummarizeWithAccountProvider(
+        self: *const SuiRpcClient,
+        allocator: std.mem.Allocator,
+        request: tx_builder.ProgrammaticTxRequest,
+        provider: tx_request_builder.AccountProvider,
+        kind: tx_request_builder.ProgrammaticArtifactKind,
+    ) !artifact_result.OwnedProgrammaticArtifactSummary {
+        return try self.buildPlanArtifactAndSummarize(
+            allocator,
+            self.planRequestWithAccountProvider(request, provider),
+            kind,
+        );
+    }
+
     pub fn buildRequestArtifactOrChallengePromptWithAccountProvider(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
@@ -1937,6 +8464,18 @@ pub const SuiRpcClient = struct {
         );
     }
 
+    pub fn inspectRequestOrChallengePromptAndSummarizeWithAccountProvider(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        request: tx_builder.ProgrammaticTxRequest,
+        provider: tx_request_builder.AccountProvider,
+    ) !ProgrammaticClientActionOrChallengePromptResult {
+        return try self.inspectPlanOrChallengePromptAndSummarize(
+            allocator,
+            self.planRequestWithAccountProvider(request, provider),
+        );
+    }
+
     pub fn inspectRequestWithChallengeResponseWithAccountProvider(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
@@ -1945,6 +8484,20 @@ pub const SuiRpcClient = struct {
         response: tx_request_builder.SessionChallengeResponse,
     ) ![]u8 {
         return try self.inspectPlanWithChallengeResponse(
+            allocator,
+            self.planRequestWithAccountProvider(request, provider),
+            response,
+        );
+    }
+
+    pub fn inspectRequestWithChallengeResponseAndSummarizeWithAccountProvider(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        request: tx_builder.ProgrammaticTxRequest,
+        provider: tx_request_builder.AccountProvider,
+        response: tx_request_builder.SessionChallengeResponse,
+    ) !inspect_result.OwnedInspectInsights {
+        return try self.inspectPlanWithChallengeResponseAndSummarize(
             allocator,
             self.planRequestWithAccountProvider(request, provider),
             response,
@@ -1991,6 +8544,21 @@ pub const SuiRpcClient = struct {
         kind: tx_request_builder.ProgrammaticArtifactKind,
     ) ![]u8 {
         return try self.buildRequestArtifactWithAccountProvider(
+            allocator,
+            request,
+            .{ .default_keystore = .{ .preparation = preparation } },
+            kind,
+        );
+    }
+
+    pub fn buildRequestArtifactAndSummarizeFromDefaultKeystore(
+        self: *const SuiRpcClient,
+        allocator: std.mem.Allocator,
+        request: tx_builder.ProgrammaticTxRequest,
+        preparation: keystore.SignerPreparation,
+        kind: tx_request_builder.ProgrammaticArtifactKind,
+    ) !artifact_result.OwnedProgrammaticArtifactSummary {
+        return try self.buildRequestArtifactAndSummarizeWithAccountProvider(
             allocator,
             request,
             .{ .default_keystore = .{ .preparation = preparation } },
@@ -2050,6 +8618,17 @@ pub const SuiRpcClient = struct {
         preparation: keystore.SignerPreparation,
     ) !InspectOrChallengePromptResult {
         return try self.inspectRequestOrChallengePromptWithAccountProvider(allocator, request, .{
+            .default_keystore = .{ .preparation = preparation },
+        });
+    }
+
+    pub fn inspectRequestOrChallengePromptAndSummarizeFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        request: tx_builder.ProgrammaticTxRequest,
+        preparation: keystore.SignerPreparation,
+    ) !ProgrammaticClientActionOrChallengePromptResult {
+        return try self.inspectRequestOrChallengePromptAndSummarizeWithAccountProvider(allocator, request, .{
             .default_keystore = .{ .preparation = preparation },
         });
     }
@@ -2221,6 +8800,21 @@ pub const SuiRpcClient = struct {
         );
     }
 
+    pub fn buildCommandsArtifactAndSummarizeWithAccountProvider(
+        self: *const SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        config: tx_request_builder.CommandRequestConfig,
+        provider: tx_request_builder.AccountProvider,
+        kind: tx_request_builder.ProgrammaticArtifactKind,
+    ) !artifact_result.OwnedProgrammaticArtifactSummary {
+        return try self.buildPlanArtifactAndSummarize(
+            allocator,
+            self.planCommandsWithAccountProvider(source, config, provider),
+            kind,
+        );
+    }
+
     pub fn buildCommandsArtifactOrChallengePromptWithAccountProvider(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
@@ -2332,6 +8926,2763 @@ pub const SuiRpcClient = struct {
         return try self.executeAuthorizedPreparedRequest(allocator, &prepared);
     }
 
+    pub fn summarizeExecutionResponse(
+        self: *const SuiRpcClient,
+        allocator: std.mem.Allocator,
+        response_json: []const u8,
+    ) !tx_result.OwnedExecutionInsights {
+        _ = self;
+        return try tx_result.extractExecutionInsights(allocator, response_json);
+    }
+
+    pub fn summarizeInspectResponse(
+        self: *const SuiRpcClient,
+        allocator: std.mem.Allocator,
+        response_json: []const u8,
+    ) !inspect_result.OwnedInspectInsights {
+        _ = self;
+        return try inspect_result.extractInspectInsights(allocator, response_json);
+    }
+
+    pub fn inspectPlanAndSummarize(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        plan: tx_request_builder.AuthorizationPlan,
+    ) !inspect_result.OwnedInspectInsights {
+        const response = try self.inspectPlan(allocator, plan);
+        defer allocator.free(response);
+        return try self.summarizeInspectResponse(allocator, response);
+    }
+
+    pub fn inspectOwnedPlanAndSummarize(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        plan: *tx_request_builder.OwnedAuthorizationPlan,
+    ) !inspect_result.OwnedInspectInsights {
+        const response = try self.inspectOwnedPlan(allocator, plan);
+        defer allocator.free(response);
+        return try self.summarizeInspectResponse(allocator, response);
+    }
+
+    pub fn inspectDslBuilderAndSummarize(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        builder: *tx_request_builder.ProgrammaticDslBuilder,
+        provider: tx_request_builder.AccountProvider,
+    ) !inspect_result.OwnedInspectInsights {
+        const response = try self.inspectDslBuilder(allocator, builder, provider);
+        defer allocator.free(response);
+        return try self.summarizeInspectResponse(allocator, response);
+    }
+
+    pub fn inspectDslBuilderWithAutoGasPaymentAndSummarize(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        builder: *tx_request_builder.ProgrammaticDslBuilder,
+        provider: tx_request_builder.AccountProvider,
+        min_balance_override: ?u64,
+    ) !inspect_result.OwnedInspectInsights {
+        var result = try self.runDslBuilderWithAutoGasPayment(
+            allocator,
+            builder,
+            provider,
+            min_balance_override,
+            .inspect_summarize,
+        );
+        errdefer result.deinit(allocator);
+        return switch (result) {
+            .inspect_summarized => |value| value,
+            else => error.InvalidResponse,
+        };
+    }
+
+    pub fn inspectDslBuilderWithAutoGasPaymentOrChallengePromptAndSummarize(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        builder: *tx_request_builder.ProgrammaticDslBuilder,
+        provider: tx_request_builder.AccountProvider,
+        min_balance_override: ?u64,
+    ) !ProgrammaticClientActionOrChallengePromptResult {
+        return try self.runDslBuilderWithAutoGasPaymentOrChallengePrompt(
+            allocator,
+            builder,
+            provider,
+            min_balance_override,
+            .inspect_summarize,
+        );
+    }
+
+    pub fn inspectDslBuilderWithAutoGasPaymentWithChallengeResponseAndSummarize(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        builder: *tx_request_builder.ProgrammaticDslBuilder,
+        provider: tx_request_builder.AccountProvider,
+        min_balance_override: ?u64,
+        response: tx_request_builder.SessionChallengeResponse,
+    ) !inspect_result.OwnedInspectInsights {
+        var result = try self.runDslBuilderWithAutoGasPaymentWithChallengeResponse(
+            allocator,
+            builder,
+            provider,
+            min_balance_override,
+            response,
+            .inspect_summarize,
+        );
+        errdefer result.deinit(allocator);
+        return switch (result) {
+            .inspect_summarized => |value| value,
+            else => error.InvalidResponse,
+        };
+    }
+
+    pub fn inspectDslBuilderWithAutoGasPaymentAndSummarizeFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        builder: *tx_request_builder.ProgrammaticDslBuilder,
+        preparation: keystore.SignerPreparation,
+        min_balance_override: ?u64,
+    ) !inspect_result.OwnedInspectInsights {
+        return try self.inspectDslBuilderWithAutoGasPaymentAndSummarize(
+            allocator,
+            builder,
+            .{ .default_keystore = .{ .preparation = preparation } },
+            min_balance_override,
+        );
+    }
+
+    pub fn inspectOptionsAndSummarize(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        options: tx_request_builder.ProgrammaticRequestOptions,
+    ) !inspect_result.OwnedInspectInsights {
+        const response = try self.inspectOptions(allocator, options);
+        defer allocator.free(response);
+        return try self.summarizeInspectResponse(allocator, response);
+    }
+
+    pub fn inspectOptionsAndSummarizeWithAccountProvider(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        options: tx_request_builder.ProgrammaticRequestOptions,
+        provider: tx_request_builder.AccountProvider,
+    ) !inspect_result.OwnedInspectInsights {
+        const response = try self.inspectOptionsWithAccountProvider(allocator, options, provider);
+        defer allocator.free(response);
+        return try self.summarizeInspectResponse(allocator, response);
+    }
+
+    pub fn inspectOptionsAndSummarizeFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        options: tx_request_builder.ProgrammaticRequestOptions,
+        preparation: keystore.SignerPreparation,
+    ) !inspect_result.OwnedInspectInsights {
+        const response = try self.inspectOptionsFromDefaultKeystore(allocator, options, preparation);
+        defer allocator.free(response);
+        return try self.summarizeInspectResponse(allocator, response);
+    }
+
+    pub fn inspectRequestAndSummarize(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        request: tx_builder.ProgrammaticTxRequest,
+    ) !inspect_result.OwnedInspectInsights {
+        return try self.inspectOptionsAndSummarize(
+            allocator,
+            tx_request_builder.optionsFromRequest(request),
+        );
+    }
+
+    pub fn inspectRequestAndSummarizeWithAccountProvider(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        request: tx_builder.ProgrammaticTxRequest,
+        provider: tx_request_builder.AccountProvider,
+    ) !inspect_result.OwnedInspectInsights {
+        return try self.inspectOptionsAndSummarizeWithAccountProvider(
+            allocator,
+            tx_request_builder.optionsFromRequest(request),
+            provider,
+        );
+    }
+
+    pub fn inspectRequestAndSummarizeFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        request: tx_builder.ProgrammaticTxRequest,
+        preparation: keystore.SignerPreparation,
+    ) !inspect_result.OwnedInspectInsights {
+        return try self.inspectOptionsAndSummarizeFromDefaultKeystore(
+            allocator,
+            tx_request_builder.optionsFromRequest(request),
+            preparation,
+        );
+    }
+
+    pub fn inspectCommandsAndSummarize(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        sender: ?[]const u8,
+        gas_budget: ?u64,
+        gas_price: ?u64,
+        options_json: ?[]const u8,
+    ) !inspect_result.OwnedInspectInsights {
+        return try self.inspectOptionsAndSummarize(
+            allocator,
+            tx_request_builder.optionsFromCommandSource(source, .{
+                .sender = sender,
+                .gas_budget = gas_budget,
+                .gas_price = gas_price,
+                .options_json = options_json,
+            }),
+        );
+    }
+
+    pub fn inspectCommandsAndSummarizeWithAccountProvider(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        config: tx_request_builder.CommandRequestConfig,
+        provider: tx_request_builder.AccountProvider,
+    ) !inspect_result.OwnedInspectInsights {
+        return try self.inspectOptionsAndSummarizeWithAccountProvider(
+            allocator,
+            tx_request_builder.optionsFromCommandSource(source, config),
+            provider,
+        );
+    }
+
+    pub fn inspectCommandsAndSummarizeFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        sender: ?[]const u8,
+        gas_budget: ?u64,
+        gas_price: ?u64,
+        options_json: ?[]const u8,
+        preparation: keystore.SignerPreparation,
+    ) !inspect_result.OwnedInspectInsights {
+        return try self.inspectOptionsAndSummarizeFromDefaultKeystore(
+            allocator,
+            tx_request_builder.optionsFromCommandSource(source, .{
+                .sender = sender,
+                .gas_budget = gas_budget,
+                .gas_price = gas_price,
+                .options_json = options_json,
+            }),
+            preparation,
+        );
+    }
+
+    pub fn getTransactionBlockAndSummarize(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        digest: []const u8,
+    ) !ObservedExecutionSummary {
+        const params = try buildTransactionBlockSummaryParams(allocator, digest);
+        defer allocator.free(params);
+
+        const confirmed_response = try self.getTransactionBlock(params);
+        errdefer self.allocator.free(confirmed_response);
+
+        var insights = try self.summarizeExecutionResponse(allocator, confirmed_response);
+        errdefer insights.deinit(allocator);
+
+        return .{
+            .digest = try allocator.dupe(u8, digest),
+            .confirmed_response = confirmed_response,
+            .insights = insights,
+        };
+    }
+
+    pub fn waitForTransactionConfirmationAndSummarize(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        digest: []const u8,
+        timeout_ms: u64,
+        poll_ms: u64,
+    ) !ObservedExecutionSummary {
+        const confirmed_response = try self.waitForTransactionConfirmation(digest, timeout_ms, poll_ms);
+        errdefer self.allocator.free(confirmed_response);
+
+        var insights = try self.summarizeExecutionResponse(allocator, confirmed_response);
+        errdefer insights.deinit(allocator);
+
+        return .{
+            .digest = try allocator.dupe(u8, digest),
+            .confirmed_response = confirmed_response,
+            .insights = insights,
+        };
+    }
+
+    pub fn observeConfirmedExecuteResponse(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        execute_response_json: []const u8,
+        timeout_ms: u64,
+        poll_ms: u64,
+    ) !ObservedExecutionSummary {
+        const digest = try extractExecuteDigest(allocator, execute_response_json) orelse return error.InvalidResponse;
+        defer allocator.free(digest);
+
+        return try self.waitForTransactionConfirmationAndSummarize(
+            allocator,
+            digest,
+            timeout_ms,
+            poll_ms,
+        );
+    }
+
+    pub fn summarizeObjectResponse(
+        self: *const SuiRpcClient,
+        allocator: std.mem.Allocator,
+        response_json: []const u8,
+    ) !object_result.OwnedObjectSummary {
+        _ = self;
+        return try object_result.extractObjectSummary(allocator, response_json);
+    }
+
+    pub fn getObjectAndSummarize(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        object_id: []const u8,
+        options_json: ?[]const u8,
+    ) !object_result.OwnedObjectSummary {
+        const response = try self.getObject(object_id, options_json);
+        defer allocator.free(response);
+        return try self.summarizeObjectResponse(allocator, response);
+    }
+
+    pub fn getObjectAndSummarizeWithOptions(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        object_id: []const u8,
+        options: ObjectDataOptions,
+    ) !object_result.OwnedObjectSummary {
+        const response = try self.getObjectWithOptions(object_id, options);
+        defer allocator.free(response);
+        return try self.summarizeObjectResponse(allocator, response);
+    }
+
+    pub fn getDynamicFieldObjectAndSummarize(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        parent_object_id: []const u8,
+        name_json: []const u8,
+    ) !object_result.OwnedObjectSummary {
+        const response = try self.getDynamicFieldObject(parent_object_id, name_json);
+        defer allocator.free(response);
+        return try self.summarizeObjectResponse(allocator, response);
+    }
+
+    pub fn getDynamicFieldObjectAndSummarizeWithName(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        parent_object_id: []const u8,
+        name: DynamicFieldName,
+    ) !object_result.OwnedObjectSummary {
+        const response = try self.getDynamicFieldObjectWithName(parent_object_id, name);
+        defer allocator.free(response);
+        return try self.summarizeObjectResponse(allocator, response);
+    }
+
+    pub fn runObjectQuery(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        query: ObjectQuery,
+    ) ![]u8 {
+        return switch (query) {
+            .get => |spec| switch (spec.options) {
+                .none => try dupeOwnedJsonResponse(self.allocator, allocator, try self.getObject(spec.object_id, null)),
+                .json => |options_json| try dupeOwnedJsonResponse(self.allocator, allocator, try self.getObject(spec.object_id, options_json)),
+                .typed => |options| try dupeOwnedJsonResponse(self.allocator, allocator, try self.getObjectWithOptions(spec.object_id, options)),
+            },
+            .dynamic_fields_page => |spec| try dupeOwnedJsonResponse(
+                self.allocator,
+                allocator,
+                try self.getDynamicFieldsWithRequest(spec.parent_object_id, spec.request),
+            ),
+            .dynamic_fields_all => |spec| blk: {
+                var page = try self.getAllDynamicFieldsWithRequest(allocator, spec.parent_object_id, spec.request);
+                defer page.deinit(allocator);
+                break :blk try std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(page, .{})});
+            },
+            .dynamic_field_object => |spec| switch (spec.name) {
+                .json => |name_json| try dupeOwnedJsonResponse(
+                    self.allocator,
+                    allocator,
+                    try self.getDynamicFieldObject(spec.parent_object_id, name_json),
+                ),
+                .typed => |name| try dupeOwnedJsonResponse(
+                    self.allocator,
+                    allocator,
+                    try self.getDynamicFieldObjectWithName(spec.parent_object_id, name),
+                ),
+            },
+        };
+    }
+
+    pub fn runObjectQueryAndSummarize(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        query: ObjectQuery,
+    ) !ObjectQuerySummary {
+        return switch (query) {
+            .get => |spec| switch (spec.options) {
+                .none => .{
+                    .object = try self.getObjectAndSummarize(allocator, spec.object_id, null),
+                },
+                .json => |options_json| .{
+                    .object = try self.getObjectAndSummarize(allocator, spec.object_id, options_json),
+                },
+                .typed => |options| .{
+                    .object = try self.getObjectAndSummarizeWithOptions(allocator, spec.object_id, options),
+                },
+            },
+            .dynamic_fields_page => |spec| .{
+                .dynamic_fields = try self.getDynamicFieldsPageWithRequest(
+                    allocator,
+                    spec.parent_object_id,
+                    spec.request,
+                ),
+            },
+            .dynamic_fields_all => |spec| .{
+                .dynamic_fields = try self.getAllDynamicFieldsWithRequest(
+                    allocator,
+                    spec.parent_object_id,
+                    spec.request,
+                ),
+            },
+            .dynamic_field_object => |spec| switch (spec.name) {
+                .json => |name_json| .{
+                    .object = try self.getDynamicFieldObjectAndSummarize(
+                        allocator,
+                        spec.parent_object_id,
+                        name_json,
+                    ),
+                },
+                .typed => |name| .{
+                    .object = try self.getDynamicFieldObjectAndSummarizeWithName(
+                        allocator,
+                        spec.parent_object_id,
+                        name,
+                    ),
+                },
+            },
+        };
+    }
+
+    pub fn runObjectQueryAction(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        query: ObjectQuery,
+        action: ObjectQueryAction,
+    ) !ObjectQueryActionResult {
+        return switch (action) {
+            .raw => .{ .raw = try self.runObjectQuery(allocator, query) },
+            .summarize => .{ .summarized = try self.runObjectQueryAndSummarize(allocator, query) },
+        };
+    }
+
+    pub fn runCoinQuery(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        query: CoinQuery,
+    ) ![]u8 {
+        return switch (query) {
+            .page => |spec| try dupeOwnedJsonResponse(
+                self.allocator,
+                allocator,
+                try self.getCoinsWithRequest(spec.owner, spec.request),
+            ),
+            .all => |spec| blk: {
+                var page = try self.getAllCoinsWithRequest(allocator, spec.owner, spec.request);
+                defer page.deinit(allocator);
+                break :blk try std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(page, .{})});
+            },
+        };
+    }
+
+    pub fn runCoinQueryAndSummarize(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        query: CoinQuery,
+    ) !coin_result.OwnedCoinPage {
+        return switch (query) {
+            .page => |spec| try self.getCoinsPageWithRequest(allocator, spec.owner, spec.request),
+            .all => |spec| try self.getAllCoinsWithRequest(allocator, spec.owner, spec.request),
+        };
+    }
+
+    pub fn runCoinQueryAction(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        query: CoinQuery,
+        action: ObjectQueryAction,
+    ) !CoinQueryActionResult {
+        return switch (action) {
+            .raw => .{ .raw = try self.runCoinQuery(allocator, query) },
+            .summarize => .{ .summarized = try self.runCoinQueryAndSummarize(allocator, query) },
+        };
+    }
+
+    pub fn selectCoinWithMinBalance(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        owner: []const u8,
+        request: CoinPageRequest,
+        min_balance: u64,
+    ) !?coin_result.OwnedCoinEntry {
+        var page = try self.getAllCoinsWithRequest(allocator, owner, request);
+        defer page.deinit(allocator);
+
+        const index = page.selectSmallestSufficientCoinIndex(min_balance) orelse return null;
+        return try page.entries[index].clone(allocator);
+    }
+
+    pub fn selectLargestCoin(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        owner: []const u8,
+        request: CoinPageRequest,
+    ) !?coin_result.OwnedCoinEntry {
+        var page = try self.getAllCoinsWithRequest(allocator, owner, request);
+        defer page.deinit(allocator);
+
+        const index = page.selectLargestCoinIndex() orelse return null;
+        return try page.entries[index].clone(allocator);
+    }
+
+    pub fn selectGasCoin(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        owner: []const u8,
+        min_balance: u64,
+    ) !?coin_result.OwnedCoinEntry {
+        return try self.selectCoinWithMinBalance(
+            allocator,
+            owner,
+            .{ .coin_type = default_sui_coin_type },
+            min_balance,
+        );
+    }
+
+    pub fn buildGasPaymentJsonFromCoin(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        coin: coin_result.OwnedCoinEntry,
+    ) ![]u8 {
+        _ = self;
+        const object_id = coin.coin_object_id orelse return error.InvalidRpcResponse;
+        const version = coin.version orelse return error.InvalidRpcResponse;
+        const digest = coin.digest orelse return error.InvalidRpcResponse;
+        return try std.fmt.allocPrint(
+            allocator,
+            "[{{\"objectId\":{f},\"version\":{f},\"digest\":{f}}}]",
+            .{
+                std.json.fmt(object_id, .{}),
+                std.json.fmt(version, .{}),
+                std.json.fmt(digest, .{}),
+            },
+        );
+    }
+
+    pub fn selectGasPaymentJsonWithMinBalance(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        owner: []const u8,
+        request: CoinPageRequest,
+        min_balance: u64,
+    ) !?[]u8 {
+        var selection = try self.selectCoinWithMinBalance(allocator, owner, request, min_balance);
+        defer if (selection) |*entry| entry.deinit(allocator);
+        if (selection == null) return null;
+        return try self.buildGasPaymentJsonFromCoin(allocator, selection.?);
+    }
+
+    pub fn selectGasPaymentJson(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        owner: []const u8,
+        min_balance: u64,
+    ) !?[]u8 {
+        var selection = try self.selectGasCoin(allocator, owner, min_balance);
+        defer if (selection) |*entry| entry.deinit(allocator);
+        if (selection == null) return null;
+        return try self.buildGasPaymentJsonFromCoin(allocator, selection.?);
+    }
+
+    pub fn selectGasPaymentJsonFromTokenWithDefaultOwner(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        token: []const u8,
+        default_owner: ?[]const u8,
+    ) !?[]u8 {
+        var request = try parseSelectedArgumentRequestTokenWithDefaultOwner(allocator, token, default_owner);
+        defer request.deinit(allocator);
+
+        return switch (request.value) {
+            .gas_coin => |spec| try self.selectGasPaymentJson(allocator, spec.owner, spec.min_balance),
+            .coin_with_min_balance => |spec| try self.selectGasPaymentJsonWithMinBalance(
+                allocator,
+                spec.owner,
+                spec.request,
+                spec.min_balance,
+            ),
+            else => error.InvalidCli,
+        };
+    }
+
+    pub fn resolveSelectedGasPaymentJsonWithDefaultOwner(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        gas_payment_json: ?[]const u8,
+        default_owner: ?[]const u8,
+    ) !?[]u8 {
+        const raw = gas_payment_json orelse return null;
+        const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+        if (!std.mem.startsWith(u8, trimmed, "select:") and !std.mem.startsWith(u8, trimmed, "sel:")) return null;
+        return (try self.selectGasPaymentJsonFromTokenWithDefaultOwner(allocator, trimmed, default_owner)) orelse return error.SelectionNotFound;
+    }
+
+    fn ownedSelectedArgumentValueFromObjectId(
+        allocator: std.mem.Allocator,
+        object_id: ?[]const u8,
+    ) !?OwnedSelectedArgumentValue {
+        const resolved = object_id orelse return null;
+        return try OwnedSelectedArgumentValue.initObjectId(allocator, resolved);
+    }
+
+    pub fn resolveObjectInputArgumentValue(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        object_id: []const u8,
+        input_kind: ObjectInputKind,
+        mutable: bool,
+        version: ?u64,
+        digest: ?[]const u8,
+        initial_shared_version: ?u64,
+    ) !OwnedSelectedArgumentValue {
+        const owned_json = switch (input_kind) {
+            .imm_or_owned => blk: {
+                if (initial_shared_version != null) return error.InvalidCli;
+                if (version != null or digest != null) {
+                    break :blk try buildImmOrOwnedObjectInputJson(
+                        allocator,
+                        object_id,
+                        version orelse return error.InvalidCli,
+                        digest orelse return error.InvalidCli,
+                    );
+                }
+                break :blk try self.resolveImmOrOwnedObjectInputJson(allocator, object_id);
+            },
+            .receiving => blk: {
+                if (initial_shared_version != null) return error.InvalidCli;
+                if (version != null or digest != null) {
+                    break :blk try buildReceivingObjectInputJson(
+                        allocator,
+                        object_id,
+                        version orelse return error.InvalidCli,
+                        digest orelse return error.InvalidCli,
+                    );
+                }
+                break :blk try self.resolveReceivingObjectInputJson(allocator, object_id);
+            },
+            .shared => blk: {
+                if (version != null or digest != null) return error.InvalidCli;
+                if (initial_shared_version) |resolved_initial_shared_version| {
+                    break :blk try buildSharedObjectInputJson(
+                        allocator,
+                        object_id,
+                        resolved_initial_shared_version,
+                        mutable,
+                    );
+                }
+                break :blk try self.resolveSharedObjectInputJson(allocator, object_id, mutable);
+            },
+        };
+        return OwnedSelectedArgumentValue.initOwnedRawJson(owned_json);
+    }
+
+    pub fn resolveObjectPresetArgumentValue(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        preset: ObjectPresetKind,
+    ) !OwnedSelectedArgumentValue {
+        const spec = objectInputPreset(preset);
+        return try self.resolveObjectInputArgumentValue(
+            allocator,
+            spec.object_id,
+            spec.input_kind,
+            spec.mutable,
+            spec.version,
+            spec.digest,
+            spec.initial_shared_version,
+        );
+    }
+
+    pub fn selectCoinArgumentValueWithMinBalance(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        owner: []const u8,
+        request: CoinPageRequest,
+        min_balance: u64,
+    ) !?OwnedSelectedArgumentValue {
+        var selection = try self.selectCoinWithMinBalance(allocator, owner, request, min_balance);
+        defer if (selection) |*entry| entry.deinit(allocator);
+        return try ownedSelectedArgumentValueFromObjectId(allocator, if (selection) |entry| entry.coin_object_id else null);
+    }
+
+    pub fn selectGasCoinArgumentValue(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        owner: []const u8,
+        min_balance: u64,
+    ) !?OwnedSelectedArgumentValue {
+        var selection = try self.selectGasCoin(allocator, owner, min_balance);
+        defer if (selection) |*entry| entry.deinit(allocator);
+        return try ownedSelectedArgumentValueFromObjectId(allocator, if (selection) |entry| entry.coin_object_id else null);
+    }
+
+    pub fn selectOwnedObject(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        owner: []const u8,
+        request: OwnedObjectsPageRequest,
+    ) !?owned_object_result.OwnedObjectEntry {
+        var page = try self.getAllOwnedObjectsWithRequest(allocator, owner, request);
+        defer page.deinit(allocator);
+
+        const index = page.selectFirstFoundIndex() orelse return null;
+        return try page.entries[index].clone(allocator);
+    }
+
+    pub fn selectOwnedObjectByStructType(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        owner: []const u8,
+        struct_type: []const u8,
+    ) !?owned_object_result.OwnedObjectEntry {
+        return try self.selectOwnedObject(allocator, owner, .{
+            .filter = .{ .struct_type = struct_type },
+        });
+    }
+
+    pub fn selectOwnedObjectByObjectId(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        owner: []const u8,
+        object_id: []const u8,
+    ) !?owned_object_result.OwnedObjectEntry {
+        return try self.selectOwnedObject(allocator, owner, .{
+            .filter = .{ .object_id = object_id },
+        });
+    }
+
+    pub fn selectOwnedObjectByModule(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        owner: []const u8,
+        package: []const u8,
+        module: []const u8,
+    ) !?owned_object_result.OwnedObjectEntry {
+        return try self.selectOwnedObject(allocator, owner, .{
+            .filter = .{
+                .move_module = .{
+                    .package = package,
+                    .module = module,
+                },
+            },
+        });
+    }
+
+    pub fn selectOwnedObjectArgumentValue(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        owner: []const u8,
+        request: OwnedObjectsPageRequest,
+    ) !?OwnedSelectedArgumentValue {
+        var selection = try self.selectOwnedObject(allocator, owner, request);
+        defer if (selection) |*entry| entry.deinit(allocator);
+        return try ownedSelectedArgumentValueFromObjectId(allocator, if (selection) |entry| entry.object_id else null);
+    }
+
+    pub fn selectOwnedObjectArgumentValueByStructType(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        owner: []const u8,
+        struct_type: []const u8,
+    ) !?OwnedSelectedArgumentValue {
+        var selection = try self.selectOwnedObjectByStructType(allocator, owner, struct_type);
+        defer if (selection) |*entry| entry.deinit(allocator);
+        return try ownedSelectedArgumentValueFromObjectId(allocator, if (selection) |entry| entry.object_id else null);
+    }
+
+    pub fn selectOwnedObjectArgumentValueByObjectId(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        owner: []const u8,
+        object_id: []const u8,
+    ) !?OwnedSelectedArgumentValue {
+        var selection = try self.selectOwnedObjectByObjectId(allocator, owner, object_id);
+        defer if (selection) |*entry| entry.deinit(allocator);
+        return try ownedSelectedArgumentValueFromObjectId(allocator, if (selection) |entry| entry.object_id else null);
+    }
+
+    pub fn selectOwnedObjectArgumentValueByModule(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        owner: []const u8,
+        package: []const u8,
+        module: []const u8,
+    ) !?OwnedSelectedArgumentValue {
+        var selection = try self.selectOwnedObjectByModule(allocator, owner, package, module);
+        defer if (selection) |*entry| entry.deinit(allocator);
+        return try ownedSelectedArgumentValueFromObjectId(allocator, if (selection) |entry| entry.object_id else null);
+    }
+
+    pub fn selectArgumentValue(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        request: SelectedArgumentRequest,
+    ) !?OwnedSelectedArgumentValue {
+        return switch (request) {
+            .object_preset => |spec| try self.resolveObjectPresetArgumentValue(
+                allocator,
+                spec.preset,
+            ),
+            .object_input => |spec| try self.resolveObjectInputArgumentValue(
+                allocator,
+                spec.object_id,
+                spec.input_kind,
+                spec.mutable,
+                spec.version,
+                spec.digest,
+                spec.initial_shared_version,
+            ),
+            .gas_coin => |spec| try self.selectGasCoinArgumentValue(allocator, spec.owner, spec.min_balance),
+            .coin_with_min_balance => |spec| try self.selectCoinArgumentValueWithMinBalance(
+                allocator,
+                spec.owner,
+                spec.request,
+                spec.min_balance,
+            ),
+            .owned_object => |spec| try self.selectOwnedObjectArgumentValue(allocator, spec.owner, spec.request),
+            .owned_object_struct_type => |spec| try self.selectOwnedObjectArgumentValueByStructType(
+                allocator,
+                spec.owner,
+                spec.struct_type,
+            ),
+            .owned_object_object_id => |spec| try self.selectOwnedObjectArgumentValueByObjectId(
+                allocator,
+                spec.owner,
+                spec.object_id,
+            ),
+            .owned_object_module => |spec| try self.selectOwnedObjectArgumentValueByModule(
+                allocator,
+                spec.owner,
+                spec.package,
+                spec.module,
+            ),
+        };
+    }
+
+    fn selectedRequestOptionalString(
+        allocator: std.mem.Allocator,
+        owned: *OwnedSelectedArgumentRequest,
+        object: std.json.ObjectMap,
+        key: []const u8,
+    ) !?[]const u8 {
+        const value = object.get(key) orelse return null;
+        if (value != .string) return error.InvalidCli;
+        return try owned.dupeAndTrack(allocator, value.string);
+    }
+
+    fn selectedRequestRequiredString(
+        allocator: std.mem.Allocator,
+        owned: *OwnedSelectedArgumentRequest,
+        object: std.json.ObjectMap,
+        key: []const u8,
+    ) ![]const u8 {
+        return (try selectedRequestOptionalString(allocator, owned, object, key)) orelse return error.InvalidCli;
+    }
+
+    fn selectedRequestResolvedOwner(
+        allocator: std.mem.Allocator,
+        owned: *OwnedSelectedArgumentRequest,
+        object: std.json.ObjectMap,
+        default_owner: ?[]const u8,
+    ) ![]const u8 {
+        if (try selectedRequestOptionalString(allocator, owned, object, "owner")) |owner| return owner;
+        const resolved = default_owner orelse return error.InvalidCli;
+        return try owned.dupeAndTrack(allocator, resolved);
+    }
+
+    fn selectedRequestOptionalU64(
+        object: std.json.ObjectMap,
+        key: []const u8,
+    ) !?u64 {
+        const value = object.get(key) orelse return null;
+        return switch (value) {
+            .integer => |number| if (number < 0) error.InvalidCli else @as(u64, @intCast(number)),
+            .string => |text| std.fmt.parseInt(u64, text, 10) catch return error.InvalidCli,
+            else => error.InvalidCli,
+        };
+    }
+
+    fn selectedRequestOptionalU64Aliases(
+        object: std.json.ObjectMap,
+        first_key: []const u8,
+        second_key: []const u8,
+    ) !?u64 {
+        if (try selectedRequestOptionalU64(object, first_key)) |value| return value;
+        return try selectedRequestOptionalU64(object, second_key);
+    }
+
+    fn selectedRequestOptionalBool(
+        object: std.json.ObjectMap,
+        key: []const u8,
+    ) !?bool {
+        const value = object.get(key) orelse return null;
+        return switch (value) {
+            .bool => |flag| flag,
+            else => error.InvalidCli,
+        };
+    }
+
+    fn parseObjectInputKind(raw: []const u8) !ObjectInputKind {
+        if (std.mem.eql(u8, raw, "imm_or_owned") or
+            std.mem.eql(u8, raw, "immOrOwned") or
+            std.mem.eql(u8, raw, "owned"))
+        {
+            return .imm_or_owned;
+        }
+        if (std.mem.eql(u8, raw, "receiving")) return .receiving;
+        if (std.mem.eql(u8, raw, "shared")) return .shared;
+        return error.InvalidCli;
+    }
+
+    fn parseObjectPresetKind(raw: []const u8) !ObjectPresetKind {
+        if (std.mem.eql(u8, raw, "clock") or
+            std.mem.eql(u8, raw, "sui_clock") or
+            std.mem.eql(u8, raw, "system_clock"))
+        {
+            return .clock;
+        }
+        if (std.mem.eql(u8, raw, "cetus_clmm_global_config_mainnet") or
+            std.mem.eql(u8, raw, "cetus_global_config_mainnet") or
+            std.mem.eql(u8, raw, "cetus.mainnet.clmm.global_config"))
+        {
+            return .cetus_clmm_global_config_mainnet;
+        }
+        if (std.mem.eql(u8, raw, "cetus_clmm_global_config_testnet") or
+            std.mem.eql(u8, raw, "cetus_global_config_testnet") or
+            std.mem.eql(u8, raw, "cetus.testnet.clmm.global_config"))
+        {
+            return .cetus_clmm_global_config_testnet;
+        }
+        return error.InvalidCli;
+    }
+
+    fn selectedRequestTokenJsonText(token: []const u8) ?[]const u8 {
+        const trimmed = std.mem.trim(u8, token, " \t\r\n");
+        if (std.mem.startsWith(u8, trimmed, "select:")) return trimmed["select:".len..];
+        if (std.mem.startsWith(u8, trimmed, "sel:")) return trimmed["sel:".len..];
+        return null;
+    }
+
+    fn observeSelectedRequestOwner(
+        seen_owner: *?[]const u8,
+        candidate: []const u8,
+    ) !void {
+        if (seen_owner.*) |existing| {
+            if (!std.mem.eql(u8, existing, candidate)) return error.InvalidCli;
+            return;
+        }
+        seen_owner.* = candidate;
+    }
+
+    fn inferSelectedRequestOwnerFromJsonValue(
+        allocator: std.mem.Allocator,
+        value: std.json.Value,
+    ) !?[]u8 {
+        var seen_owner: ?[]const u8 = null;
+
+        const Walker = struct {
+            fn walk(
+                alloc: std.mem.Allocator,
+                current: std.json.Value,
+                seen: *?[]const u8,
+            ) !void {
+                switch (current) {
+                    .string => |text| {
+                        const json_text = selectedRequestTokenJsonText(text) orelse return;
+                        const parsed = try std.json.parseFromSlice(std.json.Value, alloc, json_text, .{});
+                        defer parsed.deinit();
+                        if (parsed.value != .object) return error.InvalidCli;
+                        if (parsed.value.object.get("owner")) |owner_value| {
+                            if (owner_value != .string or owner_value.string.len == 0) return error.InvalidCli;
+                            try observeSelectedRequestOwner(seen, owner_value.string);
+                        }
+                    },
+                    .array => |array| {
+                        for (array.items) |item| try walk(alloc, item, seen);
+                    },
+                    .object => |object| {
+                        var iterator = object.iterator();
+                        while (iterator.next()) |entry| {
+                            try walk(alloc, entry.value_ptr.*, seen);
+                        }
+                    },
+                    else => {},
+                }
+            }
+        };
+
+        try Walker.walk(allocator, value, &seen_owner);
+        if (seen_owner) |owner| return try allocator.dupe(u8, owner);
+        return null;
+    }
+
+    fn inferSelectedRequestOwnerFromToken(
+        allocator: std.mem.Allocator,
+        token: []const u8,
+    ) !?[]u8 {
+        const trimmed = std.mem.trim(u8, token, " \t\r\n");
+        if (selectedRequestTokenJsonText(trimmed)) |json_text| {
+            const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_text, .{});
+            defer parsed.deinit();
+            if (parsed.value != .object) return error.InvalidCli;
+            if (parsed.value.object.get("owner")) |value| {
+                if (value != .string or value.string.len == 0) return error.InvalidCli;
+                return try allocator.dupe(u8, value.string);
+            }
+            return null;
+        }
+
+        if (std.json.parseFromSlice(std.json.Value, allocator, trimmed, .{})) |parsed| {
+            defer parsed.deinit();
+            return try inferSelectedRequestOwnerFromJsonValue(allocator, parsed.value);
+        } else |_| {}
+
+        return null;
+    }
+
+    fn inferSelectedRequestOwnerFromTokens(
+        allocator: std.mem.Allocator,
+        tokens: []const []const u8,
+    ) !?[]u8 {
+        var seen_owner: ?[]u8 = null;
+        errdefer if (seen_owner) |value| allocator.free(value);
+
+        for (tokens) |token| {
+            const candidate = try inferSelectedRequestOwnerFromToken(allocator, token) orelse continue;
+            errdefer allocator.free(candidate);
+            if (seen_owner) |existing| {
+                if (!std.mem.eql(u8, existing, candidate)) {
+                    allocator.free(candidate);
+                    return error.InvalidCli;
+                }
+                allocator.free(candidate);
+            } else {
+                seen_owner = candidate;
+            }
+        }
+
+        return seen_owner;
+    }
+
+    fn inferSelectedRequestOwnerFromCommandSource(
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+    ) !?[]u8 {
+        if (!commandSourceUsesSelectedArgumentTokens(source)) return null;
+        const commands_json = try tx_builder.resolveCommands(allocator, source);
+        defer allocator.free(commands_json);
+        return try inferSelectedRequestOwnerFromToken(allocator, commands_json);
+    }
+
+    pub fn inferSelectedRequestOwnerFromOptions(
+        allocator: std.mem.Allocator,
+        options: tx_request_builder.ProgrammaticRequestOptions,
+    ) !?[]u8 {
+        var seen_owner: ?[]u8 = null;
+        errdefer if (seen_owner) |value| allocator.free(value);
+
+        if (try inferSelectedRequestOwnerFromCommandSource(allocator, options.source)) |owner| {
+            seen_owner = owner;
+        }
+        if (try inferSelectedRequestOwnerFromToken(allocator, options.gas_payment_json orelse "")) |owner| {
+            if (seen_owner) |existing| {
+                if (!std.mem.eql(u8, existing, owner)) {
+                    allocator.free(owner);
+                    return error.InvalidCli;
+                }
+                allocator.free(owner);
+            } else {
+                seen_owner = owner;
+            }
+        }
+
+        return seen_owner;
+    }
+
+    fn parseSelectedArgumentRequestTokenWithDefaultOwner(
+        allocator: std.mem.Allocator,
+        token: []const u8,
+        default_owner: ?[]const u8,
+    ) !OwnedSelectedArgumentRequest {
+        const trimmed = std.mem.trim(u8, token, " \t\r\n");
+        const json_text = if (std.mem.startsWith(u8, trimmed, "select:"))
+            trimmed["select:".len..]
+        else if (std.mem.startsWith(u8, trimmed, "sel:"))
+            trimmed["sel:".len..]
+        else
+            return error.InvalidCli;
+
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_text, .{});
+        defer parsed.deinit();
+        if (parsed.value != .object) return error.InvalidCli;
+
+        var owned = OwnedSelectedArgumentRequest{
+            .value = undefined,
+        };
+        errdefer owned.deinit(allocator);
+
+        const object = parsed.value.object;
+        const kind = try selectedRequestRequiredString(allocator, &owned, object, "kind");
+
+        if (std.mem.eql(u8, kind, "object_preset") or
+            std.mem.eql(u8, kind, "well_known_object") or
+            std.mem.eql(u8, kind, "system_object"))
+        {
+            const preset_name = (try selectedRequestOptionalString(allocator, &owned, object, "name")) orelse
+                (try selectedRequestOptionalString(allocator, &owned, object, "preset")) orelse
+                return error.InvalidCli;
+            owned.value = .{
+                .object_preset = .{
+                    .preset = try parseObjectPresetKind(preset_name),
+                },
+            };
+            return owned;
+        }
+        if (std.mem.eql(u8, kind, "object_input") or std.mem.eql(u8, kind, "ptb_object")) {
+            const input_kind = try parseObjectInputKind(
+                try selectedRequestRequiredString(allocator, &owned, object, "inputKind"),
+            );
+            const mutable = (try selectedRequestOptionalBool(object, "mutable")) orelse false;
+            if (input_kind != .shared and object.get("mutable") != null) return error.InvalidCli;
+            const version = try selectedRequestOptionalU64(object, "version");
+            const digest = try selectedRequestOptionalString(allocator, &owned, object, "digest");
+            const initial_shared_version = try selectedRequestOptionalU64Aliases(
+                object,
+                "initialSharedVersion",
+                "initial_shared_version",
+            );
+            if (input_kind == .shared) {
+                if (version != null or digest != null) return error.InvalidCli;
+            } else {
+                if (initial_shared_version != null) return error.InvalidCli;
+                if ((version == null) != (digest == null)) return error.InvalidCli;
+            }
+            owned.value = .{
+                .object_input = .{
+                    .object_id = try selectedRequestRequiredString(allocator, &owned, object, "objectId"),
+                    .input_kind = input_kind,
+                    .mutable = mutable,
+                    .version = version,
+                    .digest = digest,
+                    .initial_shared_version = initial_shared_version,
+                },
+            };
+            return owned;
+        }
+        if (std.mem.eql(u8, kind, "gas_coin")) {
+            owned.value = .{
+                .gas_coin = .{
+                    .owner = try selectedRequestResolvedOwner(allocator, &owned, object, default_owner),
+                    .min_balance = (try selectedRequestOptionalU64(object, "minBalance")) orelse return error.InvalidCli,
+                },
+            };
+            return owned;
+        }
+        if (std.mem.eql(u8, kind, "coin_with_min_balance")) {
+            owned.value = .{
+                .coin_with_min_balance = .{
+                    .owner = try selectedRequestResolvedOwner(allocator, &owned, object, default_owner),
+                    .request = .{
+                        .coin_type = try selectedRequestOptionalString(allocator, &owned, object, "coinType"),
+                        .cursor = try selectedRequestOptionalString(allocator, &owned, object, "cursor"),
+                        .limit = try selectedRequestOptionalU64(object, "limit"),
+                    },
+                    .min_balance = (try selectedRequestOptionalU64(object, "minBalance")) orelse return error.InvalidCli,
+                },
+            };
+            return owned;
+        }
+        if (std.mem.eql(u8, kind, "owned_object")) {
+            owned.value = .{
+                .owned_object = .{
+                    .owner = try selectedRequestResolvedOwner(allocator, &owned, object, default_owner),
+                    .request = .{
+                        .cursor = try selectedRequestOptionalString(allocator, &owned, object, "cursor"),
+                        .limit = try selectedRequestOptionalU64(object, "limit"),
+                    },
+                },
+            };
+            return owned;
+        }
+        if (std.mem.eql(u8, kind, "owned_object_struct_type")) {
+            owned.value = .{
+                .owned_object_struct_type = .{
+                    .owner = try selectedRequestResolvedOwner(allocator, &owned, object, default_owner),
+                    .struct_type = try selectedRequestRequiredString(allocator, &owned, object, "structType"),
+                },
+            };
+            return owned;
+        }
+        if (std.mem.eql(u8, kind, "owned_object_object_id")) {
+            owned.value = .{
+                .owned_object_object_id = .{
+                    .owner = try selectedRequestResolvedOwner(allocator, &owned, object, default_owner),
+                    .object_id = try selectedRequestRequiredString(allocator, &owned, object, "objectId"),
+                },
+            };
+            return owned;
+        }
+        if (std.mem.eql(u8, kind, "owned_object_module")) {
+            owned.value = .{
+                .owned_object_module = .{
+                    .owner = try selectedRequestResolvedOwner(allocator, &owned, object, default_owner),
+                    .package = try selectedRequestRequiredString(allocator, &owned, object, "package"),
+                    .module = try selectedRequestRequiredString(allocator, &owned, object, "module"),
+                },
+            };
+            return owned;
+        }
+
+        return error.InvalidCli;
+    }
+
+    pub fn parseSelectedArgumentRequestToken(
+        allocator: std.mem.Allocator,
+        token: []const u8,
+    ) !OwnedSelectedArgumentRequest {
+        return try parseSelectedArgumentRequestTokenWithDefaultOwner(allocator, token, null);
+    }
+
+    pub fn selectArgumentValueFromTokenWithDefaultOwner(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        token: []const u8,
+        default_owner: ?[]const u8,
+    ) !?OwnedSelectedArgumentValue {
+        var request = try parseSelectedArgumentRequestTokenWithDefaultOwner(allocator, token, default_owner);
+        defer request.deinit(allocator);
+        return try self.selectArgumentValue(allocator, request.value);
+    }
+
+    pub fn selectArgumentValueFromToken(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        token: []const u8,
+    ) !?OwnedSelectedArgumentValue {
+        return try self.selectArgumentValueFromTokenWithDefaultOwner(allocator, token, null);
+    }
+
+    pub fn selectArgumentValuesFromTokensWithDefaultOwner(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        tokens: []const []const u8,
+        default_owner: ?[]const u8,
+    ) !OwnedSelectedArgumentValues {
+        var values = OwnedSelectedArgumentValues{};
+        errdefer values.deinit(allocator);
+
+        for (tokens) |token| {
+            const selected = try self.selectArgumentValueFromTokenWithDefaultOwner(allocator, token, default_owner) orelse return error.SelectionNotFound;
+            try values.appendOwned(allocator, selected);
+        }
+
+        return values;
+    }
+
+    pub fn selectArgumentValuesFromTokens(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        tokens: []const []const u8,
+    ) !OwnedSelectedArgumentValues {
+        return try self.selectArgumentValuesFromTokensWithDefaultOwner(allocator, tokens, null);
+    }
+
+    pub fn resolveArgumentValueTokenWithDefaultOwner(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        token: []const u8,
+        default_owner: ?[]const u8,
+    ) !OwnedSelectedArgumentValue {
+        const trimmed = std.mem.trim(u8, token, " \t\r\n");
+        if (std.mem.startsWith(u8, trimmed, "select:") or std.mem.startsWith(u8, trimmed, "sel:")) {
+            return (try self.selectArgumentValueFromTokenWithDefaultOwner(allocator, trimmed, default_owner)) orelse return error.SelectionNotFound;
+        }
+
+        if (std.json.parseFromSlice(std.json.Value, allocator, trimmed, .{})) |parsed| {
+            defer parsed.deinit();
+            const inferred_owner = if (default_owner == null)
+                try inferSelectedRequestOwnerFromJsonValue(allocator, parsed.value)
+            else
+                null;
+            defer if (inferred_owner) |value| allocator.free(value);
+            const effective_default_owner = default_owner orelse inferred_owner;
+
+            var normalized = std.ArrayList(u8){};
+            errdefer normalized.deinit(allocator);
+            try self.writeResolvedArgumentJsonValue(allocator, normalized.writer(allocator), parsed.value, effective_default_owner);
+            const normalized_json = try normalized.toOwnedSlice(allocator);
+            defer allocator.free(normalized_json);
+
+            var aliases = tx_request_builder.CommandResultAliases{};
+            const resolved_json = try tx_request_builder.parseArgumentValueToken(allocator, &aliases, normalized_json);
+            return .{
+                .value = resolved_json.value,
+                .owned_text = resolved_json.owned_json,
+            };
+        } else |_| {}
+
+        var aliases = tx_request_builder.CommandResultAliases{};
+        const resolved = try tx_request_builder.parseArgumentValueToken(allocator, &aliases, trimmed);
+        return .{
+            .value = resolved.value,
+            .owned_text = resolved.owned_json,
+        };
+    }
+
+    pub fn resolveArgumentValueToken(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        token: []const u8,
+    ) !OwnedSelectedArgumentValue {
+        return try self.resolveArgumentValueTokenWithDefaultOwner(allocator, token, null);
+    }
+
+    pub fn resolveArgumentValuesFromTokensWithDefaultOwner(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        tokens: []const []const u8,
+        default_owner: ?[]const u8,
+    ) !OwnedSelectedArgumentValues {
+        const inferred_owner = if (default_owner == null)
+            try inferSelectedRequestOwnerFromTokens(allocator, tokens)
+        else
+            null;
+        defer if (inferred_owner) |value| allocator.free(value);
+        const effective_default_owner = default_owner orelse inferred_owner;
+
+        var values = OwnedSelectedArgumentValues{};
+        errdefer values.deinit(allocator);
+
+        for (tokens) |token| {
+            const resolved = try self.resolveArgumentValueTokenWithDefaultOwner(allocator, token, effective_default_owner);
+            try values.appendOwned(allocator, resolved);
+        }
+
+        return values;
+    }
+
+    pub fn resolveArgumentValuesFromTokens(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        tokens: []const []const u8,
+    ) !OwnedSelectedArgumentValues {
+        return try self.resolveArgumentValuesFromTokensWithDefaultOwner(allocator, tokens, null);
+    }
+
+    fn writeResolvedArgumentJsonValue(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        writer: anytype,
+        value: std.json.Value,
+        default_owner: ?[]const u8,
+    ) anyerror!void {
+        switch (value) {
+            .string => |text| {
+                var resolved = try self.resolveArgumentValueTokenWithDefaultOwner(allocator, text, default_owner);
+                defer resolved.deinit(allocator);
+                const rendered = try tx_request_builder.buildArgumentValueJson(allocator, resolved.value);
+                defer allocator.free(rendered);
+                try writer.writeAll(rendered);
+            },
+            .array => |array| {
+                try writer.writeAll("[");
+                for (array.items, 0..) |item, index| {
+                    if (index != 0) try writer.writeAll(",");
+                    try self.writeResolvedArgumentJsonValue(allocator, writer, item, default_owner);
+                }
+                try writer.writeAll("]");
+            },
+            .object => |object| {
+                try writer.writeAll("{");
+                var iterator = object.iterator();
+                var index: usize = 0;
+                while (iterator.next()) |entry| : (index += 1) {
+                    if (index != 0) try writer.writeAll(",");
+                    try writer.print("{f}:", .{std.json.fmt(entry.key_ptr.*, .{})});
+                    try self.writeResolvedArgumentJsonValue(allocator, writer, entry.value_ptr.*, default_owner);
+                }
+                try writer.writeAll("}");
+            },
+            else => try writer.print("{f}", .{std.json.fmt(value, .{})}),
+        }
+    }
+
+    fn commandKindUsesResolvedArgumentField(
+        kind: []const u8,
+        field: []const u8,
+    ) bool {
+        if (std.mem.eql(u8, kind, "MoveCall")) return std.mem.eql(u8, field, "arguments");
+        if (std.mem.eql(u8, kind, "TransferObjects")) return std.mem.eql(u8, field, "objects") or std.mem.eql(u8, field, "address");
+        if (std.mem.eql(u8, kind, "SplitCoins")) return std.mem.eql(u8, field, "coin") or std.mem.eql(u8, field, "amounts");
+        if (std.mem.eql(u8, kind, "MergeCoins")) return std.mem.eql(u8, field, "destination") or std.mem.eql(u8, field, "sources");
+        if (std.mem.eql(u8, kind, "MakeMoveVec")) return std.mem.eql(u8, field, "elements");
+        if (std.mem.eql(u8, kind, "Upgrade")) return std.mem.eql(u8, field, "ticket");
+        return false;
+    }
+
+    fn writeResolvedCommandJsonValue(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        writer: anytype,
+        value: std.json.Value,
+        default_owner: ?[]const u8,
+    ) anyerror!void {
+        switch (value) {
+            .array => |array| {
+                try writer.writeAll("[");
+                for (array.items, 0..) |item, index| {
+                    if (index != 0) try writer.writeAll(",");
+                    try self.writeResolvedCommandJsonValue(allocator, writer, item, default_owner);
+                }
+                try writer.writeAll("]");
+            },
+            .object => |object| {
+                const kind_value = object.get("kind");
+                const kind = if (kind_value != null and kind_value.? == .string) kind_value.?.string else null;
+
+                try writer.writeAll("{");
+                var iterator = object.iterator();
+                var index: usize = 0;
+                while (iterator.next()) |entry| : (index += 1) {
+                    if (index != 0) try writer.writeAll(",");
+                    try writer.print("{f}:", .{std.json.fmt(entry.key_ptr.*, .{})});
+                    if (kind) |kind_text| {
+                        if (commandKindUsesResolvedArgumentField(kind_text, entry.key_ptr.*)) {
+                            try self.writeResolvedArgumentJsonValue(allocator, writer, entry.value_ptr.*, default_owner);
+                            continue;
+                        }
+                    }
+                    try writer.print("{f}", .{std.json.fmt(entry.value_ptr.*, .{})});
+                }
+                try writer.writeAll("}");
+            },
+            else => try writer.print("{f}", .{std.json.fmt(value, .{})}),
+        }
+    }
+
+    pub fn resolveSelectedArgumentTokensInCommandsJsonWithDefaultOwner(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        commands_json: []const u8,
+        default_owner: ?[]const u8,
+    ) ![]u8 {
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, commands_json, .{});
+        defer parsed.deinit();
+        const inferred_owner = if (default_owner == null)
+            try inferSelectedRequestOwnerFromJsonValue(allocator, parsed.value)
+        else
+            null;
+        defer if (inferred_owner) |value| allocator.free(value);
+        const effective_default_owner = default_owner orelse inferred_owner;
+
+        var out = std.ArrayList(u8){};
+        errdefer out.deinit(allocator);
+        try self.writeResolvedCommandJsonValue(allocator, out.writer(allocator), parsed.value, effective_default_owner);
+        return out.toOwnedSlice(allocator);
+    }
+
+    pub fn resolveSelectedArgumentTokensInCommandsJson(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        commands_json: []const u8,
+    ) ![]u8 {
+        return try self.resolveSelectedArgumentTokensInCommandsJsonWithDefaultOwner(allocator, commands_json, null);
+    }
+
+    fn commandSourceUsesSelectedArgumentTokens(source: tx_builder.CommandSource) bool {
+        if (source.commands_json) |commands_json| {
+            if (std.mem.indexOf(u8, commands_json, "select:") != null or std.mem.indexOf(u8, commands_json, "sel:") != null) return true;
+        }
+        for (source.command_items) |item| {
+            if (std.mem.indexOf(u8, item, "select:") != null or std.mem.indexOf(u8, item, "sel:") != null) return true;
+        }
+        if (source.move_call) |move_call| {
+            if (move_call.arguments) |arguments| {
+                if (std.mem.indexOf(u8, arguments, "select:") != null or std.mem.indexOf(u8, arguments, "sel:") != null) return true;
+            }
+        }
+        return false;
+    }
+
+    pub fn resolveSelectedArgumentTokensInCommandSourceWithDefaultOwner(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        default_owner: ?[]const u8,
+    ) !?[]u8 {
+        if (!commandSourceUsesSelectedArgumentTokens(source)) return null;
+        const commands_json = try tx_builder.resolveCommands(allocator, source);
+        defer allocator.free(commands_json);
+        return try self.resolveSelectedArgumentTokensInCommandsJsonWithDefaultOwner(allocator, commands_json, default_owner);
+    }
+
+    pub fn resolveSelectedArgumentTokensInCommandSource(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+    ) !?[]u8 {
+        return try self.resolveSelectedArgumentTokensInCommandSourceWithDefaultOwner(allocator, source, null);
+    }
+
+    pub fn ownOptionsResolvingSelectedArgumentTokensWithDefaultOwner(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        options: tx_request_builder.ProgrammaticRequestOptions,
+        default_owner: ?[]const u8,
+    ) !tx_request_builder.OwnedProgrammaticRequestOptions {
+        const inferred_owner = if (default_owner == null and options.sender == null)
+            try inferSelectedRequestOwnerFromOptions(allocator, options)
+        else
+            null;
+        defer if (inferred_owner) |value| allocator.free(value);
+        const effective_default_owner = default_owner orelse options.sender orelse inferred_owner;
+
+        const resolved_commands_json = try self.resolveSelectedArgumentTokensInCommandSourceWithDefaultOwner(allocator, options.source, effective_default_owner);
+        const resolved_gas_payment_json = try self.resolveSelectedGasPaymentJsonWithDefaultOwner(
+            allocator,
+            options.gas_payment_json,
+            effective_default_owner,
+        );
+        if (resolved_commands_json == null and resolved_gas_payment_json == null) return try tx_request_builder.ownOptions(allocator, options);
+        defer if (resolved_commands_json) |value| allocator.free(value);
+        defer if (resolved_gas_payment_json) |value| allocator.free(value);
+
+        return try tx_request_builder.ownOptions(allocator, .{
+            .source = if (resolved_commands_json) |value|
+                .{ .commands_json = value }
+            else
+                options.source,
+            .sender = options.sender orelse effective_default_owner,
+            .gas_budget = options.gas_budget,
+            .gas_price = options.gas_price,
+            .gas_payment_json = resolved_gas_payment_json orelse options.gas_payment_json,
+            .signatures = options.signatures,
+            .options_json = options.options_json,
+            .wait_for_confirmation = options.wait_for_confirmation,
+            .confirm_timeout_ms = options.confirm_timeout_ms,
+            .confirm_poll_ms = options.confirm_poll_ms,
+        });
+    }
+
+    pub fn ownOptionsResolvingSelectedArgumentTokens(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        options: tx_request_builder.ProgrammaticRequestOptions,
+    ) !tx_request_builder.OwnedProgrammaticRequestOptions {
+        return try self.ownOptionsResolvingSelectedArgumentTokensWithDefaultOwner(allocator, options, options.sender);
+    }
+
+    pub fn ownOptionsWithAutoGasPayment(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        options: tx_request_builder.ProgrammaticRequestOptions,
+        min_balance_override: ?u64,
+    ) !tx_request_builder.OwnedProgrammaticRequestOptions {
+        if (options.gas_payment_json != null) return error.InvalidCli;
+
+        const inferred_owner = if (options.sender == null)
+            try inferSelectedRequestOwnerFromOptions(allocator, options)
+        else
+            null;
+        defer if (inferred_owner) |value| allocator.free(value);
+
+        const sender = options.sender orelse inferred_owner orelse return error.InvalidCli;
+        const gas_payment_json = try self.selectGasPaymentJson(
+            allocator,
+            sender,
+            min_balance_override orelse options.gas_budget orelse 1,
+        ) orelse return error.SelectionNotFound;
+        defer allocator.free(gas_payment_json);
+
+        return try self.ownOptionsResolvingSelectedArgumentTokensWithDefaultOwner(allocator, .{
+            .source = options.source,
+            .sender = sender,
+            .gas_budget = options.gas_budget,
+            .gas_price = options.gas_price,
+            .gas_payment_json = gas_payment_json,
+            .signatures = options.signatures,
+            .options_json = options.options_json,
+            .wait_for_confirmation = options.wait_for_confirmation,
+            .confirm_timeout_ms = options.confirm_timeout_ms,
+            .confirm_poll_ms = options.confirm_poll_ms,
+        }, sender);
+    }
+
+    pub fn ownOptionsFromCommandSourceWithAutoGasPayment(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        config: tx_request_builder.CommandRequestConfig,
+        min_balance_override: ?u64,
+    ) !tx_request_builder.OwnedProgrammaticRequestOptions {
+        return try self.ownOptionsWithAutoGasPayment(
+            allocator,
+            tx_request_builder.optionsFromCommandSource(source, config),
+            min_balance_override,
+        );
+    }
+
+    pub fn ownOptionsFromCommandSourceResolvingSelectedArgumentTokens(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        config: tx_request_builder.CommandRequestConfig,
+    ) !tx_request_builder.OwnedProgrammaticRequestOptions {
+        return try self.ownOptionsResolvingSelectedArgumentTokensWithDefaultOwner(
+            allocator,
+            tx_request_builder.optionsFromCommandSource(source, config),
+            config.sender,
+        );
+    }
+
+    pub fn runOptionsResolvingSelectedArgumentTokensWithAccountProvider(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        options: tx_request_builder.ProgrammaticRequestOptions,
+        provider: tx_request_builder.AccountProvider,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionResult {
+        var plan = (try self.ownOptionsResolvingSelectedArgumentTokens(allocator, options)).authorizationPlan(provider);
+        defer plan.deinit(allocator);
+        return try self.runOwnedPlan(allocator, &plan, action);
+    }
+
+    pub fn runOptionsWithAutoGasPaymentWithAccountProvider(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        options: tx_request_builder.ProgrammaticRequestOptions,
+        provider: tx_request_builder.AccountProvider,
+        min_balance_override: ?u64,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionResult {
+        var plan = (try self.ownOptionsWithAutoGasPayment(allocator, options, min_balance_override)).authorizationPlan(provider);
+        defer plan.deinit(allocator);
+        return try self.runOwnedPlan(allocator, &plan, action);
+    }
+
+    pub fn runOptionsWithAutoGasPaymentOrChallengePromptWithAccountProvider(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        options: tx_request_builder.ProgrammaticRequestOptions,
+        provider: tx_request_builder.AccountProvider,
+        min_balance_override: ?u64,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionOrChallengePromptResult {
+        var plan = (try self.ownOptionsWithAutoGasPayment(
+            allocator,
+            options,
+            min_balance_override,
+        )).authorizationPlan(provider);
+        defer plan.deinit(allocator);
+        return try self.runOwnedPlanOrChallengePrompt(allocator, &plan, action);
+    }
+
+    pub fn runOptionsWithAutoGasPaymentWithChallengeResponseWithAccountProvider(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        options: tx_request_builder.ProgrammaticRequestOptions,
+        provider: tx_request_builder.AccountProvider,
+        min_balance_override: ?u64,
+        response: tx_request_builder.SessionChallengeResponse,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionResult {
+        var plan = (try self.ownOptionsWithAutoGasPayment(
+            allocator,
+            options,
+            min_balance_override,
+        )).authorizationPlan(provider);
+        defer plan.deinit(allocator);
+        return try self.runOwnedPlanWithChallengeResponse(allocator, &plan, response, action);
+    }
+
+    pub fn runOptionsResolvingSelectedArgumentTokensOrChallengePromptWithAccountProvider(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        options: tx_request_builder.ProgrammaticRequestOptions,
+        provider: tx_request_builder.AccountProvider,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionOrChallengePromptResult {
+        var plan = (try self.ownOptionsResolvingSelectedArgumentTokens(allocator, options)).authorizationPlan(provider);
+        defer plan.deinit(allocator);
+        return try self.runOwnedPlanOrChallengePrompt(allocator, &plan, action);
+    }
+
+    pub fn runOptionsResolvingSelectedArgumentTokensWithChallengeResponseWithAccountProvider(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        options: tx_request_builder.ProgrammaticRequestOptions,
+        provider: tx_request_builder.AccountProvider,
+        response: tx_request_builder.SessionChallengeResponse,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionResult {
+        var plan = (try self.ownOptionsResolvingSelectedArgumentTokens(allocator, options)).authorizationPlan(provider);
+        defer plan.deinit(allocator);
+        return try self.runOwnedPlanWithChallengeResponse(allocator, &plan, response, action);
+    }
+
+    pub fn runOptionsWithAutoGasPaymentFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        options: tx_request_builder.ProgrammaticRequestOptions,
+        preparation: keystore.SignerPreparation,
+        min_balance_override: ?u64,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionResult {
+        return try self.runOptionsWithAutoGasPaymentWithAccountProvider(
+            allocator,
+            options,
+            .{ .default_keystore = .{ .preparation = preparation } },
+            min_balance_override,
+            action,
+        );
+    }
+
+    pub fn runOptionsWithAutoGasPaymentOrChallengePromptFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        options: tx_request_builder.ProgrammaticRequestOptions,
+        preparation: keystore.SignerPreparation,
+        min_balance_override: ?u64,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionOrChallengePromptResult {
+        return try self.runOptionsWithAutoGasPaymentOrChallengePromptWithAccountProvider(
+            allocator,
+            options,
+            .{ .default_keystore = .{ .preparation = preparation } },
+            min_balance_override,
+            action,
+        );
+    }
+
+    pub fn runOptionsWithAutoGasPaymentWithChallengeResponseFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        options: tx_request_builder.ProgrammaticRequestOptions,
+        preparation: keystore.SignerPreparation,
+        min_balance_override: ?u64,
+        response: tx_request_builder.SessionChallengeResponse,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionResult {
+        return try self.runOptionsWithAutoGasPaymentWithChallengeResponseWithAccountProvider(
+            allocator,
+            options,
+            .{ .default_keystore = .{ .preparation = preparation } },
+            min_balance_override,
+            response,
+            action,
+        );
+    }
+
+    pub fn runOptionsResolvingSelectedArgumentTokensFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        options: tx_request_builder.ProgrammaticRequestOptions,
+        preparation: keystore.SignerPreparation,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionResult {
+        return try self.runOptionsResolvingSelectedArgumentTokensWithAccountProvider(
+            allocator,
+            options,
+            .{ .default_keystore = .{ .preparation = preparation } },
+            action,
+        );
+    }
+
+    pub fn runOptionsResolvingSelectedArgumentTokensOrChallengePromptFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        options: tx_request_builder.ProgrammaticRequestOptions,
+        preparation: keystore.SignerPreparation,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionOrChallengePromptResult {
+        return try self.runOptionsResolvingSelectedArgumentTokensOrChallengePromptWithAccountProvider(
+            allocator,
+            options,
+            .{ .default_keystore = .{ .preparation = preparation } },
+            action,
+        );
+    }
+
+    pub fn runOptionsResolvingSelectedArgumentTokensWithChallengeResponseFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        options: tx_request_builder.ProgrammaticRequestOptions,
+        preparation: keystore.SignerPreparation,
+        response: tx_request_builder.SessionChallengeResponse,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionResult {
+        return try self.runOptionsResolvingSelectedArgumentTokensWithChallengeResponseWithAccountProvider(
+            allocator,
+            options,
+            .{ .default_keystore = .{ .preparation = preparation } },
+            response,
+            action,
+        );
+    }
+
+    pub fn runCommandsResolvingSelectedArgumentTokensWithAccountProvider(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        config: tx_request_builder.CommandRequestConfig,
+        provider: tx_request_builder.AccountProvider,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionResult {
+        var plan = (try self.ownOptionsFromCommandSourceResolvingSelectedArgumentTokens(
+            allocator,
+            source,
+            config,
+        )).authorizationPlan(provider);
+        defer plan.deinit(allocator);
+        return try self.runOwnedPlan(allocator, &plan, action);
+    }
+
+    pub fn runCommandsWithAutoGasPaymentWithAccountProvider(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        config: tx_request_builder.CommandRequestConfig,
+        provider: tx_request_builder.AccountProvider,
+        min_balance_override: ?u64,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionResult {
+        var plan = (try self.ownOptionsFromCommandSourceWithAutoGasPayment(
+            allocator,
+            source,
+            config,
+            min_balance_override,
+        )).authorizationPlan(provider);
+        defer plan.deinit(allocator);
+        return try self.runOwnedPlan(allocator, &plan, action);
+    }
+
+    pub fn runCommandsWithAutoGasPaymentOrChallengePromptWithAccountProvider(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        config: tx_request_builder.CommandRequestConfig,
+        provider: tx_request_builder.AccountProvider,
+        min_balance_override: ?u64,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionOrChallengePromptResult {
+        var plan = (try self.ownOptionsFromCommandSourceWithAutoGasPayment(
+            allocator,
+            source,
+            config,
+            min_balance_override,
+        )).authorizationPlan(provider);
+        defer plan.deinit(allocator);
+        return try self.runOwnedPlanOrChallengePrompt(allocator, &plan, action);
+    }
+
+    pub fn runCommandsWithAutoGasPaymentWithChallengeResponseWithAccountProvider(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        config: tx_request_builder.CommandRequestConfig,
+        provider: tx_request_builder.AccountProvider,
+        min_balance_override: ?u64,
+        response: tx_request_builder.SessionChallengeResponse,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionResult {
+        var plan = (try self.ownOptionsFromCommandSourceWithAutoGasPayment(
+            allocator,
+            source,
+            config,
+            min_balance_override,
+        )).authorizationPlan(provider);
+        defer plan.deinit(allocator);
+        return try self.runOwnedPlanWithChallengeResponse(allocator, &plan, response, action);
+    }
+
+    pub fn runCommandsResolvingSelectedArgumentTokensOrChallengePromptWithAccountProvider(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        config: tx_request_builder.CommandRequestConfig,
+        provider: tx_request_builder.AccountProvider,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionOrChallengePromptResult {
+        var plan = (try self.ownOptionsFromCommandSourceResolvingSelectedArgumentTokens(
+            allocator,
+            source,
+            config,
+        )).authorizationPlan(provider);
+        defer plan.deinit(allocator);
+        return try self.runOwnedPlanOrChallengePrompt(allocator, &plan, action);
+    }
+
+    pub fn runCommandsResolvingSelectedArgumentTokensWithChallengeResponseWithAccountProvider(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        config: tx_request_builder.CommandRequestConfig,
+        provider: tx_request_builder.AccountProvider,
+        response: tx_request_builder.SessionChallengeResponse,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionResult {
+        var plan = (try self.ownOptionsFromCommandSourceResolvingSelectedArgumentTokens(
+            allocator,
+            source,
+            config,
+        )).authorizationPlan(provider);
+        defer plan.deinit(allocator);
+        return try self.runOwnedPlanWithChallengeResponse(allocator, &plan, response, action);
+    }
+
+    pub fn runCommandsWithAutoGasPaymentFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        config: tx_request_builder.CommandRequestConfig,
+        preparation: keystore.SignerPreparation,
+        min_balance_override: ?u64,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionResult {
+        return try self.runCommandsWithAutoGasPaymentWithAccountProvider(
+            allocator,
+            source,
+            config,
+            .{ .default_keystore = .{ .preparation = preparation } },
+            min_balance_override,
+            action,
+        );
+    }
+
+    pub fn runCommandsWithAutoGasPaymentOrChallengePromptFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        config: tx_request_builder.CommandRequestConfig,
+        preparation: keystore.SignerPreparation,
+        min_balance_override: ?u64,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionOrChallengePromptResult {
+        return try self.runCommandsWithAutoGasPaymentOrChallengePromptWithAccountProvider(
+            allocator,
+            source,
+            config,
+            .{ .default_keystore = .{ .preparation = preparation } },
+            min_balance_override,
+            action,
+        );
+    }
+
+    pub fn runCommandsWithAutoGasPaymentWithChallengeResponseFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        config: tx_request_builder.CommandRequestConfig,
+        preparation: keystore.SignerPreparation,
+        min_balance_override: ?u64,
+        response: tx_request_builder.SessionChallengeResponse,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionResult {
+        return try self.runCommandsWithAutoGasPaymentWithChallengeResponseWithAccountProvider(
+            allocator,
+            source,
+            config,
+            .{ .default_keystore = .{ .preparation = preparation } },
+            min_balance_override,
+            response,
+            action,
+        );
+    }
+
+    pub fn runCommandsResolvingSelectedArgumentTokensFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        config: tx_request_builder.CommandRequestConfig,
+        preparation: keystore.SignerPreparation,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionResult {
+        return try self.runCommandsResolvingSelectedArgumentTokensWithAccountProvider(
+            allocator,
+            source,
+            config,
+            .{ .default_keystore = .{ .preparation = preparation } },
+            action,
+        );
+    }
+
+    pub fn runCommandsResolvingSelectedArgumentTokensOrChallengePromptFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        config: tx_request_builder.CommandRequestConfig,
+        preparation: keystore.SignerPreparation,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionOrChallengePromptResult {
+        return try self.runCommandsResolvingSelectedArgumentTokensOrChallengePromptWithAccountProvider(
+            allocator,
+            source,
+            config,
+            .{ .default_keystore = .{ .preparation = preparation } },
+            action,
+        );
+    }
+
+    pub fn runCommandsResolvingSelectedArgumentTokensWithChallengeResponseFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        config: tx_request_builder.CommandRequestConfig,
+        preparation: keystore.SignerPreparation,
+        response: tx_request_builder.SessionChallengeResponse,
+        action: ProgrammaticClientAction,
+    ) !ProgrammaticClientActionResult {
+        return try self.runCommandsResolvingSelectedArgumentTokensWithChallengeResponseWithAccountProvider(
+            allocator,
+            source,
+            config,
+            .{ .default_keystore = .{ .preparation = preparation } },
+            response,
+            action,
+        );
+    }
+
+    pub fn selectArgumentValues(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        requests: []const SelectedArgumentRequest,
+    ) !OwnedSelectedArgumentValues {
+        var values = OwnedSelectedArgumentValues{};
+        errdefer values.deinit(allocator);
+
+        for (requests) |request| {
+            const selected = try self.selectArgumentValue(allocator, request) orelse return error.SelectionNotFound;
+            try values.appendOwned(allocator, selected);
+        }
+
+        return values;
+    }
+
+    pub fn appendMoveCallFromSelectedArguments(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        builder: *tx_request_builder.ProgrammaticDslBuilder,
+        package_id: []const u8,
+        module: []const u8,
+        function_name: []const u8,
+        type_arg_items: []const []const u8,
+        requests: []const SelectedArgumentRequest,
+    ) !void {
+        var values = try self.selectArgumentValues(allocator, requests);
+        defer values.deinit(allocator);
+        try builder.appendMoveCallFromValues(package_id, module, function_name, type_arg_items, values.slice());
+    }
+
+    pub fn appendMoveCallAndGetValueFromSelectedArguments(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        builder: *tx_request_builder.ProgrammaticDslBuilder,
+        package_id: []const u8,
+        module: []const u8,
+        function_name: []const u8,
+        type_arg_items: []const []const u8,
+        requests: []const SelectedArgumentRequest,
+    ) !tx_request_builder.ArgumentValue {
+        var values = try self.selectArgumentValues(allocator, requests);
+        defer values.deinit(allocator);
+        return try builder.appendMoveCallAndGetValueFromValues(
+            package_id,
+            module,
+            function_name,
+            type_arg_items,
+            values.slice(),
+        );
+    }
+
+    pub fn appendMakeMoveVecFromSelectedArguments(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        builder: *tx_request_builder.ProgrammaticDslBuilder,
+        type_value: ?[]const u8,
+        requests: []const SelectedArgumentRequest,
+    ) !void {
+        var values = try self.selectArgumentValues(allocator, requests);
+        defer values.deinit(allocator);
+        try builder.appendMakeMoveVecFromValues(type_value, values.slice());
+    }
+
+    pub fn appendMakeMoveVecAndGetValueFromSelectedArguments(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        builder: *tx_request_builder.ProgrammaticDslBuilder,
+        type_value: ?[]const u8,
+        requests: []const SelectedArgumentRequest,
+    ) !tx_request_builder.ArgumentValue {
+        var values = try self.selectArgumentValues(allocator, requests);
+        defer values.deinit(allocator);
+        return try builder.appendMakeMoveVecAndGetValueFromValues(type_value, values.slice());
+    }
+
+    pub fn appendSplitCoinsFromSelectedArgument(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        builder: *tx_request_builder.ProgrammaticDslBuilder,
+        coin_request: SelectedArgumentRequest,
+        amounts: []const tx_request_builder.ArgumentValue,
+    ) !void {
+        var coin = try self.selectArgumentValue(allocator, coin_request) orelse return error.SelectionNotFound;
+        defer coin.deinit(allocator);
+        try builder.appendSplitCoinsFromValues(coin.value, amounts);
+    }
+
+    pub fn appendSplitCoinsAndGetValueFromSelectedArgument(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        builder: *tx_request_builder.ProgrammaticDslBuilder,
+        coin_request: SelectedArgumentRequest,
+        amounts: []const tx_request_builder.ArgumentValue,
+    ) !tx_request_builder.ArgumentValue {
+        var coin = try self.selectArgumentValue(allocator, coin_request) orelse return error.SelectionNotFound;
+        defer coin.deinit(allocator);
+        return try builder.appendSplitCoinsAndGetValueFromValues(coin.value, amounts);
+    }
+
+    pub fn appendTransferObjectsFromSelectedArguments(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        builder: *tx_request_builder.ProgrammaticDslBuilder,
+        object_requests: []const SelectedArgumentRequest,
+        address: tx_request_builder.ArgumentValue,
+    ) !void {
+        var values = try self.selectArgumentValues(allocator, object_requests);
+        defer values.deinit(allocator);
+        try builder.appendTransferObjectsFromValues(values.slice(), address);
+    }
+
+    pub fn appendTransferObjectsAndGetValueFromSelectedArguments(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        builder: *tx_request_builder.ProgrammaticDslBuilder,
+        object_requests: []const SelectedArgumentRequest,
+        address: tx_request_builder.ArgumentValue,
+    ) !tx_request_builder.ArgumentValue {
+        var values = try self.selectArgumentValues(allocator, object_requests);
+        defer values.deinit(allocator);
+        return try builder.appendTransferObjectsAndGetValueFromValues(values.slice(), address);
+    }
+
+    pub fn appendMergeCoinsFromSelectedArguments(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        builder: *tx_request_builder.ProgrammaticDslBuilder,
+        destination_request: SelectedArgumentRequest,
+        source_requests: []const SelectedArgumentRequest,
+    ) !void {
+        var destination = try self.selectArgumentValue(allocator, destination_request) orelse return error.SelectionNotFound;
+        defer destination.deinit(allocator);
+        var sources = try self.selectArgumentValues(allocator, source_requests);
+        defer sources.deinit(allocator);
+        try builder.appendMergeCoinsFromValues(destination.value, sources.slice());
+    }
+
+    pub fn appendMergeCoinsAndGetValueFromSelectedArguments(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        builder: *tx_request_builder.ProgrammaticDslBuilder,
+        destination_request: SelectedArgumentRequest,
+        source_requests: []const SelectedArgumentRequest,
+    ) !tx_request_builder.ArgumentValue {
+        var destination = try self.selectArgumentValue(allocator, destination_request) orelse return error.SelectionNotFound;
+        defer destination.deinit(allocator);
+        var sources = try self.selectArgumentValues(allocator, source_requests);
+        defer sources.deinit(allocator);
+        return try builder.appendMergeCoinsAndGetValueFromValues(destination.value, sources.slice());
+    }
+
+    pub fn appendUpgradeFromSelectedArgument(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        builder: *tx_request_builder.ProgrammaticDslBuilder,
+        modules_json: []const u8,
+        dependencies_json: []const u8,
+        package_id: []const u8,
+        ticket_request: SelectedArgumentRequest,
+    ) !void {
+        var ticket = try self.selectArgumentValue(allocator, ticket_request) orelse return error.SelectionNotFound;
+        defer ticket.deinit(allocator);
+        try builder.appendUpgradeFromValue(modules_json, dependencies_json, package_id, ticket.value);
+    }
+
+    pub fn appendUpgradeAndGetValueFromSelectedArgument(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        builder: *tx_request_builder.ProgrammaticDslBuilder,
+        modules_json: []const u8,
+        dependencies_json: []const u8,
+        package_id: []const u8,
+        ticket_request: SelectedArgumentRequest,
+    ) !tx_request_builder.ArgumentValue {
+        var ticket = try self.selectArgumentValue(allocator, ticket_request) orelse return error.SelectionNotFound;
+        defer ticket.deinit(allocator);
+        return try builder.appendUpgradeAndGetValueFromValue(modules_json, dependencies_json, package_id, ticket.value);
+    }
+
+    pub fn runOwnedObjectsQuery(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        query: OwnedObjectsQuery,
+    ) ![]u8 {
+        return switch (query) {
+            .page => |spec| try dupeOwnedJsonResponse(
+                self.allocator,
+                allocator,
+                try self.getOwnedObjectsWithRequest(spec.owner, spec.request),
+            ),
+            .all => |spec| blk: {
+                var page = try self.getAllOwnedObjectsWithRequest(allocator, spec.owner, spec.request);
+                defer page.deinit(allocator);
+                break :blk try std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(page, .{})});
+            },
+        };
+    }
+
+    pub fn runOwnedObjectsQueryAndSummarize(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        query: OwnedObjectsQuery,
+    ) !owned_object_result.OwnedObjectPage {
+        return switch (query) {
+            .page => |spec| try self.getOwnedObjectsPageWithRequest(allocator, spec.owner, spec.request),
+            .all => |spec| try self.getAllOwnedObjectsWithRequest(allocator, spec.owner, spec.request),
+        };
+    }
+
+    pub fn runOwnedObjectsQueryAction(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        query: OwnedObjectsQuery,
+        action: ObjectQueryAction,
+    ) !OwnedObjectsQueryActionResult {
+        return switch (action) {
+            .raw => .{ .raw = try self.runOwnedObjectsQuery(allocator, query) },
+            .summarize => .{ .summarized = try self.runOwnedObjectsQueryAndSummarize(allocator, query) },
+        };
+    }
+
+    pub fn runResourceQuery(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        query: ResourceQuery,
+    ) ![]u8 {
+        return switch (query) {
+            .coins => |coin_query| try self.runCoinQuery(allocator, coin_query),
+            .owned_objects => |owned_objects_query| try self.runOwnedObjectsQuery(allocator, owned_objects_query),
+        };
+    }
+
+    pub fn runResourceQueryAndSummarize(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        query: ResourceQuery,
+    ) !ResourceQuerySummary {
+        return switch (query) {
+            .coins => |coin_query| .{ .coins = try self.runCoinQueryAndSummarize(allocator, coin_query) },
+            .owned_objects => |owned_objects_query| .{ .owned_objects = try self.runOwnedObjectsQueryAndSummarize(allocator, owned_objects_query) },
+        };
+    }
+
+    pub fn runResourceQueryAction(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        query: ResourceQuery,
+        action: ResourceQueryAction,
+    ) !ResourceQueryActionResult {
+        return switch (action) {
+            .raw => .{ .raw = try self.runResourceQuery(allocator, query) },
+            .summarize => .{ .summarized = try self.runResourceQueryAndSummarize(allocator, query) },
+        };
+    }
+
+    pub fn runResourceDiscoveryQuery(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        query: ResourceDiscoveryQuery,
+    ) ![]u8 {
+        if (query.coins == null and query.owned_objects == null) return error.InvalidCli;
+
+        const coins_json = if (query.coins) |coins_query|
+            try self.runCoinQuery(allocator, coins_query)
+        else
+            null;
+        defer if (coins_json) |value| allocator.free(value);
+
+        const owned_objects_json = if (query.owned_objects) |owned_objects_query|
+            try self.runOwnedObjectsQuery(allocator, owned_objects_query)
+        else
+            null;
+        defer if (owned_objects_json) |value| allocator.free(value);
+
+        var out = std.ArrayList(u8){};
+        defer out.deinit(allocator);
+
+        const writer = out.writer(allocator);
+        try writer.writeAll("{");
+        var has_output = false;
+        if (coins_json) |value| {
+            try writer.writeAll("\"coins\":");
+            try writer.writeAll(value);
+            has_output = true;
+        }
+        if (owned_objects_json) |value| {
+            if (has_output) try writer.writeAll(",");
+            try writer.writeAll("\"owned_objects\":");
+            try writer.writeAll(value);
+        }
+        try writer.writeAll("}");
+        return out.toOwnedSlice(allocator);
+    }
+
+    pub fn runResourceDiscoveryQueryAndSummarize(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        query: ResourceDiscoveryQuery,
+    ) !ResourceDiscoverySummary {
+        if (query.coins == null and query.owned_objects == null) return error.InvalidCli;
+
+        return .{
+            .coins = if (query.coins) |coins_query|
+                try self.runCoinQueryAndSummarize(allocator, coins_query)
+            else
+                null,
+            .owned_objects = if (query.owned_objects) |owned_objects_query|
+                try self.runOwnedObjectsQueryAndSummarize(allocator, owned_objects_query)
+            else
+                null,
+        };
+    }
+
+    pub fn runResourceDiscoveryQueryAction(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        query: ResourceDiscoveryQuery,
+        action: ResourceQueryAction,
+    ) !ResourceDiscoveryActionResult {
+        return switch (action) {
+            .raw => .{ .raw = try self.runResourceDiscoveryQuery(allocator, query) },
+            .summarize => .{ .summarized = try self.runResourceDiscoveryQueryAndSummarize(allocator, query) },
+        };
+    }
+
+    pub fn runReadQueryAction(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        query: ReadQuery,
+        action: ReadQueryAction,
+    ) !ReadQueryActionResult {
+        return switch (query) {
+            .account => |account_query| switch (action) {
+                .raw => blk: {
+                    var result = (try keystore.runAccountQueryFromDefaultKeystore(allocator, account_query)) orelse return error.InvalidCli;
+                    defer result.deinit(allocator);
+                    break :blk .{ .raw = try accountQueryResultToJson(allocator, result) };
+                },
+                .summarize => .{
+                    .summarized = .{
+                        .account = (try keystore.runAccountQueryFromDefaultKeystore(allocator, account_query)) orelse return error.InvalidCli,
+                    },
+                },
+                .observe => return error.UnsupportedQueryAction,
+            },
+            .resources => |resource_query| switch (action) {
+                .raw => .{ .raw = try self.runResourceDiscoveryQuery(allocator, resource_query) },
+                .summarize => .{
+                    .summarized = .{
+                        .resources = try self.runResourceDiscoveryQueryAndSummarize(allocator, resource_query),
+                    },
+                },
+                .observe => return error.UnsupportedQueryAction,
+            },
+            .coins => |coin_query| switch (action) {
+                .raw => blk: {
+                    const result = try self.runResourceQueryAction(allocator, .{ .coins = coin_query }, .raw);
+                    break :blk switch (result) {
+                        .raw => |response| .{ .raw = response },
+                        .summarized => unreachable,
+                    };
+                },
+                .summarize => blk: {
+                    const result = try self.runResourceQueryAction(allocator, .{ .coins = coin_query }, .summarize);
+                    break :blk switch (result) {
+                        .raw => unreachable,
+                        .summarized => |summary| switch (summary) {
+                            .coins => |value| .{ .summarized = .{ .coins = value } },
+                            .owned_objects => unreachable,
+                        },
+                    };
+                },
+                .observe => return error.UnsupportedQueryAction,
+            },
+            .owned_objects => |owned_objects_query| switch (action) {
+                .raw => blk: {
+                    const result = try self.runResourceQueryAction(allocator, .{ .owned_objects = owned_objects_query }, .raw);
+                    break :blk switch (result) {
+                        .raw => |response| .{ .raw = response },
+                        .summarized => unreachable,
+                    };
+                },
+                .summarize => blk: {
+                    const result = try self.runResourceQueryAction(allocator, .{ .owned_objects = owned_objects_query }, .summarize);
+                    break :blk switch (result) {
+                        .raw => unreachable,
+                        .summarized => |summary| switch (summary) {
+                            .coins => unreachable,
+                            .owned_objects => |value| .{ .summarized = .{ .owned_objects = value } },
+                        },
+                    };
+                },
+                .observe => return error.UnsupportedQueryAction,
+            },
+            .object => |object_query| switch (action) {
+                .raw => .{ .raw = try self.runObjectQuery(allocator, object_query) },
+                .summarize => .{
+                    .summarized = .{
+                        .object = try self.runObjectQueryAndSummarize(allocator, object_query),
+                    },
+                },
+                .observe => return error.UnsupportedQueryAction,
+            },
+            .transaction_status => |spec| switch (action) {
+                .raw => blk: {
+                    const params_json = try std.fmt.allocPrint(self.allocator, "[\"{s}\"]", .{spec.digest});
+                    defer self.allocator.free(params_json);
+                    break :blk .{
+                        .raw = try dupeOwnedJsonResponse(
+                            self.allocator,
+                            allocator,
+                            try self.getTransactionBlock(params_json),
+                        ),
+                    };
+                },
+                .summarize => blk: {
+                    const params_json = try buildTransactionBlockSummaryParams(self.allocator, spec.digest);
+                    defer self.allocator.free(params_json);
+                    const response = try self.getTransactionBlock(params_json);
+                    defer self.allocator.free(response);
+                    break :blk .{
+                        .summarized = .{
+                            .transaction = try self.summarizeExecutionResponse(allocator, response),
+                        },
+                    };
+                },
+                .observe => .{
+                    .observed = try self.getTransactionBlockAndSummarize(allocator, spec.digest),
+                },
+            },
+            .transaction_confirm => |spec| switch (action) {
+                .raw => .{
+                    .raw = try self.waitForTransactionConfirmation(
+                        spec.digest,
+                        spec.timeout_ms,
+                        spec.poll_ms,
+                    ),
+                },
+                .summarize => blk: {
+                    const response = try self.waitForTransactionConfirmation(
+                        spec.digest,
+                        spec.timeout_ms,
+                        spec.poll_ms,
+                    );
+                    defer self.allocator.free(response);
+                    break :blk .{
+                        .summarized = .{
+                            .transaction = try self.summarizeExecutionResponse(allocator, response),
+                        },
+                    };
+                },
+                .observe => .{
+                    .observed = try self.waitForTransactionConfirmationAndSummarize(
+                        allocator,
+                        spec.digest,
+                        spec.timeout_ms,
+                        spec.poll_ms,
+                    ),
+                },
+            },
+        };
+    }
+
+    pub fn getDynamicFieldsPage(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        parent_object_id: []const u8,
+        cursor: ?[]const u8,
+        limit: ?u64,
+    ) !dynamic_field_result.OwnedDynamicFieldPage {
+        return try self.getDynamicFieldsPageWithRequest(allocator, parent_object_id, .{
+            .cursor = cursor,
+            .limit = limit,
+        });
+    }
+
+    pub fn getDynamicFieldsPageWithRequest(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        parent_object_id: []const u8,
+        request: DynamicFieldPageRequest,
+    ) !dynamic_field_result.OwnedDynamicFieldPage {
+        const response = try self.getDynamicFieldsWithRequest(parent_object_id, request);
+        defer allocator.free(response);
+        return try self.summarizeDynamicFieldsResponse(allocator, response);
+    }
+
+    pub fn getCoinsPageWithRequest(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        owner: []const u8,
+        request: CoinPageRequest,
+    ) !coin_result.OwnedCoinPage {
+        const response = try self.getCoinsWithRequest(owner, request);
+        defer allocator.free(response);
+        return try self.summarizeCoinsResponse(allocator, response);
+    }
+
+    pub fn getOwnedObjectsPageWithRequest(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        owner: []const u8,
+        request: OwnedObjectsPageRequest,
+    ) !owned_object_result.OwnedObjectPage {
+        const response = try self.getOwnedObjectsWithRequest(owner, request);
+        defer allocator.free(response);
+        return try self.summarizeOwnedObjectsResponse(allocator, response);
+    }
+
+    pub fn getAllDynamicFields(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        parent_object_id: []const u8,
+        limit: ?u64,
+    ) !dynamic_field_result.OwnedDynamicFieldPage {
+        return try self.getAllDynamicFieldsWithRequest(allocator, parent_object_id, .{ .limit = limit });
+    }
+
+    pub fn getAllDynamicFieldsWithRequest(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        parent_object_id: []const u8,
+        request: DynamicFieldPageRequest,
+    ) !dynamic_field_result.OwnedDynamicFieldPage {
+        var collected = std.ArrayList(dynamic_field_result.OwnedDynamicFieldEntry).empty;
+        errdefer {
+            for (collected.items) |*entry| entry.deinit(allocator);
+            collected.deinit(allocator);
+        }
+
+        var cursor_owned: ?[]u8 = if (request.cursor) |value| try allocator.dupe(u8, value) else null;
+        defer if (cursor_owned) |value| allocator.free(value);
+
+        while (true) {
+            var page = try self.getDynamicFieldsPageWithRequest(
+                allocator,
+                parent_object_id,
+                .{
+                    .cursor = if (cursor_owned) |value| value else null,
+                    .limit = request.limit,
+                },
+            );
+            defer page.deinit(allocator);
+
+            for (page.entries) |entry| {
+                try collected.append(allocator, try entry.clone(allocator));
+            }
+
+            if (!page.has_next_page) break;
+            const next_cursor = page.next_cursor orelse return error.InvalidResponse;
+            if (cursor_owned) |value| allocator.free(value);
+            cursor_owned = try allocator.dupe(u8, next_cursor);
+        }
+
+        return .{
+            .entries = try collected.toOwnedSlice(allocator),
+            .next_cursor = null,
+            .has_next_page = false,
+        };
+    }
+
+    pub fn getAllCoins(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        owner: []const u8,
+        coin_type: ?[]const u8,
+        limit: ?u64,
+    ) !coin_result.OwnedCoinPage {
+        return try self.getAllCoinsWithRequest(allocator, owner, .{
+            .coin_type = coin_type,
+            .limit = limit,
+        });
+    }
+
+    pub fn getAllCoinsWithRequest(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        owner: []const u8,
+        request: CoinPageRequest,
+    ) !coin_result.OwnedCoinPage {
+        var collected = std.ArrayList(coin_result.OwnedCoinEntry).empty;
+        errdefer {
+            for (collected.items) |*entry| entry.deinit(allocator);
+            collected.deinit(allocator);
+        }
+
+        var cursor_owned: ?[]u8 = if (request.cursor) |value| try allocator.dupe(u8, value) else null;
+        defer if (cursor_owned) |value| allocator.free(value);
+
+        while (true) {
+            var page = try self.getCoinsPageWithRequest(
+                allocator,
+                owner,
+                .{
+                    .coin_type = request.coin_type,
+                    .cursor = if (cursor_owned) |value| value else null,
+                    .limit = request.limit,
+                },
+            );
+            defer page.deinit(allocator);
+
+            for (page.entries) |entry| {
+                try collected.append(allocator, try entry.clone(allocator));
+            }
+
+            if (!page.has_next_page) break;
+            const next_cursor = page.next_cursor orelse return error.InvalidResponse;
+            if (cursor_owned) |value| allocator.free(value);
+            cursor_owned = try allocator.dupe(u8, next_cursor);
+        }
+
+        return .{
+            .entries = try collected.toOwnedSlice(allocator),
+            .next_cursor = null,
+            .has_next_page = false,
+        };
+    }
+
+    pub fn getAllOwnedObjectsWithRequest(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        owner: []const u8,
+        request: OwnedObjectsPageRequest,
+    ) !owned_object_result.OwnedObjectPage {
+        var collected = std.ArrayList(owned_object_result.OwnedObjectEntry).empty;
+        errdefer {
+            for (collected.items) |*entry| entry.deinit(allocator);
+            collected.deinit(allocator);
+        }
+
+        var cursor_owned: ?[]u8 = if (request.cursor) |value| try allocator.dupe(u8, value) else null;
+        defer if (cursor_owned) |value| allocator.free(value);
+
+        while (true) {
+            var page = try self.getOwnedObjectsPageWithRequest(
+                allocator,
+                owner,
+                .{
+                    .filter = request.filter,
+                    .options = request.options,
+                    .cursor = if (cursor_owned) |value| value else null,
+                    .limit = request.limit,
+                },
+            );
+            defer page.deinit(allocator);
+
+            for (page.entries) |entry| {
+                try collected.append(allocator, try entry.clone(allocator));
+            }
+
+            if (!page.has_next_page) break;
+            const next_cursor = page.next_cursor orelse return error.InvalidResponse;
+            if (cursor_owned) |value| allocator.free(value);
+            cursor_owned = try allocator.dupe(u8, next_cursor);
+        }
+
+        return .{
+            .entries = try collected.toOwnedSlice(allocator),
+            .next_cursor = null,
+            .has_next_page = false,
+        };
+    }
+
+    pub fn executeOptionsAndSummarizeWithAccountProvider(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        options: tx_request_builder.ProgrammaticRequestOptions,
+        provider: tx_request_builder.AccountProvider,
+    ) !tx_result.OwnedExecutionInsights {
+        const response = try self.executeOptionsWithAccountProvider(allocator, options, provider);
+        defer allocator.free(response);
+        return try self.summarizeExecutionResponse(allocator, response);
+    }
+
+    pub fn executeOptionsAndObserveConfirmedWithAccountProvider(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        options: tx_request_builder.ProgrammaticRequestOptions,
+        provider: tx_request_builder.AccountProvider,
+        timeout_ms: u64,
+        poll_ms: u64,
+    ) !ObservedExecutionSummary {
+        const response = try self.executeOptionsWithAccountProvider(allocator, options, provider);
+        defer allocator.free(response);
+        return try self.observeConfirmedExecuteResponse(allocator, response, timeout_ms, poll_ms);
+    }
+
+    pub fn executeOptionsAndSummarizeFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        options: tx_request_builder.ProgrammaticRequestOptions,
+        preparation: keystore.SignerPreparation,
+    ) !tx_result.OwnedExecutionInsights {
+        const response = try self.executeOptionsFromDefaultKeystore(allocator, options, preparation);
+        defer allocator.free(response);
+        return try self.summarizeExecutionResponse(allocator, response);
+    }
+
+    pub fn executeOptionsAndObserveConfirmedFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        options: tx_request_builder.ProgrammaticRequestOptions,
+        preparation: keystore.SignerPreparation,
+        timeout_ms: u64,
+        poll_ms: u64,
+    ) !ObservedExecutionSummary {
+        const response = try self.executeOptionsFromDefaultKeystore(allocator, options, preparation);
+        defer allocator.free(response);
+        return try self.observeConfirmedExecuteResponse(allocator, response, timeout_ms, poll_ms);
+    }
+
     pub fn getSessionChallengeRequest(
         self: *const SuiRpcClient,
         options: tx_request_builder.ProgrammaticRequestOptions,
@@ -2358,7 +11709,7 @@ pub const SuiRpcClient = struct {
         provider: tx_request_builder.AccountProvider,
     ) !?OwnedSessionChallengePrompt {
         const request = self.getSessionChallengeRequest(options, provider) orelse return null;
-        const text = (try tx_request_builder.buildSessionChallengeText(allocator, request)).?;
+        const text = try tx_request_builder.buildSessionChallengeText(allocator, request);
         return try buildOwnedSessionChallengePrompt(allocator, request, text);
     }
 
@@ -2592,6 +11943,58 @@ pub const SuiRpcClient = struct {
         }), preparation);
     }
 
+    pub fn executeCommandsAndConfirmAndSummarizeFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        sender: ?[]const u8,
+        gas_budget: ?u64,
+        gas_price: ?u64,
+        options_json: ?[]const u8,
+        timeout_ms: u64,
+        poll_ms: u64,
+        preparation: keystore.SignerPreparation,
+    ) !tx_result.OwnedExecutionInsights {
+        const response = try self.executeCommandsAndConfirmFromDefaultKeystore(
+            allocator,
+            source,
+            sender,
+            gas_budget,
+            gas_price,
+            options_json,
+            timeout_ms,
+            poll_ms,
+            preparation,
+        );
+        defer allocator.free(response);
+        return try self.summarizeExecutionResponse(allocator, response);
+    }
+
+    pub fn executeCommandsAndObserveConfirmedFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        sender: ?[]const u8,
+        gas_budget: ?u64,
+        gas_price: ?u64,
+        options_json: ?[]const u8,
+        timeout_ms: u64,
+        poll_ms: u64,
+        preparation: keystore.SignerPreparation,
+    ) !ObservedExecutionSummary {
+        const response = try self.executeCommandsFromDefaultKeystore(
+            allocator,
+            source,
+            sender,
+            gas_budget,
+            gas_price,
+            options_json,
+            preparation,
+        );
+        defer allocator.free(response);
+        return try self.observeConfirmedExecuteResponse(allocator, response, timeout_ms, poll_ms);
+    }
+
     pub fn executeCommandsAndConfirmWithAccountProvider(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
@@ -2608,6 +12011,42 @@ pub const SuiRpcClient = struct {
         );
     }
 
+    pub fn executeCommandsAndConfirmAndSummarizeWithAccountProvider(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        config: tx_request_builder.CommandRequestConfig,
+        provider: tx_request_builder.AccountProvider,
+    ) !tx_result.OwnedExecutionInsights {
+        const response = try self.executeCommandsAndConfirmWithAccountProvider(
+            allocator,
+            source,
+            config,
+            provider,
+        );
+        defer allocator.free(response);
+        return try self.summarizeExecutionResponse(allocator, response);
+    }
+
+    pub fn executeCommandsAndObserveConfirmedWithAccountProvider(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        config: tx_request_builder.CommandRequestConfig,
+        provider: tx_request_builder.AccountProvider,
+        timeout_ms: u64,
+        poll_ms: u64,
+    ) !ObservedExecutionSummary {
+        const response = try self.executeCommandsWithAccountProvider(
+            allocator,
+            source,
+            config,
+            provider,
+        );
+        defer allocator.free(response);
+        return try self.observeConfirmedExecuteResponse(allocator, response, timeout_ms, poll_ms);
+    }
+
     pub fn inspectCommandsOrChallengePromptWithAccountProvider(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
@@ -2616,6 +12055,19 @@ pub const SuiRpcClient = struct {
         provider: tx_request_builder.AccountProvider,
     ) !InspectOrChallengePromptResult {
         return try self.inspectPlanOrChallengePrompt(
+            allocator,
+            self.planCommandsWithAccountProvider(source, config, provider),
+        );
+    }
+
+    pub fn inspectCommandsOrChallengePromptAndSummarizeWithAccountProvider(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        config: tx_request_builder.CommandRequestConfig,
+        provider: tx_request_builder.AccountProvider,
+    ) !ProgrammaticClientActionOrChallengePromptResult {
+        return try self.inspectPlanOrChallengePromptAndSummarize(
             allocator,
             self.planCommandsWithAccountProvider(source, config, provider),
         );
@@ -2630,6 +12082,21 @@ pub const SuiRpcClient = struct {
         response: tx_request_builder.SessionChallengeResponse,
     ) ![]u8 {
         return try self.inspectPlanWithChallengeResponse(
+            allocator,
+            self.planCommandsWithAccountProvider(source, config, provider),
+            response,
+        );
+    }
+
+    pub fn inspectCommandsWithChallengeResponseAndSummarizeWithAccountProvider(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        config: tx_request_builder.CommandRequestConfig,
+        provider: tx_request_builder.AccountProvider,
+        response: tx_request_builder.SessionChallengeResponse,
+    ) !inspect_result.OwnedInspectInsights {
+        return try self.inspectPlanWithChallengeResponseAndSummarize(
             allocator,
             self.planCommandsWithAccountProvider(source, config, provider),
             response,
@@ -2679,6 +12146,23 @@ pub const SuiRpcClient = struct {
         kind: tx_request_builder.ProgrammaticArtifactKind,
     ) ![]u8 {
         return try self.buildCommandsArtifactWithAccountProvider(
+            allocator,
+            source,
+            config,
+            .{ .default_keystore = .{ .preparation = preparation } },
+            kind,
+        );
+    }
+
+    pub fn buildCommandsArtifactAndSummarizeFromDefaultKeystore(
+        self: *const SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        config: tx_request_builder.CommandRequestConfig,
+        preparation: keystore.SignerPreparation,
+        kind: tx_request_builder.ProgrammaticArtifactKind,
+    ) !artifact_result.OwnedProgrammaticArtifactSummary {
+        return try self.buildCommandsArtifactAndSummarizeWithAccountProvider(
             allocator,
             source,
             config,
@@ -2746,6 +12230,18 @@ pub const SuiRpcClient = struct {
         preparation: keystore.SignerPreparation,
     ) !InspectOrChallengePromptResult {
         return try self.inspectCommandsOrChallengePromptWithAccountProvider(allocator, source, config, .{
+            .default_keystore = .{ .preparation = preparation },
+        });
+    }
+
+    pub fn inspectCommandsOrChallengePromptAndSummarizeFromDefaultKeystore(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+        config: tx_request_builder.CommandRequestConfig,
+        preparation: keystore.SignerPreparation,
+    ) !ProgrammaticClientActionOrChallengePromptResult {
+        return try self.inspectCommandsOrChallengePromptAndSummarizeWithAccountProvider(allocator, source, config, .{
             .default_keystore = .{ .preparation = preparation },
         });
     }
@@ -2917,6 +12413,6544 @@ test "sendRequestFrom uses request_sender callback and validates request payload
     try testing.expect(body_match);
     try testing.expectEqual(@as(u64, 1), request_id);
     try testing.expectEqualStrings("{\"result\":{\"ok\":true}}", response);
+}
+
+test "getObject uses sui_getObject and preserves options json" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var saw_request = false;
+    var method_ok = false;
+    var params_ok = false;
+
+    const MockContext = struct {
+        saw_request: *bool,
+        method_ok: *bool,
+        params_ok: *bool,
+    };
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            _ = req.id;
+            _ = req.request_body;
+            const ctx = @as(*MockContext, @ptrCast(@alignCast(context)));
+            ctx.saw_request.* = true;
+            ctx.method_ok.* = std.mem.eql(u8, req.method, "sui_getObject");
+            ctx.params_ok.* = std.mem.eql(
+                u8,
+                req.params_json,
+                "[\"0xobject\",{\"showType\":true,\"showOwner\":true}]",
+            );
+            return alloc.dupe(u8, "{\"result\":{\"data\":{\"objectId\":\"0xobject\"}}}");
+        }
+    }.call;
+
+    var ctx = MockContext{
+        .saw_request = &saw_request,
+        .method_ok = &method_ok,
+        .params_ok = &params_ok,
+    };
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &ctx,
+        .callback = callback,
+    };
+
+    const response = try client_instance.getObject("0xobject", "{\"showType\":true,\"showOwner\":true}");
+    defer allocator.free(response);
+
+    try testing.expect(saw_request);
+    try testing.expect(method_ok);
+    try testing.expect(params_ok);
+    try testing.expectEqualStrings("{\"result\":{\"data\":{\"objectId\":\"0xobject\"}}}", response);
+}
+
+test "buildObjectOptionsJson omits disabled fields and keeps stable key names" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const empty = try SuiRpcClient.buildObjectOptionsJson(allocator, .{});
+    try testing.expect(empty == null);
+
+    const json = try SuiRpcClient.buildObjectOptionsJson(allocator, .{
+        .show_type = true,
+        .show_owner = true,
+        .show_storage_rebate = true,
+    });
+    defer if (json) |value| allocator.free(value);
+
+    try testing.expectEqualStrings(
+        "{\"showType\":true,\"showOwner\":true,\"showStorageRebate\":true}",
+        json.?,
+    );
+}
+
+test "getObjectWithOptions builds sui_getObject params from typed options" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            try testing.expectEqualStrings("sui_getObject", req.method);
+            try testing.expectEqualStrings(
+                "[\"0xobject\",{\"showType\":true,\"showOwner\":true,\"showStorageRebate\":true}]",
+                req.params_json,
+            );
+            return alloc.dupe(u8, "{\"result\":{\"data\":{\"objectId\":\"0xobject\"}}}");
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    const response = try client_instance.getObjectWithOptions("0xobject", .{
+        .show_type = true,
+        .show_owner = true,
+        .show_storage_rebate = true,
+    });
+    defer allocator.free(response);
+
+    try testing.expectEqualStrings("{\"result\":{\"data\":{\"objectId\":\"0xobject\"}}}", response);
+}
+
+test "getObjectAndSummarize extracts D2-style object summaries" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            try testing.expectEqualStrings("sui_getObject", req.method);
+            try testing.expectEqualStrings("[\"0xobject\",{\"showType\":true,\"showOwner\":true}]", req.params_json);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":{\"objectId\":\"0xobject\",\"version\":\"7\",\"digest\":\"digest-1\",\"type\":\"0x2::coin::Coin<0x2::sui::SUI>\",\"owner\":{\"AddressOwner\":\"0xowner\"},\"previousTransaction\":\"0xprev\",\"storageRebate\":\"42\"}}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var summary = try client_instance.getObjectAndSummarize(
+        allocator,
+        "0xobject",
+        "{\"showType\":true,\"showOwner\":true}",
+    );
+    defer summary.deinit(allocator);
+
+    try testing.expectEqual(object_result.ObjectReadStatus.found, summary.status);
+    try testing.expectEqualStrings("0xobject", summary.object_id.?);
+    try testing.expectEqual(@as(?u64, 7), summary.version);
+    try testing.expectEqual(object_result.ObjectOwnerKind.address_owner, summary.owner_kind.?);
+    try testing.expectEqualStrings("0xowner", summary.owner_value.?);
+    try testing.expectEqual(@as(?u64, 42), summary.storage_rebate);
+}
+
+test "getObjectAndSummarizeWithOptions extracts summaries from typed object options" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            try testing.expectEqualStrings("sui_getObject", req.method);
+            try testing.expectEqualStrings(
+                "[\"0xobject\",{\"showType\":true,\"showOwner\":true,\"showStorageRebate\":true}]",
+                req.params_json,
+            );
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":{\"objectId\":\"0xobject\",\"version\":\"7\",\"digest\":\"digest-1\",\"type\":\"0x2::coin::Coin<0x2::sui::SUI>\",\"owner\":{\"AddressOwner\":\"0xowner\"},\"previousTransaction\":\"0xprev\",\"storageRebate\":\"42\"}}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var summary = try client_instance.getObjectAndSummarizeWithOptions(
+        allocator,
+        "0xobject",
+        .{
+            .show_type = true,
+            .show_owner = true,
+            .show_storage_rebate = true,
+        },
+    );
+    defer summary.deinit(allocator);
+
+    try testing.expectEqual(object_result.ObjectReadStatus.found, summary.status);
+    try testing.expectEqualStrings("0xobject", summary.object_id.?);
+    try testing.expectEqual(@as(?u64, 7), summary.version);
+    try testing.expectEqual(object_result.ObjectOwnerKind.address_owner, summary.owner_kind.?);
+    try testing.expectEqualStrings("0xowner", summary.owner_value.?);
+    try testing.expectEqual(@as(?u64, 42), summary.storage_rebate);
+}
+
+test "runObjectQueryAndSummarize supports typed object-get queries" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            try testing.expectEqualStrings("sui_getObject", req.method);
+            try testing.expectEqualStrings(
+                "[\"0xobject\",{\"showType\":true,\"showOwner\":true}]",
+                req.params_json,
+            );
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":{\"objectId\":\"0xobject\",\"version\":\"7\",\"digest\":\"digest-1\",\"type\":\"0x2::coin::Coin<0x2::sui::SUI>\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var summary = try client_instance.runObjectQueryAndSummarize(allocator, .{
+        .get = .{
+            .object_id = "0xobject",
+            .options = .{
+                .typed = .{
+                    .show_type = true,
+                    .show_owner = true,
+                },
+            },
+        },
+    });
+    defer summary.deinit(allocator);
+
+    try testing.expectEqualStrings("0xobject", summary.object.object_id.?);
+    try testing.expectEqual(object_result.ObjectOwnerKind.address_owner, summary.object.owner_kind.?);
+}
+
+test "runObjectQuery supports typed object-get queries" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            try testing.expectEqualStrings("sui_getObject", req.method);
+            try testing.expectEqualStrings(
+                "[\"0xobject\",{\"showType\":true,\"showOwner\":true}]",
+                req.params_json,
+            );
+            return alloc.dupe(u8, "{\"result\":{\"data\":{\"objectId\":\"0xobject\"}}}");
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    const response = try client_instance.runObjectQuery(allocator, .{
+        .get = .{
+            .object_id = "0xobject",
+            .options = .{
+                .typed = .{
+                    .show_type = true,
+                    .show_owner = true,
+                },
+            },
+        },
+    });
+    defer allocator.free(response);
+
+    try testing.expectEqualStrings("{\"result\":{\"data\":{\"objectId\":\"0xobject\"}}}", response);
+}
+
+test "runObjectQueryAction dispatches typed object-get queries" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            try testing.expectEqualStrings("sui_getObject", req.method);
+            try testing.expectEqualStrings(
+                "[\"0xobject\",{\"showType\":true,\"showOwner\":true}]",
+                req.params_json,
+            );
+            return alloc.dupe(u8, "{\"result\":{\"data\":{\"objectId\":\"0xobject\"}}}");
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var result = try client_instance.runObjectQueryAction(
+        allocator,
+        .{
+            .get = .{
+                .object_id = "0xobject",
+                .options = .{
+                    .typed = .{
+                        .show_type = true,
+                        .show_owner = true,
+                    },
+                },
+            },
+        },
+        .raw,
+    );
+    defer result.deinit(allocator);
+
+    try testing.expectEqualStrings("{\"result\":{\"data\":{\"objectId\":\"0xobject\"}}}", result.raw);
+}
+
+test "getDynamicFields uses suix_getDynamicFields and preserves cursor and limit" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var saw_request = false;
+    var method_ok = false;
+    var params_ok = false;
+
+    const MockContext = struct {
+        saw_request: *bool,
+        method_ok: *bool,
+        params_ok: *bool,
+    };
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            _ = req.id;
+            _ = req.request_body;
+            const ctx = @as(*MockContext, @ptrCast(@alignCast(context)));
+            ctx.saw_request.* = true;
+            ctx.method_ok.* = std.mem.eql(u8, req.method, "suix_getDynamicFields");
+            ctx.params_ok.* = std.mem.eql(
+                u8,
+                req.params_json,
+                "[\"0xparent\",\"cursor-1\",25]",
+            );
+            return alloc.dupe(u8, "{\"result\":{\"data\":[{\"name\":{\"type\":\"address\",\"value\":\"0xowner\"},\"bcsName\":\"AQ==\",\"type\":\"DynamicField\",\"objectType\":\"0x2::example::Field\",\"objectId\":\"0xchild\",\"version\":\"4\",\"digest\":\"digest-1\"}],\"nextCursor\":\"cursor-2\",\"hasNextPage\":true}}");
+        }
+    }.call;
+
+    var ctx = MockContext{
+        .saw_request = &saw_request,
+        .method_ok = &method_ok,
+        .params_ok = &params_ok,
+    };
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &ctx,
+        .callback = callback,
+    };
+
+    const response = try client_instance.getDynamicFields("0xparent", "cursor-1", 25);
+    defer allocator.free(response);
+
+    try testing.expect(saw_request);
+    try testing.expect(method_ok);
+    try testing.expect(params_ok);
+    try testing.expect(std.mem.indexOf(u8, response, "\"nextCursor\":\"cursor-2\"") != null);
+}
+
+test "getDynamicFieldsWithRequest uses typed pagination requests" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            try testing.expectEqualStrings("suix_getDynamicFields", req.method);
+            try testing.expectEqualStrings("[\"0xparent\",\"cursor-typed\",15]", req.params_json);
+            return alloc.dupe(u8, "{\"result\":{\"data\":[],\"hasNextPage\":false}}");
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    const response = try client_instance.getDynamicFieldsWithRequest("0xparent", .{
+        .cursor = "cursor-typed",
+        .limit = 15,
+    });
+    defer allocator.free(response);
+
+    try testing.expectEqualStrings("{\"result\":{\"data\":[],\"hasNextPage\":false}}", response);
+}
+
+test "getCoinsWithRequest uses typed coin page requests" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            try testing.expectEqualStrings("suix_getCoins", req.method);
+            try testing.expectEqualStrings("[\"0xowner\",\"0x2::sui::SUI\",\"cursor-typed\",15]", req.params_json);
+            return alloc.dupe(u8, "{\"result\":{\"data\":[],\"hasNextPage\":false}}");
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    const response = try client_instance.getCoinsWithRequest("0xowner", .{
+        .coin_type = "0x2::sui::SUI",
+        .cursor = "cursor-typed",
+        .limit = 15,
+    });
+    defer allocator.free(response);
+
+    try testing.expectEqualStrings("{\"result\":{\"data\":[],\"hasNextPage\":false}}", response);
+}
+
+test "getOwnedObjectsWithRequest uses typed owned-object requests" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            try testing.expectEqualStrings("suix_getOwnedObjects", req.method);
+            try testing.expectEqualStrings(
+                "[\"0xowner\",{\"filter\":{\"StructType\":\"0x2::coin::Coin<0x2::sui::SUI>\"},\"options\":{\"showType\":true,\"showOwner\":true}},\"cursor-typed\",15]",
+                req.params_json,
+            );
+            return alloc.dupe(u8, "{\"result\":{\"data\":[],\"hasNextPage\":false}}");
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    const response = try client_instance.getOwnedObjectsWithRequest("0xowner", .{
+        .filter = .{
+            .struct_type = "0x2::coin::Coin<0x2::sui::SUI>",
+        },
+        .options = .{
+            .typed = .{
+                .show_type = true,
+                .show_owner = true,
+            },
+        },
+        .cursor = "cursor-typed",
+        .limit = 15,
+    });
+    defer allocator.free(response);
+
+    try testing.expectEqualStrings("{\"result\":{\"data\":[],\"hasNextPage\":false}}", response);
+}
+
+test "getOwnedObjectsWithRequest uses typed move-module owned-object filters" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            try testing.expectEqualStrings("suix_getOwnedObjects", req.method);
+            try testing.expectEqualStrings(
+                "[\"0xowner\",{\"filter\":{\"MoveModule\":{\"package\":\"0x2\",\"module\":\"coin\"}},\"options\":{\"showType\":true}},null,15]",
+                req.params_json,
+            );
+            return alloc.dupe(u8, "{\"result\":{\"data\":[],\"hasNextPage\":false}}");
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    const response = try client_instance.getOwnedObjectsWithRequest("0xowner", .{
+        .filter = .{
+            .move_module = .{
+                .package = "0x2",
+                .module = "coin",
+            },
+        },
+        .options = .{
+            .typed = .{
+                .show_type = true,
+            },
+        },
+        .limit = 15,
+    });
+    defer allocator.free(response);
+
+    try testing.expectEqualStrings("{\"result\":{\"data\":[],\"hasNextPage\":false}}", response);
+}
+
+test "getOwnedObjectsWithRequest uses typed object-id owned-object filters" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            try testing.expectEqualStrings("suix_getOwnedObjects", req.method);
+            try testing.expectEqualStrings(
+                "[\"0xowner\",{\"filter\":{\"ObjectId\":\"0xobject-1\"}},null,15]",
+                req.params_json,
+            );
+            return alloc.dupe(u8, "{\"result\":{\"data\":[],\"hasNextPage\":false}}");
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    const response = try client_instance.getOwnedObjectsWithRequest("0xowner", .{
+        .filter = .{ .object_id = "0xobject-1" },
+        .limit = 15,
+    });
+    defer allocator.free(response);
+
+    try testing.expectEqualStrings("{\"result\":{\"data\":[],\"hasNextPage\":false}}", response);
+}
+
+test "buildDynamicFieldNameJson builds stable typed dynamic-field names" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const json = try SuiRpcClient.buildDynamicFieldNameJson(allocator, .{
+        .type_name = "address",
+        .value_json = "\"0xowner\"",
+    });
+    defer allocator.free(json);
+
+    try testing.expectEqualStrings(
+        "{\"type\":\"address\",\"value\":\"0xowner\"}",
+        json,
+    );
+}
+
+test "getDynamicFieldObjectWithName builds params from typed dynamic-field names" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            try testing.expectEqualStrings("suix_getDynamicFieldObject", req.method);
+            try testing.expectEqualStrings(
+                "[\"0xparent\",{\"type\":\"address\",\"value\":\"0xowner\"}]",
+                req.params_json,
+            );
+            return alloc.dupe(u8, "{\"result\":{\"data\":{\"objectId\":\"0xchild\"}}}");
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    const response = try client_instance.getDynamicFieldObjectWithName("0xparent", .{
+        .type_name = "address",
+        .value_json = "\"0xowner\"",
+    });
+    defer allocator.free(response);
+
+    try testing.expectEqualStrings("{\"result\":{\"data\":{\"objectId\":\"0xchild\"}}}", response);
+}
+
+test "getDynamicFieldObjectAndSummarize extracts object summaries from dynamic field lookups" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            try testing.expectEqualStrings("suix_getDynamicFieldObject", req.method);
+            try testing.expectEqualStrings(
+                "[\"0xparent\",{\"type\":\"address\",\"value\":\"0xowner\"}]",
+                req.params_json,
+            );
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":{\"objectId\":\"0xchild\",\"version\":\"4\",\"digest\":\"digest-1\",\"type\":\"0x2::example::Field\",\"owner\":{\"ObjectOwner\":\"0xparent\"},\"previousTransaction\":\"0xprev-field\",\"storageRebate\":\"9\"}}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var summary = try client_instance.getDynamicFieldObjectAndSummarize(
+        allocator,
+        "0xparent",
+        "{\"type\":\"address\",\"value\":\"0xowner\"}",
+    );
+    defer summary.deinit(allocator);
+
+    try testing.expectEqual(object_result.ObjectReadStatus.found, summary.status);
+    try testing.expectEqualStrings("0xchild", summary.object_id.?);
+    try testing.expectEqual(@as(?u64, 4), summary.version);
+    try testing.expectEqual(object_result.ObjectOwnerKind.object_owner, summary.owner_kind.?);
+    try testing.expectEqualStrings("0xparent", summary.owner_value.?);
+    try testing.expectEqual(@as(?u64, 9), summary.storage_rebate);
+}
+
+test "getDynamicFieldObjectAndSummarizeWithName extracts summaries from typed dynamic-field names" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            try testing.expectEqualStrings("suix_getDynamicFieldObject", req.method);
+            try testing.expectEqualStrings(
+                "[\"0xparent\",{\"type\":\"address\",\"value\":\"0xowner\"}]",
+                req.params_json,
+            );
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":{\"objectId\":\"0xchild\",\"version\":\"4\",\"digest\":\"digest-1\",\"type\":\"0x2::example::Field\",\"owner\":{\"ObjectOwner\":\"0xparent\"},\"previousTransaction\":\"0xprev-field\",\"storageRebate\":\"9\"}}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var summary = try client_instance.getDynamicFieldObjectAndSummarizeWithName(
+        allocator,
+        "0xparent",
+        .{
+            .type_name = "address",
+            .value_json = "\"0xowner\"",
+        },
+    );
+    defer summary.deinit(allocator);
+
+    try testing.expectEqual(object_result.ObjectReadStatus.found, summary.status);
+    try testing.expectEqualStrings("0xchild", summary.object_id.?);
+    try testing.expectEqual(@as(?u64, 4), summary.version);
+    try testing.expectEqual(object_result.ObjectOwnerKind.object_owner, summary.owner_kind.?);
+    try testing.expectEqualStrings("0xparent", summary.owner_value.?);
+    try testing.expectEqual(@as(?u64, 9), summary.storage_rebate);
+}
+
+test "runObjectQueryAndSummarize supports typed dynamic-field-object queries" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            try testing.expectEqualStrings("suix_getDynamicFieldObject", req.method);
+            try testing.expectEqualStrings(
+                "[\"0xparent\",{\"type\":\"address\",\"value\":\"0xowner\"}]",
+                req.params_json,
+            );
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":{\"objectId\":\"0xchild\",\"version\":\"4\",\"owner\":{\"ObjectOwner\":\"0xparent\"}}}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var summary = try client_instance.runObjectQueryAndSummarize(allocator, .{
+        .dynamic_field_object = .{
+            .parent_object_id = "0xparent",
+            .name = .{
+                .typed = .{
+                    .type_name = "address",
+                    .value_json = "\"0xowner\"",
+                },
+            },
+        },
+    });
+    defer summary.deinit(allocator);
+
+    try testing.expectEqualStrings("0xchild", summary.object.object_id.?);
+    try testing.expectEqual(object_result.ObjectOwnerKind.object_owner, summary.object.owner_kind.?);
+}
+
+test "getAllDynamicFields aggregates multiple pages until hasNextPage becomes false" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var request_count: usize = 0;
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const count = @as(*usize, @ptrCast(@alignCast(context)));
+            count.* += 1;
+
+            try testing.expectEqualStrings("suix_getDynamicFields", req.method);
+
+            if (count.* == 1) {
+                try testing.expectEqualStrings("[\"0xparent\",null,2]", req.params_json);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"name\":{\"type\":\"address\",\"value\":\"0xowner-1\"},\"type\":\"DynamicField\",\"objectType\":\"0x2::example::Field\",\"objectId\":\"0xchild-1\",\"version\":\"1\",\"digest\":\"digest-1\"}],\"nextCursor\":\"cursor-1\",\"hasNextPage\":true}}",
+                );
+            }
+
+            try testing.expectEqualStrings("[\"0xparent\",\"cursor-1\",2]", req.params_json);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"name\":{\"type\":\"address\",\"value\":\"0xowner-2\"},\"type\":\"DynamicField\",\"objectType\":\"0x2::example::Field\",\"objectId\":\"0xchild-2\",\"version\":\"2\",\"digest\":\"digest-2\"}],\"nextCursor\":null,\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &request_count,
+        .callback = callback,
+    };
+
+    var page = try client_instance.getAllDynamicFields(allocator, "0xparent", 2);
+    defer page.deinit(allocator);
+
+    try testing.expectEqual(@as(usize, 2), request_count);
+    try testing.expectEqual(@as(usize, 2), page.entries.len);
+    try testing.expectEqualStrings("0xchild-1", page.entries[0].object_id.?);
+    try testing.expectEqualStrings("0xchild-2", page.entries[1].object_id.?);
+    try testing.expect(!page.has_next_page);
+    try testing.expect(page.next_cursor == null);
+}
+
+test "getAllDynamicFieldsWithRequest starts from typed cursors and limits" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var request_count: usize = 0;
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const count = @as(*usize, @ptrCast(@alignCast(context)));
+            count.* += 1;
+            try testing.expectEqualStrings("suix_getDynamicFields", req.method);
+
+            if (count.* == 1) {
+                try testing.expectEqualStrings("[\"0xparent\",\"cursor-start\",2]", req.params_json);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"name\":{\"type\":\"address\",\"value\":\"0xowner-1\"},\"type\":\"DynamicField\",\"objectType\":\"0x2::example::Field\",\"objectId\":\"0xchild-1\",\"version\":\"1\",\"digest\":\"digest-1\"}],\"nextCursor\":\"cursor-next\",\"hasNextPage\":true}}",
+                );
+            }
+
+            try testing.expectEqualStrings("[\"0xparent\",\"cursor-next\",2]", req.params_json);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"name\":{\"type\":\"address\",\"value\":\"0xowner-2\"},\"type\":\"DynamicField\",\"objectType\":\"0x2::example::Field\",\"objectId\":\"0xchild-2\",\"version\":\"2\",\"digest\":\"digest-2\"}],\"nextCursor\":null,\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &request_count,
+        .callback = callback,
+    };
+
+    var page = try client_instance.getAllDynamicFieldsWithRequest(allocator, "0xparent", .{
+        .cursor = "cursor-start",
+        .limit = 2,
+    });
+    defer page.deinit(allocator);
+
+    try testing.expectEqual(@as(usize, 2), request_count);
+    try testing.expectEqual(@as(usize, 2), page.entries.len);
+    try testing.expectEqualStrings("0xchild-1", page.entries[0].object_id.?);
+    try testing.expectEqualStrings("0xchild-2", page.entries[1].object_id.?);
+    try testing.expect(!page.has_next_page);
+    try testing.expect(page.next_cursor == null);
+}
+
+test "getAllCoinsWithRequest aggregates multiple pages" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var request_count: usize = 0;
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const count = @as(*usize, @ptrCast(@alignCast(context)));
+            count.* += 1;
+            try testing.expectEqualStrings("suix_getCoins", req.method);
+
+            if (count.* == 1) {
+                try testing.expectEqualStrings("[\"0xowner\",\"0x2::sui::SUI\",null,2]", req.params_json);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xcoin-1\",\"version\":\"1\",\"digest\":\"digest-1\",\"balance\":\"7\",\"previousTransaction\":\"0xprev-1\"}],\"nextCursor\":\"cursor-next\",\"hasNextPage\":true}}",
+                );
+            }
+
+            try testing.expectEqualStrings("[\"0xowner\",\"0x2::sui::SUI\",\"cursor-next\",2]", req.params_json);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xcoin-2\",\"version\":\"2\",\"digest\":\"digest-2\",\"balance\":\"8\",\"previousTransaction\":\"0xprev-2\"}],\"nextCursor\":null,\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &request_count,
+        .callback = callback,
+    };
+
+    var page = try client_instance.getAllCoinsWithRequest(allocator, "0xowner", .{
+        .coin_type = "0x2::sui::SUI",
+        .limit = 2,
+    });
+    defer page.deinit(allocator);
+
+    try testing.expectEqual(@as(usize, 2), request_count);
+    try testing.expectEqual(@as(usize, 2), page.entries.len);
+    try testing.expectEqualStrings("0xcoin-1", page.entries[0].coin_object_id.?);
+    try testing.expectEqualStrings("7", page.entries[0].balance.?);
+    try testing.expectEqualStrings("0xcoin-2", page.entries[1].coin_object_id.?);
+    try testing.expectEqualStrings("8", page.entries[1].balance.?);
+    try testing.expect(!page.has_next_page);
+    try testing.expect(page.next_cursor == null);
+}
+
+test "getAllOwnedObjectsWithRequest aggregates multiple pages" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var request_count: usize = 0;
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const count = @as(*usize, @ptrCast(@alignCast(context)));
+            count.* += 1;
+            try testing.expectEqualStrings("suix_getOwnedObjects", req.method);
+
+            if (count.* == 1) {
+                try testing.expectEqualStrings("[\"0xowner\",null,null,2]", req.params_json);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xobject-1\",\"type\":\"0x2::coin::Coin<0x2::sui::SUI>\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"nextCursor\":\"cursor-next\",\"hasNextPage\":true}}",
+                );
+            }
+
+            try testing.expectEqualStrings("[\"0xowner\",null,\"cursor-next\",2]", req.params_json);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xobject-2\",\"type\":\"0x2::example::Thing\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"nextCursor\":null,\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &request_count,
+        .callback = callback,
+    };
+
+    var page = try client_instance.getAllOwnedObjectsWithRequest(allocator, "0xowner", .{
+        .limit = 2,
+    });
+    defer page.deinit(allocator);
+
+    try testing.expectEqual(@as(usize, 2), request_count);
+    try testing.expectEqual(@as(usize, 2), page.entries.len);
+    try testing.expectEqualStrings("0xobject-1", page.entries[0].object_id.?);
+    try testing.expectEqualStrings("0xobject-2", page.entries[1].object_id.?);
+    try testing.expect(!page.has_next_page);
+    try testing.expect(page.next_cursor == null);
+}
+
+test "runObjectQueryAndSummarize supports aggregated dynamic-field queries" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var request_count: usize = 0;
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const count = @as(*usize, @ptrCast(@alignCast(context)));
+            count.* += 1;
+            try testing.expectEqualStrings("suix_getDynamicFields", req.method);
+
+            if (count.* == 1) {
+                try testing.expectEqualStrings("[\"0xparent\",\"cursor-start\",2]", req.params_json);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"name\":{\"type\":\"address\",\"value\":\"0xowner-1\"},\"objectId\":\"0xchild-1\"}],\"nextCursor\":\"cursor-next\",\"hasNextPage\":true}}",
+                );
+            }
+
+            try testing.expectEqualStrings("[\"0xparent\",\"cursor-next\",2]", req.params_json);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"name\":{\"type\":\"address\",\"value\":\"0xowner-2\"},\"objectId\":\"0xchild-2\"}],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &request_count,
+        .callback = callback,
+    };
+
+    var summary = try client_instance.runObjectQueryAndSummarize(allocator, .{
+        .dynamic_fields_all = .{
+            .parent_object_id = "0xparent",
+            .request = .{
+                .cursor = "cursor-start",
+                .limit = 2,
+            },
+        },
+    });
+    defer summary.deinit(allocator);
+
+    try testing.expectEqual(@as(usize, 2), request_count);
+    try testing.expectEqual(@as(usize, 2), summary.dynamic_fields.entries.len);
+    try testing.expectEqualStrings("0xchild-1", summary.dynamic_fields.entries[0].object_id.?);
+    try testing.expectEqualStrings("0xchild-2", summary.dynamic_fields.entries[1].object_id.?);
+}
+
+test "runObjectQuery supports aggregated dynamic-field queries" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var request_count: usize = 0;
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const count = @as(*usize, @ptrCast(@alignCast(context)));
+            count.* += 1;
+            try testing.expectEqualStrings("suix_getDynamicFields", req.method);
+
+            if (count.* == 1) {
+                try testing.expectEqualStrings("[\"0xparent\",\"cursor-start\",2]", req.params_json);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"name\":{\"type\":\"address\",\"value\":\"0xowner-1\"},\"objectId\":\"0xchild-1\"}],\"nextCursor\":\"cursor-next\",\"hasNextPage\":true}}",
+                );
+            }
+
+            try testing.expectEqualStrings("[\"0xparent\",\"cursor-next\",2]", req.params_json);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"name\":{\"type\":\"address\",\"value\":\"0xowner-2\"},\"objectId\":\"0xchild-2\"}],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &request_count,
+        .callback = callback,
+    };
+
+    const response = try client_instance.runObjectQuery(allocator, .{
+        .dynamic_fields_all = .{
+            .parent_object_id = "0xparent",
+            .request = .{
+                .cursor = "cursor-start",
+                .limit = 2,
+            },
+        },
+    });
+    defer allocator.free(response);
+
+    try testing.expectEqual(@as(usize, 2), request_count);
+    try testing.expect(std.mem.indexOf(u8, response, "\"entries\"") != null);
+    try testing.expect(std.mem.indexOf(u8, response, "\"0xchild-1\"") != null);
+    try testing.expect(std.mem.indexOf(u8, response, "\"0xchild-2\"") != null);
+}
+
+test "runObjectQueryAction dispatches summarized dynamic-field queries" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            try testing.expectEqualStrings("suix_getDynamicFields", req.method);
+            try testing.expectEqualStrings("[\"0xparent\",\"cursor-1\",25]", req.params_json);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"name\":{\"type\":\"address\",\"value\":\"0xowner\"},\"objectId\":\"0xchild\"}],\"nextCursor\":\"cursor-2\",\"hasNextPage\":true}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var result = try client_instance.runObjectQueryAction(
+        allocator,
+        .{
+            .dynamic_fields_page = .{
+                .parent_object_id = "0xparent",
+                .request = .{
+                    .cursor = "cursor-1",
+                    .limit = 25,
+                },
+            },
+        },
+        .summarize,
+    );
+    defer result.deinit(allocator);
+
+    try testing.expect(result.summarized.dynamic_fields.has_next_page);
+    try testing.expectEqualStrings("0xchild", result.summarized.dynamic_fields.entries[0].object_id.?);
+}
+
+test "runCoinQueryAction dispatches summarized coin queries" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            try testing.expectEqualStrings("suix_getCoins", req.method);
+            try testing.expectEqualStrings("[\"0xowner\",\"0x2::sui::SUI\",\"cursor-1\",25]", req.params_json);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xcoin\",\"balance\":\"9\"}],\"nextCursor\":\"cursor-2\",\"hasNextPage\":true}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var result = try client_instance.runCoinQueryAction(
+        allocator,
+        .{
+            .page = .{
+                .owner = "0xowner",
+                .request = .{
+                    .coin_type = "0x2::sui::SUI",
+                    .cursor = "cursor-1",
+                    .limit = 25,
+                },
+            },
+        },
+        .summarize,
+    );
+    defer result.deinit(allocator);
+
+    try testing.expect(result.summarized.has_next_page);
+    try testing.expectEqualStrings("0xcoin", result.summarized.entries[0].coin_object_id.?);
+    try testing.expectEqualStrings("9", result.summarized.entries[0].balance.?);
+}
+
+test "runResourceQueryAction dispatches summarized coin resource queries" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            try testing.expectEqualStrings("suix_getCoins", req.method);
+            try testing.expectEqualStrings("[\"0xowner\",\"0x2::sui::SUI\",\"cursor-1\",25]", req.params_json);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xcoin\",\"balance\":\"9\"}],\"nextCursor\":\"cursor-2\",\"hasNextPage\":true}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var result = try client_instance.runResourceQueryAction(
+        allocator,
+        .{
+            .coins = .{
+                .page = .{
+                    .owner = "0xowner",
+                    .request = .{
+                        .coin_type = "0x2::sui::SUI",
+                        .cursor = "cursor-1",
+                        .limit = 25,
+                    },
+                },
+            },
+        },
+        .summarize,
+    );
+    defer result.deinit(allocator);
+
+    try testing.expect(result.summarized.coins.has_next_page);
+    try testing.expectEqualStrings("0xcoin", result.summarized.coins.entries[0].coin_object_id.?);
+}
+
+test "runResourceDiscoveryQueryAction dispatches summarized mixed resource discovery queries" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var request_count: usize = 0;
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const count = @as(*usize, @ptrCast(@alignCast(context)));
+            count.* += 1;
+            if (count.* == 1) {
+                try testing.expectEqualStrings("suix_getCoins", req.method);
+                try testing.expectEqualStrings("[\"0xowner\",\"0x2::sui::SUI\",null,25]", req.params_json);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xcoin\",\"balance\":\"9\"}],\"hasNextPage\":false}}",
+                );
+            }
+            try testing.expectEqualStrings("suix_getOwnedObjects", req.method);
+            try testing.expectEqualStrings("[\"0xowner\",null,null,25]", req.params_json);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xobject\",\"type\":\"0x2::example::Thing\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &request_count,
+        .callback = callback,
+    };
+
+    var result = try client_instance.runResourceDiscoveryQueryAction(
+        allocator,
+        .{
+            .coins = .{
+                .page = .{
+                    .owner = "0xowner",
+                    .request = .{
+                        .coin_type = "0x2::sui::SUI",
+                        .limit = 25,
+                    },
+                },
+            },
+            .owned_objects = .{
+                .page = .{
+                    .owner = "0xowner",
+                    .request = .{
+                        .limit = 25,
+                    },
+                },
+            },
+        },
+        .summarize,
+    );
+    defer result.deinit(allocator);
+
+    try testing.expectEqual(@as(usize, 2), request_count);
+    try testing.expect(result.summarized.coins != null);
+    try testing.expect(result.summarized.owned_objects != null);
+    try testing.expectEqualStrings("0xcoin", result.summarized.coins.?.entries[0].coin_object_id.?);
+    try testing.expectEqualStrings("0xobject", result.summarized.owned_objects.?.entries[0].object_id.?);
+}
+
+test "runOwnedObjectsQueryAction dispatches summarized owned-object queries" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            try testing.expectEqualStrings("suix_getOwnedObjects", req.method);
+            try testing.expectEqualStrings("[\"0xowner\",null,\"cursor-1\",25]", req.params_json);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xobject\",\"type\":\"0x2::coin::Coin<0x2::sui::SUI>\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"nextCursor\":\"cursor-2\",\"hasNextPage\":true}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var result = try client_instance.runOwnedObjectsQueryAction(
+        allocator,
+        .{
+            .page = .{
+                .owner = "0xowner",
+                .request = .{
+                    .cursor = "cursor-1",
+                    .limit = 25,
+                },
+            },
+        },
+        .summarize,
+    );
+    defer result.deinit(allocator);
+
+    try testing.expect(result.summarized.has_next_page);
+    try testing.expectEqualStrings("0xobject", result.summarized.entries[0].object_id.?);
+    try testing.expectEqualStrings("address_owner", result.summarized.entries[0].owner_kind.?);
+}
+
+test "runResourceQueryAction dispatches raw owned-object resource queries" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            try testing.expectEqualStrings("suix_getOwnedObjects", req.method);
+            try testing.expectEqualStrings("[\"0xowner\",null,\"cursor-1\",25]", req.params_json);
+            return alloc.dupe(u8, "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xobject\"}}],\"hasNextPage\":false}}");
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var result = try client_instance.runResourceQueryAction(
+        allocator,
+        .{
+            .owned_objects = .{
+                .page = .{
+                    .owner = "0xowner",
+                    .request = .{
+                        .cursor = "cursor-1",
+                        .limit = 25,
+                    },
+                },
+            },
+        },
+        .raw,
+    );
+    defer result.deinit(allocator);
+
+    try testing.expect(std.mem.indexOf(u8, result.raw, "\"0xobject\"") != null);
+}
+
+test "selectCoinWithMinBalance chooses the smallest sufficient coin across pages" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var request_count: usize = 0;
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const count = @as(*usize, @ptrCast(@alignCast(context)));
+            count.* += 1;
+            try testing.expectEqualStrings("suix_getCoins", req.method);
+            if (count.* == 1) {
+                try testing.expectEqualStrings("[\"0xowner\",\"0x2::sui::SUI\",null,2]", req.params_json);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xcoin-1\",\"balance\":\"42\"}],\"nextCursor\":\"cursor-next\",\"hasNextPage\":true}}",
+                );
+            }
+            try testing.expectEqualStrings("[\"0xowner\",\"0x2::sui::SUI\",\"cursor-next\",2]", req.params_json);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xcoin-2\",\"balance\":\"9\"}],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &request_count,
+        .callback = callback,
+    };
+
+    const selection = try client_instance.selectCoinWithMinBalance(allocator, "0xowner", .{
+        .coin_type = default_sui_coin_type,
+        .limit = 2,
+    }, 8);
+    defer if (selection) |entry| entry.deinit(allocator);
+
+    try testing.expectEqual(@as(usize, 2), request_count);
+    try testing.expect(selection != null);
+    try testing.expectEqualStrings("0xcoin-2", selection.?.coin_object_id.?);
+    try testing.expectEqualStrings("9", selection.?.balance.?);
+}
+
+test "selectGasCoin uses the default SUI coin type" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            try testing.expectEqualStrings("suix_getCoins", req.method);
+            try testing.expectEqualStrings("[\"0xowner\",\"0x2::sui::SUI\",null,null]", req.params_json);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xgas\",\"balance\":\"12\"}],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    const selection = try client_instance.selectGasCoin(allocator, "0xowner", 10);
+    defer if (selection) |entry| entry.deinit(allocator);
+
+    try testing.expect(selection != null);
+    try testing.expectEqualStrings(default_sui_coin_type, selection.?.coin_type.?);
+    try testing.expectEqualStrings("0xgas", selection.?.coin_object_id.?);
+}
+
+test "selectGasCoinArgumentValue returns object-id argument values for DSL usage" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            try testing.expectEqualStrings("suix_getCoins", req.method);
+            try testing.expectEqualStrings("[\"0xowner\",\"0x2::sui::SUI\",null,null]", req.params_json);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xgas-value\",\"balance\":\"17\"}],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var selection = try client_instance.selectGasCoinArgumentValue(allocator, "0xowner", 10);
+    defer if (selection) |*value| value.deinit(allocator);
+
+    try testing.expect(selection != null);
+    switch (selection.?.value) {
+        .object_id => |value| try testing.expectEqualStrings("0xgas-value", value),
+        else => try testing.expect(false),
+    }
+}
+
+test "selectGasPaymentJson uses selected gas coin object refs" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            try testing.expectEqualStrings("suix_getCoins", req.method);
+            try testing.expectEqualStrings("[\"0xowner\",\"0x2::sui::SUI\",null,null]", req.params_json);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xgas-payment\",\"version\":\"11\",\"digest\":\"digest-gas-payment\",\"balance\":\"17\"}],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    const gas_payment_json = try client_instance.selectGasPaymentJson(allocator, "0xowner", 10);
+    defer if (gas_payment_json) |value| allocator.free(value);
+
+    try testing.expect(gas_payment_json != null);
+    try testing.expectEqualStrings(
+        "[{\"objectId\":\"0xgas-payment\",\"version\":\"11\",\"digest\":\"digest-gas-payment\"}]",
+        gas_payment_json.?,
+    );
+}
+
+test "SelectedArgumentDslBuilder selectGasPayment stores explicit gas payment json" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            try testing.expectEqualStrings("suix_getCoins", req.method);
+            try testing.expectEqualStrings("[\"0xowner\",\"0x2::sui::SUI\",null,null]", req.params_json);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xgas-builder\",\"version\":\"12\",\"digest\":\"digest-gas-builder\",\"balance\":\"25\"}],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var builder = SelectedArgumentDslBuilder.init(&client_instance, allocator);
+    defer builder.deinit();
+
+    try builder.selectGasPayment("0xowner", 20);
+
+    var owned = try builder.finish();
+    defer owned.deinit(allocator);
+
+    try testing.expect(owned.options.gas_payment_json != null);
+    try testing.expectEqualStrings(
+        "[{\"objectId\":\"0xgas-builder\",\"version\":\"12\",\"digest\":\"digest-gas-builder\"}]",
+        owned.options.gas_payment_json.?,
+    );
+}
+
+test "selectGasPaymentJsonFromTokenWithDefaultOwner resolves ownerless gas-coin tokens" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            try testing.expectEqualStrings("suix_getCoins", req.method);
+            try testing.expect(std.mem.indexOf(u8, req.params_json, "0xowner") != null);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xfeed99\",\"version\":\"19\",\"digest\":\"digest-feed99\",\"balance\":\"1000\"}],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    const resolved = try client_instance.selectGasPaymentJsonFromTokenWithDefaultOwner(
+        allocator,
+        "select:{\"kind\":\"gas_coin\",\"minBalance\":10}",
+        "0xowner",
+    ) orelse return error.TestUnexpectedResult;
+    defer allocator.free(resolved);
+
+    try testing.expect(std.mem.indexOf(u8, resolved, "\"objectId\":\"0xfeed99\"") != null);
+}
+
+test "selectOwnedObject skips failed entries and returns the first found object across pages" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var request_count: usize = 0;
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const count = @as(*usize, @ptrCast(@alignCast(context)));
+            count.* += 1;
+            try testing.expectEqualStrings("suix_getOwnedObjects", req.method);
+            if (count.* == 1) {
+                try testing.expectEqualStrings("[\"0xowner\",null,null,2]", req.params_json);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"error\":{\"code\":-1,\"message\":\"missing\"}}],\"nextCursor\":\"cursor-next\",\"hasNextPage\":true}}",
+                );
+            }
+            try testing.expectEqualStrings("[\"0xowner\",null,\"cursor-next\",2]", req.params_json);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xobject-2\",\"type\":\"0x2::example::Thing\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &request_count,
+        .callback = callback,
+    };
+
+    const selection = try client_instance.selectOwnedObject(allocator, "0xowner", .{
+        .limit = 2,
+    });
+    defer if (selection) |entry| entry.deinit(allocator);
+
+    try testing.expectEqual(@as(usize, 2), request_count);
+    try testing.expect(selection != null);
+    try testing.expectEqualStrings("0xobject-2", selection.?.object_id.?);
+    try testing.expectEqualStrings("0x2::example::Thing", selection.?.type_name.?);
+}
+
+test "selectOwnedObjectArgumentValueByStructType returns object-id argument values" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            try testing.expectEqualStrings("suix_getOwnedObjects", req.method);
+            try testing.expectEqualStrings(
+                "[\"0xowner\",{\"filter\":{\"StructType\":\"0x2::example::Thing\"}},null,null]",
+                req.params_json,
+            );
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xselected-object\",\"type\":\"0x2::example::Thing\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var selection = try client_instance.selectOwnedObjectArgumentValueByStructType(
+        allocator,
+        "0xowner",
+        "0x2::example::Thing",
+    );
+    defer if (selection) |*value| value.deinit(allocator);
+
+    try testing.expect(selection != null);
+    switch (selection.?.value) {
+        .object_id => |value| try testing.expectEqualStrings("0xselected-object", value),
+        else => try testing.expect(false),
+    }
+}
+
+test "selectArgumentValues batches gas and owned-object selections into DSL-ready values" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var request_count: usize = 0;
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const count = @as(*usize, @ptrCast(@alignCast(context)));
+            count.* += 1;
+            if (count.* == 1) {
+                try testing.expectEqualStrings("suix_getCoins", req.method);
+                try testing.expectEqualStrings("[\"0xowner\",\"0x2::sui::SUI\",null,null]", req.params_json);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xgas-batch\",\"balance\":\"19\"}],\"hasNextPage\":false}}",
+                );
+            }
+
+            try testing.expectEqualStrings("suix_getOwnedObjects", req.method);
+            try testing.expectEqualStrings(
+                "[\"0xowner\",{\"filter\":{\"StructType\":\"0x2::example::Thing\"}},null,null]",
+                req.params_json,
+            );
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xobject-batch\",\"type\":\"0x2::example::Thing\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &request_count,
+        .callback = callback,
+    };
+
+    var values = try client_instance.selectArgumentValues(allocator, &.{
+        .{ .gas_coin = .{ .owner = "0xowner", .min_balance = 10 } },
+        .{ .owned_object_struct_type = .{ .owner = "0xowner", .struct_type = "0x2::example::Thing" } },
+    });
+    defer values.deinit(allocator);
+
+    try testing.expectEqual(@as(usize, 2), request_count);
+    try testing.expectEqual(@as(usize, 2), values.slice().len);
+    switch (values.slice()[0]) {
+        .object_id => |value| try testing.expectEqualStrings("0xgas-batch", value),
+        else => try testing.expect(false),
+    }
+    switch (values.slice()[1]) {
+        .object_id => |value| try testing.expectEqualStrings("0xobject-batch", value),
+        else => try testing.expect(false),
+    }
+}
+
+test "selectArgumentValues returns SelectionNotFound when a resource cannot be selected" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            try testing.expectEqualStrings("suix_getOwnedObjects", req.method);
+            try testing.expectEqualStrings(
+                "[\"0xowner\",{\"filter\":{\"ObjectId\":\"0xmissing\"}},null,null]",
+                req.params_json,
+            );
+            return alloc.dupe(u8, "{\"result\":{\"data\":[],\"hasNextPage\":false}}");
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    try testing.expectError(error.SelectionNotFound, client_instance.selectArgumentValues(allocator, &.{
+        .{ .owned_object_object_id = .{ .owner = "0xowner", .object_id = "0xmissing" } },
+    }));
+}
+
+test "appendMoveCallFromSelectedArguments resolves resources directly into DSL commands" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var request_count: usize = 0;
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const count = @as(*usize, @ptrCast(@alignCast(context)));
+            count.* += 1;
+            if (count.* == 1) {
+                try testing.expectEqualStrings("suix_getCoins", req.method);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xgas-helper\",\"balance\":\"21\"}],\"hasNextPage\":false}}",
+                );
+            }
+
+            try testing.expectEqualStrings("suix_getOwnedObjects", req.method);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xcap-helper\",\"type\":\"0x2::coin::TreasuryCap<0x2::sui::SUI>\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &request_count,
+        .callback = callback,
+    };
+
+    var builder = tx_request_builder.ProgrammaticDslBuilder.init(allocator);
+    defer builder.deinit();
+
+    try client_instance.appendMoveCallFromSelectedArguments(
+        allocator,
+        &builder,
+        "0x2",
+        "coin",
+        "some_fun",
+        &.{},
+        &.{
+            .{ .gas_coin = .{ .owner = "0xowner", .min_balance = 10 } },
+            .{ .owned_object_module = .{ .owner = "0xowner", .package = "0x2", .module = "coin" } },
+        },
+    );
+
+    var owned = try builder.finish();
+    defer owned.deinit(allocator);
+    const commands_json = owned.takeCommandsJson().?;
+    defer allocator.free(commands_json);
+
+    try testing.expectEqual(@as(usize, 2), request_count);
+    try testing.expect(std.mem.indexOf(u8, commands_json, "\"MoveCall\"") != null);
+    try testing.expect(std.mem.indexOf(u8, commands_json, "0xgas-helper") != null);
+    try testing.expect(std.mem.indexOf(u8, commands_json, "0xcap-helper") != null);
+}
+
+test "appendSplitCoinsFromSelectedArgument resolves selected gas coins into DSL commands" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            try testing.expectEqualStrings("suix_getCoins", req.method);
+            try testing.expectEqualStrings("[\"0xowner\",\"0x2::sui::SUI\",null,null]", req.params_json);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xgas-split\",\"balance\":\"50\"}],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var builder = tx_request_builder.ProgrammaticDslBuilder.init(allocator);
+    defer builder.deinit();
+
+    _ = try client_instance.appendSplitCoinsAndGetValueFromSelectedArgument(
+        allocator,
+        &builder,
+        .{ .gas_coin = .{ .owner = "0xowner", .min_balance = 10 } },
+        &.{.{ .u64 = 7 }},
+    );
+
+    var owned = try builder.finish();
+    defer owned.deinit(allocator);
+    const commands_json = owned.takeCommandsJson().?;
+    defer allocator.free(commands_json);
+
+    try testing.expect(std.mem.indexOf(u8, commands_json, "\"SplitCoins\"") != null);
+    try testing.expect(std.mem.indexOf(u8, commands_json, "0xgas-split") != null);
+}
+
+test "appendMakeMoveVecFromSelectedArguments resolves selected objects directly into DSL commands" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var request_count: usize = 0;
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const count = @as(*usize, @ptrCast(@alignCast(context)));
+            count.* += 1;
+            try testing.expectEqualStrings("suix_getOwnedObjects", req.method);
+            if (count.* == 1) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xvec-1\",\"type\":\"0x2::example::Thing\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
+                );
+            }
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xvec-2\",\"type\":\"0x2::example::Thing\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &request_count,
+        .callback = callback,
+    };
+
+    var builder = tx_request_builder.ProgrammaticDslBuilder.init(allocator);
+    defer builder.deinit();
+
+    try client_instance.appendMakeMoveVecFromSelectedArguments(
+        allocator,
+        &builder,
+        "0x2::example::Thing",
+        &.{
+            .{ .owned_object_object_id = .{ .owner = "0xowner", .object_id = "0xvec-1" } },
+            .{ .owned_object_struct_type = .{ .owner = "0xowner", .struct_type = "0x2::example::Thing" } },
+        },
+    );
+
+    var owned = try builder.finish();
+    defer owned.deinit(allocator);
+    const commands_json = owned.takeCommandsJson().?;
+    defer allocator.free(commands_json);
+
+    try testing.expectEqual(@as(usize, 2), request_count);
+    try testing.expect(std.mem.indexOf(u8, commands_json, "\"MakeMoveVec\"") != null);
+    try testing.expect(std.mem.indexOf(u8, commands_json, "0xvec-1") != null);
+    try testing.expect(std.mem.indexOf(u8, commands_json, "0xvec-2") != null);
+}
+
+test "appendTransferObjectsFromSelectedArguments resolves selected objects directly into DSL commands" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            try testing.expectEqualStrings("suix_getOwnedObjects", req.method);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xtransfer-object\",\"type\":\"0x2::example::Thing\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var builder = tx_request_builder.ProgrammaticDslBuilder.init(allocator);
+    defer builder.deinit();
+
+    try client_instance.appendTransferObjectsFromSelectedArguments(
+        allocator,
+        &builder,
+        &.{
+            .{ .owned_object_struct_type = .{ .owner = "0xowner", .struct_type = "0x2::example::Thing" } },
+        },
+        .{ .address = "0xreceiver" },
+    );
+
+    var owned = try builder.finish();
+    defer owned.deinit(allocator);
+    const commands_json = owned.takeCommandsJson().?;
+    defer allocator.free(commands_json);
+
+    try testing.expect(std.mem.indexOf(u8, commands_json, "\"TransferObjects\"") != null);
+    try testing.expect(std.mem.indexOf(u8, commands_json, "0xtransfer-object") != null);
+    try testing.expect(std.mem.indexOf(u8, commands_json, "0xreceiver") != null);
+}
+
+test "appendMergeCoinsFromSelectedArguments resolves selected coins directly into DSL commands" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var request_count: usize = 0;
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const count = @as(*usize, @ptrCast(@alignCast(context)));
+            count.* += 1;
+            try testing.expectEqualStrings("suix_getCoins", req.method);
+            if (count.* == 1) {
+                try testing.expectEqualStrings("[\"0xowner\",\"0x2::sui::SUI\",null,null]", req.params_json);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xdestination-coin\",\"balance\":\"50\"}],\"hasNextPage\":false}}",
+                );
+            }
+            if (count.* == 2) {
+                try testing.expectEqualStrings("[\"0xowner\",\"0x2::sui::SUI\",null,null]", req.params_json);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xsource-coin-1\",\"balance\":\"7\"}],\"hasNextPage\":false}}",
+                );
+            }
+            try testing.expectEqualStrings("[\"0xowner\",\"0x2::sui::SUI\",null,null]", req.params_json);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xsource-coin-2\",\"balance\":\"8\"}],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &request_count,
+        .callback = callback,
+    };
+
+    var builder = tx_request_builder.ProgrammaticDslBuilder.init(allocator);
+    defer builder.deinit();
+
+    try client_instance.appendMergeCoinsFromSelectedArguments(
+        allocator,
+        &builder,
+        .{ .gas_coin = .{ .owner = "0xowner", .min_balance = 10 } },
+        &.{
+            .{ .coin_with_min_balance = .{ .owner = "0xowner", .request = .{ .coin_type = default_sui_coin_type }, .min_balance = 5 } },
+            .{ .coin_with_min_balance = .{ .owner = "0xowner", .request = .{ .coin_type = default_sui_coin_type }, .min_balance = 6 } },
+        },
+    );
+
+    var owned = try builder.finish();
+    defer owned.deinit(allocator);
+    const commands_json = owned.takeCommandsJson().?;
+    defer allocator.free(commands_json);
+
+    try testing.expectEqual(@as(usize, 3), request_count);
+    try testing.expect(std.mem.indexOf(u8, commands_json, "\"MergeCoins\"") != null);
+    try testing.expect(std.mem.indexOf(u8, commands_json, "0xdestination-coin") != null);
+    try testing.expect(std.mem.indexOf(u8, commands_json, "0xsource-coin-1") != null);
+    try testing.expect(std.mem.indexOf(u8, commands_json, "0xsource-coin-2") != null);
+}
+
+test "appendMergeCoinsFromSelectedArguments returns SelectionNotFound for missing destinations" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            try testing.expectEqualStrings("suix_getCoins", req.method);
+            return alloc.dupe(u8, "{\"result\":{\"data\":[],\"hasNextPage\":false}}");
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var builder = tx_request_builder.ProgrammaticDslBuilder.init(allocator);
+    defer builder.deinit();
+
+    try testing.expectError(
+        error.SelectionNotFound,
+        client_instance.appendMergeCoinsFromSelectedArguments(
+            allocator,
+            &builder,
+            .{ .gas_coin = .{ .owner = "0xowner", .min_balance = 10 } },
+            &.{.{ .coin_with_min_balance = .{ .owner = "0xowner", .request = .{ .coin_type = default_sui_coin_type }, .min_balance = 5 } }},
+        ),
+    );
+}
+
+test "appendUpgradeFromSelectedArgument resolves selected tickets directly into DSL commands" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            try testing.expectEqualStrings("suix_getOwnedObjects", req.method);
+            try testing.expectEqualStrings(
+                "[\"0xowner\",{\"filter\":{\"MoveModule\":{\"package\":\"0x2\",\"module\":\"package\"}}},null,null]",
+                req.params_json,
+            );
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xupgrade-ticket\",\"type\":\"0x2::package::UpgradeCap\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var builder = tx_request_builder.ProgrammaticDslBuilder.init(allocator);
+    defer builder.deinit();
+
+    try client_instance.appendUpgradeFromSelectedArgument(
+        allocator,
+        &builder,
+        "[\"AA==\"]",
+        "[\"0x2\"]",
+        "0xpackage",
+        .{ .owned_object_module = .{ .owner = "0xowner", .package = "0x2", .module = "package" } },
+    );
+
+    var owned = try builder.finish();
+    defer owned.deinit(allocator);
+    const commands_json = owned.takeCommandsJson().?;
+    defer allocator.free(commands_json);
+
+    try testing.expect(std.mem.indexOf(u8, commands_json, "\"Upgrade\"") != null);
+    try testing.expect(std.mem.indexOf(u8, commands_json, "0xupgrade-ticket") != null);
+    try testing.expect(std.mem.indexOf(u8, commands_json, "0xpackage") != null);
+}
+
+test "SelectedArgumentDslBuilder runs build artifact summarize actions from selected arguments" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            try testing.expectEqualStrings("suix_getOwnedObjects", req.method);
+            try testing.expectEqualStrings(
+                "[\"0xowner\",{\"filter\":{\"StructType\":\"0x2::example::Thing\"}},null,null]",
+                req.params_json,
+            );
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xbuilder-object\",\"type\":\"0x2::example::Thing\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var builder = SelectedArgumentDslBuilder.init(&client_instance, allocator);
+    defer builder.deinit();
+    builder.setSender("0xsender");
+    builder.setSignatures(&.{"sig-a"});
+
+    try builder.appendMoveCallFromSelectedArguments(
+        "0x2",
+        "example",
+        "act",
+        &.{},
+        &.{
+            .{ .owned_object_struct_type = .{ .owner = "0xowner", .struct_type = "0x2::example::Thing" } },
+        },
+    );
+
+    var result = try builder.run(.{
+        .direct_signatures = .{
+            .sender = "0xsender",
+            .signatures = &.{"sig-a"},
+        },
+    }, .{ .build_artifact_summarize = .execute_payload });
+    defer result.deinit(allocator);
+
+    switch (result) {
+        .artifact_summarized => |summary| switch (summary) {
+            .execute_payload => |payload| {
+                try testing.expectEqual(@as(usize, 1), payload.command_count);
+                try testing.expectEqualStrings("0xsender", payload.sender.?);
+            },
+            else => try testing.expect(false),
+        },
+        else => try testing.expect(false),
+    }
+}
+
+test "executeCommandSourceResolvingSelectedArgumentTokensAndConfirmAndSummarizeWithSignatures extracts execution insights" {
+    const testing = std.testing;
+    const State = struct { request_count: usize = 0 };
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var state = State{};
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const st = @as(*State, @ptrCast(@alignCast(context)));
+            st.request_count += 1;
+
+            if (std.mem.eql(u8, req.method, "suix_getOwnedObjects")) {
+                try testing.expect(std.mem.indexOf(u8, req.params_json, "0xowner") != null);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xsel111\",\"type\":\"0x2::example::Thing\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall")) {
+                const params = try std.json.parseFromSlice(std.json.Value, alloc, req.params_json, .{});
+                defer params.deinit();
+                try testing.expectEqualStrings("0xowner", params.value.array.items[0].string);
+                try testing.expectEqualStrings("0xgas", params.value.array.items[6].string);
+                try testing.expectEqualStrings("0xsel111", params.value.array.items[5].array.items[0].string);
+                return alloc.dupe(u8, "{\"result\":{\"txBytes\":\"AQIDBA==\"}}");
+            }
+            if (std.mem.eql(u8, req.method, "sui_executeTransactionBlock")) {
+                const payload = try std.json.parseFromSlice(std.json.Value, alloc, req.params_json, .{});
+                defer payload.deinit();
+                try testing.expectEqualStrings("AQIDBA==", payload.value.array.items[0].string);
+                try testing.expectEqualStrings("sig-a", payload.value.array.items[1].array.items[0].string);
+                return alloc.dupe(u8, "{\"result\":{\"digest\":\"selected-signature-digest\"}}");
+            }
+            try testing.expectEqualStrings("sui_getTransactionBlock", req.method);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"digest\":\"selected-signature-digest\",\"effects\":{\"status\":{\"status\":\"success\"},\"gasUsed\":{\"computationCost\":\"9\",\"storageCost\":\"2\",\"storageRebate\":\"1\"}},\"balanceChanges\":[{\"owner\":{\"AddressOwner\":\"0xowner\"},\"coinType\":\"0x2::sui::SUI\",\"amount\":\"-10\"}]}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &state,
+        .callback = callback,
+    };
+
+    var insights = try client_instance.executeCommandSourceResolvingSelectedArgumentTokensAndConfirmAndSummarizeWithSignatures(
+        allocator,
+        .{
+            .move_call = .{
+                .package_id = "0x2",
+                .module = "example",
+                .function_name = "act",
+                .type_args = "[]",
+                .arguments = "[\"select:{\\\"kind\\\":\\\"owned_object_struct_type\\\",\\\"owner\\\":\\\"0xowner\\\",\\\"structType\\\":\\\"0x2::example::Thing\\\"}\"]",
+            },
+        },
+        .{
+            .sender = "0xowner",
+            .gas_budget = 100,
+            .gas_payment_json = "[{\"objectId\":\"0xgas\",\"version\":\"1\",\"digest\":\"digest-gas\"}]",
+            .signatures = &.{"sig-a"},
+        },
+        100,
+        0,
+    );
+    defer insights.deinit(allocator);
+
+    try testing.expectEqual(tx_result.ExecutionStatus.success, insights.status);
+    try testing.expectEqualStrings("0xowner", insights.balance_changes[0].owner.?);
+    try testing.expectEqual(@as(?i128, -10), insights.balance_changes[0].amount);
+    try testing.expectEqual(@as(usize, 4), state.request_count);
+}
+
+test "executeCommandSourceResolvingSelectedArgumentTokensAndObserveFromDefaultKeystore tracks observations" {
+    const testing = std.testing;
+    const State = struct {
+        request_count: usize = 0,
+        expected_sender: []const u8,
+    };
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const keystore_path = try std.fmt.allocPrint(allocator, "tmp_client_selected_execute_default_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(keystore_path);
+
+    const seed = [_]u8{0x51} ** 32;
+    var encoded_key_bytes: [33]u8 = undefined;
+    encoded_key_bytes[0] = 0;
+    encoded_key_bytes[1..].* = seed;
+    const encoded_len = std.base64.standard.Encoder.calcSize(encoded_key_bytes.len);
+    const encoded_key = try allocator.alloc(u8, encoded_len);
+    defer allocator.free(encoded_key);
+    _ = std.base64.standard.Encoder.encode(encoded_key, &encoded_key_bytes);
+
+    const keystore_contents = try std.fmt.allocPrint(allocator, "[\"{s}\"]", .{encoded_key});
+    defer allocator.free(keystore_contents);
+    const expected_sender = try keystore.resolveAddressFromKeystoreContents(
+        allocator,
+        keystore_contents,
+        encoded_key,
+    ) orelse return error.TestUnexpectedResult;
+    defer allocator.free(expected_sender);
+
+    const cwd = std.fs.cwd();
+    try cwd.writeFile(.{
+        .sub_path = keystore_path,
+        .data = keystore_contents,
+    });
+    defer cwd.deleteFile(keystore_path) catch {};
+
+    const old_override = keystore.test_keystore_path_override;
+    keystore.test_keystore_path_override = keystore_path;
+    defer keystore.test_keystore_path_override = old_override;
+
+    var state = State{ .expected_sender = expected_sender };
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const st = @as(*State, @ptrCast(@alignCast(context)));
+            st.request_count += 1;
+
+            if (std.mem.eql(u8, req.method, "suix_getOwnedObjects")) {
+                try testing.expect(std.mem.indexOf(u8, req.params_json, st.expected_sender) != null);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xsel-default\",\"type\":\"0x2::example::Thing\",\"owner\":{\"AddressOwner\":\"0xplaceholder\"}}}],\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall")) {
+                const params = try std.json.parseFromSlice(std.json.Value, alloc, req.params_json, .{});
+                defer params.deinit();
+                try testing.expectEqualStrings(st.expected_sender, params.value.array.items[0].string);
+                try testing.expectEqualStrings("0xgas-default", params.value.array.items[6].string);
+                try testing.expectEqualStrings("0xsel-default", params.value.array.items[5].array.items[0].string);
+                return alloc.dupe(u8, "{\"result\":{\"txBytes\":\"AQIDBA==\"}}");
+            }
+            if (std.mem.eql(u8, req.method, "sui_executeTransactionBlock")) {
+                const payload = try std.json.parseFromSlice(std.json.Value, alloc, req.params_json, .{});
+                defer payload.deinit();
+                try testing.expectEqualStrings("AQIDBA==", payload.value.array.items[0].string);
+                try testing.expectEqual(@as(usize, 1), payload.value.array.items[1].array.items.len);
+                return alloc.dupe(u8, "{\"result\":{\"digest\":\"selected-default-digest\"}}");
+            }
+            try testing.expectEqualStrings("sui_getTransactionBlock", req.method);
+            return alloc.dupe(
+                u8,
+                try std.fmt.allocPrint(
+                    alloc,
+                    "{{\"result\":{{\"digest\":\"selected-default-digest\",\"effects\":{{\"status\":{{\"status\":\"success\"}},\"gasUsed\":{{\"computationCost\":\"10\",\"storageCost\":\"3\",\"storageRebate\":\"1\"}}}},\"balanceChanges\":[{{\"owner\":{{\"AddressOwner\":\"{s}\"}},\"coinType\":\"0x2::sui::SUI\",\"amount\":\"-11\"}}]}}}}",
+                    .{st.expected_sender},
+                ),
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &state,
+        .callback = callback,
+    };
+
+    var observed = try client_instance.executeCommandSourceResolvingSelectedArgumentTokensAndObserveFromDefaultKeystore(
+        allocator,
+        .{
+            .move_call = .{
+                .package_id = "0x2",
+                .module = "example",
+                .function_name = "act",
+                .type_args = "[]",
+                .arguments = "[\"select:{\\\"kind\\\":\\\"owned_object_struct_type\\\",\\\"structType\\\":\\\"0x2::example::Thing\\\"}\"]",
+            },
+        },
+        .{
+            .sender = expected_sender,
+            .gas_budget = 100,
+            .gas_payment_json = "[{\"objectId\":\"0xgas-default\",\"version\":\"2\",\"digest\":\"digest-gas-default\"}]",
+        },
+        .{ .from_keystore = true },
+        100,
+        0,
+    );
+    defer observed.deinit(allocator);
+
+    try testing.expectEqualStrings("selected-default-digest", observed.digest);
+    try testing.expectEqual(tx_result.ExecutionStatus.success, observed.insights.status);
+    try testing.expectEqualStrings(expected_sender, observed.insights.balance_changes[0].owner.?);
+    try testing.expectEqual(@as(usize, 4), state.request_count);
+}
+
+test "executeCommandSourceWithAutoGasPaymentAndConfirmAndSummarizeWithSignatures selects gas and returns insights" {
+    const testing = std.testing;
+    const State = struct { request_count: usize = 0 };
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var state = State{};
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const st = @as(*State, @ptrCast(@alignCast(context)));
+            st.request_count += 1;
+
+            if (std.mem.eql(u8, req.method, "suix_getCoins")) {
+                try testing.expect(std.mem.indexOf(u8, req.params_json, "0xowner") != null);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xauto-coin\",\"version\":\"7\",\"digest\":\"digest-auto-coin\",\"balance\":\"90\"}],\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_batchTransaction")) {
+                const params = try std.json.parseFromSlice(std.json.Value, alloc, req.params_json, .{});
+                defer params.deinit();
+                try testing.expectEqualStrings("0xowner", params.value.array.items[0].string);
+                try testing.expectEqualStrings("0xauto-coin", params.value.array.items[2].string);
+                return alloc.dupe(u8, "{\"result\":{\"txBytes\":\"AQIDBA==\"}}");
+            }
+            if (std.mem.eql(u8, req.method, "sui_executeTransactionBlock")) {
+                const payload = try std.json.parseFromSlice(std.json.Value, alloc, req.params_json, .{});
+                defer payload.deinit();
+                try testing.expectEqualStrings("AQIDBA==", payload.value.array.items[0].string);
+                try testing.expectEqualStrings("sig-a", payload.value.array.items[1].array.items[0].string);
+                return alloc.dupe(u8, "{\"result\":{\"digest\":\"auto-signature-digest\"}}");
+            }
+            try testing.expectEqualStrings("sui_getTransactionBlock", req.method);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"digest\":\"auto-signature-digest\",\"effects\":{\"status\":{\"status\":\"success\"},\"gasUsed\":{\"computationCost\":\"5\",\"storageCost\":\"2\",\"storageRebate\":\"1\"}},\"balanceChanges\":[{\"owner\":{\"AddressOwner\":\"0xowner\"},\"coinType\":\"0x2::sui::SUI\",\"amount\":\"-6\"}]}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &state,
+        .callback = callback,
+    };
+
+    var insights = try client_instance.executeCommandSourceWithAutoGasPaymentAndConfirmAndSummarizeWithSignatures(
+        allocator,
+        .{
+            .commands_json = "[{\"kind\":\"TransferObjects\",\"objects\":[\"0xcoin\"],\"address\":\"0xreceiver\"}]",
+        },
+        .{
+            .sender = "0xowner",
+            .gas_budget = 100,
+            .signatures = &.{"sig-a"},
+        },
+        50,
+        100,
+        0,
+    );
+    defer insights.deinit(allocator);
+
+    try testing.expectEqual(tx_result.ExecutionStatus.success, insights.status);
+    try testing.expectEqualStrings("0xowner", insights.balance_changes[0].owner.?);
+    try testing.expectEqual(@as(?i128, -6), insights.balance_changes[0].amount);
+    try testing.expectEqual(@as(usize, 4), state.request_count);
+}
+
+test "executeCommandSourceWithAutoGasPaymentAndObserveFromDefaultKeystore tracks observations" {
+    const testing = std.testing;
+    const State = struct {
+        request_count: usize = 0,
+        expected_sender: []const u8,
+    };
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const keystore_path = try std.fmt.allocPrint(allocator, "tmp_client_auto_execute_default_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(keystore_path);
+
+    const seed = [_]u8{0x61} ** 32;
+    var encoded_key_bytes: [33]u8 = undefined;
+    encoded_key_bytes[0] = 0;
+    encoded_key_bytes[1..].* = seed;
+    const encoded_len = std.base64.standard.Encoder.calcSize(encoded_key_bytes.len);
+    const encoded_key = try allocator.alloc(u8, encoded_len);
+    defer allocator.free(encoded_key);
+    _ = std.base64.standard.Encoder.encode(encoded_key, &encoded_key_bytes);
+
+    const keystore_contents = try std.fmt.allocPrint(allocator, "[\"{s}\"]", .{encoded_key});
+    defer allocator.free(keystore_contents);
+    const expected_sender = try keystore.resolveAddressFromKeystoreContents(
+        allocator,
+        keystore_contents,
+        encoded_key,
+    ) orelse return error.TestUnexpectedResult;
+    defer allocator.free(expected_sender);
+
+    const cwd = std.fs.cwd();
+    try cwd.writeFile(.{
+        .sub_path = keystore_path,
+        .data = keystore_contents,
+    });
+    defer cwd.deleteFile(keystore_path) catch {};
+
+    const old_override = keystore.test_keystore_path_override;
+    keystore.test_keystore_path_override = keystore_path;
+    defer keystore.test_keystore_path_override = old_override;
+
+    var state = State{ .expected_sender = expected_sender };
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const st = @as(*State, @ptrCast(@alignCast(context)));
+            st.request_count += 1;
+
+            if (std.mem.eql(u8, req.method, "suix_getCoins")) {
+                try testing.expect(std.mem.indexOf(u8, req.params_json, st.expected_sender) != null);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xauto-default-coin\",\"version\":\"8\",\"digest\":\"digest-auto-default-coin\",\"balance\":\"95\"}],\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_batchTransaction")) {
+                const params = try std.json.parseFromSlice(std.json.Value, alloc, req.params_json, .{});
+                defer params.deinit();
+                try testing.expectEqualStrings(st.expected_sender, params.value.array.items[0].string);
+                try testing.expectEqualStrings("0xauto-default-coin", params.value.array.items[2].string);
+                return alloc.dupe(u8, "{\"result\":{\"txBytes\":\"AQIDBA==\"}}");
+            }
+            if (std.mem.eql(u8, req.method, "sui_executeTransactionBlock")) {
+                const payload = try std.json.parseFromSlice(std.json.Value, alloc, req.params_json, .{});
+                defer payload.deinit();
+                try testing.expectEqualStrings("AQIDBA==", payload.value.array.items[0].string);
+                try testing.expectEqual(@as(usize, 1), payload.value.array.items[1].array.items.len);
+                return alloc.dupe(u8, "{\"result\":{\"digest\":\"auto-default-digest\"}}");
+            }
+            try testing.expectEqualStrings("sui_getTransactionBlock", req.method);
+            return alloc.dupe(
+                u8,
+                try std.fmt.allocPrint(
+                    alloc,
+                    "{{\"result\":{{\"digest\":\"auto-default-digest\",\"effects\":{{\"status\":{{\"status\":\"success\"}},\"gasUsed\":{{\"computationCost\":\"6\",\"storageCost\":\"2\",\"storageRebate\":\"1\"}}}},\"balanceChanges\":[{{\"owner\":{{\"AddressOwner\":\"{s}\"}},\"coinType\":\"0x2::sui::SUI\",\"amount\":\"-7\"}}]}}}}",
+                    .{st.expected_sender},
+                ),
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &state,
+        .callback = callback,
+    };
+
+    var observed = try client_instance.executeCommandSourceWithAutoGasPaymentAndObserveFromDefaultKeystore(
+        allocator,
+        .{
+            .commands_json = "[{\"kind\":\"TransferObjects\",\"objects\":[\"0xcoin\"],\"address\":\"0xreceiver\"}]",
+        },
+        .{
+            .sender = expected_sender,
+            .gas_budget = 100,
+        },
+        50,
+        .{ .from_keystore = true },
+        100,
+        0,
+    );
+    defer observed.deinit(allocator);
+
+    try testing.expectEqualStrings("auto-default-digest", observed.digest);
+    try testing.expectEqual(tx_result.ExecutionStatus.success, observed.insights.status);
+    try testing.expectEqualStrings(expected_sender, observed.insights.balance_changes[0].owner.?);
+    try testing.expectEqual(@as(usize, 4), state.request_count);
+}
+
+test "runCommandSourceResolvingSelectedArgumentTokensOrChallengePromptWithAccountProvider returns structured prompts" {
+    const testing = std.testing;
+    const State = struct { request_count: usize = 0 };
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var state = State{};
+    var authorizer_called = false;
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const st = @as(*State, @ptrCast(@alignCast(context)));
+            st.request_count += 1;
+            try testing.expectEqualStrings("suix_getOwnedObjects", req.method);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xprompt-real\",\"type\":\"0x2::example::Thing\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    const authorizer = struct {
+        fn call(context: *anyopaque, _: std.mem.Allocator, _: tx_request_builder.RemoteAuthorizationRequest) !tx_request_builder.RemoteAuthorizationResult {
+            const seen = @as(*bool, @ptrCast(@alignCast(context)));
+            seen.* = true;
+            return .{};
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &state,
+        .callback = callback,
+    };
+
+    var result = try client_instance.runCommandSourceResolvingSelectedArgumentTokensOrChallengePromptWithAccountProvider(
+        allocator,
+        .{
+            .move_call = .{
+                .package_id = "0x2",
+                .module = "example",
+                .function_name = "act",
+                .type_args = "[]",
+                .arguments = "[\"select:{\\\"kind\\\":\\\"owned_object_struct_type\\\",\\\"structType\\\":\\\"0x2::example::Thing\\\"}\"]",
+            },
+        },
+        .{
+            .sender = "0xowner",
+            .gas_budget = 100,
+            .gas_payment_json = "[{\"objectId\":\"0xgas\",\"version\":\"1\",\"digest\":\"digest-gas\"}]",
+        },
+        .{
+            .remote_signer = .{
+                .address = "0xowner",
+                .authorizer = .{ .context = &authorizer_called, .callback = authorizer },
+                .session = .{ .kind = .remote_signer, .session_id = "pending-real-selected" },
+                .session_challenge = .{
+                    .passkey = .{
+                        .rp_id = "wallet.example",
+                        .challenge_b64url = "challenge-real-selected",
+                    },
+                },
+                .session_action = .execute,
+                .session_supports_execute = false,
+            },
+        },
+        .{ .execute_confirm_summarize = .{ .timeout_ms = 100, .poll_ms = 0 } },
+    );
+    defer result.deinit(allocator);
+
+    switch (result) {
+        .challenge_required => |prompt| {
+            try testing.expectEqualStrings("0xowner", prompt.account_address.?);
+            try testing.expectEqual(tx_request_builder.SessionChallengeAction.execute, prompt.action);
+        },
+        else => try testing.expect(false),
+    }
+    try testing.expectEqual(@as(usize, 1), state.request_count);
+    try testing.expect(!authorizer_called);
+}
+
+test "runCommandSourceResolvingSelectedArgumentTokensWithChallengeResponseWithAccountProvider completes summarized execution after approval" {
+    const testing = std.testing;
+    const State = struct { request_count: usize = 0 };
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var state = State{};
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const st = @as(*State, @ptrCast(@alignCast(context)));
+            st.request_count += 1;
+            if (std.mem.eql(u8, req.method, "suix_getOwnedObjects")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xapprove-real\",\"type\":\"0x2::example::Thing\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall")) {
+                return alloc.dupe(u8, "{\"result\":{\"txBytes\":\"AQIDBA==\"}}");
+            }
+            if (std.mem.eql(u8, req.method, "sui_executeTransactionBlock")) {
+                return alloc.dupe(u8, "{\"result\":{\"digest\":\"selected-provider-digest\"}}");
+            }
+            try testing.expectEqualStrings("sui_getTransactionBlock", req.method);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"digest\":\"selected-provider-digest\",\"effects\":{\"status\":{\"status\":\"success\"},\"gasUsed\":{\"computationCost\":\"9\",\"storageCost\":\"2\",\"storageRebate\":\"1\"}},\"balanceChanges\":[{\"owner\":{\"AddressOwner\":\"0xowner\"},\"coinType\":\"0x2::sui::SUI\",\"amount\":\"-10\"}]}}",
+            );
+        }
+    }.call;
+
+    const authorizer = struct {
+        fn call(_: *anyopaque, _: std.mem.Allocator, req: tx_request_builder.RemoteAuthorizationRequest) !tx_request_builder.RemoteAuthorizationResult {
+            try testing.expect(req.tx_bytes_base64 != null);
+            try testing.expectEqualStrings("AQIDBA==", req.tx_bytes_base64.?);
+            try testing.expectEqualStrings("approved-real-selected", req.account_session.session_id.?);
+            return .{
+                .sender = "0xowner",
+                .signatures = &.{"sig-provider"},
+                .session = req.account_session,
+            };
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &state,
+        .callback = callback,
+    };
+
+    var result = try client_instance.runCommandSourceResolvingSelectedArgumentTokensWithChallengeResponseWithAccountProvider(
+        allocator,
+        .{
+            .move_call = .{
+                .package_id = "0x2",
+                .module = "example",
+                .function_name = "act",
+                .type_args = "[]",
+                .arguments = "[\"select:{\\\"kind\\\":\\\"owned_object_struct_type\\\",\\\"structType\\\":\\\"0x2::example::Thing\\\"}\"]",
+            },
+        },
+        .{
+            .sender = "0xowner",
+            .gas_budget = 100,
+            .gas_payment_json = "[{\"objectId\":\"0xgas\",\"version\":\"1\",\"digest\":\"digest-gas\"}]",
+        },
+        .{
+            .remote_signer = .{
+                .address = "0xowner",
+                .authorizer = .{ .context = undefined, .callback = authorizer },
+                .session = .{ .kind = .remote_signer, .session_id = "pending-real-selected" },
+                .session_challenge = .{
+                    .passkey = .{
+                        .rp_id = "wallet.example",
+                        .challenge_b64url = "challenge-real-selected",
+                    },
+                },
+                .session_action = .execute,
+                .session_supports_execute = false,
+            },
+        },
+        .{
+            .session = .{ .kind = .remote_signer, .session_id = "approved-real-selected" },
+            .supports_execute = true,
+        },
+        .{ .execute_confirm_summarize = .{ .timeout_ms = 100, .poll_ms = 0 } },
+    );
+    defer result.deinit(allocator);
+
+    switch (result) {
+        .summarized => |insights| {
+            try testing.expectEqual(tx_result.ExecutionStatus.success, insights.status);
+            try testing.expectEqualStrings("0xowner", insights.balance_changes[0].owner.?);
+        },
+        else => try testing.expect(false),
+    }
+    try testing.expectEqual(@as(usize, 4), state.request_count);
+}
+
+test "runCommandSourceWithAutoGasPaymentOrChallengePromptWithAccountProvider returns structured prompts" {
+    const testing = std.testing;
+    const State = struct { request_count: usize = 0 };
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var state = State{};
+    var authorizer_called = false;
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const st = @as(*State, @ptrCast(@alignCast(context)));
+            st.request_count += 1;
+            try testing.expectEqualStrings("suix_getCoins", req.method);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xprompt-coin\",\"version\":\"7\",\"digest\":\"digest-prompt-coin\",\"balance\":\"90\"}],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    const authorizer = struct {
+        fn call(context: *anyopaque, _: std.mem.Allocator, _: tx_request_builder.RemoteAuthorizationRequest) !tx_request_builder.RemoteAuthorizationResult {
+            const seen = @as(*bool, @ptrCast(@alignCast(context)));
+            seen.* = true;
+            return .{};
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &state,
+        .callback = callback,
+    };
+
+    var result = try client_instance.runCommandSourceWithAutoGasPaymentOrChallengePromptWithAccountProvider(
+        allocator,
+        .{
+            .commands_json = "[{\"kind\":\"TransferObjects\",\"objects\":[\"0xcoin\"],\"address\":\"0xreceiver\"}]",
+        },
+        .{
+            .sender = "0xowner",
+            .gas_budget = 100,
+        },
+        .{
+            .remote_signer = .{
+                .address = "0xowner",
+                .authorizer = .{ .context = &authorizer_called, .callback = authorizer },
+                .session = .{ .kind = .remote_signer, .session_id = "pending-real-auto" },
+                .session_challenge = .{
+                    .passkey = .{
+                        .rp_id = "wallet.example",
+                        .challenge_b64url = "challenge-real-auto",
+                    },
+                },
+                .session_action = .execute,
+                .session_supports_execute = false,
+            },
+        },
+        50,
+        .{ .execute_confirm_observe = .{ .timeout_ms = 100, .poll_ms = 0 } },
+    );
+    defer result.deinit(allocator);
+
+    switch (result) {
+        .challenge_required => |prompt| {
+            try testing.expectEqualStrings("0xowner", prompt.account_address.?);
+            try testing.expectEqual(tx_request_builder.SessionChallengeAction.execute, prompt.action);
+        },
+        else => try testing.expect(false),
+    }
+    try testing.expectEqual(@as(usize, 1), state.request_count);
+    try testing.expect(!authorizer_called);
+}
+
+test "runCommandSourceWithAutoGasPaymentWithChallengeResponseWithAccountProvider completes observed execution after approval" {
+    const testing = std.testing;
+    const State = struct { request_count: usize = 0 };
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var state = State{};
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const st = @as(*State, @ptrCast(@alignCast(context)));
+            st.request_count += 1;
+            if (std.mem.eql(u8, req.method, "suix_getCoins")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xapprove-auto-coin\",\"version\":\"8\",\"digest\":\"digest-approve-auto-coin\",\"balance\":\"95\"}],\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_batchTransaction")) {
+                return alloc.dupe(u8, "{\"result\":{\"txBytes\":\"AQIDBA==\"}}");
+            }
+            if (std.mem.eql(u8, req.method, "sui_executeTransactionBlock")) {
+                return alloc.dupe(u8, "{\"result\":{\"digest\":\"auto-provider-digest\"}}");
+            }
+            try testing.expectEqualStrings("sui_getTransactionBlock", req.method);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"digest\":\"auto-provider-digest\",\"effects\":{\"status\":{\"status\":\"success\"},\"gasUsed\":{\"computationCost\":\"6\",\"storageCost\":\"2\",\"storageRebate\":\"1\"}},\"balanceChanges\":[{\"owner\":{\"AddressOwner\":\"0xowner\"},\"coinType\":\"0x2::sui::SUI\",\"amount\":\"-7\"}]}}",
+            );
+        }
+    }.call;
+
+    const authorizer = struct {
+        fn call(_: *anyopaque, _: std.mem.Allocator, req: tx_request_builder.RemoteAuthorizationRequest) !tx_request_builder.RemoteAuthorizationResult {
+            try testing.expect(req.tx_bytes_base64 != null);
+            try testing.expectEqualStrings("AQIDBA==", req.tx_bytes_base64.?);
+            try testing.expectEqualStrings("approved-real-auto", req.account_session.session_id.?);
+            return .{
+                .sender = "0xowner",
+                .signatures = &.{"sig-provider-auto"},
+                .session = req.account_session,
+            };
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &state,
+        .callback = callback,
+    };
+
+    var result = try client_instance.runCommandSourceWithAutoGasPaymentWithChallengeResponseWithAccountProvider(
+        allocator,
+        .{
+            .commands_json = "[{\"kind\":\"TransferObjects\",\"objects\":[\"0xcoin\"],\"address\":\"0xreceiver\"}]",
+        },
+        .{
+            .sender = "0xowner",
+            .gas_budget = 100,
+        },
+        .{
+            .remote_signer = .{
+                .address = "0xowner",
+                .authorizer = .{ .context = undefined, .callback = authorizer },
+                .session = .{ .kind = .remote_signer, .session_id = "pending-real-auto" },
+                .session_challenge = .{
+                    .passkey = .{
+                        .rp_id = "wallet.example",
+                        .challenge_b64url = "challenge-real-auto",
+                    },
+                },
+                .session_action = .execute,
+                .session_supports_execute = false,
+            },
+        },
+        50,
+        .{
+            .session = .{ .kind = .remote_signer, .session_id = "approved-real-auto" },
+            .supports_execute = true,
+        },
+        .{ .execute_confirm_observe = .{ .timeout_ms = 100, .poll_ms = 0 } },
+    );
+    defer result.deinit(allocator);
+
+    switch (result) {
+        .observed => |observed| {
+            try testing.expectEqualStrings("auto-provider-digest", observed.digest);
+            try testing.expectEqual(tx_result.ExecutionStatus.success, observed.insights.status);
+        },
+        else => try testing.expect(false),
+    }
+    try testing.expectEqual(@as(usize, 4), state.request_count);
+}
+
+test "SelectedArgumentDslBuilder runOrChallengePrompt returns structured prompts from selected arguments" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            try testing.expectEqualStrings("suix_getOwnedObjects", req.method);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xprompt-object\",\"type\":\"0x2::example::Thing\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var builder = SelectedArgumentDslBuilder.init(&client_instance, allocator);
+    defer builder.deinit();
+
+    try builder.appendMoveCallFromSelectedArguments(
+        "0x2",
+        "example",
+        "act",
+        &.{},
+        &.{
+            .{ .owned_object_struct_type = .{ .owner = "0xowner", .struct_type = "0x2::example::Thing" } },
+        },
+    );
+
+    var result = try builder.runOrChallengePrompt(.{
+        .remote_signer = .{
+            .address = "0xcloud",
+            .authorizer = .{
+                .context = undefined,
+                .callback = struct {
+                    fn call(_: *anyopaque, _: std.mem.Allocator, _: tx_request_builder.RemoteAuthorizationRequest) !tx_request_builder.RemoteAuthorizationResult {
+                        return .{};
+                    }
+                }.call,
+            },
+            .session = .{ .kind = .remote_signer, .session_id = "pending-selected-builder" },
+            .session_challenge = .{
+                .passkey = .{
+                    .rp_id = "wallet.example",
+                    .challenge_b64url = "challenge-selected-builder",
+                },
+            },
+            .session_action = .execute,
+            .session_supports_execute = false,
+        },
+    }, .authorize);
+    defer result.deinit(allocator);
+
+    switch (result) {
+        .challenge_required => |prompt| {
+            try testing.expectEqualStrings("0xcloud", prompt.account_address.?);
+            try testing.expectEqual(tx_request_builder.SessionChallengeAction.execute, prompt.action);
+        },
+        else => try testing.expect(false),
+    }
+}
+
+test "SelectedArgumentDslBuilder runWithChallengeResponse completes artifact summarize actions after approval" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const rpc_callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            try testing.expectEqualStrings("suix_getOwnedObjects", req.method);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xapproved-object\",\"type\":\"0x2::example::Thing\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    const authorizer = struct {
+        fn call(_: *anyopaque, _: std.mem.Allocator, req: tx_request_builder.RemoteAuthorizationRequest) !tx_request_builder.RemoteAuthorizationResult {
+            try testing.expectEqualStrings("approved-selected-builder", req.account_session.session_id.?);
+            return .{
+                .sender = "0xapproved-sender",
+                .signatures = &.{"sig-approved"},
+                .session = req.account_session,
+            };
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = rpc_callback,
+    };
+
+    var builder = SelectedArgumentDslBuilder.init(&client_instance, allocator);
+    defer builder.deinit();
+
+    try builder.appendMoveCallFromSelectedArguments(
+        "0x2",
+        "example",
+        "act",
+        &.{},
+        &.{
+            .{ .owned_object_struct_type = .{ .owner = "0xowner", .struct_type = "0x2::example::Thing" } },
+        },
+    );
+
+    var result = try builder.runWithChallengeResponse(
+        .{
+            .remote_signer = .{
+                .address = "0xcloud",
+                .authorizer = .{
+                    .context = undefined,
+                    .callback = authorizer,
+                },
+                .session = .{ .kind = .remote_signer, .session_id = "pending-selected-builder" },
+                .session_challenge = .{
+                    .passkey = .{
+                        .rp_id = "wallet.example",
+                        .challenge_b64url = "challenge-selected-builder",
+                    },
+                },
+                .session_action = .execute,
+                .session_supports_execute = false,
+            },
+        },
+        .{
+            .session = .{ .kind = .remote_signer, .session_id = "approved-selected-builder" },
+            .supports_execute = true,
+        },
+        .{ .build_artifact_summarize = .execute_payload },
+    );
+    defer result.deinit(allocator);
+
+    switch (result) {
+        .artifact_summarized => |summary| switch (summary) {
+            .execute_payload => |payload| {
+                try testing.expectEqual(@as(usize, 1), payload.command_count);
+                try testing.expectEqualStrings("0xapproved-sender", payload.sender.?);
+                try testing.expectEqual(@as(usize, 1), payload.signature_count);
+            },
+            else => try testing.expect(false),
+        },
+        else => try testing.expect(false),
+    }
+}
+
+test "runDslBuilderWithAutoGasPaymentOrChallengePromptWithAccountProvider returns structured prompts after selecting gas payment" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var coin_lookup_seen = false;
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const seen = @as(*bool, @ptrCast(@alignCast(context)));
+            try testing.expectEqualStrings("suix_getCoins", req.method);
+            seen.* = true;
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xdsl-auto-gas\",\"version\":\"17\",\"digest\":\"digest-dsl-auto-gas\",\"balance\":\"500\"}],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &coin_lookup_seen,
+        .callback = callback,
+    };
+
+    var builder = tx_request_builder.ProgrammaticDslBuilder.init(allocator);
+    defer builder.deinit();
+    builder.setSender("0xowner");
+    try builder.appendMoveCallFromValues(
+        "0x2",
+        "example",
+        "act",
+        &.{},
+        &.{.{ .object_id = "0xthing" }},
+    );
+
+    var result = try client_instance.runDslBuilderWithAutoGasPaymentOrChallengePrompt(
+        allocator,
+        &builder,
+        .{
+            .remote_signer = .{
+                .address = "0xcloud",
+                .session = .{ .kind = .remote_signer, .session_id = "pending-dsl-auto-gas" },
+                .session_challenge = .{
+                    .passkey = .{
+                        .rp_id = "wallet.example",
+                        .challenge_b64url = "challenge-dsl-auto-gas",
+                    },
+                },
+                .session_action = .execute,
+                .session_supports_execute = false,
+            },
+        },
+        50,
+        .authorize,
+    );
+    defer result.deinit(allocator);
+
+    switch (result) {
+        .challenge_required => |prompt| switch (prompt.challenge) {
+            .passkey => |challenge| {
+                try testing.expectEqualStrings("wallet.example", challenge.rp_id);
+                try testing.expectEqualStrings("challenge-dsl-auto-gas", challenge.challenge_b64url);
+            },
+            else => return error.TestUnexpectedResult,
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    try testing.expect(coin_lookup_seen);
+}
+
+test "SelectedArgumentDslBuilder runWithAutoGasPaymentWithChallengeResponse completes artifact summarize actions after approval" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const rpc_callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            try testing.expectEqualStrings("suix_getCoins", req.method);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xselected-auto-gas\",\"version\":\"23\",\"digest\":\"digest-selected-auto-gas\",\"balance\":\"900\"}],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    const authorizer = struct {
+        fn call(_: *anyopaque, _: std.mem.Allocator, req: tx_request_builder.RemoteAuthorizationRequest) !tx_request_builder.RemoteAuthorizationResult {
+            try testing.expectEqualStrings("approved-selected-auto-gas", req.account_session.session_id.?);
+            return .{
+                .sender = "0xapproved-owner",
+                .signatures = &.{"sig-selected-auto-gas"},
+                .session = req.account_session,
+            };
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = rpc_callback,
+    };
+
+    var builder = SelectedArgumentDslBuilder.init(&client_instance, allocator);
+    defer builder.deinit();
+    builder.setSender("0xowner");
+    try builder.appendMoveCallFromArgumentTokens(
+        "0x2",
+        "example",
+        "act",
+        &.{},
+        &.{"obj:0xthing"},
+    );
+
+    var result = try builder.runWithAutoGasPaymentWithChallengeResponse(
+        .{
+            .remote_signer = .{
+                .address = "0xcloud",
+                .authorizer = .{
+                    .context = undefined,
+                    .callback = authorizer,
+                },
+                .session = .{ .kind = .remote_signer, .session_id = "pending-selected-auto-gas" },
+                .session_challenge = .{
+                    .passkey = .{
+                        .rp_id = "wallet.example",
+                        .challenge_b64url = "challenge-selected-auto-gas",
+                    },
+                },
+                .session_action = .execute,
+                .session_supports_execute = false,
+            },
+        },
+        50,
+        .{
+            .session = .{ .kind = .remote_signer, .session_id = "approved-selected-auto-gas" },
+            .supports_execute = true,
+        },
+        .{ .build_artifact_summarize = .execute_payload },
+    );
+    defer result.deinit(allocator);
+
+    switch (result) {
+        .artifact_summarized => |summary| switch (summary) {
+            .execute_payload => |payload| {
+                try testing.expectEqualStrings("0xapproved-owner", payload.sender.?);
+                try testing.expectEqual(@as(usize, 1), payload.signature_count);
+                try testing.expectEqual(@as(usize, 1), payload.command_count);
+            },
+            else => try testing.expect(false),
+        },
+        else => try testing.expect(false),
+    }
+}
+
+test "SelectedArgumentDslBuilder executeOrChallengePromptAndConfirm returns structured prompts from selected arguments" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            try testing.expectEqualStrings("suix_getOwnedObjects", req.method);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xselected-prompt\",\"type\":\"0x2::example::Thing\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var builder = SelectedArgumentDslBuilder.init(&client_instance, allocator);
+    defer builder.deinit();
+
+    try builder.appendMoveCallFromSelectedArguments(
+        "0x2",
+        "example",
+        "act",
+        &.{},
+        &.{
+            .{ .owned_object_struct_type = .{ .owner = "0xowner", .struct_type = "0x2::example::Thing" } },
+        },
+    );
+
+    var result = try builder.executeOrChallengePromptAndConfirm(.{
+        .remote_signer = .{
+            .address = "0xcloud-selected",
+            .authorizer = .{
+                .context = undefined,
+                .callback = struct {
+                    fn call(_: *anyopaque, _: std.mem.Allocator, _: tx_request_builder.RemoteAuthorizationRequest) !tx_request_builder.RemoteAuthorizationResult {
+                        return .{};
+                    }
+                }.call,
+            },
+            .session = .{ .kind = .remote_signer, .session_id = "pending-selected-prompt" },
+            .session_challenge = .{
+                .passkey = .{
+                    .rp_id = "wallet.example",
+                    .challenge_b64url = "challenge-selected-prompt",
+                },
+            },
+            .session_action = .execute,
+            .session_supports_execute = false,
+        },
+    }, 100, 0);
+    defer result.deinit(allocator);
+
+    switch (result) {
+        .challenge_required => |prompt| {
+            try testing.expectEqualStrings("0xcloud-selected", prompt.account_address.?);
+            try testing.expectEqual(tx_request_builder.SessionChallengeAction.execute, prompt.action);
+        },
+        else => try testing.expect(false),
+    }
+}
+
+test "SelectedArgumentDslBuilder executeWithChallengeResponseAndObserve completes after approval" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var rpc_count: usize = 0;
+
+    const rpc_callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const count = @as(*usize, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "suix_getOwnedObjects")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xselected-approved\",\"type\":\"0x2::example::Thing\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
+                );
+            }
+            count.* += 1;
+            if (std.mem.eql(u8, req.method, "sui_executeTransactionBlock")) {
+                return alloc.dupe(u8, "{\"result\":{\"digest\":\"selected-approved-digest\"}}");
+            }
+            if (std.mem.eql(u8, req.method, "sui_getTransactionBlock")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"digest\":\"selected-approved-digest\",\"effects\":{\"status\":{\"status\":\"success\"},\"gasUsed\":{\"computationCost\":\"8\",\"storageCost\":\"2\",\"storageRebate\":\"1\"}},\"balanceChanges\":[{\"owner\":{\"AddressOwner\":\"0xapproved-selected\"},\"coinType\":\"0x2::sui::SUI\",\"amount\":\"-9\"}]}}",
+                );
+            }
+            return alloc.dupe(u8, "{\"error\":{\"code\":-32603,\"message\":\"unexpected\"}}");
+        }
+    }.call;
+
+    const authorizer = struct {
+        fn call(_: *anyopaque, _: std.mem.Allocator, req: tx_request_builder.RemoteAuthorizationRequest) !tx_request_builder.RemoteAuthorizationResult {
+            try testing.expectEqualStrings("approved-selected-runtime", req.account_session.session_id.?);
+            return .{
+                .sender = "0xapproved-selected",
+                .signatures = &.{"sig-approved-selected"},
+                .session = req.account_session,
+            };
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &rpc_count,
+        .callback = rpc_callback,
+    };
+
+    var builder = SelectedArgumentDslBuilder.init(&client_instance, allocator);
+    defer builder.deinit();
+
+    try builder.appendMoveCallFromSelectedArguments(
+        "0x2",
+        "example",
+        "act",
+        &.{},
+        &.{
+            .{ .owned_object_struct_type = .{ .owner = "0xowner", .struct_type = "0x2::example::Thing" } },
+        },
+    );
+
+    var observation = try builder.executeWithChallengeResponseAndObserve(
+        .{
+            .remote_signer = .{
+                .address = "0xcloud-selected",
+                .authorizer = .{
+                    .context = undefined,
+                    .callback = authorizer,
+                },
+                .session = .{ .kind = .remote_signer, .session_id = "pending-selected-runtime" },
+                .session_challenge = .{
+                    .passkey = .{
+                        .rp_id = "wallet.example",
+                        .challenge_b64url = "challenge-selected-runtime",
+                    },
+                },
+                .session_action = .execute,
+                .session_supports_execute = false,
+            },
+        },
+        .{
+            .session = .{ .kind = .remote_signer, .session_id = "approved-selected-runtime" },
+            .supports_execute = true,
+        },
+        100,
+        0,
+    );
+    defer observation.deinit(allocator);
+
+    try testing.expectEqual(@as(usize, 2), rpc_count);
+    try testing.expectEqualStrings("selected-approved-digest", observation.digest);
+    try testing.expectEqual(tx_result.ExecutionStatus.success, observation.insights.status);
+    try testing.expectEqualStrings("0xapproved-selected", observation.insights.balance_changes[0].owner.?);
+}
+
+test "parseSelectedArgumentRequestToken parses gas and owned-object request tokens" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var gas_request = try SuiRpcClient.parseSelectedArgumentRequestToken(
+        allocator,
+        "sel:{\"kind\":\"gas_coin\",\"owner\":\"0xowner\",\"minBalance\":7}",
+    );
+    defer gas_request.deinit(allocator);
+
+    switch (gas_request.value) {
+        .gas_coin => |value| {
+            try testing.expectEqualStrings("0xowner", value.owner);
+            try testing.expectEqual(@as(u64, 7), value.min_balance);
+        },
+        else => try testing.expect(false),
+    }
+
+    var object_request = try SuiRpcClient.parseSelectedArgumentRequestToken(
+        allocator,
+        "select:{\"kind\":\"owned_object_module\",\"owner\":\"0xowner\",\"package\":\"0x2\",\"module\":\"coin\"}",
+    );
+    defer object_request.deinit(allocator);
+
+    switch (object_request.value) {
+        .owned_object_module => |value| {
+            try testing.expectEqualStrings("0xowner", value.owner);
+            try testing.expectEqualStrings("0x2", value.package);
+            try testing.expectEqualStrings("coin", value.module);
+        },
+        else => try testing.expect(false),
+    }
+}
+
+test "parseSelectedArgumentRequestToken parses object-input request tokens" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var request = try SuiRpcClient.parseSelectedArgumentRequestToken(
+        allocator,
+        "select:{\"kind\":\"object_input\",\"objectId\":\"0xshared\",\"inputKind\":\"shared\",\"mutable\":true}",
+    );
+    defer request.deinit(allocator);
+
+    switch (request.value) {
+        .object_input => |value| {
+            try testing.expectEqualStrings("0xshared", value.object_id);
+            try testing.expectEqual(ObjectInputKind.shared, value.input_kind);
+            try testing.expectEqual(true, value.mutable);
+            try testing.expectEqual(@as(?u64, null), value.version);
+            try testing.expectEqual(@as(?u64, null), value.initial_shared_version);
+            try testing.expect(value.digest == null);
+        },
+        else => try testing.expect(false),
+    }
+}
+
+test "parseSelectedArgumentRequestToken parses object preset request tokens" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var request = try SuiRpcClient.parseSelectedArgumentRequestToken(
+        allocator,
+        "select:{\"kind\":\"object_preset\",\"name\":\"clock\"}",
+    );
+    defer request.deinit(allocator);
+
+    switch (request.value) {
+        .object_preset => |value| {
+            try testing.expectEqual(ObjectPresetKind.clock, value.preset);
+        },
+        else => try testing.expect(false),
+    }
+
+    var alias_request = try SuiRpcClient.parseSelectedArgumentRequestToken(
+        allocator,
+        "select:{\"kind\":\"system_object\",\"preset\":\"sui_clock\"}",
+    );
+    defer alias_request.deinit(allocator);
+
+    switch (alias_request.value) {
+        .object_preset => |value| {
+            try testing.expectEqual(ObjectPresetKind.clock, value.preset);
+        },
+        else => try testing.expect(false),
+    }
+
+    var cetus_request = try SuiRpcClient.parseSelectedArgumentRequestToken(
+        allocator,
+        "select:{\"kind\":\"object_preset\",\"name\":\"cetus.mainnet.clmm.global_config\"}",
+    );
+    defer cetus_request.deinit(allocator);
+
+    switch (cetus_request.value) {
+        .object_preset => |value| {
+            try testing.expectEqual(ObjectPresetKind.cetus_clmm_global_config_mainnet, value.preset);
+        },
+        else => try testing.expect(false),
+    }
+}
+
+test "parseSelectedArgumentRequestToken parses object-input inline metadata" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var request = try SuiRpcClient.parseSelectedArgumentRequestToken(
+        allocator,
+        "select:{\"kind\":\"object_input\",\"objectId\":\"0xclock\",\"inputKind\":\"shared\",\"initialSharedVersion\":1,\"mutable\":false}",
+    );
+    defer request.deinit(allocator);
+
+    switch (request.value) {
+        .object_input => |value| {
+            try testing.expectEqualStrings("0xclock", value.object_id);
+            try testing.expectEqual(ObjectInputKind.shared, value.input_kind);
+            try testing.expectEqual(false, value.mutable);
+            try testing.expectEqual(@as(?u64, null), value.version);
+            try testing.expectEqual(@as(?u64, 1), value.initial_shared_version);
+            try testing.expect(value.digest == null);
+        },
+        else => try testing.expect(false),
+    }
+
+    try testing.expectError(
+        error.InvalidCli,
+        SuiRpcClient.parseSelectedArgumentRequestToken(
+            allocator,
+            "select:{\"kind\":\"object_input\",\"objectId\":\"0xowned\",\"inputKind\":\"imm_or_owned\",\"version\":7}",
+        ),
+    );
+}
+
+test "resolveArgumentValuesFromTokens resolves mixed selected and typed argument tokens" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            try testing.expectEqualStrings("suix_getOwnedObjects", req.method);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xresolved-object\",\"type\":\"0x2::example::Thing\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var values = try client_instance.resolveArgumentValuesFromTokens(allocator, &.{
+        "u64:7",
+        "select:{\"kind\":\"owned_object_struct_type\",\"owner\":\"0xowner\",\"structType\":\"0x2::example::Thing\"}",
+    });
+    defer values.deinit(allocator);
+
+    try testing.expectEqual(@as(usize, 2), values.slice().len);
+    switch (values.slice()[0]) {
+        .u64 => |value| try testing.expectEqual(@as(u64, 7), value),
+        else => try testing.expect(false),
+    }
+    switch (values.slice()[1]) {
+        .object_id => |value| try testing.expectEqualStrings("0xresolved-object", value),
+        else => try testing.expect(false),
+    }
+}
+
+test "resolveArgumentValuesFromTokens resolves object preset request tokens without RPC" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, _: std.mem.Allocator, _: RpcRequest) ![]u8 {
+            return error.OutOfMemory;
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var values = try client_instance.resolveArgumentValuesFromTokens(allocator, &.{
+        "select:{\"kind\":\"object_preset\",\"name\":\"clock\"}",
+    });
+    defer values.deinit(allocator);
+
+    try testing.expectEqual(@as(usize, 1), values.slice().len);
+    switch (values.slice()[0]) {
+        .raw_json => |json| {
+            const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
+            defer parsed.deinit();
+            const shared = parsed.value.object.get("Object").?.object.get("SharedObject").?;
+            try testing.expectEqualStrings("0x6", shared.object.get("objectId").?.string);
+            try testing.expectEqual(@as(i64, 1), shared.object.get("initialSharedVersion").?.integer);
+            try testing.expectEqual(false, shared.object.get("mutable").?.bool);
+        },
+        else => try testing.expect(false),
+    }
+}
+
+test "resolveArgumentValuesFromTokens resolves cetus object preset request tokens with RPC" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            try testing.expectEqualStrings("sui_getObject", req.method);
+            try testing.expect(std.mem.indexOf(u8, req.params_json, "0xdaa46292632c3c4d8f31f23ea0f9b36a28ff3677e9684980e4438403a67a3d8f") != null);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":{\"objectId\":\"0xdaa46292632c3c4d8f31f23ea0f9b36a28ff3677e9684980e4438403a67a3d8f\",\"version\":\"11\",\"digest\":\"cetus-config-digest\",\"owner\":{\"Shared\":{\"initial_shared_version\":\"7\"}}}}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var values = try client_instance.resolveArgumentValuesFromTokens(allocator, &.{
+        "select:{\"kind\":\"object_preset\",\"name\":\"cetus_clmm_global_config_mainnet\"}",
+    });
+    defer values.deinit(allocator);
+
+    try testing.expectEqual(@as(usize, 1), values.slice().len);
+    switch (values.slice()[0]) {
+        .raw_json => |json| {
+            const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
+            defer parsed.deinit();
+            const shared = parsed.value.object.get("Object").?.object.get("SharedObject").?;
+            try testing.expectEqualStrings("0xdaa46292632c3c4d8f31f23ea0f9b36a28ff3677e9684980e4438403a67a3d8f", shared.object.get("objectId").?.string);
+            try testing.expectEqual(@as(i64, 7), shared.object.get("initialSharedVersion").?.integer);
+            try testing.expectEqual(false, shared.object.get("mutable").?.bool);
+        },
+        else => try testing.expect(false),
+    }
+}
+
+test "resolveArgumentValuesFromTokens resolves object-input selected request tokens" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            try testing.expectEqualStrings("sui_getObject", req.method);
+            if (std.mem.indexOf(u8, req.params_json, "0xshared") != null) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":{\"objectId\":\"0xshared\",\"version\":\"9\",\"digest\":\"shared-digest\",\"owner\":{\"Shared\":{\"initial_shared_version\":\"4\"}}}}}",
+                );
+            }
+            if (std.mem.indexOf(u8, req.params_json, "0xowned") != null) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":{\"objectId\":\"0xowned\",\"version\":\"7\",\"digest\":\"owned-digest\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}}",
+                );
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var values = try client_instance.resolveArgumentValuesFromTokens(allocator, &.{
+        "select:{\"kind\":\"object_input\",\"objectId\":\"0xshared\",\"inputKind\":\"shared\",\"mutable\":true}",
+        "select:{\"kind\":\"object_input\",\"objectId\":\"0xowned\",\"inputKind\":\"receiving\"}",
+    });
+    defer values.deinit(allocator);
+
+    try testing.expectEqual(@as(usize, 2), values.slice().len);
+
+    switch (values.slice()[0]) {
+        .raw_json => |json| {
+            const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
+            defer parsed.deinit();
+            const shared = parsed.value.object.get("Object").?.object.get("SharedObject").?;
+            try testing.expectEqualStrings("0xshared", shared.object.get("objectId").?.string);
+            try testing.expectEqual(@as(i64, 4), shared.object.get("initialSharedVersion").?.integer);
+            try testing.expectEqual(true, shared.object.get("mutable").?.bool);
+        },
+        else => try testing.expect(false),
+    }
+
+    switch (values.slice()[1]) {
+        .raw_json => |json| {
+            const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
+            defer parsed.deinit();
+            const receiving = parsed.value.object.get("Object").?.object.get("Receiving").?;
+            try testing.expectEqualStrings("0xowned", receiving.object.get("objectId").?.string);
+            try testing.expectEqual(@as(i64, 7), receiving.object.get("version").?.integer);
+            try testing.expectEqualStrings("owned-digest", receiving.object.get("digest").?.string);
+        },
+        else => try testing.expect(false),
+    }
+}
+
+test "resolveArgumentValuesFromTokens resolves object-input inline metadata without RPC" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, _: std.mem.Allocator, _: RpcRequest) ![]u8 {
+            return error.OutOfMemory;
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var values = try client_instance.resolveArgumentValuesFromTokens(allocator, &.{
+        "select:{\"kind\":\"object_input\",\"objectId\":\"0xclock\",\"inputKind\":\"shared\",\"initialSharedVersion\":1}",
+        "select:{\"kind\":\"object_input\",\"objectId\":\"0xowned\",\"inputKind\":\"imm_or_owned\",\"version\":7,\"digest\":\"owned-digest\"}",
+    });
+    defer values.deinit(allocator);
+
+    try testing.expectEqual(@as(usize, 2), values.slice().len);
+
+    switch (values.slice()[0]) {
+        .raw_json => |json| {
+            const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
+            defer parsed.deinit();
+            const shared = parsed.value.object.get("Object").?.object.get("SharedObject").?;
+            try testing.expectEqualStrings("0xclock", shared.object.get("objectId").?.string);
+            try testing.expectEqual(@as(i64, 1), shared.object.get("initialSharedVersion").?.integer);
+            try testing.expectEqual(false, shared.object.get("mutable").?.bool);
+        },
+        else => try testing.expect(false),
+    }
+
+    switch (values.slice()[1]) {
+        .raw_json => |json| {
+            const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
+            defer parsed.deinit();
+            const owned = parsed.value.object.get("Object").?.object.get("ImmOrOwnedObject").?;
+            try testing.expectEqualStrings("0xowned", owned.object.get("objectId").?.string);
+            try testing.expectEqual(@as(i64, 7), owned.object.get("version").?.integer);
+            try testing.expectEqualStrings("owned-digest", owned.object.get("digest").?.string);
+        },
+        else => try testing.expect(false),
+    }
+}
+
+test "resolveArgumentValuesFromTokensWithDefaultOwner resolves ownerless selected request tokens" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            try testing.expectEqualStrings("suix_getOwnedObjects", req.method);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xsender-owned\",\"type\":\"0x2::example::Thing\",\"owner\":{\"AddressOwner\":\"0xsender\"}}}],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var values = try client_instance.resolveArgumentValuesFromTokensWithDefaultOwner(allocator, &.{
+        "select:{\"kind\":\"owned_object_struct_type\",\"structType\":\"0x2::example::Thing\"}",
+    }, "0xsender");
+    defer values.deinit(allocator);
+
+    try testing.expectEqual(@as(usize, 1), values.slice().len);
+    switch (values.slice()[0]) {
+        .object_id => |value| try testing.expectEqualStrings("0xsender-owned", value),
+        else => try testing.expect(false),
+    }
+}
+
+test "resolveArgumentValuesFromTokens resolves nested selected request tokens inside json containers" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            try testing.expectEqualStrings("suix_getOwnedObjects", req.method);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xfeed01\",\"type\":\"0x2::example::Thing\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var values = try client_instance.resolveArgumentValuesFromTokens(allocator, &.{
+        "{\"owner\":\"select:{\\\"kind\\\":\\\"owned_object_struct_type\\\",\\\"owner\\\":\\\"0xowner\\\",\\\"structType\\\":\\\"0x2::example::Thing\\\"}\",\"enabled\":true}",
+    });
+    defer values.deinit(allocator);
+
+    try testing.expectEqual(@as(usize, 1), values.slice().len);
+    switch (values.slice()[0]) {
+        .raw_json => |json| {
+            const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
+            defer parsed.deinit();
+            try testing.expectEqualStrings("0xfeed01", parsed.value.object.get("owner").?.string);
+            try testing.expectEqual(true, parsed.value.object.get("enabled").?.bool);
+        },
+        else => try testing.expect(false),
+    }
+}
+
+test "resolveSelectedArgumentTokensInCommandSource resolves move-call sources into commands json" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            try testing.expectEqualStrings("suix_getOwnedObjects", req.method);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xaaa111\",\"type\":\"0x2::example::Thing\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    const resolved = try client_instance.resolveSelectedArgumentTokensInCommandSource(allocator, .{
+        .move_call = .{
+            .package_id = "0x2",
+            .module = "example",
+            .function_name = "act",
+            .type_args = "[]",
+            .arguments = "[\"select:{\\\"kind\\\":\\\"owned_object_struct_type\\\",\\\"owner\\\":\\\"0xowner\\\",\\\"structType\\\":\\\"0x2::example::Thing\\\"}\",7]",
+        },
+    });
+    defer allocator.free(resolved.?);
+
+    try testing.expect(resolved != null);
+    try testing.expect(std.mem.indexOf(u8, resolved.?, "\"MoveCall\"") != null);
+    try testing.expect(std.mem.indexOf(u8, resolved.?, "0xaaa111") != null);
+    try testing.expect(std.mem.indexOf(u8, resolved.?, "7") != null);
+}
+
+test "ownOptionsWithAutoGasPayment infers sender from selected owners and stores gas payment" {
+    const testing = std.testing;
+    const Counts = struct { owned: usize = 0, coin: usize = 0 };
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const counts = @as(*Counts, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "suix_getOwnedObjects")) {
+                counts.owned += 1;
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, "0xowner") != null);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0x0dd001\",\"type\":\"0x2::example::Thing\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "suix_getCoins")) {
+                counts.coin += 1;
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, "0xowner") != null);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0x0dd0aa\",\"version\":\"31\",\"digest\":\"digest-0dd0aa\",\"balance\":\"500\"}],\"hasNextPage\":false}}",
+                );
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+
+    var counts = Counts{};
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &counts,
+        .callback = callback,
+    };
+
+    var owned = try client_instance.ownOptionsWithAutoGasPayment(
+        allocator,
+        .{
+            .source = .{
+                .move_call = .{
+                    .package_id = "0x2",
+                    .module = "example",
+                    .function_name = "act",
+                    .type_args = "[]",
+                    .arguments = "[\"select:{\\\"kind\\\":\\\"owned_object_struct_type\\\",\\\"owner\\\":\\\"0xowner\\\",\\\"structType\\\":\\\"0x2::example::Thing\\\"}\",\"select:{\\\"kind\\\":\\\"owned_object_struct_type\\\",\\\"structType\\\":\\\"0x2::example::Thing\\\"}\"]",
+                },
+            },
+            .gas_budget = 100,
+            .signatures = &.{"sig-a"},
+        },
+        50,
+    );
+    defer owned.deinit(allocator);
+
+    try testing.expectEqual(@as(usize, 2), counts.owned);
+    try testing.expectEqual(@as(usize, 1), counts.coin);
+    try testing.expectEqualStrings("0xowner", owned.sender.?);
+    try testing.expect(owned.gas_payment_json != null);
+    try testing.expect(std.mem.indexOf(u8, owned.gas_payment_json.?, "0x0dd0aa") != null);
+    try testing.expect(owned.commands_json != null);
+    try testing.expect(std.mem.indexOf(u8, owned.commands_json.?, "0x0dd001") != null);
+}
+
+test "runCommandsResolvingSelectedArgumentTokensWithAccountProvider builds summarized artifacts from selected command sources" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            try testing.expectEqualStrings("suix_getOwnedObjects", req.method);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xbbb222\",\"type\":\"0x2::example::Thing\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var result = try client_instance.runCommandsResolvingSelectedArgumentTokensWithAccountProvider(
+        allocator,
+        .{
+            .commands_json = "[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"example\",\"function\":\"act\",\"typeArguments\":[],\"arguments\":[\"select:{\\\"kind\\\":\\\"owned_object_struct_type\\\",\\\"structType\\\":\\\"0x2::example::Thing\\\"}\",7]}]",
+        },
+        .{
+            .sender = "0xsender",
+            .gas_budget = 1000,
+            .gas_price = 7,
+            .signatures = &.{"sig-a"},
+        },
+        .none,
+        .{ .build_artifact_summarize = .execute_payload },
+    );
+    defer result.deinit(allocator);
+
+    switch (result) {
+        .artifact_summarized => |summary| switch (summary) {
+            .execute_payload => |payload| {
+                try testing.expectEqual(@as(usize, 1), payload.command_count);
+                try testing.expectEqualStrings("0xsender", payload.sender.?);
+                try testing.expectEqual(@as(usize, 1), payload.signature_count);
+            },
+            else => try testing.expect(false),
+        },
+        else => try testing.expect(false),
+    }
+}
+
+test "runCommandsWithAutoGasPaymentWithAccountProvider builds artifacts with inferred sender and gas payment" {
+    const testing = std.testing;
+    const Counts = struct { owned: usize = 0, coin: usize = 0 };
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const counts = @as(*Counts, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "suix_getOwnedObjects")) {
+                counts.owned += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0x0dd111\",\"type\":\"0x2::example::Thing\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "suix_getCoins")) {
+                counts.coin += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0x0dd222\",\"version\":\"32\",\"digest\":\"digest-0dd222\",\"balance\":\"900\"}],\"hasNextPage\":false}}",
+                );
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+
+    var counts = Counts{};
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &counts,
+        .callback = callback,
+    };
+
+    var result = try client_instance.runCommandsWithAutoGasPaymentWithAccountProvider(
+        allocator,
+        .{
+            .commands_json = "[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"example\",\"function\":\"act\",\"typeArguments\":[],\"arguments\":[\"select:{\\\"kind\\\":\\\"owned_object_struct_type\\\",\\\"owner\\\":\\\"0xowner\\\",\\\"structType\\\":\\\"0x2::example::Thing\\\"}\",\"select:{\\\"kind\\\":\\\"owned_object_struct_type\\\",\\\"structType\\\":\\\"0x2::example::Thing\\\"}\"]}]",
+        },
+        .{
+            .gas_budget = 120,
+            .signatures = &.{"sig-a"},
+        },
+        .none,
+        50,
+        .{ .build_artifact_summarize = .execute_payload },
+    );
+    defer result.deinit(allocator);
+
+    try testing.expectEqual(@as(usize, 2), counts.owned);
+    try testing.expectEqual(@as(usize, 1), counts.coin);
+    switch (result) {
+        .artifact_summarized => |summary| switch (summary) {
+            .execute_payload => |payload| {
+                try testing.expectEqualStrings("0xowner", payload.sender.?);
+                try testing.expectEqual(@as(usize, 1), payload.signature_count);
+                try testing.expectEqual(@as(usize, 1), payload.command_count);
+            },
+            else => try testing.expect(false),
+        },
+        else => try testing.expect(false),
+    }
+}
+
+test "runOptionsWithAutoGasPaymentOrChallengePromptWithAccountProvider returns structured prompts after selecting gas payment" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var coin_lookup_seen = false;
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const seen = @as(*bool, @ptrCast(@alignCast(context)));
+            try testing.expectEqualStrings("suix_getCoins", req.method);
+            seen.* = true;
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xauto111\",\"version\":\"7\",\"digest\":\"digest-auto111\",\"balance\":\"500\"}],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &coin_lookup_seen,
+        .callback = callback,
+    };
+
+    var result = try client_instance.runOptionsWithAutoGasPaymentOrChallengePromptWithAccountProvider(
+        allocator,
+        .{
+            .sender = "0xowner",
+            .source = .{
+                .command_items = &.{
+                    "{\"kind\":\"TransferObjects\",\"objects\":[\"obj:0xthing\"],\"address\":\"0xreceiver\"}",
+                },
+            },
+        },
+        .{
+            .remote_signer = .{
+                .address = "0xcloud",
+                .session = .{ .kind = .remote_signer, .session_id = "bootstrap-session" },
+                .session_challenge = .{
+                    .passkey = .{
+                        .rp_id = "wallet.example",
+                        .challenge_b64url = "challenge-auto-gas",
+                    },
+                },
+                .session_action = .execute,
+                .session_supports_execute = false,
+            },
+        },
+        50,
+        .authorize,
+    );
+    defer result.deinit(allocator);
+
+    switch (result) {
+        .challenge_required => |value| switch (value.challenge) {
+            .passkey => |challenge| {
+                try testing.expectEqualStrings("wallet.example", challenge.rp_id);
+                try testing.expectEqualStrings("challenge-auto-gas", challenge.challenge_b64url);
+            },
+            else => return error.TestUnexpectedResult,
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    try testing.expect(coin_lookup_seen);
+}
+
+test "runCommandsWithAutoGasPaymentWithChallengeResponseWithAccountProvider builds summarized artifacts after approval" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const rpc_callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            try testing.expectEqualStrings("suix_getCoins", req.method);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xauto222\",\"version\":\"9\",\"digest\":\"digest-auto222\",\"balance\":\"900\"}],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    const authorizer = struct {
+        fn call(_: *anyopaque, _: std.mem.Allocator, req: tx_request_builder.RemoteAuthorizationRequest) !tx_request_builder.RemoteAuthorizationResult {
+            try testing.expectEqualStrings("auto-gas-approved", req.account_session.session_id.?);
+            return .{
+                .sender = "0xapproved-owner",
+                .signatures = &.{"sig-auto-gas-approved"},
+                .session = req.account_session,
+            };
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = rpc_callback,
+    };
+
+    var result = try client_instance.runCommandsWithAutoGasPaymentWithChallengeResponseWithAccountProvider(
+        allocator,
+        .{
+            .command_items = &.{
+                "{\"kind\":\"TransferObjects\",\"objects\":[\"obj:0xthing\"],\"address\":\"0xreceiver\"}",
+            },
+        },
+        .{
+            .sender = "0xowner",
+        },
+        .{
+            .remote_signer = .{
+                .address = "0xcloud",
+                .authorizer = .{
+                    .context = undefined,
+                    .callback = authorizer,
+                },
+                .session = .{ .kind = .remote_signer, .session_id = "bootstrap-session" },
+                .session_challenge = .{
+                    .passkey = .{
+                        .rp_id = "wallet.example",
+                        .challenge_b64url = "challenge-auto-gas",
+                    },
+                },
+                .session_action = .execute,
+                .session_supports_execute = false,
+            },
+        },
+        50,
+        .{
+            .session = .{ .kind = .remote_signer, .session_id = "auto-gas-approved" },
+            .supports_execute = true,
+        },
+        .{ .build_artifact_summarize = .execute_payload },
+    );
+    defer result.deinit(allocator);
+
+    switch (result) {
+        .artifact_summarized => |summary| switch (summary) {
+            .execute_payload => |payload| {
+                try testing.expectEqualStrings("0xapproved-owner", payload.sender.?);
+                try testing.expectEqual(@as(usize, 1), payload.signature_count);
+                try testing.expectEqual(@as(usize, 1), payload.command_count);
+            },
+            else => try testing.expect(false),
+        },
+        else => try testing.expect(false),
+    }
+}
+
+test "runOptionsResolvingSelectedArgumentTokensOrChallengePromptWithAccountProvider returns structured prompts for selected options" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var lookup_seen = false;
+
+    const MockContext = struct {
+        lookup_seen: *bool,
+    };
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const ctx = @as(*MockContext, @ptrCast(@alignCast(context)));
+            try testing.expectEqualStrings("suix_getOwnedObjects", req.method);
+            ctx.lookup_seen.* = true;
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xsel001\",\"type\":\"0x2::example::Thing\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var ctx = MockContext{
+        .lookup_seen = &lookup_seen,
+    };
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &ctx,
+        .callback = callback,
+    };
+
+    var result = try client_instance.runOptionsResolvingSelectedArgumentTokensOrChallengePromptWithAccountProvider(
+        allocator,
+        .{
+            .source = .{
+                .command_items = &.{
+                    "{\"kind\":\"TransferObjects\",\"objects\":[\"select:{\\\"kind\\\":\\\"owned_object_struct_type\\\",\\\"owner\\\":\\\"0xowner\\\",\\\"structType\\\":\\\"0x2::example::Thing\\\"}\"],\"address\":\"0xreceiver\"}",
+                },
+            },
+        },
+        .{
+            .remote_signer = .{
+                .address = "0xcloud",
+                .session = .{ .kind = .remote_signer, .session_id = "bootstrap-session" },
+                .session_challenge = .{
+                    .passkey = .{
+                        .rp_id = "wallet.example",
+                        .challenge_b64url = "challenge-selected",
+                    },
+                },
+                .session_action = .execute,
+                .session_supports_execute = false,
+            },
+        },
+        .authorize,
+    );
+    defer result.deinit(allocator);
+
+    switch (result) {
+        .challenge_required => |value| switch (value.challenge) {
+            .passkey => |challenge| {
+                try testing.expectEqualStrings("wallet.example", challenge.rp_id);
+                try testing.expectEqualStrings("challenge-selected", challenge.challenge_b64url);
+            },
+            else => return error.TestUnexpectedResult,
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    try testing.expect(lookup_seen);
+}
+
+test "runCommandsResolvingSelectedArgumentTokensWithChallengeResponseWithAccountProvider builds summarized artifacts after approval" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const rpc_callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            try testing.expectEqualStrings("suix_getOwnedObjects", req.method);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xsel002\",\"type\":\"0x2::example::Thing\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    const authorizer = struct {
+        fn call(_: *anyopaque, _: std.mem.Allocator, req: tx_request_builder.RemoteAuthorizationRequest) !tx_request_builder.RemoteAuthorizationResult {
+            try testing.expectEqualStrings("selected-approved", req.account_session.session_id.?);
+            return .{
+                .sender = "0xselected-approved",
+                .signatures = &.{"sig-selected-approved"},
+                .session = req.account_session,
+            };
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = rpc_callback,
+    };
+
+    var result = try client_instance.runCommandsResolvingSelectedArgumentTokensWithChallengeResponseWithAccountProvider(
+        allocator,
+        .{
+            .command_items = &.{
+                "{\"kind\":\"TransferObjects\",\"objects\":[\"select:{\\\"kind\\\":\\\"owned_object_struct_type\\\",\\\"owner\\\":\\\"0xowner\\\",\\\"structType\\\":\\\"0x2::example::Thing\\\"}\"],\"address\":\"0xreceiver\"}",
+            },
+        },
+        .{},
+        .{
+            .remote_signer = .{
+                .address = "0xcloud",
+                .authorizer = .{
+                    .context = undefined,
+                    .callback = authorizer,
+                },
+                .session = .{ .kind = .remote_signer, .session_id = "bootstrap-session" },
+                .session_challenge = .{
+                    .passkey = .{
+                        .rp_id = "wallet.example",
+                        .challenge_b64url = "challenge-selected",
+                    },
+                },
+                .session_action = .execute,
+                .session_supports_execute = false,
+            },
+        },
+        .{
+            .session = .{ .kind = .remote_signer, .session_id = "selected-approved" },
+            .supports_execute = true,
+        },
+        .{ .build_artifact_summarize = .execute_payload },
+    );
+    defer result.deinit(allocator);
+
+    switch (result) {
+        .artifact_summarized => |summary| switch (summary) {
+            .execute_payload => |payload| {
+                try testing.expectEqualStrings("0xselected-approved", payload.sender.?);
+                try testing.expectEqual(@as(usize, 1), payload.signature_count);
+                try testing.expectEqual(@as(usize, 1), payload.command_count);
+            },
+            else => return error.TestUnexpectedResult,
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "runOptionsResolvingSelectedArgumentTokensFromDefaultKeystore completes authorize actions immediately" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const keystore_path = try std.fmt.allocPrint(allocator, "tmp_client_selected_options_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(keystore_path);
+
+    const old_override = keystore.test_keystore_path_override;
+    keystore.test_keystore_path_override = keystore_path;
+    defer keystore.test_keystore_path_override = old_override;
+
+    var file = try std.fs.cwd().createFile(keystore_path, .{ .truncate = true });
+    defer file.close();
+    defer _ = std.fs.cwd().deleteFile(keystore_path) catch {};
+    try file.writeAll("[{\"alias\":\"builder\",\"privateKey\":\"sig-builder\",\"address\":\"0xbuilder\"}]");
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            try testing.expectEqualStrings("suix_getOwnedObjects", req.method);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xsel003\",\"type\":\"0x2::example::Thing\",\"owner\":{\"AddressOwner\":\"0xbuilder\"}}}],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var result = try client_instance.runOptionsResolvingSelectedArgumentTokensFromDefaultKeystore(
+        allocator,
+        .{
+            .source = .{
+                .command_items = &.{
+                    "{\"kind\":\"TransferObjects\",\"objects\":[\"select:{\\\"kind\\\":\\\"owned_object_struct_type\\\",\\\"owner\\\":\\\"0xbuilder\\\",\\\"structType\\\":\\\"0x2::example::Thing\\\"}\"],\"address\":\"0xreceiver\"}",
+                },
+            },
+        },
+        .{ .signer_selectors = &.{"builder"} },
+        .authorize,
+    );
+    defer result.deinit(allocator);
+
+    switch (result) {
+        .authorized => |prepared| {
+            try testing.expectEqualStrings("0xbuilder", prepared.prepared.request.sender.?);
+            try testing.expectEqualStrings("sig-builder", prepared.prepared.request.signatures[0]);
+            try testing.expect(prepared.supports_execute);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "runCommandsResolvingSelectedArgumentTokensOrChallengePromptFromDefaultKeystore completes build artifact actions immediately" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const keystore_path = try std.fmt.allocPrint(allocator, "tmp_client_selected_commands_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(keystore_path);
+
+    const old_override = keystore.test_keystore_path_override;
+    keystore.test_keystore_path_override = keystore_path;
+    defer keystore.test_keystore_path_override = old_override;
+
+    var file = try std.fs.cwd().createFile(keystore_path, .{ .truncate = true });
+    defer file.close();
+    defer _ = std.fs.cwd().deleteFile(keystore_path) catch {};
+    try file.writeAll("[{\"alias\":\"builder\",\"privateKey\":\"sig-builder\",\"address\":\"0xbuilder\"}]");
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            try testing.expectEqualStrings("suix_getOwnedObjects", req.method);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xsel004\",\"type\":\"0x2::example::Thing\",\"owner\":{\"AddressOwner\":\"0xbuilder\"}}}],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var result = try client_instance.runCommandsResolvingSelectedArgumentTokensOrChallengePromptFromDefaultKeystore(
+        allocator,
+        .{
+            .command_items = &.{
+                "{\"kind\":\"TransferObjects\",\"objects\":[\"select:{\\\"kind\\\":\\\"owned_object_struct_type\\\",\\\"owner\\\":\\\"0xbuilder\\\",\\\"structType\\\":\\\"0x2::example::Thing\\\"}\"],\"address\":\"0xreceiver\"}",
+            },
+        },
+        .{},
+        .{ .signer_selectors = &.{"builder"} },
+        .{ .build_artifact_summarize = .execute_payload },
+    );
+    defer result.deinit(allocator);
+
+    switch (result) {
+        .completed => |completed| switch (completed) {
+            .artifact_summarized => |summary| switch (summary) {
+                .execute_payload => |payload| {
+                    try testing.expectEqualStrings("0xbuilder", payload.sender.?);
+                    try testing.expectEqual(@as(usize, 1), payload.signature_count);
+                    try testing.expectEqual(@as(usize, 1), payload.command_count);
+                },
+                else => return error.TestUnexpectedResult,
+            },
+            else => return error.TestUnexpectedResult,
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "SelectedArgumentDslBuilder appendMoveCallFromArgumentTokens resolves selected and typed resources into DSL commands" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var request_count: usize = 0;
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const count = @as(*usize, @ptrCast(@alignCast(context)));
+            count.* += 1;
+            try testing.expectEqualStrings("suix_getOwnedObjects", req.method);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xtoken-object\",\"type\":\"0x2::example::Thing\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &request_count,
+        .callback = callback,
+    };
+
+    var builder = SelectedArgumentDslBuilder.init(&client_instance, allocator);
+    defer builder.deinit();
+
+    try builder.appendMoveCallFromArgumentTokens(
+        "0x2",
+        "example",
+        "act",
+        &.{},
+        &.{
+            "u64:7",
+            "select:{\"kind\":\"owned_object_struct_type\",\"owner\":\"0xowner\",\"structType\":\"0x2::example::Thing\"}",
+        },
+    );
+
+    var owned = try builder.finish();
+    defer owned.deinit(allocator);
+    const commands_json = owned.takeCommandsJson().?;
+    defer allocator.free(commands_json);
+
+    try testing.expectEqual(@as(usize, 1), request_count);
+    try testing.expect(std.mem.indexOf(u8, commands_json, "\"MoveCall\"") != null);
+    try testing.expect(std.mem.indexOf(u8, commands_json, "7") != null);
+    try testing.expect(std.mem.indexOf(u8, commands_json, "0xtoken-object") != null);
+}
+
+test "SelectedArgumentDslBuilder append split transfer and merge commands from mixed argument tokens" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            if (std.mem.eql(u8, req.method, "suix_getCoins")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinObjectId\":\"0xc0ffee\",\"coinType\":\"0x2::sui::SUI\",\"balance\":\"17\"}],\"hasNextPage\":false}}",
+                );
+            }
+            try testing.expectEqualStrings("suix_getOwnedObjects", req.method);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xabcd01\",\"type\":\"0x2::example::Thing\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var builder = SelectedArgumentDslBuilder.init(&client_instance, allocator);
+    defer builder.deinit();
+
+    try builder.appendSplitCoinsFromArgumentTokens(
+        "select:{\"kind\":\"gas_coin\",\"owner\":\"0xowner\",\"minBalance\":7}",
+        &.{"u64:7"},
+    );
+    try builder.appendTransferObjectsFromArgumentTokens(
+        &.{"select:{\"kind\":\"owned_object_struct_type\",\"owner\":\"0xowner\",\"structType\":\"0x2::example::Thing\"}"},
+        "addr:0xdef456",
+    );
+    try builder.appendMergeCoinsFromArgumentTokens(
+        "select:{\"kind\":\"gas_coin\",\"owner\":\"0xowner\",\"minBalance\":7}",
+        &.{"obj:0xaaa111"},
+    );
+
+    var owned = try builder.finish();
+    defer owned.deinit(allocator);
+    const commands_json = owned.takeCommandsJson().?;
+    defer allocator.free(commands_json);
+
+    try testing.expect(std.mem.indexOf(u8, commands_json, "\"SplitCoins\"") != null);
+    try testing.expect(std.mem.indexOf(u8, commands_json, "\"TransferObjects\"") != null);
+    try testing.expect(std.mem.indexOf(u8, commands_json, "\"MergeCoins\"") != null);
+    try testing.expect(std.mem.indexOf(u8, commands_json, "0xc0ffee") != null);
+    try testing.expect(std.mem.indexOf(u8, commands_json, "0xabcd01") != null);
+    try testing.expect(std.mem.indexOf(u8, commands_json, "0xdef456") != null);
+    try testing.expect(std.mem.indexOf(u8, commands_json, "0xaaa111") != null);
+}
+
+test "SelectedArgumentDslBuilder append make-move-vec and upgrade commands from mixed argument tokens" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            try testing.expectEqualStrings("suix_getOwnedObjects", req.method);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xbeef02\",\"type\":\"0x2::example::Ticket\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var builder = SelectedArgumentDslBuilder.init(&client_instance, allocator);
+    defer builder.deinit();
+
+    try builder.appendMakeMoveVecFromArgumentTokens(
+        "0x2::example::Ticket",
+        &.{
+            "select:{\"kind\":\"owned_object_struct_type\",\"owner\":\"0xowner\",\"structType\":\"0x2::example::Ticket\"}",
+            "obj:0xabc222",
+        },
+    );
+    try builder.appendUpgradeFromArgumentToken(
+        "[\"AQID\"]",
+        "[\"0x2\"]",
+        "0x2",
+        "select:{\"kind\":\"owned_object_struct_type\",\"owner\":\"0xowner\",\"structType\":\"0x2::example::Ticket\"}",
+    );
+
+    var owned = try builder.finish();
+    defer owned.deinit(allocator);
+    const commands_json = owned.takeCommandsJson().?;
+    defer allocator.free(commands_json);
+
+    try testing.expect(std.mem.indexOf(u8, commands_json, "\"MakeMoveVec\"") != null);
+    try testing.expect(std.mem.indexOf(u8, commands_json, "\"Upgrade\"") != null);
+    try testing.expect(std.mem.indexOf(u8, commands_json, "0xbeef02") != null);
+    try testing.expect(std.mem.indexOf(u8, commands_json, "0xabc222") != null);
+}
+
+test "SelectedArgumentDslBuilder mixed token get-value helpers can chain through result handles" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            if (std.mem.eql(u8, req.method, "suix_getCoins")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinObjectId\":\"0xc0ffee\",\"coinType\":\"0x2::sui::SUI\",\"balance\":\"17\"}],\"hasNextPage\":false}}",
+                );
+            }
+            std.debug.assert(std.mem.eql(u8, req.method, "suix_getOwnedObjects"));
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xabcd01\",\"type\":\"0x2::example::Thing\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var builder = SelectedArgumentDslBuilder.init(&client_instance, allocator);
+    defer builder.deinit();
+
+    const split_value = try builder.appendSplitCoinsAndGetValueFromArgumentTokens(
+        "select:{\"kind\":\"gas_coin\",\"owner\":\"0xowner\",\"minBalance\":7}",
+        &.{"u64:7"},
+    );
+    const split_handle = switch (split_value) {
+        .result => |handle| handle,
+        else => return error.TestUnexpectedResult,
+    };
+    try testing.expectEqual(@as(u16, 0), split_handle.command_index);
+
+    _ = try builder.dslBuilder().appendTransferObjectsAndGetValueFromValues(
+        &.{split_handle.outputValue(0)},
+        .{ .address = "0xdef456" },
+    );
+
+    const move_value = try builder.appendMoveCallAndGetValueFromArgumentTokens(
+        "0x2",
+        "example",
+        "act",
+        &.{},
+        &.{
+            "select:{\"kind\":\"owned_object_struct_type\",\"owner\":\"0xowner\",\"structType\":\"0x2::example::Thing\"}",
+            "u64:7",
+        },
+    );
+    const move_handle = switch (move_value) {
+        .result => |handle| handle,
+        else => return error.TestUnexpectedResult,
+    };
+    try testing.expectEqual(@as(u16, 2), move_handle.command_index);
+
+    var owned = try builder.finish();
+    defer owned.deinit(allocator);
+    const commands_json = owned.takeCommandsJson().?;
+    defer allocator.free(commands_json);
+
+    try testing.expect(std.mem.indexOf(u8, commands_json, "\"SplitCoins\"") != null);
+    try testing.expect(std.mem.indexOf(u8, commands_json, "\"TransferObjects\"") != null);
+    try testing.expect(std.mem.indexOf(u8, commands_json, "\"MoveCall\"") != null);
+    try testing.expect(std.mem.indexOf(u8, commands_json, "0xc0ffee") != null);
+    try testing.expect(std.mem.indexOf(u8, commands_json, "0xabcd01") != null);
+}
+
+test "SelectedArgumentDslBuilder mixed token get-value helpers cover vec transfer merge and upgrade" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            if (std.mem.eql(u8, req.method, "suix_getCoins")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinObjectId\":\"0xc0ffee\",\"coinType\":\"0x2::sui::SUI\",\"balance\":\"17\"}],\"hasNextPage\":false}}",
+                );
+            }
+            std.debug.assert(std.mem.eql(u8, req.method, "suix_getOwnedObjects"));
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xbeef02\",\"type\":\"0x2::example::Ticket\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var builder = SelectedArgumentDslBuilder.init(&client_instance, allocator);
+    defer builder.deinit();
+
+    const vec_value = try builder.appendMakeMoveVecAndGetValueFromArgumentTokens(
+        "0x2::example::Ticket",
+        &.{
+            "select:{\"kind\":\"owned_object_struct_type\",\"owner\":\"0xowner\",\"structType\":\"0x2::example::Ticket\"}",
+            "obj:0xabc222",
+        },
+    );
+    const transfer_value = try builder.appendTransferObjectsAndGetValueFromArgumentTokens(
+        &.{"select:{\"kind\":\"owned_object_struct_type\",\"owner\":\"0xowner\",\"structType\":\"0x2::example::Ticket\"}"},
+        "addr:0xdef456",
+    );
+    const merge_value = try builder.appendMergeCoinsAndGetValueFromArgumentTokens(
+        "select:{\"kind\":\"gas_coin\",\"owner\":\"0xowner\",\"minBalance\":7}",
+        &.{"obj:0xaaa111"},
+    );
+    const upgrade_value = try builder.appendUpgradeAndGetValueFromArgumentToken(
+        "[\"AQID\"]",
+        "[\"0x2\"]",
+        "0x2",
+        "select:{\"kind\":\"owned_object_struct_type\",\"owner\":\"0xowner\",\"structType\":\"0x2::example::Ticket\"}",
+    );
+
+    const vec_handle = switch (vec_value) {
+        .result => |handle| handle,
+        else => return error.TestUnexpectedResult,
+    };
+    const transfer_handle = switch (transfer_value) {
+        .result => |handle| handle,
+        else => return error.TestUnexpectedResult,
+    };
+    const merge_handle = switch (merge_value) {
+        .result => |handle| handle,
+        else => return error.TestUnexpectedResult,
+    };
+    const upgrade_handle = switch (upgrade_value) {
+        .result => |handle| handle,
+        else => return error.TestUnexpectedResult,
+    };
+    try testing.expectEqual(@as(u16, 0), vec_handle.command_index);
+    try testing.expectEqual(@as(u16, 1), transfer_handle.command_index);
+    try testing.expectEqual(@as(u16, 2), merge_handle.command_index);
+    try testing.expectEqual(@as(u16, 3), upgrade_handle.command_index);
+
+    var owned = try builder.finish();
+    defer owned.deinit(allocator);
+    const commands_json = owned.takeCommandsJson().?;
+    defer allocator.free(commands_json);
+
+    try testing.expect(std.mem.indexOf(u8, commands_json, "\"MakeMoveVec\"") != null);
+    try testing.expect(std.mem.indexOf(u8, commands_json, "\"TransferObjects\"") != null);
+    try testing.expect(std.mem.indexOf(u8, commands_json, "\"MergeCoins\"") != null);
+    try testing.expect(std.mem.indexOf(u8, commands_json, "\"Upgrade\"") != null);
+    try testing.expect(std.mem.indexOf(u8, commands_json, "0xbeef02") != null);
+    try testing.expect(std.mem.indexOf(u8, commands_json, "0xc0ffee") != null);
+}
+
+test "runDslBuilder supports execute confirm observe actions" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var request_count: usize = 0;
+
+    const rpc_callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const count = @as(*usize, @ptrCast(@alignCast(context)));
+            count.* += 1;
+            if (std.mem.eql(u8, req.method, "sui_executeTransactionBlock")) {
+                return alloc.dupe(u8, "{\"result\":{\"digest\":\"dsl-observe-digest\"}}");
+            }
+            if (std.mem.eql(u8, req.method, "sui_getTransactionBlock")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"digest\":\"dsl-observe-digest\",\"effects\":{\"status\":{\"status\":\"success\"},\"gasUsed\":{\"computationCost\":\"9\",\"storageCost\":\"2\",\"storageRebate\":\"1\"}},\"balanceChanges\":[{\"owner\":{\"AddressOwner\":\"0xrunner\"},\"coinType\":\"0x2::sui::SUI\",\"amount\":\"-10\"}]}}",
+                );
+            }
+            return alloc.dupe(u8, "{\"error\":{\"code\":-32603,\"message\":\"unexpected\"}}");
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &request_count,
+        .callback = rpc_callback,
+    };
+
+    var builder = tx_request_builder.ProgrammaticDslBuilder.init(allocator);
+    defer builder.deinit();
+    _ = try builder.appendTransferObjectsAndGetValueFromValues(
+        &.{.{ .object_id = "0xcoin" }},
+        .{ .address = "0xreceiver" },
+    );
+
+    var result = try client_instance.runDslBuilder(
+        allocator,
+        &builder,
+        .{
+            .direct_signatures = .{
+                .sender = "0xrunner",
+                .signatures = &.{"sig-runner"},
+            },
+        },
+        .{ .execute_confirm_observe = .{ .timeout_ms = 100, .poll_ms = 0 } },
+    );
+    defer result.deinit(allocator);
+
+    try testing.expectEqual(@as(usize, 2), request_count);
+    switch (result) {
+        .observed => |observation| {
+            try testing.expectEqualStrings("dsl-observe-digest", observation.digest);
+            try testing.expectEqual(tx_result.ExecutionStatus.success, observation.insights.status);
+            try testing.expectEqualStrings("0xrunner", observation.insights.balance_changes[0].owner.?);
+        },
+        else => try testing.expect(false),
+    }
+}
+
+test "SelectedArgumentDslBuilder inspect and observe wrappers work with selected arguments" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var request_count: usize = 0;
+
+    const rpc_callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const count = @as(*usize, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "suix_getOwnedObjects")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xselected-inspect\",\"type\":\"0x2::example::Thing\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
+                );
+            }
+            count.* += 1;
+            if (std.mem.eql(u8, req.method, "sui_devInspectTransactionBlock")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"effects\":{\"status\":{\"status\":\"success\"}},\"results\":[{\"returnValues\":[]}],\"events\":[{\"type\":\"0x2::event::Thing\"}]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_executeTransactionBlock")) {
+                return alloc.dupe(u8, "{\"result\":{\"digest\":\"selected-observe\"}}");
+            }
+            if (std.mem.eql(u8, req.method, "sui_getTransactionBlock")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"digest\":\"selected-observe\",\"effects\":{\"status\":{\"status\":\"success\"},\"gasUsed\":{\"computationCost\":\"6\",\"storageCost\":\"2\",\"storageRebate\":\"1\"}},\"balanceChanges\":[{\"owner\":{\"AddressOwner\":\"0xsel\"},\"coinType\":\"0x2::sui::SUI\",\"amount\":\"-7\"}]}}",
+                );
+            }
+            return alloc.dupe(u8, "{\"error\":{\"code\":-32603,\"message\":\"unexpected\"}}");
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &request_count,
+        .callback = rpc_callback,
+    };
+
+    var builder = SelectedArgumentDslBuilder.init(&client_instance, allocator);
+    defer builder.deinit();
+    builder.setSender("0xsel");
+    builder.setSignatures(&.{"sig-sel"});
+
+    try builder.appendMoveCallFromSelectedArguments(
+        "0x2",
+        "example",
+        "act",
+        &.{},
+        &.{
+            .{ .owned_object_struct_type = .{ .owner = "0xowner", .struct_type = "0x2::example::Thing" } },
+        },
+    );
+
+    var inspect = try builder.inspectAndSummarize(.{
+        .direct_signatures = .{
+            .sender = "0xsel",
+            .signatures = &.{"sig-sel"},
+        },
+    });
+    defer inspect.deinit(allocator);
+    try testing.expectEqual(inspect_result.InspectStatus.success, inspect.status);
+    try testing.expectEqual(@as(usize, 1), inspect.results_count);
+
+    var observed = try builder.executeAndObserve(.{
+        .direct_signatures = .{
+            .sender = "0xsel",
+            .signatures = &.{"sig-sel"},
+        },
+    }, 100, 0);
+    defer observed.deinit(allocator);
+
+    try testing.expectEqualStrings("selected-observe", observed.digest);
+    try testing.expectEqual(tx_result.ExecutionStatus.success, observed.insights.status);
+    try testing.expectEqualStrings("0xsel", observed.insights.balance_changes[0].owner.?);
+    try testing.expectEqual(@as(usize, 3), request_count);
+}
+
+test "inspectDslBuilderWithAutoGasPaymentAndSummarize selects gas before summarized inspect" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var request_count: usize = 0;
+
+    const rpc_callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const count = @as(*usize, @ptrCast(@alignCast(context)));
+            count.* += 1;
+            if (std.mem.eql(u8, req.method, "suix_getCoins")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xinspect-gas\",\"version\":\"31\",\"digest\":\"digest-inspect-gas\",\"balance\":\"500\"}],\"hasNextPage\":false}}",
+                );
+            }
+            try testing.expectEqualStrings("sui_devInspectTransactionBlock", req.method);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"effects\":{\"status\":{\"status\":\"success\"}},\"results\":[{\"returnValues\":[]}],\"events\":[{\"type\":\"0x2::event::Thing\"}]}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &request_count,
+        .callback = rpc_callback,
+    };
+
+    var builder = tx_request_builder.ProgrammaticDslBuilder.init(allocator);
+    defer builder.deinit();
+    builder.setSender("0xrunner");
+    _ = try builder.appendTransferObjectsAndGetValueFromValues(
+        &.{.{ .object_id = "0xcoin" }},
+        .{ .address = "0xreceiver" },
+    );
+
+    var insights = try client_instance.inspectDslBuilderWithAutoGasPaymentAndSummarize(
+        allocator,
+        &builder,
+        .{
+            .direct_signatures = .{
+                .sender = "0xrunner",
+                .signatures = &.{"sig-runner"},
+            },
+        },
+        50,
+    );
+    defer insights.deinit(allocator);
+
+    try testing.expectEqual(@as(usize, 2), request_count);
+    try testing.expectEqual(inspect_result.InspectStatus.success, insights.status);
+    try testing.expectEqual(@as(usize, 1), insights.results_count);
+}
+
+test "inspectDslBuilderWithAutoGasPaymentOrChallengePromptAndSummarize returns structured prompts after selecting gas payment" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var coin_lookup_seen = false;
+
+    const rpc_callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const seen = @as(*bool, @ptrCast(@alignCast(context)));
+            try testing.expectEqualStrings("suix_getCoins", req.method);
+            seen.* = true;
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xinspect-prompt-gas\",\"version\":\"33\",\"digest\":\"digest-inspect-prompt-gas\",\"balance\":\"500\"}],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &coin_lookup_seen,
+        .callback = rpc_callback,
+    };
+
+    var builder = tx_request_builder.ProgrammaticDslBuilder.init(allocator);
+    defer builder.deinit();
+    builder.setSender("0xrunner");
+    _ = try builder.appendTransferObjectsAndGetValueFromValues(
+        &.{.{ .object_id = "0xcoin" }},
+        .{ .address = "0xreceiver" },
+    );
+
+    var result = try client_instance.inspectDslBuilderWithAutoGasPaymentOrChallengePromptAndSummarize(
+        allocator,
+        &builder,
+        .{
+            .remote_signer = .{
+                .address = "0xcloud",
+                .session = .{ .kind = .remote_signer, .session_id = "pending-auto-gas-inspect" },
+                .session_challenge = .{
+                    .passkey = .{
+                        .rp_id = "wallet.example",
+                        .challenge_b64url = "challenge-auto-gas-inspect",
+                    },
+                },
+                .session_action = .execute,
+                .session_supports_execute = false,
+            },
+        },
+        50,
+    );
+    defer result.deinit(allocator);
+
+    switch (result) {
+        .challenge_required => |prompt| switch (prompt.challenge) {
+            .passkey => |challenge| {
+                try testing.expectEqualStrings("wallet.example", challenge.rp_id);
+                try testing.expectEqualStrings("challenge-auto-gas-inspect", challenge.challenge_b64url);
+            },
+            else => return error.TestUnexpectedResult,
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    try testing.expect(coin_lookup_seen);
+}
+
+test "SelectedArgumentDslBuilder executeAndConfirmAndSummarizeWithAutoGasPaymentFromDefaultKeystore works with selected arguments" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const keystore_path = try std.fmt.allocPrint(allocator, "tmp_client_selected_auto_gas_confirm_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(keystore_path);
+
+    const old_override = keystore.test_keystore_path_override;
+    keystore.test_keystore_path_override = keystore_path;
+    defer keystore.test_keystore_path_override = old_override;
+
+    var file = try std.fs.cwd().createFile(keystore_path, .{ .truncate = true });
+    defer file.close();
+    defer _ = std.fs.cwd().deleteFile(keystore_path) catch {};
+    try file.writeAll("[{\"alias\":\"builder\",\"privateKey\":\"sig-builder\",\"address\":\"0xbuilder\"}]");
+
+    var request_count: usize = 0;
+
+    const rpc_callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const count = @as(*usize, @ptrCast(@alignCast(context)));
+            count.* += 1;
+            if (std.mem.eql(u8, req.method, "suix_getOwnedObjects")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xselected-auto-gas-object\",\"type\":\"0x2::example::Thing\",\"owner\":{\"AddressOwner\":\"0xbuilder\"}}}],\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "suix_getCoins")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xselected-auto-gas-coin\",\"version\":\"41\",\"digest\":\"digest-selected-auto-gas-coin\",\"balance\":\"900\"}],\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_executeTransactionBlock")) {
+                return alloc.dupe(u8, "{\"result\":{\"digest\":\"selected-auto-gas-confirm\"}}");
+            }
+            try testing.expectEqualStrings("sui_getTransactionBlock", req.method);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"digest\":\"selected-auto-gas-confirm\",\"effects\":{\"status\":{\"status\":\"success\"},\"gasUsed\":{\"computationCost\":\"8\",\"storageCost\":\"2\",\"storageRebate\":\"1\"}},\"balanceChanges\":[{\"owner\":{\"AddressOwner\":\"0xbuilder\"},\"coinType\":\"0x2::sui::SUI\",\"amount\":\"-9\"}]}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &request_count,
+        .callback = rpc_callback,
+    };
+
+    var builder = SelectedArgumentDslBuilder.init(&client_instance, allocator);
+    defer builder.deinit();
+
+    try builder.appendMoveCallFromSelectedArguments(
+        "0x2",
+        "example",
+        "act",
+        &.{},
+        &.{
+            .{ .owned_object_struct_type = .{ .owner = "0xbuilder", .struct_type = "0x2::example::Thing" } },
+        },
+    );
+
+    var insights = try builder.executeAndConfirmAndSummarizeWithAutoGasPaymentFromDefaultKeystore(
+        .{ .signer_selectors = &.{"builder"} },
+        50,
+        100,
+        0,
+    );
+    defer insights.deinit(allocator);
+
+    try testing.expectEqual(@as(usize, 4), request_count);
+    try testing.expectEqual(tx_result.ExecutionStatus.success, insights.status);
+    try testing.expectEqualStrings("0xbuilder", insights.balance_changes[0].owner.?);
+}
+
+test "SelectedArgumentDslBuilder executeWithChallengeResponseAndConfirmAndSummarizeWithAutoGasPayment completes after approval" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const rpc_callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            if (std.mem.eql(u8, req.method, "suix_getOwnedObjects")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xauto-gas-selected-object\",\"type\":\"0x2::example::Thing\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "suix_getCoins")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xauto-gas-selected-coin\",\"version\":\"51\",\"digest\":\"digest-auto-gas-selected-coin\",\"balance\":\"900\"}],\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_executeTransactionBlock")) {
+                return alloc.dupe(u8, "{\"result\":{\"digest\":\"selected-auto-gas-approved\"}}");
+            }
+            try testing.expectEqualStrings("sui_getTransactionBlock", req.method);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"digest\":\"selected-auto-gas-approved\",\"effects\":{\"status\":{\"status\":\"success\"},\"gasUsed\":{\"computationCost\":\"7\",\"storageCost\":\"2\",\"storageRebate\":\"1\"}},\"balanceChanges\":[{\"owner\":{\"AddressOwner\":\"0xapproved-owner\"},\"coinType\":\"0x2::sui::SUI\",\"amount\":\"-8\"}]}}",
+            );
+        }
+    }.call;
+
+    const authorizer = struct {
+        fn call(_: *anyopaque, _: std.mem.Allocator, req: tx_request_builder.RemoteAuthorizationRequest) !tx_request_builder.RemoteAuthorizationResult {
+            try testing.expectEqualStrings("approved-auto-gas-selected", req.account_session.session_id.?);
+            return .{
+                .sender = "0xapproved-owner",
+                .signatures = &.{"sig-approved-auto-gas"},
+                .session = req.account_session,
+            };
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = rpc_callback,
+    };
+
+    var builder = SelectedArgumentDslBuilder.init(&client_instance, allocator);
+    defer builder.deinit();
+    builder.setSender("0xowner");
+
+    try builder.appendMoveCallFromSelectedArguments(
+        "0x2",
+        "example",
+        "act",
+        &.{},
+        &.{
+            .{ .owned_object_struct_type = .{ .owner = "0xowner", .struct_type = "0x2::example::Thing" } },
+        },
+    );
+
+    var insights = try builder.executeWithChallengeResponseAndConfirmAndSummarizeWithAutoGasPayment(
+        .{
+            .remote_signer = .{
+                .address = "0xcloud",
+                .authorizer = .{
+                    .context = undefined,
+                    .callback = authorizer,
+                },
+                .session = .{ .kind = .remote_signer, .session_id = "pending-auto-gas-selected" },
+                .session_challenge = .{
+                    .passkey = .{
+                        .rp_id = "wallet.example",
+                        .challenge_b64url = "challenge-auto-gas-selected",
+                    },
+                },
+                .session_action = .execute,
+                .session_supports_execute = false,
+            },
+        },
+        50,
+        .{
+            .session = .{ .kind = .remote_signer, .session_id = "approved-auto-gas-selected" },
+            .supports_execute = true,
+        },
+        100,
+        0,
+    );
+    defer insights.deinit(allocator);
+
+    try testing.expectEqual(tx_result.ExecutionStatus.success, insights.status);
+    try testing.expectEqualStrings("0xapproved-owner", insights.balance_changes[0].owner.?);
+}
+
+test "runDslBuilderFromDefaultKeystore builds summarized artifacts immediately" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const keystore_path = try std.fmt.allocPrint(allocator, "tmp_client_dsl_builder_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(keystore_path);
+
+    const old_override = keystore.test_keystore_path_override;
+    keystore.test_keystore_path_override = keystore_path;
+    defer keystore.test_keystore_path_override = old_override;
+
+    var file = try std.fs.cwd().createFile(keystore_path, .{ .truncate = true });
+    defer file.close();
+    defer _ = std.fs.cwd().deleteFile(keystore_path) catch {};
+    try file.writeAll("[{\"alias\":\"builder\",\"privateKey\":\"sig-builder\",\"address\":\"0xbuilder\"}]");
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+
+    var builder = tx_request_builder.ProgrammaticDslBuilder.init(allocator);
+    defer builder.deinit();
+    _ = try builder.appendTransferObjectsAndGetValueFromValues(
+        &.{.{ .object_id = "0xcoin" }},
+        .{ .address = "0xreceiver" },
+    );
+
+    var result = try client_instance.runDslBuilderFromDefaultKeystore(
+        allocator,
+        &builder,
+        .{ .signer_selectors = &.{"builder"} },
+        .{ .build_artifact_summarize = .execute_payload },
+    );
+    defer result.deinit(allocator);
+
+    switch (result) {
+        .artifact_summarized => |summary| switch (summary) {
+            .execute_payload => |payload| {
+                try testing.expectEqualStrings("0xbuilder", payload.sender.?);
+                try testing.expectEqual(@as(usize, 1), payload.signature_count);
+                try testing.expectEqual(@as(usize, 1), payload.command_count);
+            },
+            else => return error.TestUnexpectedResult,
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "SelectedArgumentDslBuilder runFromDefaultKeystore builds summarized artifacts from selected arguments" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const keystore_path = try std.fmt.allocPrint(allocator, "tmp_client_selected_dsl_builder_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(keystore_path);
+
+    const old_override = keystore.test_keystore_path_override;
+    keystore.test_keystore_path_override = keystore_path;
+    defer keystore.test_keystore_path_override = old_override;
+
+    var file = try std.fs.cwd().createFile(keystore_path, .{ .truncate = true });
+    defer file.close();
+    defer _ = std.fs.cwd().deleteFile(keystore_path) catch {};
+    try file.writeAll("[{\"alias\":\"builder\",\"privateKey\":\"sig-builder\",\"address\":\"0xbuilder\"}]");
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            try testing.expectEqualStrings("suix_getOwnedObjects", req.method);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xsel-builder\",\"type\":\"0x2::example::Thing\",\"owner\":{\"AddressOwner\":\"0xbuilder\"}}}],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var builder = SelectedArgumentDslBuilder.init(&client_instance, allocator);
+    defer builder.deinit();
+
+    try builder.appendMoveCallFromSelectedArguments(
+        "0x2",
+        "example",
+        "act",
+        &.{},
+        &.{
+            .{ .owned_object_struct_type = .{ .owner = "0xbuilder", .struct_type = "0x2::example::Thing" } },
+        },
+    );
+
+    var result = try builder.runFromDefaultKeystore(
+        .{ .signer_selectors = &.{"builder"} },
+        .{ .build_artifact_summarize = .execute_payload },
+    );
+    defer result.deinit(allocator);
+
+    switch (result) {
+        .artifact_summarized => |summary| switch (summary) {
+            .execute_payload => |payload| {
+                try testing.expectEqualStrings("0xbuilder", payload.sender.?);
+                try testing.expectEqual(@as(usize, 1), payload.signature_count);
+                try testing.expectEqual(@as(usize, 1), payload.command_count);
+            },
+            else => return error.TestUnexpectedResult,
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "SelectedArgumentDslBuilder inspectAndSummarizeFromDefaultKeystore works with selected arguments" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const keystore_path = try std.fmt.allocPrint(allocator, "tmp_client_selected_inspect_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(keystore_path);
+
+    const old_override = keystore.test_keystore_path_override;
+    keystore.test_keystore_path_override = keystore_path;
+    defer keystore.test_keystore_path_override = old_override;
+
+    var file = try std.fs.cwd().createFile(keystore_path, .{ .truncate = true });
+    defer file.close();
+    defer _ = std.fs.cwd().deleteFile(keystore_path) catch {};
+    try file.writeAll("[{\"alias\":\"builder\",\"privateKey\":\"sig-builder\",\"address\":\"0xbuilder\"}]");
+
+    var request_count: usize = 0;
+
+    const rpc_callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const count = @as(*usize, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "suix_getOwnedObjects")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xselected-inspect-default\",\"type\":\"0x2::example::Thing\",\"owner\":{\"AddressOwner\":\"0xbuilder\"}}}],\"hasNextPage\":false}}",
+                );
+            }
+            count.* += 1;
+            if (std.mem.eql(u8, req.method, "sui_devInspectTransactionBlock")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"effects\":{\"status\":{\"status\":\"success\"}},\"results\":[{\"returnValues\":[]}],\"events\":[]}}",
+                );
+            }
+            return alloc.dupe(u8, "{\"error\":{\"code\":-32603,\"message\":\"unexpected\"}}");
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &request_count,
+        .callback = rpc_callback,
+    };
+
+    var builder = SelectedArgumentDslBuilder.init(&client_instance, allocator);
+    defer builder.deinit();
+
+    try builder.appendMoveCallFromSelectedArguments(
+        "0x2",
+        "example",
+        "act",
+        &.{},
+        &.{
+            .{ .owned_object_struct_type = .{ .owner = "0xbuilder", .struct_type = "0x2::example::Thing" } },
+        },
+    );
+
+    var inspect = try builder.inspectAndSummarizeFromDefaultKeystore(.{ .signer_selectors = &.{"builder"} });
+    defer inspect.deinit(allocator);
+
+    try testing.expectEqual(inspect_result.InspectStatus.success, inspect.status);
+    try testing.expectEqual(@as(usize, 1), inspect.results_count);
+    try testing.expectEqual(@as(usize, 1), request_count);
+}
+
+test "SelectedArgumentDslBuilder executeAndObserveFromDefaultKeystore works with selected arguments" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const keystore_path = try std.fmt.allocPrint(allocator, "tmp_client_selected_observe_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(keystore_path);
+
+    const old_override = keystore.test_keystore_path_override;
+    keystore.test_keystore_path_override = keystore_path;
+    defer keystore.test_keystore_path_override = old_override;
+
+    var file = try std.fs.cwd().createFile(keystore_path, .{ .truncate = true });
+    defer file.close();
+    defer _ = std.fs.cwd().deleteFile(keystore_path) catch {};
+    try file.writeAll("[{\"alias\":\"builder\",\"privateKey\":\"sig-builder\",\"address\":\"0xbuilder\"}]");
+
+    var request_count: usize = 0;
+
+    const rpc_callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const count = @as(*usize, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "suix_getOwnedObjects")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xselected-observe-default\",\"type\":\"0x2::example::Thing\",\"owner\":{\"AddressOwner\":\"0xbuilder\"}}}],\"hasNextPage\":false}}",
+                );
+            }
+            count.* += 1;
+            if (std.mem.eql(u8, req.method, "sui_executeTransactionBlock")) {
+                return alloc.dupe(u8, "{\"result\":{\"digest\":\"selected-observe-default\"}}");
+            }
+            if (std.mem.eql(u8, req.method, "sui_getTransactionBlock")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"digest\":\"selected-observe-default\",\"effects\":{\"status\":{\"status\":\"success\"},\"gasUsed\":{\"computationCost\":\"8\",\"storageCost\":\"3\",\"storageRebate\":\"1\"}},\"balanceChanges\":[{\"owner\":{\"AddressOwner\":\"0xbuilder\"},\"coinType\":\"0x2::sui::SUI\",\"amount\":\"-9\"}]}}",
+                );
+            }
+            return alloc.dupe(u8, "{\"error\":{\"code\":-32603,\"message\":\"unexpected\"}}");
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &request_count,
+        .callback = rpc_callback,
+    };
+
+    var builder = SelectedArgumentDslBuilder.init(&client_instance, allocator);
+    defer builder.deinit();
+
+    try builder.appendMoveCallFromSelectedArguments(
+        "0x2",
+        "example",
+        "act",
+        &.{},
+        &.{
+            .{ .owned_object_struct_type = .{ .owner = "0xbuilder", .struct_type = "0x2::example::Thing" } },
+        },
+    );
+
+    var observed = try builder.executeAndObserveFromDefaultKeystore(.{ .signer_selectors = &.{"builder"} }, 100, 0);
+    defer observed.deinit(allocator);
+
+    try testing.expectEqualStrings("selected-observe-default", observed.digest);
+    try testing.expectEqual(tx_result.ExecutionStatus.success, observed.insights.status);
+    try testing.expectEqualStrings("0xbuilder", observed.insights.balance_changes[0].owner.?);
+    try testing.expectEqual(@as(usize, 2), request_count);
+}
+
+test "executeDslBuilderAndConfirmAndSummarizeFromDefaultKeystore extracts signer-backed execution insights" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const keystore_path = try std.fmt.allocPrint(allocator, "tmp_client_dsl_builder_summary_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(keystore_path);
+
+    const old_override = keystore.test_keystore_path_override;
+    keystore.test_keystore_path_override = keystore_path;
+    defer keystore.test_keystore_path_override = old_override;
+
+    var file = try std.fs.cwd().createFile(keystore_path, .{ .truncate = true });
+    defer file.close();
+    defer _ = std.fs.cwd().deleteFile(keystore_path) catch {};
+    try file.writeAll("[{\"alias\":\"builder\",\"privateKey\":\"sig-builder\",\"address\":\"0xbuilder\"}]");
+
+    var request_count: usize = 0;
+
+    const rpc_callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const count = @as(*usize, @ptrCast(@alignCast(context)));
+            count.* += 1;
+            if (std.mem.eql(u8, req.method, "sui_executeTransactionBlock")) {
+                return alloc.dupe(u8, "{\"result\":{\"digest\":\"dsl-summary-default\"}}");
+            }
+            if (std.mem.eql(u8, req.method, "sui_getTransactionBlock")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"digest\":\"dsl-summary-default\",\"effects\":{\"status\":{\"status\":\"success\"},\"gasUsed\":{\"computationCost\":\"11\",\"storageCost\":\"4\",\"storageRebate\":\"1\"}},\"balanceChanges\":[{\"owner\":{\"AddressOwner\":\"0xbuilder\"},\"coinType\":\"0x2::sui::SUI\",\"amount\":\"-14\"}]}}",
+                );
+            }
+            return alloc.dupe(u8, "{\"error\":{\"code\":-32603,\"message\":\"unexpected\"}}");
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &request_count,
+        .callback = rpc_callback,
+    };
+
+    var builder = tx_request_builder.ProgrammaticDslBuilder.init(allocator);
+    defer builder.deinit();
+    _ = try builder.appendTransferObjectsAndGetValueFromValues(
+        &.{.{ .object_id = "0xcoin" }},
+        .{ .address = "0xreceiver" },
+    );
+
+    var insights = try client_instance.executeDslBuilderAndConfirmAndSummarizeFromDefaultKeystore(
+        allocator,
+        &builder,
+        .{ .signer_selectors = &.{"builder"} },
+        100,
+        0,
+    );
+    defer insights.deinit(allocator);
+
+    try testing.expectEqual(tx_result.ExecutionStatus.success, insights.status);
+    try testing.expectEqualStrings("0xbuilder", insights.balance_changes[0].owner.?);
+    try testing.expectEqual(@as(?i128, -14), insights.balance_changes[0].amount);
+    try testing.expectEqual(@as(usize, 2), request_count);
+}
+
+test "SelectedArgumentDslBuilder executeAndConfirmAndSummarizeFromDefaultKeystore works with selected arguments" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const keystore_path = try std.fmt.allocPrint(allocator, "tmp_client_selected_summary_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(keystore_path);
+
+    const old_override = keystore.test_keystore_path_override;
+    keystore.test_keystore_path_override = keystore_path;
+    defer keystore.test_keystore_path_override = old_override;
+
+    var file = try std.fs.cwd().createFile(keystore_path, .{ .truncate = true });
+    defer file.close();
+    defer _ = std.fs.cwd().deleteFile(keystore_path) catch {};
+    try file.writeAll("[{\"alias\":\"builder\",\"privateKey\":\"sig-builder\",\"address\":\"0xbuilder\"}]");
+
+    var request_count: usize = 0;
+
+    const rpc_callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const count = @as(*usize, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "suix_getOwnedObjects")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xselected-summary-default\",\"type\":\"0x2::example::Thing\",\"owner\":{\"AddressOwner\":\"0xbuilder\"}}}],\"hasNextPage\":false}}",
+                );
+            }
+            count.* += 1;
+            if (std.mem.eql(u8, req.method, "sui_executeTransactionBlock")) {
+                return alloc.dupe(u8, "{\"result\":{\"digest\":\"selected-summary-default\"}}");
+            }
+            if (std.mem.eql(u8, req.method, "sui_getTransactionBlock")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"digest\":\"selected-summary-default\",\"effects\":{\"status\":{\"status\":\"success\"},\"gasUsed\":{\"computationCost\":\"12\",\"storageCost\":\"5\",\"storageRebate\":\"2\"}},\"balanceChanges\":[{\"owner\":{\"AddressOwner\":\"0xbuilder\"},\"coinType\":\"0x2::sui::SUI\",\"amount\":\"-15\"}]}}",
+                );
+            }
+            return alloc.dupe(u8, "{\"error\":{\"code\":-32603,\"message\":\"unexpected\"}}");
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &request_count,
+        .callback = rpc_callback,
+    };
+
+    var builder = SelectedArgumentDslBuilder.init(&client_instance, allocator);
+    defer builder.deinit();
+
+    try builder.appendMoveCallFromSelectedArguments(
+        "0x2",
+        "example",
+        "act",
+        &.{},
+        &.{
+            .{ .owned_object_struct_type = .{ .owner = "0xbuilder", .struct_type = "0x2::example::Thing" } },
+        },
+    );
+
+    var insights = try builder.executeAndConfirmAndSummarizeFromDefaultKeystore(
+        .{ .signer_selectors = &.{"builder"} },
+        100,
+        0,
+    );
+    defer insights.deinit(allocator);
+
+    try testing.expectEqual(tx_result.ExecutionStatus.success, insights.status);
+    try testing.expectEqualStrings("0xbuilder", insights.balance_changes[0].owner.?);
+    try testing.expectEqual(@as(?i128, -15), insights.balance_changes[0].amount);
+    try testing.expectEqual(@as(usize, 2), request_count);
+}
+
+test "authorizeDslBuilderOrChallengePromptFromDefaultKeystore authorizes immediately when no challenge is needed" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const keystore_path = try std.fmt.allocPrint(allocator, "tmp_client_dsl_authorize_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(keystore_path);
+
+    const old_override = keystore.test_keystore_path_override;
+    keystore.test_keystore_path_override = keystore_path;
+    defer keystore.test_keystore_path_override = old_override;
+
+    var file = try std.fs.cwd().createFile(keystore_path, .{ .truncate = true });
+    defer file.close();
+    defer _ = std.fs.cwd().deleteFile(keystore_path) catch {};
+    try file.writeAll("[{\"alias\":\"builder\",\"privateKey\":\"sig-builder\",\"address\":\"0xbuilder\"}]");
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+
+    var builder = tx_request_builder.ProgrammaticDslBuilder.init(allocator);
+    defer builder.deinit();
+    _ = try builder.appendTransferObjectsAndGetValueFromValues(
+        &.{.{ .object_id = "0xcoin" }},
+        .{ .address = "0xreceiver" },
+    );
+
+    var result = try client_instance.authorizeDslBuilderOrChallengePromptFromDefaultKeystore(
+        allocator,
+        &builder,
+        .{ .signer_selectors = &.{"builder"} },
+    );
+    defer result.deinit(allocator);
+
+    switch (result) {
+        .authorized => |prepared| {
+            try testing.expectEqualStrings("0xbuilder", prepared.prepared.request.sender.?);
+            try testing.expectEqualStrings("sig-builder", prepared.prepared.request.signatures[0]);
+            try testing.expect(prepared.supports_execute);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "buildDslBuilderArtifactOrChallengePromptFromDefaultKeystore builds artifacts immediately" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const keystore_path = try std.fmt.allocPrint(allocator, "tmp_client_dsl_artifact_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(keystore_path);
+
+    const old_override = keystore.test_keystore_path_override;
+    keystore.test_keystore_path_override = keystore_path;
+    defer keystore.test_keystore_path_override = old_override;
+
+    var file = try std.fs.cwd().createFile(keystore_path, .{ .truncate = true });
+    defer file.close();
+    defer _ = std.fs.cwd().deleteFile(keystore_path) catch {};
+    try file.writeAll("[{\"alias\":\"builder\",\"privateKey\":\"sig-builder\",\"address\":\"0xbuilder\"}]");
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+
+    var builder = tx_request_builder.ProgrammaticDslBuilder.init(allocator);
+    defer builder.deinit();
+    _ = try builder.appendTransferObjectsAndGetValueFromValues(
+        &.{.{ .object_id = "0xcoin" }},
+        .{ .address = "0xreceiver" },
+    );
+
+    var result = try client_instance.buildDslBuilderArtifactOrChallengePromptFromDefaultKeystore(
+        allocator,
+        &builder,
+        .{ .signer_selectors = &.{"builder"} },
+        .execute_payload,
+    );
+    defer result.deinit(allocator);
+
+    switch (result) {
+        .artifact => |payload| {
+            defer allocator.free(payload);
+            try testing.expect(std.mem.indexOf(u8, payload, "0xbuilder") != null);
+            try testing.expect(std.mem.indexOf(u8, payload, "sig-builder") != null);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "buildDslBuilderArtifactFromDefaultKeystore builds raw artifacts immediately" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const keystore_path = try std.fmt.allocPrint(allocator, "tmp_client_dsl_raw_artifact_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(keystore_path);
+
+    const old_override = keystore.test_keystore_path_override;
+    keystore.test_keystore_path_override = keystore_path;
+    defer keystore.test_keystore_path_override = old_override;
+
+    var file = try std.fs.cwd().createFile(keystore_path, .{ .truncate = true });
+    defer file.close();
+    defer _ = std.fs.cwd().deleteFile(keystore_path) catch {};
+    try file.writeAll("[{\"alias\":\"builder\",\"privateKey\":\"sig-builder\",\"address\":\"0xbuilder\"}]");
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+
+    var builder = tx_request_builder.ProgrammaticDslBuilder.init(allocator);
+    defer builder.deinit();
+    _ = try builder.appendTransferObjectsAndGetValueFromValues(
+        &.{.{ .object_id = "0xcoin" }},
+        .{ .address = "0xreceiver" },
+    );
+
+    const payload = try client_instance.buildDslBuilderArtifactFromDefaultKeystore(
+        allocator,
+        &builder,
+        .{ .signer_selectors = &.{"builder"} },
+        .execute_payload,
+    );
+    defer allocator.free(payload);
+
+    try testing.expect(std.mem.indexOf(u8, payload, "0xbuilder") != null);
+    try testing.expect(std.mem.indexOf(u8, payload, "sig-builder") != null);
+}
+
+test "SelectedArgumentDslBuilder executeOrChallengePromptAndConfirmFromDefaultKeystore works with selected arguments" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const keystore_path = try std.fmt.allocPrint(allocator, "tmp_client_selected_execute_prompt_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(keystore_path);
+
+    const old_override = keystore.test_keystore_path_override;
+    keystore.test_keystore_path_override = keystore_path;
+    defer keystore.test_keystore_path_override = old_override;
+
+    var file = try std.fs.cwd().createFile(keystore_path, .{ .truncate = true });
+    defer file.close();
+    defer _ = std.fs.cwd().deleteFile(keystore_path) catch {};
+    try file.writeAll("[{\"alias\":\"builder\",\"privateKey\":\"sig-builder\",\"address\":\"0xbuilder\"}]");
+
+    var request_count: usize = 0;
+
+    const rpc_callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const count = @as(*usize, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "suix_getOwnedObjects")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xselected-prompt-default\",\"type\":\"0x2::example::Thing\",\"owner\":{\"AddressOwner\":\"0xbuilder\"}}}],\"hasNextPage\":false}}",
+                );
+            }
+            count.* += 1;
+            if (std.mem.eql(u8, req.method, "sui_executeTransactionBlock")) {
+                return alloc.dupe(u8, "{\"result\":{\"digest\":\"selected-prompt-default\"}}");
+            }
+            if (std.mem.eql(u8, req.method, "sui_getTransactionBlock")) {
+                return alloc.dupe(u8, "{\"result\":{\"digest\":\"selected-prompt-default\"}}");
+            }
+            return alloc.dupe(u8, "{\"error\":{\"code\":-32603,\"message\":\"unexpected\"}}");
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &request_count,
+        .callback = rpc_callback,
+    };
+
+    var builder = SelectedArgumentDslBuilder.init(&client_instance, allocator);
+    defer builder.deinit();
+
+    try builder.appendMoveCallFromSelectedArguments(
+        "0x2",
+        "example",
+        "act",
+        &.{},
+        &.{
+            .{ .owned_object_struct_type = .{ .owner = "0xbuilder", .struct_type = "0x2::example::Thing" } },
+        },
+    );
+
+    var result = try builder.executeOrChallengePromptAndConfirmFromDefaultKeystore(
+        .{ .signer_selectors = &.{"builder"} },
+        100,
+        0,
+    );
+    defer result.deinit(allocator);
+
+    switch (result) {
+        .executed => |response| try testing.expectEqualStrings("{\"result\":{\"digest\":\"selected-prompt-default\"}}", response),
+        else => return error.TestUnexpectedResult,
+    }
+    try testing.expectEqual(@as(usize, 2), request_count);
+}
+
+test "SelectedArgumentDslBuilder inspectFromDefaultKeystore works with selected arguments" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const keystore_path = try std.fmt.allocPrint(allocator, "tmp_client_selected_raw_inspect_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(keystore_path);
+
+    const old_override = keystore.test_keystore_path_override;
+    keystore.test_keystore_path_override = keystore_path;
+    defer keystore.test_keystore_path_override = old_override;
+
+    var file = try std.fs.cwd().createFile(keystore_path, .{ .truncate = true });
+    defer file.close();
+    defer _ = std.fs.cwd().deleteFile(keystore_path) catch {};
+    try file.writeAll("[{\"alias\":\"builder\",\"privateKey\":\"sig-builder\",\"address\":\"0xbuilder\"}]");
+
+    const rpc_callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            if (std.mem.eql(u8, req.method, "suix_getOwnedObjects")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xselected-raw-inspect\",\"type\":\"0x2::example::Thing\",\"owner\":{\"AddressOwner\":\"0xbuilder\"}}}],\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_devInspectTransactionBlock")) {
+                return alloc.dupe(u8, "{\"result\":{\"inspected\":true}}");
+            }
+            return alloc.dupe(u8, "{\"error\":{\"code\":-32603,\"message\":\"unexpected\"}}");
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = rpc_callback,
+    };
+
+    var builder = SelectedArgumentDslBuilder.init(&client_instance, allocator);
+    defer builder.deinit();
+    try builder.appendMoveCallFromSelectedArguments(
+        "0x2",
+        "example",
+        "act",
+        &.{},
+        &.{
+            .{ .owned_object_struct_type = .{ .owner = "0xbuilder", .struct_type = "0x2::example::Thing" } },
+        },
+    );
+
+    const response = try builder.inspectFromDefaultKeystore(.{ .signer_selectors = &.{"builder"} });
+    defer allocator.free(response);
+
+    try testing.expectEqualStrings("{\"result\":{\"inspected\":true}}", response);
+}
+
+test "SelectedArgumentDslBuilder executeFromDefaultKeystore works with selected arguments" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const keystore_path = try std.fmt.allocPrint(allocator, "tmp_client_selected_raw_execute_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(keystore_path);
+
+    const old_override = keystore.test_keystore_path_override;
+    keystore.test_keystore_path_override = keystore_path;
+    defer keystore.test_keystore_path_override = old_override;
+
+    var file = try std.fs.cwd().createFile(keystore_path, .{ .truncate = true });
+    defer file.close();
+    defer _ = std.fs.cwd().deleteFile(keystore_path) catch {};
+    try file.writeAll("[{\"alias\":\"builder\",\"privateKey\":\"sig-builder\",\"address\":\"0xbuilder\"}]");
+
+    const rpc_callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            if (std.mem.eql(u8, req.method, "suix_getOwnedObjects")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xselected-raw-execute\",\"type\":\"0x2::example::Thing\",\"owner\":{\"AddressOwner\":\"0xbuilder\"}}}],\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_executeTransactionBlock")) {
+                return alloc.dupe(u8, "{\"result\":{\"digest\":\"selected-raw-execute\"}}");
+            }
+            return alloc.dupe(u8, "{\"error\":{\"code\":-32603,\"message\":\"unexpected\"}}");
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = rpc_callback,
+    };
+
+    var builder = SelectedArgumentDslBuilder.init(&client_instance, allocator);
+    defer builder.deinit();
+    try builder.appendMoveCallFromSelectedArguments(
+        "0x2",
+        "example",
+        "act",
+        &.{},
+        &.{
+            .{ .owned_object_struct_type = .{ .owner = "0xbuilder", .struct_type = "0x2::example::Thing" } },
+        },
+    );
+
+    const response = try builder.executeFromDefaultKeystore(.{ .signer_selectors = &.{"builder"} });
+    defer allocator.free(response);
+
+    try testing.expectEqualStrings("{\"result\":{\"digest\":\"selected-raw-execute\"}}", response);
+}
+
+test "SelectedArgumentDslBuilder executeAndConfirmFromDefaultKeystore works with selected arguments" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const keystore_path = try std.fmt.allocPrint(allocator, "tmp_client_selected_raw_confirm_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(keystore_path);
+
+    const old_override = keystore.test_keystore_path_override;
+    keystore.test_keystore_path_override = keystore_path;
+    defer keystore.test_keystore_path_override = old_override;
+
+    var file = try std.fs.cwd().createFile(keystore_path, .{ .truncate = true });
+    defer file.close();
+    defer _ = std.fs.cwd().deleteFile(keystore_path) catch {};
+    try file.writeAll("[{\"alias\":\"builder\",\"privateKey\":\"sig-builder\",\"address\":\"0xbuilder\"}]");
+
+    var request_count: usize = 0;
+
+    const rpc_callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const count = @as(*usize, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "suix_getOwnedObjects")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xselected-raw-confirm\",\"type\":\"0x2::example::Thing\",\"owner\":{\"AddressOwner\":\"0xbuilder\"}}}],\"hasNextPage\":false}}",
+                );
+            }
+            count.* += 1;
+            if (std.mem.eql(u8, req.method, "sui_executeTransactionBlock")) {
+                return alloc.dupe(u8, "{\"result\":{\"digest\":\"selected-raw-confirm\"}}");
+            }
+            if (std.mem.eql(u8, req.method, "sui_getTransactionBlock")) {
+                return alloc.dupe(u8, "{\"result\":{\"digest\":\"selected-raw-confirm\"}}");
+            }
+            return alloc.dupe(u8, "{\"error\":{\"code\":-32603,\"message\":\"unexpected\"}}");
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &request_count,
+        .callback = rpc_callback,
+    };
+
+    var builder = SelectedArgumentDslBuilder.init(&client_instance, allocator);
+    defer builder.deinit();
+    try builder.appendMoveCallFromSelectedArguments(
+        "0x2",
+        "example",
+        "act",
+        &.{},
+        &.{
+            .{ .owned_object_struct_type = .{ .owner = "0xbuilder", .struct_type = "0x2::example::Thing" } },
+        },
+    );
+
+    const response = try builder.executeAndConfirmFromDefaultKeystore(.{ .signer_selectors = &.{"builder"} }, 100, 0);
+    defer allocator.free(response);
+
+    try testing.expectEqualStrings("{\"result\":{\"digest\":\"selected-raw-confirm\"}}", response);
+    try testing.expectEqual(@as(usize, 2), request_count);
+}
+
+test "selectOwnedObjectByModule uses typed move-module filters" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            try testing.expectEqualStrings("suix_getOwnedObjects", req.method);
+            try testing.expectEqualStrings(
+                "[\"0xowner\",{\"filter\":{\"MoveModule\":{\"package\":\"0x2\",\"module\":\"coin\"}}},null,null]",
+                req.params_json,
+            );
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xmodule-object\",\"type\":\"0x2::coin::TreasuryCap<0x2::sui::SUI>\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    const selection = try client_instance.selectOwnedObjectByModule(allocator, "0xowner", "0x2", "coin");
+    defer if (selection) |entry| entry.deinit(allocator);
+
+    try testing.expect(selection != null);
+    try testing.expectEqualStrings("0xmodule-object", selection.?.object_id.?);
+}
+
+test "runReadQueryAction dispatches raw transaction-status queries" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            try testing.expectEqualStrings("sui_getTransactionBlock", req.method);
+            try testing.expectEqualStrings("[\"0xdigest\"]", req.params_json);
+            return alloc.dupe(u8, "{\"result\":{\"digest\":\"0xdigest\"}}");
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var result = try client_instance.runReadQueryAction(
+        allocator,
+        .{ .transaction_status = .{ .digest = "0xdigest" } },
+        .raw,
+    );
+    defer result.deinit(allocator);
+
+    try testing.expectEqualStrings("{\"result\":{\"digest\":\"0xdigest\"}}", result.raw);
+}
+
+test "runReadQueryAction dispatches raw coin queries" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            try testing.expectEqualStrings("suix_getCoins", req.method);
+            try testing.expectEqualStrings("[\"0xowner\",\"0x2::sui::SUI\",\"cursor-1\",25]", req.params_json);
+            return alloc.dupe(u8, "{\"result\":{\"data\":[{\"coinObjectId\":\"0xcoin\"}],\"hasNextPage\":false}}");
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var result = try client_instance.runReadQueryAction(
+        allocator,
+        .{
+            .coins = .{
+                .page = .{
+                    .owner = "0xowner",
+                    .request = .{
+                        .coin_type = "0x2::sui::SUI",
+                        .cursor = "cursor-1",
+                        .limit = 25,
+                    },
+                },
+            },
+        },
+        .raw,
+    );
+    defer result.deinit(allocator);
+
+    try testing.expect(std.mem.indexOf(u8, result.raw, "\"0xcoin\"") != null);
+}
+
+test "runReadQueryAction dispatches summarized resource discovery queries" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var request_count: usize = 0;
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const count = @as(*usize, @ptrCast(@alignCast(context)));
+            count.* += 1;
+            if (count.* == 1) {
+                try testing.expectEqualStrings("suix_getCoins", req.method);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xcoin\",\"balance\":\"9\"}],\"hasNextPage\":false}}",
+                );
+            }
+            try testing.expectEqualStrings("suix_getOwnedObjects", req.method);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xobject\",\"type\":\"0x2::example::Thing\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &request_count,
+        .callback = callback,
+    };
+
+    var result = try client_instance.runReadQueryAction(
+        allocator,
+        .{
+            .resources = .{
+                .coins = .{
+                    .page = .{
+                        .owner = "0xowner",
+                        .request = .{},
+                    },
+                },
+                .owned_objects = .{
+                    .page = .{
+                        .owner = "0xowner",
+                        .request = .{},
+                    },
+                },
+            },
+        },
+        .summarize,
+    );
+    defer result.deinit(allocator);
+
+    try testing.expectEqual(@as(usize, 2), request_count);
+    try testing.expect(result.summarized.resources.coins != null);
+    try testing.expect(result.summarized.resources.owned_objects != null);
+    try testing.expectEqualStrings("0xcoin", result.summarized.resources.coins.?.entries[0].coin_object_id.?);
+    try testing.expectEqualStrings("0xobject", result.summarized.resources.owned_objects.?.entries[0].object_id.?);
+}
+
+test "runReadQueryAction dispatches raw owned-object queries" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            try testing.expectEqualStrings("suix_getOwnedObjects", req.method);
+            try testing.expectEqualStrings("[\"0xowner\",null,\"cursor-1\",25]", req.params_json);
+            return alloc.dupe(u8, "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xobject\"}}],\"hasNextPage\":false}}");
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var result = try client_instance.runReadQueryAction(
+        allocator,
+        .{
+            .owned_objects = .{
+                .page = .{
+                    .owner = "0xowner",
+                    .request = .{
+                        .cursor = "cursor-1",
+                        .limit = 25,
+                    },
+                },
+            },
+        },
+        .raw,
+    );
+    defer result.deinit(allocator);
+
+    try testing.expect(std.mem.indexOf(u8, result.raw, "\"0xobject\"") != null);
+}
+
+test "runReadQueryAction dispatches summarized account-list queries" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const keystore_path = try std.fmt.allocPrint(allocator, "tmp_client_read_query_accounts_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(keystore_path);
+
+    const old_override = keystore.test_keystore_path_override;
+    keystore.test_keystore_path_override = keystore_path;
+    defer keystore.test_keystore_path_override = old_override;
+
+    var file = try std.fs.cwd().createFile(keystore_path, .{ .truncate = true });
+    defer file.close();
+    defer _ = std.fs.cwd().deleteFile(keystore_path) catch {};
+    try file.writeAll("[\"sk_raw\",{\"alias\":\"main\",\"privateKey\":\"sk_obj\",\"address\":\"0x123\"}]");
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+
+    var result = try client_instance.runReadQueryAction(
+        allocator,
+        .{ .account = .list },
+        .summarize,
+    );
+    defer result.deinit(allocator);
+
+    try testing.expectEqual(@as(usize, 2), result.summarized.account.list.accounts.len);
+    try testing.expectEqualStrings("sk_raw", result.summarized.account.list.accounts[0].selector.?);
+    try testing.expectEqualStrings("main", result.summarized.account.list.accounts[1].alias.?);
+}
+
+test "runReadQueryAction dispatches raw account-list queries" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const keystore_path = try std.fmt.allocPrint(allocator, "tmp_client_read_query_accounts_raw_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(keystore_path);
+
+    const old_override = keystore.test_keystore_path_override;
+    keystore.test_keystore_path_override = keystore_path;
+    defer keystore.test_keystore_path_override = old_override;
+
+    var file = try std.fs.cwd().createFile(keystore_path, .{ .truncate = true });
+    defer file.close();
+    defer _ = std.fs.cwd().deleteFile(keystore_path) catch {};
+    try file.writeAll("[{\"alias\":\"main\",\"privateKey\":\"sk_obj\",\"address\":\"0x123\"}]");
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+
+    var result = try client_instance.runReadQueryAction(
+        allocator,
+        .{ .account = .list },
+        .raw,
+    );
+    defer result.deinit(allocator);
+
+    try testing.expectEqualStrings(
+        "{\"accounts\":[{\"index\":0,\"selector\":\"sk_obj\",\"alias\":\"main\",\"address\":\"0x123\"}]}",
+        result.raw,
+    );
+}
+
+test "runReadQueryAction rejects observed account queries" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+
+    try testing.expectError(
+        error.UnsupportedQueryAction,
+        client_instance.runReadQueryAction(
+            allocator,
+            .{ .account = .list },
+            .observe,
+        ),
+    );
+}
+
+test "runReadQueryAction dispatches summarized transaction-status queries" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            try testing.expectEqualStrings("sui_getTransactionBlock", req.method);
+            try testing.expectEqualStrings("[\"0xdigest\"]", req.params_json);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"digest\":\"0xdigest\",\"effects\":{\"status\":{\"status\":\"success\"},\"gasUsed\":{\"computationCost\":\"11\",\"storageCost\":\"3\",\"storageRebate\":\"1\",\"nonRefundableStorageFee\":\"2\"}},\"balanceChanges\":[{\"owner\":{\"AddressOwner\":\"0xowner\"},\"coinType\":\"0x2::sui::SUI\",\"amount\":\"-15\"}]}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var result = try client_instance.runReadQueryAction(
+        allocator,
+        .{ .transaction_status = .{ .digest = "0xdigest" } },
+        .summarize,
+    );
+    defer result.deinit(allocator);
+
+    try testing.expectEqual(tx_result.ExecutionStatus.success, result.summarized.transaction.status);
+    try testing.expectEqual(@as(usize, 1), result.summarized.transaction.balance_changes.len);
+}
+
+test "runReadQueryAction dispatches observed transaction-status queries" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            try testing.expectEqualStrings("sui_getTransactionBlock", req.method);
+            try testing.expectEqualStrings("[\"0xdigest\"]", req.params_json);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"digest\":\"0xdigest\",\"effects\":{\"status\":{\"status\":\"success\"},\"gasUsed\":{\"computationCost\":\"11\",\"storageCost\":\"3\",\"storageRebate\":\"1\",\"nonRefundableStorageFee\":\"2\"}},\"balanceChanges\":[{\"owner\":{\"AddressOwner\":\"0xowner\"},\"coinType\":\"0x2::sui::SUI\",\"amount\":\"-15\"}]}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var result = try client_instance.runReadQueryAction(
+        allocator,
+        .{ .transaction_status = .{ .digest = "0xdigest" } },
+        .observe,
+    );
+    defer result.deinit(allocator);
+
+    try testing.expectEqualStrings("0xdigest", result.observed.digest);
+    try testing.expectEqual(tx_result.ExecutionStatus.success, result.observed.insights.status);
+}
+
+test "runReadQueryAction dispatches summarized transaction-confirm queries" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var request_count: usize = 0;
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const count = @as(*usize, @ptrCast(@alignCast(context)));
+            count.* += 1;
+            try testing.expectEqualStrings("sui_getTransactionBlock", req.method);
+            try testing.expectEqualStrings("[\"0xconfirm\",{\"showEffects\":true,\"showBalanceChanges\":true}]", req.params_json);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"digest\":\"0xconfirm\",\"effects\":{\"status\":{\"status\":\"success\"},\"gasUsed\":{\"computationCost\":\"5\",\"storageCost\":\"2\",\"storageRebate\":\"1\",\"nonRefundableStorageFee\":\"1\"}},\"balanceChanges\":[{\"owner\":{\"AddressOwner\":\"0xowner\"},\"coinType\":\"0x2::sui::SUI\",\"amount\":\"-7\"}]}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &request_count,
+        .callback = callback,
+    };
+
+    var result = try client_instance.runReadQueryAction(
+        allocator,
+        .{
+            .transaction_confirm = .{
+                .digest = "0xconfirm",
+                .timeout_ms = 1,
+                .poll_ms = 0,
+            },
+        },
+        .summarize,
+    );
+    defer result.deinit(allocator);
+
+    try testing.expectEqual(@as(usize, 1), request_count);
+    try testing.expectEqual(tx_result.ExecutionStatus.success, result.summarized.transaction.status);
+    try testing.expectEqual(@as(usize, 1), result.summarized.transaction.balance_changes.len);
+}
+
+test "getAllDynamicFields returns empty first pages without extra requests" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var request_count: usize = 0;
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const count = @as(*usize, @ptrCast(@alignCast(context)));
+            count.* += 1;
+            try testing.expectEqualStrings("suix_getDynamicFields", req.method);
+            try testing.expectEqualStrings("[\"0xparent\",null,5]", req.params_json);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[],\"nextCursor\":null,\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &request_count,
+        .callback = callback,
+    };
+
+    var page = try client_instance.getAllDynamicFields(allocator, "0xparent", 5);
+    defer page.deinit(allocator);
+
+    try testing.expectEqual(@as(usize, 1), request_count);
+    try testing.expectEqual(@as(usize, 0), page.entries.len);
+    try testing.expect(!page.has_next_page);
+}
+
+test "getAllDynamicFields aborts on second-page rpc errors" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var request_count: usize = 0;
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const count = @as(*usize, @ptrCast(@alignCast(context)));
+            count.* += 1;
+
+            if (count.* == 1) {
+                try testing.expectEqualStrings("suix_getDynamicFields", req.method);
+                try testing.expectEqualStrings("[\"0xparent\",null,1]", req.params_json);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"name\":{\"type\":\"address\",\"value\":\"0xowner-1\"},\"type\":\"DynamicField\",\"objectType\":\"0x2::example::Field\",\"objectId\":\"0xchild-1\",\"version\":\"1\",\"digest\":\"digest-1\"}],\"nextCursor\":\"cursor-1\",\"hasNextPage\":true}}",
+                );
+            }
+
+            return alloc.dupe(
+                u8,
+                "{\"error\":{\"code\":-32000,\"message\":\"temporary failure\"}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &request_count,
+        .callback = callback,
+    };
+
+    try testing.expectError(
+        error.RpcError,
+        client_instance.getAllDynamicFields(allocator, "0xparent", 1),
+    );
+    try testing.expectEqual(@as(usize, 2), request_count);
 }
 
 test "call stores rpc error details when rpc returns error object" {
@@ -3352,6 +19386,14 @@ test "authorizePlanOrChallengePrompt returns structured prompt without authoriza
         },
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "elapsedExceedsTimeout handles unbounded confirmation timeouts" {
+    const testing = std.testing;
+
+    try testing.expect(!SuiRpcClient.elapsedExceedsTimeout(5_000, std.math.maxInt(u64)));
+    try testing.expect(!SuiRpcClient.elapsedExceedsTimeout(5, 10));
+    try testing.expect(SuiRpcClient.elapsedExceedsTimeout(11, 10));
 }
 
 test "buildPlanArtifactOrChallengePrompt returns structured prompt without artifact generation" {
@@ -6691,6 +22733,163 @@ test "executeOptionsAndConfirmWithAccountProvider waits for confirmed transactio
     try testing.expect(std.mem.indexOf(u8, execute_params.?, "sig-opt") != null);
 }
 
+test "executeOptionsAndConfirmAndSummarizeWithAccountProvider extracts D4-style execution insights" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var execute_seen = false;
+    var confirm_seen = false;
+
+    const MockContext = struct {
+        execute_seen: *bool,
+        confirm_seen: *bool,
+    };
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            _ = req.id;
+            _ = req.params_json;
+            _ = req.request_body;
+
+            const ctx = @as(*MockContext, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "sui_executeTransactionBlock")) {
+                ctx.execute_seen.* = true;
+                return alloc.dupe(u8, "{\"result\":{\"digest\":\"0xopt-summary\"}}");
+            }
+            if (std.mem.eql(u8, req.method, "sui_getTransactionBlock")) {
+                ctx.confirm_seen.* = true;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"digest\":\"0xopt-summary\",\"effects\":{\"status\":{\"status\":\"success\"},\"gasUsed\":{\"computationCost\":\"1000\",\"storageCost\":\"200\",\"storageRebate\":\"50\",\"nonRefundableStorageFee\":\"1\"}},\"balanceChanges\":[{\"owner\":{\"AddressOwner\":\"0xopt-sender\"},\"coinType\":\"0x2::sui::SUI\",\"amount\":\"-1151\"}]}}",
+                );
+            }
+            return alloc.dupe(u8, "{\"error\":{\"code\":-32603,\"message\":\"unexpected\"}}");
+        }
+    }.call;
+
+    var ctx = MockContext{
+        .execute_seen = &execute_seen,
+        .confirm_seen = &confirm_seen,
+    };
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &ctx,
+        .callback = callback,
+    };
+
+    var insights = try client_instance.executeOptionsAndConfirmAndSummarizeWithAccountProvider(
+        allocator,
+        .{
+            .source = .{
+                .command_items = &.{
+                    "{\"kind\":\"TransferObjects\",\"objects\":[\"0xcoin\"],\"address\":\"0xreceiver\"}",
+                },
+            },
+        },
+        .{
+            .direct_signatures = .{
+                .sender = "0xopt-sender",
+                .signatures = &.{"sig-opt"},
+            },
+        },
+        5_000,
+        1,
+    );
+    defer insights.deinit(allocator);
+
+    try testing.expect(execute_seen);
+    try testing.expect(confirm_seen);
+    try testing.expectEqual(tx_result.ExecutionStatus.success, insights.status);
+    try testing.expectEqual(@as(?u64, 1000), insights.gas_summary.computation_cost);
+    try testing.expectEqual(@as(?i128, 1151), @abs(insights.gas_summary.netGasSpent().?));
+    try testing.expectEqual(@as(usize, 1), insights.balance_changes.len);
+    try testing.expectEqualStrings("0xopt-sender", insights.balance_changes[0].owner.?);
+    try testing.expectEqual(@as(?i128, -1151), insights.balance_changes[0].amount);
+}
+
+test "runPlan supports execute confirm summarize actions" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var execute_seen = false;
+    var confirm_seen = false;
+
+    const MockContext = struct {
+        execute_seen: *bool,
+        confirm_seen: *bool,
+    };
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            _ = req.id;
+            _ = req.params_json;
+            _ = req.request_body;
+
+            const ctx = @as(*MockContext, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "sui_executeTransactionBlock")) {
+                ctx.execute_seen.* = true;
+                return alloc.dupe(u8, "{\"result\":{\"digest\":\"0xrun-summary\"}}");
+            }
+            if (std.mem.eql(u8, req.method, "sui_getTransactionBlock")) {
+                ctx.confirm_seen.* = true;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"digest\":\"0xrun-summary\",\"effects\":{\"status\":{\"status\":\"success\"},\"gasUsed\":{\"computationCost\":\"15\",\"storageCost\":\"5\",\"storageRebate\":\"2\"}},\"balanceChanges\":[{\"owner\":{\"AddressOwner\":\"0xrun\"},\"coinType\":\"0x2::sui::SUI\",\"amount\":\"-18\"}]}}",
+                );
+            }
+            return alloc.dupe(u8, "{\"error\":{\"code\":-32603,\"message\":\"unexpected\"}}");
+        }
+    }.call;
+
+    var ctx = MockContext{
+        .execute_seen = &execute_seen,
+        .confirm_seen = &confirm_seen,
+    };
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &ctx,
+        .callback = callback,
+    };
+
+    var result = try client_instance.runPlan(
+        allocator,
+        tx_request_builder.authorizationPlan(.{
+            .source = .{
+                .command_items = &.{
+                    "{\"kind\":\"TransferObjects\",\"objects\":[\"0xcoin\"],\"address\":\"0xreceiver\"}",
+                },
+            },
+        }, .{
+            .direct_signatures = .{
+                .sender = "0xrun",
+                .signatures = &.{"sig-run"},
+            },
+        }),
+        .{ .execute_confirm_summarize = .{ .timeout_ms = 5_000, .poll_ms = 1 } },
+    );
+    defer result.deinit(allocator);
+
+    try testing.expect(execute_seen);
+    try testing.expect(confirm_seen);
+    switch (result) {
+        .summarized => |insights| {
+            try testing.expectEqual(tx_result.ExecutionStatus.success, insights.status);
+            try testing.expectEqual(@as(?u64, 15), insights.gas_summary.computation_cost);
+            try testing.expectEqualStrings("0xrun", insights.balance_changes[0].owner.?);
+            try testing.expectEqual(@as(?i128, -18), insights.balance_changes[0].amount);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
 test "executeCommandsAndConfirmWithAccountProvider forces confirmation" {
     const testing = std.testing;
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -7766,4 +23965,1141 @@ test "executeCommandsAndConfirmFromDefaultKeystore waits with signer-backed payl
     try testing.expectEqualStrings("0xbuilder", tx_block.value.object.get("sender").?.string);
     try testing.expectEqualStrings("sig-builder", payload.value.array.items[1].array.items[0].string);
     try testing.expectEqualStrings("{\"result\":{\"digest\":\"0xabc\"}}", response);
+}
+
+test "executeCommandsAndConfirmAndSummarizeFromDefaultKeystore extracts signer-backed execution insights" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const keystore_path = try std.fmt.allocPrint(allocator, "tmp_client_keystore_exec_cmd_summary_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(keystore_path);
+
+    const old_override = keystore.test_keystore_path_override;
+    keystore.test_keystore_path_override = keystore_path;
+    defer keystore.test_keystore_path_override = old_override;
+
+    var file = try std.fs.cwd().createFile(keystore_path, .{ .truncate = true });
+    defer file.close();
+    defer _ = std.fs.cwd().deleteFile(keystore_path) catch {};
+    try file.writeAll("[{\"alias\":\"builder\",\"privateKey\":\"sig-builder\",\"address\":\"0xbuilder\"}]");
+
+    var execute_seen = false;
+    var confirm_seen = false;
+
+    const MockContext = struct {
+        execute_seen: *bool,
+        confirm_seen: *bool,
+    };
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            _ = req.id;
+            _ = req.params_json;
+            _ = req.request_body;
+
+            const ctx = @as(*MockContext, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "sui_executeTransactionBlock")) {
+                ctx.execute_seen.* = true;
+                return alloc.dupe(u8, "{\"result\":{\"digest\":\"0xcmd-summary\"}}");
+            }
+            if (std.mem.eql(u8, req.method, "sui_getTransactionBlock")) {
+                ctx.confirm_seen.* = true;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"digest\":\"0xcmd-summary\",\"effects\":{\"status\":{\"status\":\"success\"},\"gasUsed\":{\"computationCost\":\"9\",\"storageCost\":\"2\",\"storageRebate\":\"1\"}},\"balanceChanges\":[{\"owner\":{\"AddressOwner\":\"0xbuilder\"},\"coinType\":\"0x2::sui::SUI\",\"amount\":\"-10\"}]}}",
+                );
+            }
+            return alloc.dupe(u8, "{\"error\":{\"code\":-32603,\"message\":\"unexpected\"}}");
+        }
+    }.call;
+
+    var ctx = MockContext{
+        .execute_seen = &execute_seen,
+        .confirm_seen = &confirm_seen,
+    };
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &ctx,
+        .callback = callback,
+    };
+
+    var insights = try client_instance.executeCommandsAndConfirmAndSummarizeFromDefaultKeystore(
+        allocator,
+        .{
+            .command_items = &.{
+                "{\"kind\":\"TransferObjects\",\"objects\":[\"0xcoin\"],\"address\":\"0xreceiver\"}",
+            },
+        },
+        null,
+        900,
+        5,
+        null,
+        5_000,
+        1,
+        .{ .signer_selectors = &.{"builder"} },
+    );
+    defer insights.deinit(allocator);
+
+    try testing.expect(execute_seen);
+    try testing.expect(confirm_seen);
+    try testing.expectEqual(tx_result.ExecutionStatus.success, insights.status);
+    try testing.expectEqual(@as(?u64, 9), insights.gas_summary.computation_cost);
+    try testing.expectEqual(@as(usize, 1), insights.balance_changes.len);
+    try testing.expectEqualStrings("0xbuilder", insights.balance_changes[0].owner.?);
+    try testing.expectEqual(@as(?i128, -10), insights.balance_changes[0].amount);
+}
+
+
+test "runPlan supports execute summarize actions with default keystore providers" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const keystore_path = try std.fmt.allocPrint(allocator, "tmp_client_keystore_run_summary_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(keystore_path);
+
+    const old_override = keystore.test_keystore_path_override;
+    keystore.test_keystore_path_override = keystore_path;
+    defer keystore.test_keystore_path_override = old_override;
+
+    var file = try std.fs.cwd().createFile(keystore_path, .{ .truncate = true });
+    defer file.close();
+    defer _ = std.fs.cwd().deleteFile(keystore_path) catch {};
+    try file.writeAll("[{\"alias\":\"builder\",\"privateKey\":\"sig-builder\",\"address\":\"0xbuilder\"}]");
+
+    var execute_seen = false;
+
+    const MockContext = struct {
+        execute_seen: *bool,
+    };
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            _ = req.id;
+            _ = req.params_json;
+            _ = req.request_body;
+
+            const ctx = @as(*MockContext, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "sui_executeTransactionBlock")) {
+                ctx.execute_seen.* = true;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"digest\":\"0xrun-keystore\",\"effects\":{\"status\":{\"status\":\"success\"},\"gasUsed\":{\"computationCost\":\"9\",\"storageCost\":\"2\",\"storageRebate\":\"1\"}},\"balanceChanges\":[{\"owner\":{\"AddressOwner\":\"0xbuilder\"},\"coinType\":\"0x2::sui::SUI\",\"amount\":\"-10\"}]}}",
+                );
+            }
+            return alloc.dupe(u8, "{\"error\":{\"code\":-32603,\"message\":\"unexpected\"}}");
+        }
+    }.call;
+
+    var ctx = MockContext{
+        .execute_seen = &execute_seen,
+    };
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &ctx,
+        .callback = callback,
+    };
+
+    var result = try client_instance.runPlan(
+        allocator,
+        tx_request_builder.authorizationPlan(.{
+            .source = .{
+                .command_items = &.{
+                    "{\"kind\":\"TransferObjects\",\"objects\":[\"0xcoin\"],\"address\":\"0xreceiver\"}",
+                },
+            },
+        }, .{
+            .default_keystore = .{
+                .preparation = .{
+                    .signer_selectors = &.{"builder"},
+                },
+            },
+        }),
+        .execute_summarize,
+    );
+    defer result.deinit(allocator);
+
+    try testing.expect(execute_seen);
+    switch (result) {
+        .summarized => |insights| {
+            try testing.expectEqual(tx_result.ExecutionStatus.success, insights.status);
+            try testing.expectEqual(@as(?u64, 9), insights.gas_summary.computation_cost);
+            try testing.expectEqualStrings("0xbuilder", insights.balance_changes[0].owner.?);
+            try testing.expectEqual(@as(?i128, -10), insights.balance_changes[0].amount);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "runPlanOrChallengePrompt returns structured prompts for execute confirm summarize actions" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var saw_request = false;
+
+    const MockContext = struct {
+        saw_request: *bool,
+    };
+
+    const rpc_callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            _ = req.id;
+            _ = req.method;
+            _ = req.params_json;
+            _ = req.request_body;
+            const ctx = @as(*MockContext, @ptrCast(@alignCast(context)));
+            ctx.saw_request.* = true;
+            return alloc.dupe(u8, "{\"error\":{\"code\":-32603,\"message\":\"unexpected\"}}");
+        }
+    }.call;
+
+    var ctx = MockContext{
+        .saw_request = &saw_request,
+    };
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &ctx,
+        .callback = rpc_callback,
+    };
+
+    const plan = client_instance.planCommandsWithAccountProvider(
+        .{
+            .command_items = &.{
+                "{\"kind\":\"TransferObjects\",\"objects\":[\"0xcoin\"],\"address\":\"0xreceiver\"}",
+            },
+        },
+        .{},
+        .{
+            .remote_signer = .{
+                .address = "0xcloud",
+                .authorizer = .{
+                    .context = undefined,
+                    .callback = struct {
+                        fn call(_: *anyopaque, _: std.mem.Allocator, _: tx_request_builder.RemoteAuthorizationRequest) !tx_request_builder.RemoteAuthorizationResult {
+                            return .{};
+                        }
+                    }.call,
+                },
+                .session = .{ .kind = .remote_signer, .session_id = "pending-summary-session" },
+                .session_challenge = .{
+                    .passkey = .{
+                        .rp_id = "wallet.example",
+                        .challenge_b64url = "challenge-summary",
+                    },
+                },
+                .session_action = .execute,
+                .session_supports_execute = false,
+            },
+        },
+    );
+
+    var result = try client_instance.runPlanOrChallengePrompt(
+        allocator,
+        plan,
+        .{ .execute_confirm_summarize = .{ .timeout_ms = 5_000, .poll_ms = 1 } },
+    );
+    defer result.deinit(allocator);
+
+    switch (result) {
+        .challenge_required => |prompt| {
+            try testing.expectEqualStrings("0xcloud", prompt.account_address.?);
+            try testing.expectEqual(tx_request_builder.SessionChallengeAction.execute, prompt.action);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    try testing.expect(!saw_request);
+}
+
+test "runPlanWithChallengeResponse completes execute confirm summarize actions after approval" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var execute_seen = false;
+    var confirm_seen = false;
+    var execute_params: ?[]const u8 = null;
+
+    const MockContext = struct {
+        execute_seen: *bool,
+        confirm_seen: *bool,
+        execute_params: *?[]const u8,
+    };
+
+    const rpc_callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            _ = req.id;
+            _ = req.request_body;
+            const ctx = @as(*MockContext, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "sui_executeTransactionBlock")) {
+                ctx.execute_seen.* = true;
+                ctx.execute_params.* = try alloc.dupe(u8, req.params_json);
+                return alloc.dupe(u8, "{\"result\":{\"digest\":\"summary-approved-confirm\"}}");
+            }
+            if (std.mem.eql(u8, req.method, "sui_getTransactionBlock")) {
+                ctx.confirm_seen.* = true;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"digest\":\"summary-approved-confirm\",\"effects\":{\"status\":{\"status\":\"success\"},\"gasUsed\":{\"computationCost\":\"14\",\"storageCost\":\"4\",\"storageRebate\":\"1\"}},\"balanceChanges\":[{\"owner\":{\"AddressOwner\":\"0xsummary-approved\"},\"coinType\":\"0x2::sui::SUI\",\"amount\":\"-17\"}]}}",
+                );
+            }
+            return alloc.dupe(u8, "{\"error\":{\"code\":-32603,\"message\":\"unexpected\"}}");
+        }
+    }.call;
+
+    var ctx = MockContext{
+        .execute_seen = &execute_seen,
+        .confirm_seen = &confirm_seen,
+        .execute_params = &execute_params,
+    };
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &ctx,
+        .callback = rpc_callback,
+    };
+
+    const authorizer = struct {
+        fn call(_: *anyopaque, _: std.mem.Allocator, req: tx_request_builder.RemoteAuthorizationRequest) !tx_request_builder.RemoteAuthorizationResult {
+            try testing.expectEqualStrings("approved-summary-session", req.account_session.session_id.?);
+            return .{
+                .sender = "0xsummary-approved",
+                .signatures = &.{"sig-summary-approved"},
+                .session = req.account_session,
+            };
+        }
+    }.call;
+
+    const plan = client_instance.planCommandsWithAccountProvider(
+        .{
+            .command_items = &.{
+                "{\"kind\":\"TransferObjects\",\"objects\":[\"0xcoin\"],\"address\":\"0xreceiver\"}",
+            },
+        },
+        .{},
+        .{
+            .remote_signer = .{
+                .address = "0xcloud",
+                .authorizer = .{
+                    .context = undefined,
+                    .callback = authorizer,
+                },
+                .session = .{ .kind = .remote_signer, .session_id = "pending-summary-session" },
+                .session_challenge = .{
+                    .passkey = .{
+                        .rp_id = "wallet.example",
+                        .challenge_b64url = "challenge-summary",
+                    },
+                },
+                .session_action = .execute,
+                .session_supports_execute = false,
+            },
+        },
+    );
+
+    var result = try client_instance.runPlanWithChallengeResponse(
+        allocator,
+        plan,
+        .{
+            .session = .{ .kind = .remote_signer, .session_id = "approved-summary-session" },
+            .supports_execute = true,
+        },
+        .{ .execute_confirm_summarize = .{ .timeout_ms = 5_000, .poll_ms = 1 } },
+    );
+    defer result.deinit(allocator);
+
+    try testing.expect(execute_seen);
+    try testing.expect(confirm_seen);
+    try testing.expect(execute_params != null);
+    defer allocator.free(execute_params.?);
+    try testing.expect(std.mem.indexOf(u8, execute_params.?, "0xsummary-approved") != null);
+    try testing.expect(std.mem.indexOf(u8, execute_params.?, "sig-summary-approved") != null);
+
+    switch (result) {
+        .summarized => |insights| {
+            try testing.expectEqual(tx_result.ExecutionStatus.success, insights.status);
+            try testing.expectEqual(@as(?u64, 14), insights.gas_summary.computation_cost);
+            try testing.expectEqual(@as(?i128, 17), @abs(insights.gas_summary.netGasSpent().?));
+            try testing.expectEqualStrings("0xsummary-approved", insights.balance_changes[0].owner.?);
+            try testing.expectEqual(@as(?i128, -17), insights.balance_changes[0].amount);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "getTransactionBlockAndSummarize builds observed summaries from digests" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            try testing.expectEqualStrings("sui_getTransactionBlock", req.method);
+            try testing.expectEqualStrings("[\"0xobserved\",{\"showEffects\":true,\"showBalanceChanges\":true}]", req.params_json);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"digest\":\"0xobserved\",\"effects\":{\"status\":{\"status\":\"success\"},\"gasUsed\":{\"computationCost\":\"10\",\"storageCost\":\"3\",\"storageRebate\":\"1\"}},\"balanceChanges\":[{\"owner\":{\"AddressOwner\":\"0xowner\"},\"coinType\":\"0x2::sui::SUI\",\"amount\":\"-12\"}]}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var observation = try client_instance.getTransactionBlockAndSummarize(allocator, "0xobserved");
+    defer observation.deinit(allocator);
+
+    try testing.expectEqualStrings("0xobserved", observation.digest);
+    try testing.expect(std.mem.indexOf(u8, observation.confirmed_response, "\"digest\":\"0xobserved\"") != null);
+    try testing.expectEqual(tx_result.ExecutionStatus.success, observation.insights.status);
+    try testing.expectEqual(@as(?u64, 10), observation.insights.gas_summary.computation_cost);
+    try testing.expectEqual(@as(?i128, -12), observation.insights.balance_changes[0].amount);
+    try testing.expectEqualStrings("0xowner", observation.insights.balance_changes[0].owner.?);
+}
+
+test "executeOptionsAndObserveConfirmedWithAccountProvider tracks confirmed execution summaries" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var request_count: usize = 0;
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const count = @as(*usize, @ptrCast(@alignCast(context)));
+            count.* += 1;
+
+            if (count.* == 1) {
+                try testing.expectEqualStrings("sui_executeTransactionBlock", req.method);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"digest\":\"0xexecute-observed\"}}",
+                );
+            }
+
+            try testing.expectEqualStrings("sui_getTransactionBlock", req.method);
+            try testing.expectEqualStrings("[\"0xexecute-observed\",{\"showEffects\":true,\"showBalanceChanges\":true}]", req.params_json);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"digest\":\"0xexecute-observed\",\"effects\":{\"status\":{\"status\":\"success\"},\"gasUsed\":{\"computationCost\":\"7\",\"storageCost\":\"2\",\"storageRebate\":\"1\"}},\"balanceChanges\":[{\"owner\":{\"AddressOwner\":\"0xwatch\"},\"coinType\":\"0x2::sui::SUI\",\"amount\":\"-8\"}]}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &request_count,
+        .callback = callback,
+    };
+
+    var observation = try client_instance.executeOptionsAndObserveConfirmedWithAccountProvider(
+        allocator,
+        .{
+            .source = .{
+                .command_items = &.{
+                    "{\"kind\":\"TransferObjects\",\"objects\":[\"0xcoin\"],\"address\":\"0xreceiver\"}",
+                },
+            },
+        },
+        .{
+            .direct_signatures = .{
+                .sender = "0xwatch",
+                .signatures = &.{"sig-watch"},
+            },
+        },
+        100,
+        0,
+    );
+    defer observation.deinit(allocator);
+
+    try testing.expectEqual(@as(usize, 2), request_count);
+    try testing.expectEqualStrings("0xexecute-observed", observation.digest);
+    try testing.expectEqual(tx_result.ExecutionStatus.success, observation.insights.status);
+    try testing.expectEqual(@as(?u64, 7), observation.insights.gas_summary.computation_cost);
+    try testing.expectEqual(@as(?i128, -8), observation.insights.balance_changes[0].amount);
+    try testing.expectEqualStrings("0xwatch", observation.insights.balance_changes[0].owner.?);
+}
+
+test "runPlan supports execute confirm observe actions" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var request_count: usize = 0;
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const count = @as(*usize, @ptrCast(@alignCast(context)));
+            count.* += 1;
+
+            if (count.* == 1) {
+                try testing.expectEqualStrings("sui_executeTransactionBlock", req.method);
+                return alloc.dupe(u8, "{\"result\":{\"digest\":\"0xobserved-runplan\"}}");
+            }
+
+            try testing.expectEqualStrings("sui_getTransactionBlock", req.method);
+            try testing.expectEqualStrings("[\"0xobserved-runplan\",{\"showEffects\":true,\"showBalanceChanges\":true}]", req.params_json);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"digest\":\"0xobserved-runplan\",\"effects\":{\"status\":{\"status\":\"success\"},\"gasUsed\":{\"computationCost\":\"11\",\"storageCost\":\"3\",\"storageRebate\":\"1\"}},\"balanceChanges\":[{\"owner\":{\"AddressOwner\":\"0xrunner\"},\"coinType\":\"0x2::sui::SUI\",\"amount\":\"-13\"}]}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &request_count,
+        .callback = callback,
+    };
+
+    var result = try client_instance.runPlan(
+        allocator,
+        client_instance.planOptionsWithAccountProvider(.{
+            .source = .{
+                .command_items = &.{
+                    "{\"kind\":\"TransferObjects\",\"objects\":[\"0xcoin\"],\"address\":\"0xreceiver\"}",
+                },
+            },
+        }, .{
+            .direct_signatures = .{
+                .sender = "0xrunner",
+                .signatures = &.{"sig-runner"},
+            },
+        }),
+        .{ .execute_confirm_observe = .{ .timeout_ms = 100, .poll_ms = 0 } },
+    );
+    defer result.deinit(allocator);
+
+    try testing.expectEqual(@as(usize, 2), request_count);
+    switch (result) {
+        .observed => |observation| {
+            try testing.expectEqualStrings("0xobserved-runplan", observation.digest);
+            try testing.expectEqual(tx_result.ExecutionStatus.success, observation.insights.status);
+            try testing.expectEqual(@as(?u64, 11), observation.insights.gas_summary.computation_cost);
+            try testing.expectEqualStrings("0xrunner", observation.insights.balance_changes[0].owner.?);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "runPlanOrChallengePrompt returns prompt for execute confirm observe actions" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+
+    const plan = client_instance.planCommandsWithAccountProvider(
+        .{
+            .command_items = &.{
+                "{\"kind\":\"TransferObjects\",\"objects\":[\"0xcoin\"],\"address\":\"0xreceiver\"}",
+            },
+        },
+        .{},
+        .{
+            .remote_signer = .{
+                .address = "0xcloud-observe",
+                .authorizer = .{
+                    .context = undefined,
+                    .callback = struct {
+                        fn call(_: *anyopaque, _: std.mem.Allocator, _: tx_request_builder.RemoteAuthorizationRequest) !tx_request_builder.RemoteAuthorizationResult {
+                            return .{};
+                        }
+                    }.call,
+                },
+                .session = .{ .kind = .remote_signer, .session_id = "pending-observe-session" },
+                .session_challenge = .{
+                    .passkey = .{
+                        .rp_id = "wallet.example",
+                        .challenge_b64url = "challenge-observe",
+                    },
+                },
+                .session_action = .execute,
+                .session_supports_execute = false,
+            },
+        },
+    );
+
+    var result = try client_instance.runPlanOrChallengePrompt(
+        allocator,
+        plan,
+        .{ .execute_confirm_observe = .{ .timeout_ms = 100, .poll_ms = 0 } },
+    );
+    defer result.deinit(allocator);
+
+    switch (result) {
+        .challenge_required => |prompt| {
+            try testing.expectEqualStrings("0xcloud-observe", prompt.account_address.?);
+            try testing.expectEqual(tx_request_builder.SessionChallengeAction.execute, prompt.action);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "inspectOptionsAndSummarizeWithAccountProvider extracts structured inspect insights" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var saw_request = false;
+
+    const MockContext = struct {
+        saw_request: *bool,
+    };
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const ctx = @as(*MockContext, @ptrCast(@alignCast(context)));
+            ctx.saw_request.* = true;
+            std.debug.assert(std.mem.eql(u8, req.method, "sui_devInspectTransactionBlock"));
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "0xinspect") != null);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"effects\":{\"status\":{\"status\":\"success\"}},\"events\":[{\"type\":\"A\"}],\"results\":[{\"returnValues\":[]},{\"returnValues\":[]}]}}",
+            );
+        }
+    }.call;
+
+    var ctx = MockContext{ .saw_request = &saw_request };
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &ctx,
+        .callback = callback,
+    };
+
+    var insights = try client_instance.inspectOptionsAndSummarizeWithAccountProvider(allocator, .{
+        .source = .{
+            .command_items = &.{
+                "{\"kind\":\"TransferObjects\",\"objects\":[\"0xcoin\"],\"address\":\"0xreceiver\"}",
+            },
+        },
+    }, .{
+        .zklogin = .{
+            .address = "0xinspect",
+            .session = .{ .kind = .zklogin, .session_id = "inspect-session" },
+        },
+    });
+    defer insights.deinit(allocator);
+
+    try testing.expect(saw_request);
+    try testing.expectEqual(inspect_result.InspectStatus.success, insights.status);
+    try testing.expectEqual(@as(usize, 2), insights.results_count);
+    try testing.expectEqual(@as(usize, 1), insights.events_count);
+}
+
+test "inspectDslBuilderAndSummarize extracts structured inspect insights" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            std.debug.assert(std.mem.eql(u8, req.method, "sui_devInspectTransactionBlock"));
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "0xdsl") != null);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"effects\":{\"status\":{\"status\":\"failure\",\"error\":\"move abort\"}},\"events\":[],\"results\":[]}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var builder = tx_request_builder.ProgrammaticDslBuilder.init(allocator);
+    defer builder.deinit();
+    _ = try builder.appendTransferObjectsAndGetValueFromValues(
+        &.{ .{ .object_id = "0xcoin" } },
+        .{ .address = "0xreceiver" },
+    );
+    builder.setSender("0xdsl");
+
+    var insights = try client_instance.inspectDslBuilderAndSummarize(allocator, &builder, .{
+        .direct_signatures = .{
+            .sender = "0xdsl",
+            .signatures = &.{"sig-dsl"},
+        },
+    });
+    defer insights.deinit(allocator);
+
+    try testing.expectEqual(inspect_result.InspectStatus.failure, insights.status);
+    try testing.expectEqualStrings("move abort", insights.error_message.?);
+    try testing.expectEqual(@as(usize, 0), insights.results_count);
+    try testing.expectEqual(@as(usize, 0), insights.events_count);
+}
+
+test "inspectPlanOrChallengePromptAndSummarize returns structured prompt without sending inspect rpc" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var saw_request = false;
+
+    const MockContext = struct {
+        saw_request: *bool,
+    };
+
+    const rpc_callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            _ = req.id;
+            _ = req.method;
+            _ = req.params_json;
+            _ = req.request_body;
+            const ctx = @as(*MockContext, @ptrCast(@alignCast(context)));
+            ctx.saw_request.* = true;
+            return alloc.dupe(u8, "{\"result\":{\"unexpected\":true}}");
+        }
+    }.call;
+
+    var ctx = MockContext{ .saw_request = &saw_request };
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &ctx,
+        .callback = rpc_callback,
+    };
+
+    const plan = client_instance.planCommandsWithAccountProvider(
+        .{
+            .command_items = &.{
+                "{\"kind\":\"TransferObjects\",\"objects\":[\"0xcoin\"],\"address\":\"0xreceiver\"}",
+            },
+        },
+        .{},
+        .{
+            .remote_signer = .{
+                .address = "0xcloud",
+                .authorizer = .{
+                    .context = undefined,
+                    .callback = struct {
+                        fn call(_: *anyopaque, _: std.mem.Allocator, _: tx_request_builder.RemoteAuthorizationRequest) !tx_request_builder.RemoteAuthorizationResult {
+                            return .{};
+                        }
+                    }.call,
+                },
+                .session = .{ .kind = .remote_signer, .session_id = "pending-session" },
+                .session_challenge = .{
+                    .passkey = .{
+                        .rp_id = "wallet.example",
+                        .challenge_b64url = "challenge-xyz",
+                    },
+                },
+                .session_action = .inspect,
+                .session_supports_execute = false,
+            },
+        },
+    );
+
+    var result = try client_instance.inspectPlanOrChallengePromptAndSummarize(allocator, plan);
+    defer result.deinit(allocator);
+
+    switch (result) {
+        .challenge_required => |prompt| {
+            try testing.expectEqual(tx_request_builder.SessionChallengeAction.inspect, prompt.action);
+            try testing.expectEqualStrings("0xcloud", prompt.account_address.?);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    try testing.expect(!saw_request);
+}
+
+test "inspectPlanWithChallengeResponseAndSummarize applies challenge response before summarized inspect" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const rpc_callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            std.debug.assert(std.mem.eql(u8, req.method, "sui_devInspectTransactionBlock"));
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "0xapproved") != null);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"effects\":{\"status\":{\"status\":\"failure\",\"error\":\"move abort\"}},\"results\":[{\"returnValues\":[]}],\"events\":[]}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = rpc_callback,
+    };
+
+    const authorizer = struct {
+        fn call(_: *anyopaque, _: std.mem.Allocator, req: tx_request_builder.RemoteAuthorizationRequest) !tx_request_builder.RemoteAuthorizationResult {
+            try testing.expectEqualStrings("approved-session", req.account_session.session_id.?);
+            return .{
+                .sender = "0xapproved",
+                .signatures = &.{"sig-approved"},
+                .session = req.account_session,
+            };
+        }
+    }.call;
+
+    const plan = client_instance.planCommandsWithAccountProvider(
+        .{
+            .command_items = &.{
+                "{\"kind\":\"TransferObjects\",\"objects\":[\"0xcoin\"],\"address\":\"0xreceiver\"}",
+            },
+        },
+        .{},
+        .{
+            .remote_signer = .{
+                .address = "0xcloud",
+                .authorizer = .{
+                    .context = undefined,
+                    .callback = authorizer,
+                },
+                .session = .{ .kind = .remote_signer, .session_id = "pending-session" },
+                .session_challenge = .{
+                    .passkey = .{
+                        .rp_id = "wallet.example",
+                        .challenge_b64url = "challenge-xyz",
+                    },
+                },
+                .session_action = .inspect,
+                .session_supports_execute = false,
+            },
+        },
+    );
+
+    var insights = try client_instance.inspectPlanWithChallengeResponseAndSummarize(
+        allocator,
+        plan,
+        .{
+            .session = .{ .kind = .remote_signer, .session_id = "approved-session" },
+            .supports_execute = false,
+        },
+    );
+    defer insights.deinit(allocator);
+
+    try testing.expectEqual(inspect_result.InspectStatus.failure, insights.status);
+    try testing.expectEqualStrings("move abort", insights.error_message.?);
+    try testing.expectEqual(@as(usize, 1), insights.results_count);
+}
+
+test "inspectCommandsAndSummarizeFromDefaultKeystore extracts immediate inspect summaries" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            std.debug.assert(std.mem.eql(u8, req.method, "sui_devInspectTransactionBlock"));
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "0xinspect-default") != null);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"effects\":{\"status\":{\"status\":\"success\"}},\"results\":[{\"returnValues\":[]}],\"events\":[{\"type\":\"A\"}]}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var insights = try client_instance.inspectCommandsAndSummarizeFromDefaultKeystore(
+        allocator,
+        .{
+            .command_items = &.{
+                "{\"kind\":\"TransferObjects\",\"objects\":[\"0xcoin\"],\"address\":\"0xreceiver\"}",
+            },
+        },
+        "0xinspect-default",
+        null,
+        null,
+        null,
+        .{ .selector = null, .keystore_path = null },
+    );
+    defer insights.deinit(allocator);
+
+    try testing.expectEqual(inspect_result.InspectStatus.success, insights.status);
+    try testing.expectEqual(@as(usize, 1), insights.results_count);
+    try testing.expectEqual(@as(usize, 1), insights.events_count);
+}
+
+test "inspectOptionsOrChallengePromptAndSummarizeFromDefaultKeystore completes immediately" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            std.debug.assert(std.mem.eql(u8, req.method, "sui_devInspectTransactionBlock"));
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "0xinspect-default") != null);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"effects\":{\"status\":{\"status\":\"success\"}},\"results\":[{\"returnValues\":[]}],\"events\":[]}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var result = try client_instance.inspectOptionsOrChallengePromptAndSummarizeFromDefaultKeystore(allocator, .{
+        .source = .{
+            .command_items = &.{
+                "{\"kind\":\"TransferObjects\",\"objects\":[\"0xcoin\"],\"address\":\"0xreceiver\"}",
+            },
+        },
+        .sender = "0xinspect-default",
+    }, .{
+        .selector = null,
+        .keystore_path = null,
+    });
+    defer result.deinit(allocator);
+
+    switch (result) {
+        .completed => |completed| switch (completed) {
+            .inspect_summarized => |insights| {
+                try testing.expectEqual(inspect_result.InspectStatus.success, insights.status);
+                try testing.expectEqual(@as(usize, 1), insights.results_count);
+            },
+            else => return error.TestUnexpectedResult,
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "inspectCommandsOrChallengePromptAndSummarizeFromDefaultKeystore completes immediately" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            std.debug.assert(std.mem.eql(u8, req.method, "sui_devInspectTransactionBlock"));
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "0xinspect-default") != null);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"effects\":{\"status\":{\"status\":\"success\"}},\"results\":[{\"returnValues\":[]}],\"events\":[{\"type\":\"A\"}]}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var result = try client_instance.inspectCommandsOrChallengePromptAndSummarizeFromDefaultKeystore(
+        allocator,
+        .{
+            .command_items = &.{
+                "{\"kind\":\"TransferObjects\",\"objects\":[\"0xcoin\"],\"address\":\"0xreceiver\"}",
+            },
+        },
+        .{ .sender = "0xinspect-default" },
+        .{
+            .selector = null,
+            .keystore_path = null,
+        },
+    );
+    defer result.deinit(allocator);
+
+    switch (result) {
+        .completed => |completed| switch (completed) {
+            .inspect_summarized => |insights| {
+                try testing.expectEqual(inspect_result.InspectStatus.success, insights.status);
+                try testing.expectEqual(@as(usize, 1), insights.events_count);
+            },
+            else => return error.TestUnexpectedResult,
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "buildPlanArtifactAndSummarize summarizes execute payload artifacts" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+
+    var summary = try client_instance.buildPlanArtifactAndSummarize(
+        allocator,
+        client_instance.planOptionsWithAccountProvider(.{
+            .source = .{
+                .command_items = &.{
+                    "{\"kind\":\"TransferObjects\",\"objects\":[\"0xcoin\"],\"address\":\"0xreceiver\"}",
+                },
+            },
+            .sender = "0xartifact",
+            .gas_budget = 900,
+            .gas_price = 7,
+            .signatures = &.{"sig-artifact"},
+            .options_json = "{\"showEffects\":true}",
+        }, .{
+            .direct_signatures = .{
+                .sender = "0xartifact",
+                .signatures = &.{"sig-artifact"},
+            },
+        }),
+        .execute_payload,
+    );
+    defer summary.deinit(allocator);
+
+    switch (summary) {
+        .execute_payload => |value| {
+            try testing.expectEqual(artifact_result.ArtifactDataKind.transaction_block, value.data_kind);
+            try testing.expectEqual(@as(usize, 1), value.signature_count);
+            try testing.expectEqualStrings("ProgrammableTransaction", value.tx_kind.?);
+            try testing.expectEqualStrings("0xartifact", value.sender.?);
+            try testing.expectEqual(@as(?u64, 900), value.gas_budget);
+            try testing.expectEqual(@as(?u64, 7), value.gas_price);
+            try testing.expectEqual(@as(usize, 1), value.command_count);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "runPlan supports build artifact summarize actions" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+
+    var result = try client_instance.runPlan(
+        allocator,
+        client_instance.planOptionsWithAccountProvider(.{
+            .source = .{
+                .command_items = &.{
+                    "{\"kind\":\"TransferObjects\",\"objects\":[\"0xcoin\"],\"address\":\"0xreceiver\"}",
+                },
+            },
+            .sender = "0xrunner",
+            .gas_budget = 901,
+            .gas_price = 8,
+        }, .{
+            .direct_signatures = .{
+                .sender = "0xrunner",
+                .signatures = &.{"sig-runner"},
+            },
+        }),
+        .{ .build_artifact_summarize = .transaction_block },
+    );
+    defer result.deinit(allocator);
+
+    switch (result) {
+        .artifact_summarized => |summary| switch (summary) {
+            .transaction_block => |value| {
+                try testing.expectEqualStrings("ProgrammableTransaction", value.kind.?);
+                try testing.expectEqualStrings("0xrunner", value.sender.?);
+                try testing.expectEqual(@as(?u64, 901), value.gas_budget);
+                try testing.expectEqual(@as(?u64, 8), value.gas_price);
+                try testing.expectEqual(@as(usize, 1), value.command_count);
+            },
+            else => return error.TestUnexpectedResult,
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "runPlanOrChallengePrompt returns prompt for build artifact summarize actions" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+
+    var result = try client_instance.runPlanOrChallengePrompt(
+        allocator,
+        client_instance.planCommandsWithAccountProvider(
+            .{
+                .command_items = &.{
+                    "{\"kind\":\"TransferObjects\",\"objects\":[\"0xcoin\"],\"address\":\"0xreceiver\"}",
+                },
+            },
+            .{},
+            .{
+                .remote_signer = .{
+                    .address = "0xcloud",
+                    .authorizer = .{
+                        .context = undefined,
+                        .callback = struct {
+                            fn call(_: *anyopaque, _: std.mem.Allocator, _: tx_request_builder.RemoteAuthorizationRequest) !tx_request_builder.RemoteAuthorizationResult {
+                                return .{};
+                            }
+                        }.call,
+                    },
+                    .session = .{ .kind = .remote_signer, .session_id = "pending-session" },
+                    .session_challenge = .{
+                        .passkey = .{
+                            .rp_id = "wallet.example",
+                            .challenge_b64url = "challenge-xyz",
+                        },
+                    },
+                    .session_action = .execute,
+                    .session_supports_execute = false,
+                },
+            },
+        ),
+        .{ .build_artifact_summarize = .execute_payload },
+    );
+    defer result.deinit(allocator);
+
+    switch (result) {
+        .challenge_required => |prompt| {
+            try testing.expectEqualStrings("0xcloud", prompt.account_address.?);
+            try testing.expectEqual(tx_request_builder.SessionChallengeAction.execute, prompt.action);
+        },
+        else => return error.TestUnexpectedResult,
+    }
 }

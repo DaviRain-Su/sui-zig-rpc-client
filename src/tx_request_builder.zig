@@ -1,6 +1,7 @@
 const std = @import("std");
 const tx_builder = @import("./tx_builder.zig");
 const keystore = @import("./keystore.zig");
+const package_preset = @import("./package_preset.zig");
 
 pub const CommandResultAliases = std.StringHashMapUnmanaged(u16);
 
@@ -163,6 +164,7 @@ pub const ProgrammaticRequestOptions = struct {
     sender: ?[]const u8 = null,
     gas_budget: ?u64 = null,
     gas_price: ?u64 = null,
+    gas_payment_json: ?[]const u8 = null,
     signatures: []const []const u8 = &.{},
     options_json: ?[]const u8 = null,
     wait_for_confirmation: bool = false,
@@ -174,6 +176,7 @@ pub const CommandRequestConfig = struct {
     sender: ?[]const u8 = null,
     gas_budget: ?u64 = null,
     gas_price: ?u64 = null,
+    gas_payment_json: ?[]const u8 = null,
     signatures: []const []const u8 = &.{},
     options_json: ?[]const u8 = null,
     wait_for_confirmation: bool = false,
@@ -280,6 +283,7 @@ pub const RemoteAuthorizationRequest = struct {
     options: ProgrammaticRequestOptions,
     account_address: ?[]const u8 = null,
     account_session: AccountSession = .{},
+    tx_bytes_base64: ?[]const u8 = null,
 };
 
 pub const RemoteAuthorizationResult = struct {
@@ -375,6 +379,7 @@ pub const AuthorizedPreparedRequest = struct {
             self.prepared.request.sender,
             self.prepared.request.gas_budget,
             self.prepared.request.gas_price,
+            self.prepared.request.gas_payment_json,
         );
         return try out.toOwnedSlice(allocator);
     }
@@ -553,6 +558,7 @@ pub const OwnedProgrammaticRequestOptions = struct {
     options: ProgrammaticRequestOptions,
     owned_commands_json: ?[]u8 = null,
     owned_sender: ?[]u8 = null,
+    owned_gas_payment_json: ?[]u8 = null,
     owned_options_json: ?[]u8 = null,
     owned_signatures: std.ArrayListUnmanaged([]const u8) = .{},
 
@@ -561,6 +567,8 @@ pub const OwnedProgrammaticRequestOptions = struct {
         self.owned_commands_json = null;
         if (self.owned_sender) |value| allocator.free(value);
         self.owned_sender = null;
+        if (self.owned_gas_payment_json) |value| allocator.free(value);
+        self.owned_gas_payment_json = null;
         if (self.owned_options_json) |value| allocator.free(value);
         self.owned_options_json = null;
         for (self.owned_signatures.items) |value| allocator.free(value);
@@ -627,6 +635,7 @@ pub fn ownOptions(
             .sender = null,
             .gas_budget = prepared.request.gas_budget,
             .gas_price = prepared.request.gas_price,
+            .gas_payment_json = null,
             .signatures = &.{},
             .options_json = null,
             .wait_for_confirmation = prepared.request.wait_for_confirmation,
@@ -642,6 +651,11 @@ pub fn ownOptions(
     if (prepared.request.sender) |value| {
         owned.owned_sender = try allocator.dupe(u8, value);
         owned.options.sender = owned.owned_sender;
+    }
+
+    if (prepared.request.gas_payment_json) |value| {
+        owned.owned_gas_payment_json = try allocator.dupe(u8, value);
+        owned.options.gas_payment_json = owned.owned_gas_payment_json;
     }
 
     if (prepared.request.options_json) |value| {
@@ -1352,6 +1366,10 @@ fn stringifyJsonValue(
     return try out.toOwnedSlice(allocator);
 }
 
+fn resolvePackageIdAliasOrRaw(raw: []const u8) []const u8 {
+    return package_preset.resolvePackageIdAlias(raw) orelse raw;
+}
+
 fn normalizeRawCommandJson(
     allocator: std.mem.Allocator,
     aliases: ?*const CommandResultAliases,
@@ -1384,6 +1402,7 @@ fn normalizeRawCommandJson(
             const module = entry.object.get("module") orelse return error.InvalidCli;
             const function_name = entry.object.get("function") orelse return error.InvalidCli;
             if (package_id != .string or module != .string or function_name != .string) return error.InvalidCli;
+            const resolved_package_id = resolvePackageIdAliasOrRaw(package_id.string);
 
             var type_args_json: ?[]u8 = null;
             defer if (type_args_json) |value| allocator.free(value);
@@ -1398,7 +1417,7 @@ fn normalizeRawCommandJson(
             }
 
             try builder.appendMoveCall(.{
-                .package_id = package_id.string,
+                .package_id = resolved_package_id,
                 .module = module.string,
                 .function_name = function_name.string,
                 .type_args = if (type_args_json) |value| value else null,
@@ -1487,6 +1506,7 @@ fn normalizeRawCommandJson(
             const package_id = entry.object.get("package") orelse return error.InvalidCli;
             const ticket = entry.object.get("ticket") orelse return error.InvalidCli;
             if (package_id != .string) return error.InvalidCli;
+            const resolved_package_id = resolvePackageIdAliasOrRaw(package_id.string);
 
             const modules_json = try stringifyJsonValue(allocator, modules);
             defer allocator.free(modules_json);
@@ -1497,7 +1517,7 @@ fn normalizeRawCommandJson(
             try builder.appendUpgrade(.{
                 .modules_json = modules_json,
                 .dependencies_json = dependencies_json,
-                .package_id = package_id.string,
+                .package_id = resolved_package_id,
                 .ticket_json = ticket_json,
             });
             continue;
@@ -1843,6 +1863,10 @@ pub const ProgrammaticRequestOptionsBuilder = struct {
         self.config.gas_price = gas_price;
     }
 
+    pub fn setGasPaymentJson(self: *ProgrammaticRequestOptionsBuilder, gas_payment_json: ?[]const u8) void {
+        self.config.gas_payment_json = gas_payment_json;
+    }
+
     pub fn setSignatures(self: *ProgrammaticRequestOptionsBuilder, signatures: []const []const u8) void {
         self.config.signatures = signatures;
     }
@@ -1898,6 +1922,10 @@ pub const ProgrammaticDslBuilder = struct {
 
     pub fn setGasPrice(self: *ProgrammaticDslBuilder, gas_price: ?u64) void {
         self.options_builder.setGasPrice(gas_price);
+    }
+
+    pub fn setGasPaymentJson(self: *ProgrammaticDslBuilder, gas_payment_json: ?[]const u8) void {
+        self.options_builder.setGasPaymentJson(gas_payment_json);
     }
 
     pub fn setSignatures(self: *ProgrammaticDslBuilder, signatures: []const []const u8) void {
@@ -3105,6 +3133,7 @@ pub fn optionsFromCommandSource(
         .sender = config.sender,
         .gas_budget = config.gas_budget,
         .gas_price = config.gas_price,
+        .gas_payment_json = config.gas_payment_json,
         .signatures = config.signatures,
         .options_json = config.options_json,
         .wait_for_confirmation = config.wait_for_confirmation,
@@ -3116,9 +3145,14 @@ pub fn optionsFromCommandSource(
 fn applyDirectSignatures(
     options: ProgrammaticRequestOptions,
     account: DirectSignatureAccount,
-) ProgrammaticRequestOptions {
+) !ProgrammaticRequestOptions {
     var resolved = options;
-    if (account.sender) |sender| resolved.sender = sender;
+    if (account.sender) |sender| {
+        if (resolved.sender) |existing| {
+            if (!std.mem.eql(u8, existing, sender)) return error.InvalidCli;
+        }
+        resolved.sender = sender;
+    }
     if (account.signatures.len != 0) resolved.signatures = account.signatures;
     return resolved;
 }
@@ -3126,9 +3160,14 @@ fn applyDirectSignatures(
 fn applyFutureWalletAddress(
     options: ProgrammaticRequestOptions,
     account: FutureWalletAccount,
-) ProgrammaticRequestOptions {
+) !ProgrammaticRequestOptions {
     var resolved = options;
-    if (account.address) |address| resolved.sender = address;
+    if (account.address) |address| {
+        if (resolved.sender) |existing| {
+            if (!std.mem.eql(u8, existing, address)) return error.InvalidCli;
+        }
+        resolved.sender = address;
+    }
     return resolved;
 }
 
@@ -3136,10 +3175,20 @@ fn applyRemoteAuthorization(
     options: ProgrammaticRequestOptions,
     account_address: ?[]const u8,
     authorization: RemoteAuthorizationResult,
-) ProgrammaticRequestOptions {
+) !ProgrammaticRequestOptions {
     var resolved = options;
-    if (account_address) |address| resolved.sender = address;
-    if (authorization.sender) |sender| resolved.sender = sender;
+    if (account_address) |address| {
+        if (resolved.sender) |existing| {
+            if (!std.mem.eql(u8, existing, address)) return error.InvalidCli;
+        }
+        resolved.sender = address;
+    }
+    if (authorization.sender) |sender| {
+        if (resolved.sender) |existing| {
+            if (!std.mem.eql(u8, existing, sender)) return error.InvalidCli;
+        }
+        resolved.sender = sender;
+    }
     if (authorization.signatures.len != 0) resolved.signatures = authorization.signatures;
     return resolved;
 }
@@ -3288,6 +3337,7 @@ pub fn requestFromOptions(options: ProgrammaticRequestOptions) tx_builder.Progra
         .sender = options.sender,
         .gas_budget = options.gas_budget,
         .gas_price = options.gas_price,
+        .gas_payment_json = options.gas_payment_json,
         .signatures = options.signatures,
         .options_json = options.options_json,
         .wait_for_confirmation = options.wait_for_confirmation,
@@ -3302,6 +3352,7 @@ pub fn optionsFromRequest(request: tx_builder.ProgrammaticTxRequest) Programmati
         .sender = request.sender,
         .gas_budget = request.gas_budget,
         .gas_price = request.gas_price,
+        .gas_payment_json = request.gas_payment_json,
         .signatures = request.signatures,
         .options_json = request.options_json,
         .wait_for_confirmation = request.wait_for_confirmation,
@@ -3356,7 +3407,7 @@ pub fn prepareAuthorizedRequest(
         },
         .direct_signatures => |account| {
             return .{
-                .prepared = try prepareRequest(allocator, applyDirectSignatures(options, account)),
+                .prepared = try prepareRequest(allocator, try applyDirectSignatures(options, account)),
                 .session = account.session,
             };
         },
@@ -3418,7 +3469,7 @@ pub fn prepareAuthorizedRequest(
             return .{
                 .prepared = try prepareRequest(
                     allocator,
-                    applyRemoteAuthorization(options, account.address, authorization),
+                    try applyRemoteAuthorization(options, account.address, authorization),
                 ),
                 .session = authorization.session orelse session,
                 .supports_execute = supports_execute and authorization.supports_execute,
@@ -3438,14 +3489,14 @@ pub fn prepareAuthorizedRequest(
                 return .{
                     .prepared = try prepareRequest(
                         allocator,
-                        applyRemoteAuthorization(options, account.address, authorization),
+                        try applyRemoteAuthorization(options, account.address, authorization),
                     ),
                     .session = authorization.session orelse account.session,
                     .supports_execute = account.session_supports_execute and authorization.supports_execute,
                 };
             }
             return .{
-                .prepared = try prepareRequest(allocator, applyFutureWalletAddress(options, account)),
+                .prepared = try prepareRequest(allocator, try applyFutureWalletAddress(options, account)),
                 .session = account.session,
                 .supports_execute = false,
             };
@@ -3464,14 +3515,14 @@ pub fn prepareAuthorizedRequest(
                 return .{
                     .prepared = try prepareRequest(
                         allocator,
-                        applyRemoteAuthorization(options, account.address, authorization),
+                        try applyRemoteAuthorization(options, account.address, authorization),
                     ),
                     .session = authorization.session orelse account.session,
                     .supports_execute = account.session_supports_execute and authorization.supports_execute,
                 };
             }
             return .{
-                .prepared = try prepareRequest(allocator, applyFutureWalletAddress(options, account)),
+                .prepared = try prepareRequest(allocator, try applyFutureWalletAddress(options, account)),
                 .session = account.session,
                 .supports_execute = false,
             };
@@ -3490,14 +3541,14 @@ pub fn prepareAuthorizedRequest(
                 return .{
                     .prepared = try prepareRequest(
                         allocator,
-                        applyRemoteAuthorization(options, account.address, authorization),
+                        try applyRemoteAuthorization(options, account.address, authorization),
                     ),
                     .session = authorization.session orelse account.session,
                     .supports_execute = account.session_supports_execute and authorization.supports_execute,
                 };
             }
             return .{
-                .prepared = try prepareRequest(allocator, applyFutureWalletAddress(options, account)),
+                .prepared = try prepareRequest(allocator, try applyFutureWalletAddress(options, account)),
                 .session = account.session,
                 .supports_execute = false,
             };
@@ -3681,6 +3732,7 @@ test "requestFromOptions maps arbitrary programmatic request settings" {
         .sender = "0xabc",
         .gas_budget = 800,
         .gas_price = 6,
+        .gas_payment_json = "[{\"objectId\":\"0xgas\",\"version\":\"7\",\"digest\":\"digest-gas\"}]",
         .signatures = &.{"sig-a"},
         .options_json = "{\"showEffects\":true}",
         .wait_for_confirmation = true,
@@ -3692,6 +3744,7 @@ test "requestFromOptions maps arbitrary programmatic request settings" {
     try testing.expectEqualStrings("0xabc", request.sender.?);
     try testing.expectEqual(@as(u64, 800), request.gas_budget.?);
     try testing.expectEqual(@as(u64, 6), request.gas_price.?);
+    try testing.expectEqualStrings("[{\"objectId\":\"0xgas\",\"version\":\"7\",\"digest\":\"digest-gas\"}]", request.gas_payment_json.?);
     try testing.expectEqualStrings("sig-a", request.signatures[0]);
     try testing.expectEqualStrings("{\"showEffects\":true}", request.options_json.?);
     try testing.expect(request.wait_for_confirmation);
@@ -4004,6 +4057,32 @@ test "prepareAuthorizedRequest supports remote signer authorization callbacks" {
     try testing.expect(prepared.supports_execute);
 }
 
+test "prepareAuthorizedRequest rejects conflicting direct signature sender overrides" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    try testing.expectError(error.InvalidCli, prepareAuthorizedRequest(
+        allocator,
+        .{
+            .source = .{
+                .command_items = &.{
+                    "{\"kind\":\"TransferObjects\",\"objects\":[\"0xcoin\"],\"address\":\"0xreceiver\"}",
+                },
+            },
+            .sender = "0xexpected",
+        },
+        .{
+            .direct_signatures = .{
+                .sender = "0xother",
+                .signatures = &.{"sig-a"},
+            },
+        },
+    ));
+}
+
 test "prepareAuthorizedRequest supports session challengers before remote authorization" {
     const testing = std.testing;
 
@@ -4210,6 +4289,45 @@ test "prepareAuthorizedRequest supports authorized future wallet execution" {
     try testing.expectEqualStrings("sig-passkey", prepared.prepared.request.signatures[0]);
     try testing.expectEqual(AccountSessionKind.passkey, prepared.session.kind);
     try testing.expect(prepared.supports_execute);
+}
+
+test "prepareAuthorizedRequest rejects conflicting remote account senders" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const authorizer = struct {
+        fn call(_: *anyopaque, _: std.mem.Allocator, _: RemoteAuthorizationRequest) !RemoteAuthorizationResult {
+            return .{
+                .sender = "0xremote-account",
+                .signatures = &.{"sig-remote"},
+            };
+        }
+    }.call;
+
+    try testing.expectError(error.InvalidCli, prepareAuthorizedRequest(
+        allocator,
+        .{
+            .source = .{
+                .command_items = &.{
+                    "{\"kind\":\"TransferObjects\",\"objects\":[\"0xcoin\"],\"address\":\"0xreceiver\"}",
+                },
+            },
+            .sender = "0xexplicit-sender",
+        },
+        .{
+            .remote_signer = .{
+                .address = "0xremote-account",
+                .authorizer = .{
+                    .context = undefined,
+                    .callback = authorizer,
+                },
+                .session_supports_execute = true,
+            },
+        },
+    ));
 }
 
 test "authorizationPlan authorizes command-source configs into executable payloads" {
@@ -4700,6 +4818,111 @@ test "ownOptions normalizes and owns programmatic request fields" {
     try testing.expect(owned.options.wait_for_confirmation);
     try testing.expectEqual(@as(u64, 5_000), owned.options.confirm_timeout_ms);
     try testing.expectEqual(@as(u64, 25), owned.options.confirm_poll_ms);
+}
+
+test "AuthorizationPlan withChallengeResponse clears consumed future-wallet challenges" {
+    const testing = std.testing;
+
+    const plan = authorizationPlan(.{
+        .source = .{
+            .command_items = &.{
+                "{\"kind\":\"TransferObjects\",\"objects\":[\"0xcoin\"],\"address\":\"0xreceiver\"}",
+            },
+        },
+    }, .{
+        .passkey = .{
+            .address = "0xpasskey",
+            .session = .{ .kind = .passkey, .session_id = "pending-passkey-session" },
+            .session_challenge = .{
+                .passkey = .{
+                    .rp_id = "wallet.example",
+                    .challenge_b64url = "challenge-xyz",
+                },
+            },
+            .session_action = .execute,
+            .session_supports_execute = false,
+        },
+    });
+
+    try testing.expect(plan.challengeRequest() != null);
+
+    const updated = try plan.withChallengeResponse(.{
+        .session = .{ .kind = .passkey, .session_id = "approved-passkey-session" },
+        .supports_execute = false,
+    });
+
+    try testing.expect(updated.challengeRequest() == null);
+    switch (updated.provider) {
+        .passkey => |account| {
+            try testing.expectEqualStrings("approved-passkey-session", account.session.session_id.?);
+            try testing.expect(!account.session_supports_execute);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "applySessionChallengeResponse does not make authorizer-free passkey accounts executable" {
+    const testing = std.testing;
+
+    const updated = try applySessionChallengeResponse(.{
+        .passkey = .{
+            .address = "0xpasskey",
+            .session = .{ .kind = .passkey, .session_id = "pending-passkey-session" },
+            .session_challenge = .{
+                .passkey = .{
+                    .rp_id = "wallet.example",
+                    .challenge_b64url = "challenge-xyz",
+                },
+            },
+            .session_action = .execute,
+            .session_supports_execute = false,
+        },
+    }, .{
+        .session = .{ .kind = .passkey, .session_id = "approved-passkey-session" },
+        .supports_execute = true,
+    });
+
+    try testing.expect(!accountProviderCanExecute(updated));
+}
+
+test "prepareAuthorizedRequest keeps authorizer-free passkey accounts inspect-only after approval" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const updated = try applySessionChallengeResponse(.{
+        .passkey = .{
+            .address = "0xpasskey",
+            .session = .{ .kind = .passkey, .session_id = "pending-passkey-session" },
+            .session_challenge = .{
+                .passkey = .{
+                    .rp_id = "wallet.example",
+                    .challenge_b64url = "challenge-xyz",
+                },
+            },
+            .session_action = .execute,
+            .session_supports_execute = false,
+        },
+    }, .{
+        .session = .{ .kind = .passkey, .session_id = "approved-passkey-session" },
+        .supports_execute = true,
+    });
+
+    var prepared = try prepareAuthorizedRequest(allocator, .{
+        .source = .{
+            .command_items = &.{
+                "{\"kind\":\"TransferObjects\",\"objects\":[\"0xcoin\"],\"address\":\"0xreceiver\"}",
+            },
+        },
+    }, updated);
+    defer prepared.deinit(allocator);
+
+    try testing.expect(!prepared.supports_execute);
+    try testing.expectEqualStrings("0xpasskey", prepared.prepared.request.sender.?);
+    try testing.expectEqualStrings("approved-passkey-session", prepared.session.session_id.?);
+    try testing.expectError(error.UnsupportedAccountProvider, prepared.buildExecutePayload(allocator));
 }
 
 test "ProgrammaticDslBuilder can finish directly into owned authorization plans" {
@@ -5271,6 +5494,188 @@ test "ProgrammaticDslBuilder supports publish and upgrade with named ticket refs
     try testing.expectEqual(@as(i64, 1), parsed.value.array.items[2].object.get("ticket").?.object.get("Result").?.integer);
 }
 
+test "bootcamp C3 split and transfer scenario stays stable across typed and raw surfaces" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var typed_builder = ProgrammaticDslBuilder.init(allocator);
+    defer typed_builder.deinit();
+
+    const split_value = try typed_builder.appendSplitCoinsAndGetValueFromValueTokens("gas", &.{"u64:7"});
+    try typed_builder.assignResultAlias("coin_split", split_value.result);
+    _ = try typed_builder.appendTransferObjectsAndGetValueFromValueTokens(
+        &.{"coin_split.0"},
+        "@0xdef456",
+    );
+
+    var typed_owned = try typed_builder.finish();
+    defer typed_owned.deinit(allocator);
+
+    var raw_builder = ProgrammaticDslBuilder.init(allocator);
+    defer raw_builder.deinit();
+
+    _ = try raw_builder.appendRawJsonAndGetValues(
+        "[{\"kind\":\"SplitCoins\",\"coin\":\"GasCoin\",\"amounts\":[7]},{\"kind\":\"TransferObjects\",\"objects\":[\"output:0:0\"],\"address\":\"@0xdef456\"}]",
+    );
+
+    var raw_owned = try raw_builder.finish();
+    defer raw_owned.deinit(allocator);
+
+    const typed_commands = typed_owned.options.source.commands_json orelse return error.TestExpectedEqual;
+    const raw_commands = raw_owned.options.source.commands_json orelse return error.TestExpectedEqual;
+
+    const typed = try std.json.parseFromSlice(std.json.Value, allocator, typed_commands, .{});
+    defer typed.deinit();
+    const raw = try std.json.parseFromSlice(std.json.Value, allocator, raw_commands, .{});
+    defer raw.deinit();
+
+    try testing.expectEqual(@as(usize, 2), typed.value.array.items.len);
+    try testing.expectEqual(@as(usize, 2), raw.value.array.items.len);
+    try testing.expectEqualStrings("SplitCoins", typed.value.array.items[0].object.get("kind").?.string);
+    try testing.expectEqualStrings("SplitCoins", raw.value.array.items[0].object.get("kind").?.string);
+    try testing.expectEqual(@as(i64, 7), typed.value.array.items[0].object.get("amounts").?.array.items[0].integer);
+    try testing.expectEqual(@as(i64, 7), raw.value.array.items[0].object.get("amounts").?.array.items[0].integer);
+
+    const typed_object = typed.value.array.items[1].object.get("objects").?.array.items[0];
+    const raw_object = raw.value.array.items[1].object.get("objects").?.array.items[0];
+    try testing.expectEqualStrings("TransferObjects", typed.value.array.items[1].object.get("kind").?.string);
+    try testing.expectEqualStrings("TransferObjects", raw.value.array.items[1].object.get("kind").?.string);
+    try testing.expectEqualStrings("0xdef456", typed.value.array.items[1].object.get("address").?.string);
+    try testing.expectEqualStrings("0xdef456", raw.value.array.items[1].object.get("address").?.string);
+    try testing.expectEqual(@as(i64, 0), typed_object.object.get("NestedResult").?.array.items[0].integer);
+    try testing.expectEqual(@as(i64, 0), typed_object.object.get("NestedResult").?.array.items[1].integer);
+    try testing.expectEqual(@as(i64, 0), raw_object.object.get("NestedResult").?.array.items[0].integer);
+    try testing.expectEqual(@as(i64, 0), raw_object.object.get("NestedResult").?.array.items[1].integer);
+}
+
+test "bootcamp C3 move-call alias shorthand feeds later move-call arguments" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var builder = ProgrammaticDslBuilder.init(allocator);
+    defer builder.deinit();
+
+    const created = try builder.appendMoveCallAndGetValueFromValueTokens(
+        "0x2",
+        "counter",
+        "create",
+        &.{},
+        &.{"str:seed"},
+    );
+    try builder.assignResultAlias("created", created.result);
+
+    _ = try builder.appendMoveCallAndGetHandleFromValueTokens(
+        "0x2",
+        "counter",
+        "consume",
+        &.{},
+        &.{
+            "created.0",
+            "vector[@0xabc123, none, some(@0xdef456)]",
+        },
+    );
+
+    var owned = try builder.finish();
+    defer owned.deinit(allocator);
+
+    const commands_json = owned.options.source.commands_json orelse return error.TestExpectedEqual;
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, commands_json, .{});
+    defer parsed.deinit();
+
+    const args_json = parsed.value.array.items[1].object.get("arguments").?.array.items;
+    try testing.expect(args_json[0] == .object);
+    try testing.expectEqual(@as(i64, 0), args_json[0].object.get("NestedResult").?.array.items[0].integer);
+    try testing.expectEqual(@as(i64, 0), args_json[0].object.get("NestedResult").?.array.items[1].integer);
+    try testing.expect(args_json[1] == .array);
+    try testing.expectEqualStrings("0xabc123", args_json[1].array.items[0].string);
+    try testing.expect(args_json[1].array.items[1] == .null);
+    try testing.expectEqualStrings("0xdef456", args_json[1].array.items[2].string);
+}
+
+test "bootcamp C3 make-move-vec supports mixed result references and shorthand tokens" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var builder = ProgrammaticDslBuilder.init(allocator);
+    defer builder.deinit();
+
+    const split_value = try builder.appendSplitCoinsAndGetValueFromValueTokens("gas", &.{"u64:7"});
+    try builder.assignResultAlias("coin_split", split_value.result);
+
+    _ = try builder.appendMakeMoveVecAndGetValueFromValueTokens(
+        "0x2::sui::SUI",
+        &.{
+            "@0xabc123",
+            "ptb:name:coin_split:0",
+            "vector[@0xdef456, none]",
+        },
+    );
+
+    var owned = try builder.finish();
+    defer owned.deinit(allocator);
+
+    const commands_json = owned.options.source.commands_json orelse return error.TestExpectedEqual;
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, commands_json, .{});
+    defer parsed.deinit();
+
+    try testing.expectEqual(@as(usize, 2), parsed.value.array.items.len);
+    try testing.expectEqualStrings("MakeMoveVec", parsed.value.array.items[1].object.get("kind").?.string);
+    try testing.expectEqualStrings("0x2::sui::SUI", parsed.value.array.items[1].object.get("type").?.string);
+
+    const elements = parsed.value.array.items[1].object.get("elements").?.array.items;
+    try testing.expectEqual(@as(usize, 3), elements.len);
+    try testing.expectEqualStrings("0xabc123", elements[0].string);
+    try testing.expect(elements[1] == .object);
+    try testing.expectEqual(@as(i64, 0), elements[1].object.get("NestedResult").?.array.items[0].integer);
+    try testing.expectEqual(@as(i64, 0), elements[1].object.get("NestedResult").?.array.items[1].integer);
+    try testing.expect(elements[2] == .array);
+    try testing.expectEqualStrings("0xdef456", elements[2].array.items[0].string);
+    try testing.expect(elements[2].array.items[1] == .null);
+}
+
+test "bootcamp H1 publish and upgrade flow can build execute payloads" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var builder = ProgrammaticDslBuilder.init(allocator);
+    defer builder.deinit();
+
+    _ = try builder.appendPublishAndGetValueFromCliValues("[\"AQID\"]", "[\"0x2\"]");
+    const ticket = try builder.appendSplitCoinsAndGetValueFromValueTokens("gas", &.{"u64:7"});
+    try builder.assignResultAlias("upgrade_ticket", ticket.result);
+    _ = try builder.appendUpgradeAndGetValueFromNamedCliValues(
+        "[\"BAUG\"]",
+        "[\"0x2\",\"0x3\"]",
+        "0x42",
+        "upgrade_ticket",
+    );
+
+    const payload = try builder.buildAuthorizedExecutePayload(allocator, .{
+        .direct_signatures = .{
+            .sender = "0xabc",
+            .signatures = &.{"sig-a"},
+        },
+    });
+    defer allocator.free(payload);
+
+    try testing.expect(std.mem.indexOf(u8, payload, "Publish") != null);
+    try testing.expect(std.mem.indexOf(u8, payload, "Upgrade") != null);
+    try testing.expect(std.mem.indexOf(u8, payload, "sig-a") != null);
+    try testing.expect(std.mem.indexOf(u8, payload, "0xabc") != null);
+}
+
 test "ProgrammaticDslBuilder supports structured PTB specs without CLI tokens" {
     const testing = std.testing;
 
@@ -5627,6 +6032,22 @@ test "parseArgumentValueToken parses typed prefixes and named PTB references" {
     defer fallback.deinit(allocator);
     try testing.expect(fallback.value == .string);
     try testing.expectEqualStrings("counter-id", fallback.value.string);
+}
+
+test "parseArgumentValueToken rejects malformed shorthand tokens" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var aliases = CommandResultAliases{};
+    defer deinitCommandResultAliases(allocator, &aliases);
+
+    try testing.expectError(error.InvalidCli, parseArgumentValueToken(allocator, &aliases, "@xyz"));
+    try testing.expectError(error.InvalidCli, parseArgumentValueToken(allocator, &aliases, "bytes:0xabc"));
+    try testing.expectError(error.InvalidCli, parseArgumentValueToken(allocator, &aliases, "vector[@xyz, none]"));
+    try testing.expectError(error.InvalidCli, parseArgumentValueToken(allocator, &aliases, "some(bytes:0xabc)"));
 }
 
 test "ProgrammaticDslBuilder named CLI append helpers can return result handles directly" {
@@ -5999,6 +6420,53 @@ test "normalizeCommandItemsFromRawJson resolves typed tokens inside raw command 
     try testing.expectEqualStrings("0xdef456", transfer.value.object.get("address").?.string);
 }
 
+test "normalizeCommandItemsFromRawJson resolves package aliases inside raw command json" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var normalized = try normalizeCommandItemsFromRawJson(
+        allocator,
+        "[{\"kind\":\"MoveCall\",\"package\":\"cetus_clmm_mainnet\",\"module\":\"pool\",\"function\":\"swap\",\"arguments\":[]},{\"kind\":\"Upgrade\",\"modules\":[\"AQID\"],\"dependencies\":[\"0x2\"],\"package\":\"pkg:cetus.mainnet.clmm\",\"ticket\":{\"Result\":0}}]",
+    );
+    defer normalized.deinit(allocator);
+
+    try testing.expectEqual(@as(usize, 2), normalized.items.items.len);
+
+    const move_call = try std.json.parseFromSlice(std.json.Value, allocator, normalized.items.items[0], .{});
+    defer move_call.deinit();
+    const upgrade = try std.json.parseFromSlice(std.json.Value, allocator, normalized.items.items[1], .{});
+    defer upgrade.deinit();
+
+    try testing.expectEqualStrings(package_preset.cetus_clmm_mainnet, move_call.value.object.get("package").?.string);
+    try testing.expectEqualStrings(package_preset.cetus_clmm_mainnet, upgrade.value.object.get("package").?.string);
+}
+
+test "normalizeCommandItemsFromRawJson rejects malformed known command fields" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    try testing.expectError(error.InvalidCli, normalizeCommandItemsFromRawJson(
+        allocator,
+        "[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"set_value\",\"typeArguments\":[],\"arguments\":\"bad\"}]",
+    ));
+
+    try testing.expectError(error.InvalidCli, normalizeCommandItemsFromRawJson(
+        allocator,
+        "[{\"kind\":\"MakeMoveVec\",\"type\":\"0x2::sui::SUI\",\"elements\":\"bad\"}]",
+    ));
+
+    try testing.expectError(error.InvalidCli, normalizeCommandItemsFromRawJson(
+        allocator,
+        "[{\"kind\":\"Upgrade\",\"modules\":[\"AQID\"],\"dependencies\":[\"0x2\"],\"package\":\"0x42\",\"ticket\":\"@xyz\"}]",
+    ));
+}
+
 test "normalizeCommandItemsFromRawJsonWithAliases resolves named result references inside raw command json" {
     const testing = std.testing;
 
@@ -6065,6 +6533,7 @@ test "optionsFromRequest maps programmatic request fields" {
         .sender = "0xabc",
         .gas_budget = 900,
         .gas_price = 8,
+        .gas_payment_json = "[{\"objectId\":\"0xgas\",\"version\":\"8\",\"digest\":\"digest-gas\"}]",
         .signatures = &.{"sig-a"},
         .options_json = "{\"showEffects\":true}",
         .wait_for_confirmation = true,
@@ -6076,6 +6545,7 @@ test "optionsFromRequest maps programmatic request fields" {
     try testing.expectEqualStrings("0xabc", options.sender.?);
     try testing.expectEqual(@as(u64, 900), options.gas_budget.?);
     try testing.expectEqual(@as(u64, 8), options.gas_price.?);
+    try testing.expectEqualStrings("[{\"objectId\":\"0xgas\",\"version\":\"8\",\"digest\":\"digest-gas\"}]", options.gas_payment_json.?);
     try testing.expectEqualStrings("sig-a", options.signatures[0]);
     try testing.expectEqualStrings("{\"showEffects\":true}", options.options_json.?);
     try testing.expect(options.wait_for_confirmation);
@@ -6125,6 +6595,7 @@ test "buildExecutePayload builds payloads from generic request options" {
             },
         },
         .sender = "0xabc",
+        .gas_payment_json = "[{\"objectId\":\"0xgas\",\"version\":\"9\",\"digest\":\"digest-gas\"}]",
         .signatures = &.{"sig-a"},
     });
     defer allocator.free(payload);
@@ -6133,6 +6604,39 @@ test "buildExecutePayload builds payloads from generic request options" {
     defer parsed.deinit();
     try testing.expect(parsed.value == .array);
     try testing.expectEqual(@as(usize, 2), parsed.value.array.items.len);
+
+    const tx_block = parsed.value.array.items[0];
+    try testing.expect(tx_block == .string);
+    const parsed_tx_block = try std.json.parseFromSlice(std.json.Value, allocator, tx_block.string, .{});
+    defer parsed_tx_block.deinit();
+    try testing.expectEqualStrings("0xgas", parsed_tx_block.value.object.get("gasPayment").?.array.items[0].object.get("objectId").?.string);
+
+}
+
+test "ownOptions preserves explicit gas payment fields in normalized request options" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var owned = try ownOptions(allocator, .{
+        .source = .{
+            .move_call = .{
+                .package_id = "0x2",
+                .module = "counter",
+                .function_name = "increment",
+                .arguments = "[\"0xabc\"]",
+            },
+        },
+        .sender = "0xabc",
+        .gas_payment_json = "[{\"objectId\":\"0xgas-owned\",\"version\":\"10\",\"digest\":\"digest-gas\"}]",
+        .signatures = &.{"sig-a"},
+    });
+    defer owned.deinit(allocator);
+
+    try testing.expect(owned.options.gas_payment_json != null);
+    try testing.expectEqualStrings("[{\"objectId\":\"0xgas-owned\",\"version\":\"10\",\"digest\":\"digest-gas\"}]", owned.options.gas_payment_json.?);
 }
 
 test "prepareResolvedRequestFromContents resolves signer-backed sender and normalized commands" {

@@ -1,6 +1,7 @@
 const std = @import("std");
 const cli = @import("./cli.zig");
 const sui = @import("sui_client_zig");
+const client = sui;
 const keystore = sui.keystore;
 const tx_builder = sui.tx_builder;
 const tx_request_builder = sui.tx_request_builder;
@@ -37,7 +38,12 @@ pub fn resolvedTxBuildSenderFromArgs(
         return try keystore.resolveAddressBySelector(allocator, sender) orelse error.InvalidCli;
     }
 
-    if (args.signers.items.len == 0) return null;
+    if (args.signers.items.len == 0) {
+        if (args.from_keystore) {
+            return try keystore.resolveFirstAddressFromDefaultKeystore(allocator);
+        }
+        return null;
+    }
 
     var has_resolver_input = false;
     for (args.signers.items) |selector| {
@@ -78,6 +84,7 @@ pub fn programmaticRequestOptionsFromArgs(
         .sender = args.tx_build_sender,
         .gas_budget = args.tx_build_gas_budget,
         .gas_price = args.tx_build_gas_price,
+        .gas_payment_json = args.tx_build_gas_payment,
         .signatures = signatures,
         .options_json = args.tx_options,
         .wait_for_confirmation = args.tx_send_wait,
@@ -97,6 +104,7 @@ pub fn buildTxBuildTransactionBlockFromArgs(
                 .sender = args.tx_build_sender,
                 .gas_budget = args.tx_build_gas_budget,
                 .gas_price = args.tx_build_gas_price,
+                .gas_payment_json = args.tx_build_gas_payment,
             }),
             provider,
             .transaction_block,
@@ -113,6 +121,7 @@ pub fn buildTxBuildTransactionBlockFromArgs(
             .sender = sender,
             .gas_budget = args.tx_build_gas_budget,
             .gas_price = args.tx_build_gas_price,
+            .gas_payment_json = args.tx_build_gas_payment,
         },
         .transaction_block,
     );
@@ -179,6 +188,35 @@ pub fn programmaticAuthorizationPlanFromArgsWithAccountProvider(
             .signatures = signatures,
         },
     });
+}
+
+pub fn ownProgrammaticAuthorizationPlanFromArgsWithAutoGasPayment(
+    allocator: std.mem.Allocator,
+    rpc: *client.SuiRpcClient,
+    args: *const cli.ParsedArgs,
+    signatures: []const []const u8,
+    provider: ?tx_request_builder.AccountProvider,
+) !tx_request_builder.OwnedAuthorizationPlan {
+    var plan = programmaticAuthorizationPlanFromArgsWithAccountProvider(args, signatures, provider);
+
+    const resolved_sender = try resolvedTxBuildSenderFromArgs(allocator, args);
+    defer if (resolved_sender) |value| allocator.free(value);
+
+    const sender = resolved_sender orelse plan.options.sender orelse return error.InvalidCli;
+    const gas_payment_json = try rpc.selectGasPaymentJson(
+        allocator,
+        sender,
+        args.tx_build_gas_payment_min_balance orelse plan.options.gas_budget orelse 1,
+    ) orelse return error.SelectionNotFound;
+    defer allocator.free(gas_payment_json);
+
+    plan.options.sender = sender;
+    plan.options.gas_payment_json = gas_payment_json;
+
+    return .{
+        .owned_options = try tx_request_builder.ownOptions(allocator, plan.options),
+        .provider = plan.provider,
+    };
 }
 
 pub fn buildProgrammaticArtifactFromArgsWithAccountProvider(
@@ -271,6 +309,7 @@ test "programmaticRequestFromArgs maps parsed transaction settings" {
         .tx_build_sender = "0xabc",
         .tx_build_gas_budget = 800,
         .tx_build_gas_price = 6,
+        .tx_build_gas_payment = "[{\"objectId\":\"0xgas\",\"version\":\"1\",\"digest\":\"digest-gas\"}]",
         .tx_options = "{\"showEffects\":true}",
         .tx_send_wait = true,
         .confirm_timeout_ms = 5_000,
@@ -281,6 +320,7 @@ test "programmaticRequestFromArgs maps parsed transaction settings" {
     try testing.expectEqualStrings("0xabc", request.sender.?);
     try testing.expectEqual(@as(u64, 800), request.gas_budget.?);
     try testing.expectEqual(@as(u64, 6), request.gas_price.?);
+    try testing.expectEqualStrings("[{\"objectId\":\"0xgas\",\"version\":\"1\",\"digest\":\"digest-gas\"}]", request.gas_payment_json.?);
     try testing.expectEqualStrings("{\"showEffects\":true}", request.options_json.?);
     try testing.expect(request.wait_for_confirmation);
     try testing.expectEqual(@as(u64, 5_000), request.confirm_timeout_ms);
@@ -298,6 +338,7 @@ test "programmaticRequestOptionsFromArgs maps parsed transaction settings" {
         .tx_build_sender = "0xabc",
         .tx_build_gas_budget = 800,
         .tx_build_gas_price = 6,
+        .tx_build_gas_payment = "[{\"objectId\":\"0xgas\",\"version\":\"2\",\"digest\":\"digest-gas\"}]",
         .tx_options = "{\"showEffects\":true}",
         .tx_send_wait = true,
         .confirm_timeout_ms = 5_000,
@@ -309,6 +350,7 @@ test "programmaticRequestOptionsFromArgs maps parsed transaction settings" {
     try testing.expectEqualStrings("0xabc", options.sender.?);
     try testing.expectEqual(@as(u64, 800), options.gas_budget.?);
     try testing.expectEqual(@as(u64, 6), options.gas_price.?);
+    try testing.expectEqualStrings("[{\"objectId\":\"0xgas\",\"version\":\"2\",\"digest\":\"digest-gas\"}]", options.gas_payment_json.?);
     try testing.expectEqualStrings("{\"showEffects\":true}", options.options_json.?);
     try testing.expect(options.wait_for_confirmation);
     try testing.expectEqual(@as(u64, 5_000), options.confirm_timeout_ms);
