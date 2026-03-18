@@ -4072,7 +4072,7 @@ pub fn printUsage(writer: anytype) !void {
         "    --emit-tx-block                    Build programmable transaction block JSON\n" ++
         "    typed arg tokens: @0x... addr:0x... obj:0x... bytes:0x... bool:true u64:7 u128:... ptb:name:<alias>[:idx]\n" ++
         "                      <alias>[.<idx>] vec:[...] vector[...] option:some:<json> some(...) option:none\n" ++
-        "    selected request tokens: select:{{\"kind\":\"owned_object_struct_type\",...}} select:{{\"kind\":\"object_preset\",\"name\":\"clock\"}} select:{{\"kind\":\"object_input\",\"objectId\":\"0x...\",\"inputKind\":\"shared\",\"mutable\":true,\"initialSharedVersion\":1}}\n" ++
+        "    selected request tokens: select:{{\"kind\":\"owned_object_struct_type\",...}} select:{{\"kind\":\"coin_with_min_balance\",...}} select:{{\"kind\":\"object_preset\",\"name\":\"clock\"}} select:{{\"kind\":\"object_input\",\"objectId\":\"0x...\",\"inputKind\":\"shared\",\"mutable\":true,\"initialSharedVersion\":1}}\n" ++
         "                      bare values still fall back to string/JSON parsing\n" ++
         "  account list                        List local keystore accounts\n" ++
         "  tx simulate [params-json]            Call sui_devInspectTransactionBlock\n" ++

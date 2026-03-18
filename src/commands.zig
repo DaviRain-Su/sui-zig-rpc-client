@@ -3528,8 +3528,12 @@ test "runCommand move function with --summarize adds vector object discovery tem
         parameter.get("signature").?.string,
     );
     try testing.expectEqualStrings(
-        "[\"<arg0-item0-object-id-or-select-token>\"]",
+        "[\"select:{\\\"kind\\\":\\\"coin_with_min_balance\\\",\\\"coinType\\\":\\\"0x2::sui::SUI\\\",\\\"minBalance\\\":1}\"]",
         parameter.get("placeholder_json").?.string,
+    );
+    try testing.expectEqualStrings(
+        "select:{\"kind\":\"coin_with_min_balance\",\"coinType\":\"0x2::sui::SUI\",\"minBalance\":1}",
+        parameter.get("vector_item_coin_with_min_balance_select_token").?.string,
     );
     try testing.expectEqualStrings(
         "select:{\"kind\":\"object_input\",\"objectId\":\"0x<arg0-item0-object-id>\",\"inputKind\":\"imm_or_owned\"}",
@@ -3553,7 +3557,7 @@ test "runCommand move function with --summarize adds vector object discovery tem
     try testing.expectEqualStrings("--coin-type", vector_item_query_argv[3].string);
     try testing.expectEqualStrings("0x2::sui::SUI", vector_item_query_argv[4].string);
     try testing.expectEqualStrings(
-        "[[\"<arg0-item0-object-id-or-select-token>\"]]",
+        "[[\"select:{\\\"kind\\\":\\\"coin_with_min_balance\\\",\\\"coinType\\\":\\\"0x2::sui::SUI\\\",\\\"minBalance\\\":1}\"]]",
         parsed.value.object.get("call_template").?.object.get("args_json").?.string,
     );
     try testing.expectEqual(std.json.Value.null, parameter.get("auto_selected_arg_json").?);
@@ -3613,6 +3617,14 @@ test "runCommand move function with --summarize fills owner context into vector 
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
     defer parsed.deinit();
     const parameter = parsed.value.object.get("parameters").?.array.items[0].object;
+    try testing.expectEqualStrings(
+        "[\"select:{\\\"kind\\\":\\\"coin_with_min_balance\\\",\\\"owner\\\":\\\"0xowner\\\",\\\"coinType\\\":\\\"0x2::sui::SUI\\\",\\\"minBalance\\\":1}\"]",
+        parameter.get("placeholder_json").?.string,
+    );
+    try testing.expectEqualStrings(
+        "select:{\"kind\":\"coin_with_min_balance\",\"owner\":\"0xowner\",\"coinType\":\"0x2::sui::SUI\",\"minBalance\":1}",
+        parameter.get("vector_item_coin_with_min_balance_select_token").?.string,
+    );
     try testing.expectEqualStrings(
         "select:{\"kind\":\"owned_object_struct_type\",\"owner\":\"0xowner\",\"structType\":\"0x2::coin::Coin<0x2::sui::SUI>\"}",
         parameter.get("vector_item_owned_object_select_token").?.string,
@@ -3707,6 +3719,14 @@ test "runCommand move function with --summarize prefers largest scalar coin cand
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
     defer parsed.deinit();
     const parameter = parsed.value.object.get("parameters").?.array.items[0].object;
+    try testing.expectEqualStrings(
+        "select:{\"kind\":\"coin_with_min_balance\",\"owner\":\"0xowner\",\"coinType\":\"0x2::sui::SUI\",\"minBalance\":1}",
+        parameter.get("coin_with_min_balance_select_token").?.string,
+    );
+    try testing.expectEqualStrings(
+        "\"select:{\\\"kind\\\":\\\"coin_with_min_balance\\\",\\\"owner\\\":\\\"0xowner\\\",\\\"coinType\\\":\\\"0x2::sui::SUI\\\",\\\"minBalance\\\":1}\"",
+        parameter.get("placeholder_json").?.string,
+    );
     try testing.expectEqualStrings(
         "select:{\"kind\":\"owned_object_struct_type\",\"owner\":\"0xowner\",\"structType\":\"0x2::coin::Coin<0x2::sui::SUI>\"}",
         parameter.get("owned_object_select_token").?.string,

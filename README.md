@@ -873,6 +873,8 @@ zig build run -- events \
 - `parameters[*].imm_or_owned_object_input_select_token`: object 参数通用的 direct `object_input(imm_or_owned)` 候选
 - `parameters[*].receiving_object_input_select_token`: 如果参数是 by-value object，CLI 会额外给一个 `object_input(receiving)` 候选
 - `parameters[*].object_get_argv`: 对应的 `object get` 查询模板；preset object 会直接用 alias，其他 object 用 object-id 占位符
+- `parameters[*].coin_with_min_balance_select_token`: 如果参数是 scalar `Coin<T>`，CLI 现在会额外给一个可直接执行的 `coin_with_min_balance` 选择 token；基础 `placeholder_json` 也会优先落成这个 token，而不是泛化 object-id 占位符
+- `parameters[*].vector_item_coin_with_min_balance_select_token`: 如果参数是 `vector<Coin<T>>`，CLI 会给单个元素的 `coin_with_min_balance` 选择 token；基础 `placeholder_json` 会优先落成一项数组模板
 - `parameters[*].vector_item_imm_or_owned_object_input_select_token`: 如果参数是 `vector<object>`，CLI 会给单个元素的 direct `object_input(imm_or_owned)` 候选
 - `parameters[*].vector_item_owned_object_select_token`: 如果参数是 `vector<concrete object struct>`，CLI 会给单个元素的 `owned_object_struct_type` 候选
 - `parameters[*].vector_item_object_get_argv`: `vector<object>` 单个元素的 `object get` 查询模板
