@@ -124,6 +124,107 @@ fn printMoveFunctionTemplateOutput(
     try writer.print("{s}\n", .{text});
 }
 
+fn moveFunctionExecutionRequestArtifact(
+    result: client.rpc_client.ReadQueryActionResult,
+    command: cli.Command,
+) ![]const u8 {
+    const output_kind = switch (command) {
+        .tx_dry_run => cli.MoveFunctionTemplateOutput.preferred_tx_dry_run_request,
+        .tx_send => cli.MoveFunctionTemplateOutput.preferred_tx_send_from_keystore_request,
+        else => return error.InvalidCli,
+    };
+
+    return switch (result) {
+        .summarized => |summary| switch (summary) {
+            .move => |move| switch (move) {
+                .function => |value| try selectedMoveFunctionTemplateOutput(value, output_kind),
+                else => return error.InvalidCli,
+            },
+            else => return error.InvalidCli,
+        },
+        else => return error.InvalidCli,
+    };
+}
+
+fn stringContainsUnresolvedMoveFunctionPlaceholder(text: []const u8) bool {
+    return std.mem.indexOf(u8, text, "<arg") != null or
+        std.mem.indexOf(u8, text, "0x<") != null or
+        std.mem.eql(u8, text, "<alias-or-address>");
+}
+
+fn jsonValueContainsUnresolvedMoveFunctionPlaceholder(value: std.json.Value) bool {
+    return switch (value) {
+        .string => |text| stringContainsUnresolvedMoveFunctionPlaceholder(text),
+        .array => |array| blk: {
+            for (array.items) |item| {
+                if (jsonValueContainsUnresolvedMoveFunctionPlaceholder(item)) break :blk true;
+            }
+            break :blk false;
+        },
+        .object => |object| blk: {
+            var iterator = object.iterator();
+            while (iterator.next()) |entry| {
+                if (jsonValueContainsUnresolvedMoveFunctionPlaceholder(entry.value_ptr.*)) break :blk true;
+            }
+            break :blk false;
+        },
+        else => false,
+    };
+}
+
+fn ensureExecutableMoveFunctionRequestArtifact(
+    allocator: std.mem.Allocator,
+    request_json: []const u8,
+) !void {
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, request_json, .{});
+    defer parsed.deinit();
+    if (jsonValueContainsUnresolvedMoveFunctionPlaceholder(parsed.value)) {
+        return error.UnresolvedMoveFunctionExecutionTemplate;
+    }
+}
+
+fn buildDerivedMoveFunctionExecutionArgs(
+    allocator: std.mem.Allocator,
+    args: *const cli.ParsedArgs,
+    command: cli.Command,
+    request_json: []const u8,
+) !cli.ParsedArgs {
+    var derived = cli.ParsedArgs{
+        .command = command,
+        .has_command = true,
+        .pretty = args.pretty,
+        .confirm_timeout_ms = args.confirm_timeout_ms,
+        .confirm_poll_ms = args.confirm_poll_ms,
+        .tx_send_wait = args.tx_send_wait,
+        .tx_send_summarize = args.tx_send_summarize,
+        .tx_send_observe = args.tx_send_observe,
+    };
+    errdefer derived.deinit(allocator);
+
+    try cli.applyProgrammaticRequestArtifact(allocator, &derived, request_json);
+
+    derived.pretty = args.pretty;
+    derived.confirm_timeout_ms = args.confirm_timeout_ms;
+    derived.confirm_poll_ms = args.confirm_poll_ms;
+
+    switch (command) {
+        .tx_dry_run => {
+            derived.tx_send_wait = false;
+            derived.tx_send_observe = false;
+        },
+        .tx_send => {
+            if (args.tx_send_observe) {
+                derived.tx_send_observe = true;
+                derived.tx_send_summarize = false;
+            }
+            if (args.tx_send_wait) derived.tx_send_wait = true;
+        },
+        else => return error.InvalidCli,
+    }
+
+    return derived;
+}
+
 const ParsedSessionChallengeResponse = struct {
     arena: std.heap.ArenaAllocator,
     response: client.tx_request_builder.SessionChallengeResponse,
@@ -2272,6 +2373,47 @@ pub fn runCommandWithProgrammaticProvider(
                 else => {},
             }
 
+            if (args.command == .move_function and
+                (args.move_function_template_output != null or
+                    args.move_function_execute_dry_run or
+                    args.move_function_execute_send))
+            {
+                var query = try readQueryFromArgs(allocator, args);
+                defer query.deinit(allocator);
+                var result = try rpc.runReadQueryAction(
+                    allocator,
+                    query,
+                    .summarize,
+                );
+                defer result.deinit(allocator);
+
+                if (args.move_function_execute_dry_run or args.move_function_execute_send) {
+                    const exec_command: cli.Command = if (args.move_function_execute_dry_run) .tx_dry_run else .tx_send;
+                    const request_json = try moveFunctionExecutionRequestArtifact(result, exec_command);
+                    try ensureExecutableMoveFunctionRequestArtifact(allocator, request_json);
+                    var derived_args = try buildDerivedMoveFunctionExecutionArgs(
+                        allocator,
+                        args,
+                        exec_command,
+                        request_json,
+                    );
+                    defer derived_args.deinit(allocator);
+                    try runCommandWithProgrammaticProvider(
+                        allocator,
+                        rpc,
+                        &derived_args,
+                        writer,
+                        effective_programmatic_provider,
+                    );
+                    return;
+                }
+
+                if (args.move_function_template_output) |output_kind| {
+                    try printMoveFunctionTemplateOutput(writer, result, output_kind);
+                    return;
+                }
+            }
+
             var query = try readQueryFromArgs(allocator, args);
             defer query.deinit(allocator);
             var result = try rpc.runReadQueryAction(
@@ -2873,7 +3015,7 @@ test "runCommand move function with --summarize prints normalized function summa
         parsed.value.object.get("call_template").?.object.get("commands_json").?.string,
     );
     try testing.expectEqualStrings(
-        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"pool\",\"function\":\"swap\",\"typeArguments\":[],\"arguments\":[\"<arg0-object-id-or-select-token>\",0]}],\"sender\":\"0x<sender>\",\"gasBudget\":100000000,\"gasPrice\":1000,\"summarize\":true}",
+        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"pool\",\"function\":\"swap\",\"typeArguments\":[],\"arguments\":[\"<arg0-object-id-or-select-token>\",0]}],\"sender\":\"0x<sender>\",\"gasBudget\":100000000,\"gasPrice\":1000,\"autoGasPayment\":true,\"summarize\":true}",
         parsed.value.object.get("call_template").?.object.get("tx_dry_run_request_json").?.string,
     );
     const dry_run_argv = parsed.value.object.get("call_template").?.object.get("tx_dry_run_argv").?.array.items;
@@ -3310,7 +3452,7 @@ test "runCommand move function with --summarize carries sender and signer contex
     defer parsed.deinit();
     const template = parsed.value.object.get("call_template").?.object;
     try testing.expectEqualStrings(
-        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"pool\",\"function\":\"swap\",\"typeArguments\":[],\"arguments\":[\"<arg0-object-id-or-select-token>\",0]}],\"sender\":\"0xowner\",\"gasBudget\":100000000,\"gasPrice\":1000,\"summarize\":true}",
+        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"pool\",\"function\":\"swap\",\"typeArguments\":[],\"arguments\":[\"<arg0-object-id-or-select-token>\",0]}],\"sender\":\"0xowner\",\"gasBudget\":100000000,\"gasPrice\":1000,\"autoGasPayment\":true,\"summarize\":true}",
         template.get("tx_dry_run_request_json").?.string,
     );
     try testing.expectEqualStrings(
@@ -3437,8 +3579,243 @@ test "runCommand move function with --emit-template prints preferred dry-run req
     try runCommand(allocator, &rpc, &args, output.writer(allocator));
 
     try testing.expectEqualStrings(
-        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"module\":\"pool\",\"function\":\"swap\",\"typeArguments\":[],\"arguments\":[\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xpool1\\\",\\\"inputKind\\\":\\\"shared\\\",\\\"initialSharedVersion\\\":7,\\\"mutable\\\":true}\"]}],\"sender\":\"0x<sender>\",\"gasBudget\":100000000,\"gasPrice\":1000,\"summarize\":true}\n",
+        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"module\":\"pool\",\"function\":\"swap\",\"typeArguments\":[],\"arguments\":[\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xpool1\\\",\\\"inputKind\\\":\\\"shared\\\",\\\"initialSharedVersion\\\":7,\\\"mutable\\\":true}\"]}],\"sender\":\"0x<sender>\",\"gasBudget\":100000000,\"gasPrice\":1000,\"autoGasPayment\":true,\"summarize\":true}\n",
         output.items,
+    );
+}
+
+test "runCommand move function with --dry-run executes preferred dry-run request artifact" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const Counts = struct {
+        normalized: usize = 0,
+        dry_run: usize = 0,
+        unsafe: usize = 0,
+    };
+    var counts = Counts{};
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const state = @as(*Counts, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                state.normalized += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"visibility\":\"Public\",\"isEntry\":true,\"typeParameters\":[],\"parameters\":[\"U64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_dryRunTransactionBlock")) {
+                state.dry_run += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"effects\":{\"status\":{\"status\":\"success\"}},\"balanceChanges\":[]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "suix_getCoins")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinObjectId\":\"0x9999999999999999999999999999999999999999999999999999999999999999\",\"version\":\"1\",\"digest\":\"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"balance\":\"1000000000\"}],\"nextCursor\":null,\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall") or std.mem.eql(u8, req.method, "unsafe_batchTransaction")) {
+                state.unsafe += 1;
+                return alloc.dupe(u8, "{\"result\":{\"txBytes\":\"AQIDBA==\"}}");
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "move",
+        "function",
+        "0x2",
+        "counter",
+        "increment",
+        "--sender",
+        "0x1111111111111111111111111111111111111111111111111111111111111111",
+        "--arg",
+        "7",
+        "--dry-run",
+    });
+    defer args.deinit(allocator);
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = &counts,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    try testing.expectEqual(@as(usize, 2), counts.normalized);
+    try testing.expectEqual(@as(usize, 1), counts.dry_run);
+    try testing.expectEqual(@as(usize, 0), counts.unsafe);
+
+    try testing.expect(std.mem.indexOf(u8, output.items, "success") != null);
+}
+
+test "runCommand move function with --send executes preferred send request artifact" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const seed = [_]u8{0x52} ** 32;
+    var encoded_key_bytes: [33]u8 = undefined;
+    encoded_key_bytes[0] = 0;
+    encoded_key_bytes[1..].* = seed;
+    const encoded_len = std.base64.standard.Encoder.calcSize(encoded_key_bytes.len);
+    const encoded_key = try allocator.alloc(u8, encoded_len);
+    defer allocator.free(encoded_key);
+    _ = std.base64.standard.Encoder.encode(encoded_key, &encoded_key_bytes);
+
+    const keystore_contents = try std.fmt.allocPrint(allocator, "[\"{s}\"]", .{encoded_key});
+    defer allocator.free(keystore_contents);
+
+    const keystore_path = "tmp_move_function_send_keystore.json";
+    try std.fs.cwd().writeFile(.{
+        .sub_path = keystore_path,
+        .data = keystore_contents,
+    });
+    defer std.fs.cwd().deleteFile(keystore_path) catch {};
+
+    const old_override = client.keystore.test_keystore_path_override;
+    client.keystore.test_keystore_path_override = keystore_path;
+    defer client.keystore.test_keystore_path_override = old_override;
+
+    const State = struct {
+        gas_price: usize = 0,
+        normalized: usize = 0,
+        execute_calls: usize = 0,
+        unsafe_calls: usize = 0,
+    };
+    var state = State{};
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const ctx = @as(*State, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                ctx.normalized += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"visibility\":\"Public\",\"isEntry\":true,\"typeParameters\":[],\"parameters\":[\"U64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "suix_getReferenceGasPrice")) {
+                ctx.gas_price += 1;
+                return alloc.dupe(u8, "{\"result\":\"8\"}");
+            }
+            if (std.mem.eql(u8, req.method, "suix_getCoins")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinObjectId\":\"0x9999999999999999999999999999999999999999999999999999999999999999\",\"version\":\"1\",\"digest\":\"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"balance\":\"1000000000\"}],\"nextCursor\":null,\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_executeTransactionBlock")) {
+                ctx.execute_calls += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"digest\":\"0xmovefunctionsend\",\"effects\":{\"status\":{\"status\":\"success\"}},\"balanceChanges\":[]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getTransactionBlock")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"digest\":\"0xmovefunctionsend\",\"effects\":{\"status\":{\"status\":\"success\"}},\"balanceChanges\":[]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall") or std.mem.eql(u8, req.method, "unsafe_batchTransaction")) {
+                ctx.unsafe_calls += 1;
+                return alloc.dupe(u8, "{\"result\":{\"txBytes\":\"AQIDBA==\"}}");
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "move",
+        "function",
+        "0x2",
+        "counter",
+        "increment",
+        "--from-keystore",
+        "--signer",
+        "0",
+        "--arg",
+        "7",
+        "--send",
+    });
+    defer args.deinit(allocator);
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = &state,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    try testing.expectEqual(@as(usize, 1), state.gas_price);
+    try testing.expectEqual(@as(usize, 2), state.normalized);
+    try testing.expectEqual(@as(usize, 1), state.execute_calls);
+    try testing.expectEqual(@as(usize, 0), state.unsafe_calls);
+
+    try testing.expect(std.mem.indexOf(u8, output.items, "success") != null);
+}
+
+test "runCommand move function with direct execution rejects unresolved template placeholders" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            std.debug.assert(std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction"));
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"visibility\":\"Public\",\"isEntry\":true,\"typeParameters\":[],\"parameters\":[{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"pool\",\"name\":\"Pool\",\"typeParams\":[]}}},{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[]}}",
+            );
+        }
+    }.call;
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "move",
+        "function",
+        "0x2",
+        "pool",
+        "swap",
+        "--dry-run",
+    });
+    defer args.deinit(allocator);
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try testing.expectError(
+        error.UnresolvedMoveFunctionExecutionTemplate,
+        runCommand(allocator, &rpc, &args, output.writer(allocator)),
     );
 }
 
@@ -3546,7 +3923,7 @@ test "runCommand move function with --summarize uses queried package for shared 
         parsed.value.object.get("call_template").?.object.get("preferred_commands_json").?.string,
     );
     try testing.expectEqualStrings(
-        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"module\":\"pool\",\"function\":\"swap\",\"typeArguments\":[],\"arguments\":[\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xpool1\\\",\\\"inputKind\\\":\\\"shared\\\",\\\"initialSharedVersion\\\":7,\\\"mutable\\\":true}\"]}],\"sender\":\"0x<sender>\",\"gasBudget\":100000000,\"gasPrice\":1000,\"summarize\":true}",
+        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"module\":\"pool\",\"function\":\"swap\",\"typeArguments\":[],\"arguments\":[\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xpool1\\\",\\\"inputKind\\\":\\\"shared\\\",\\\"initialSharedVersion\\\":7,\\\"mutable\\\":true}\"]}],\"sender\":\"0x<sender>\",\"gasBudget\":100000000,\"gasPrice\":1000,\"autoGasPayment\":true,\"summarize\":true}",
         parsed.value.object.get("call_template").?.object.get("preferred_tx_dry_run_request_json").?.string,
     );
 }

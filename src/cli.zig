@@ -112,6 +112,8 @@ pub const ParsedArgs = struct {
     move_module: ?[]const u8 = null,
     move_function: ?[]const u8 = null,
     move_function_template_output: ?MoveFunctionTemplateOutput = null,
+    move_function_execute_dry_run: bool = false,
+    move_function_execute_send: bool = false,
     object_id: ?[]const u8 = null,
     object_parent_id: ?[]const u8 = null,
     object_dynamic_field_name: ?[]const u8 = null,
@@ -529,7 +531,7 @@ fn appendRequestStringItems(
     }
 }
 
-fn applyProgrammaticRequestArtifact(
+pub fn applyProgrammaticRequestArtifact(
     allocator: std.mem.Allocator,
     parsed: *ParsedArgs,
     raw: []const u8,
@@ -3756,6 +3758,26 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
                 i += 2;
                 continue;
             }
+            if (parsed.command == .move_function and std.mem.eql(u8, token, "--dry-run")) {
+                parsed.move_function_execute_dry_run = true;
+                i += 1;
+                continue;
+            }
+            if (parsed.command == .move_function and std.mem.eql(u8, token, "--send")) {
+                parsed.move_function_execute_send = true;
+                i += 1;
+                continue;
+            }
+            if (parsed.command == .move_function and std.mem.eql(u8, token, "--wait")) {
+                parsed.tx_send_wait = true;
+                i += 1;
+                continue;
+            }
+            if (parsed.command == .move_function and std.mem.eql(u8, token, "--observe")) {
+                parsed.tx_send_observe = true;
+                i += 1;
+                continue;
+            }
             return error.InvalidCli;
         }
 
@@ -3978,6 +4000,15 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
     }
     if (parsed.command == .move_function) {
         if (parsed.move_package == null or parsed.move_module == null or parsed.move_function == null) return error.InvalidCli;
+        if (parsed.move_function_execute_dry_run and parsed.move_function_execute_send) return error.InvalidCli;
+        if (parsed.move_function_template_output != null and
+            (parsed.move_function_execute_dry_run or parsed.move_function_execute_send))
+        {
+            return error.InvalidCli;
+        }
+        if (parsed.tx_send_wait and !parsed.move_function_execute_send) return error.InvalidCli;
+        if (parsed.tx_send_observe and !parsed.move_function_execute_send) return error.InvalidCli;
+        if (parsed.tx_send_summarize and parsed.tx_send_observe) return error.InvalidCli;
     }
 
     if (parsed.command == .object_get and parsed.object_id == null) return error.InvalidCli;
@@ -4088,9 +4119,12 @@ pub fn printUsage(writer: anytype) !void {
         "    --args <json|@file>                 Optional explicit argument JSON used to specialize preferred templates\n" ++
         "    --arg <json|bare|@file>             Repeatable explicit argument shorthand for --args\n" ++
         "    --emit-template <kind>              Print one generated template directly: commands|preferred-commands|dry-run-request|preferred-dry-run-request|send-request|preferred-send-request\n" ++
+        "    --dry-run                           Resolve the preferred dry-run request artifact and execute it immediately\n" ++
+        "    --send                              Resolve the preferred send request artifact and execute it immediately\n" ++
         "    --sender <address|selector>         Optional owner context for discovery hints and tx templates\n" ++
         "    --signer <alias|address|key>        Optional signer selector; first address-compatible signer becomes owner context\n" ++
         "    --from-keystore                     Use the first default keystore address as owner context when needed\n" ++
+        "    --wait|--observe                    Forward send execution mode when used with --send\n" ++
         "    --summarize                         Print parameter/return signature summary, lowering hints, discovery hints, and tx call templates\n" ++
         "  object get <object-id-or-alias>      Call sui_getObject\n" ++
         "    --options <json|@file>              object read options\n" ++
@@ -7030,6 +7064,70 @@ test "parseCliArgs parses move function command with emitted template output" {
     try testing.expectEqual(Command.move_function, parsed.command);
     try testing.expectEqual(MoveFunctionTemplateOutput.preferred_tx_dry_run_request, parsed.move_function_template_output.?);
     try testing.expect(parsed.tx_send_summarize);
+}
+
+test "parseCliArgs parses move function direct execution flags" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "move",
+        "function",
+        "0x2",
+        "pool",
+        "swap",
+        "--send",
+        "--wait",
+        "--signer",
+        "builder",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.move_function, parsed.command);
+    try testing.expect(parsed.move_function_execute_send);
+    try testing.expect(!parsed.move_function_execute_dry_run);
+    try testing.expect(parsed.tx_send_wait);
+    try testing.expectEqual(@as(usize, 1), parsed.signers.items.len);
+    try testing.expectEqualStrings("builder", parsed.signers.items[0]);
+}
+
+test "parseCliArgs rejects move function direct execution mixed with emitted template output" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    try testing.expectError(error.InvalidCli, parseCliArgs(allocator, &.{
+        "move",
+        "function",
+        "0x2",
+        "pool",
+        "swap",
+        "--dry-run",
+        "--emit-template",
+        "preferred-dry-run-request",
+    }));
+}
+
+test "parseCliArgs rejects move function wait without direct send" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    try testing.expectError(error.InvalidCli, parseCliArgs(allocator, &.{
+        "move",
+        "function",
+        "0x2",
+        "pool",
+        "swap",
+        "--wait",
+    }));
 }
 
 test "parseCliArgs parses object get summarize options" {

@@ -684,7 +684,7 @@ pub fn main() !void {
 - `events`: 调用 `suix_queryEvents`；支持 raw `--filter <json|@file>`，也支持 typed `--package --module`、`--event-type`、`--sender`、`--tx`，可用于协议对象和行为发现。
 - `move package <package-id-or-alias>`: 调用 `sui_getNormalizedMoveModulesByPackage`，发现 package 下有哪些模块。
 - `move module <package-id-or-alias> <module>`: 调用 `sui_getNormalizedMoveModule`，查看模块里的 structs / exposed functions。
-- `move function <package-id-or-alias> <module> <function>`: 调用 `sui_getNormalizedMoveFunction`，查看参数/返回类型；`--summarize` 会额外输出 CLI lowering hint 和可复用的 transaction 模板。可选 `--type-arg/--type-args` 会在本地先按具体类型实参特化 summary。`--args` / `--arg` 可以把你已知的显式参数先回填到 preferred template 里；`--sender` / `--signer` / `--from-keystore` 会把 owner 上下文回填到 owned-object discovery hint 里。`--emit-template <kind>` 可以直接把生成好的 `commands` / `request artifact` 单独输出出来。
+- `move function <package-id-or-alias> <module> <function>`: 调用 `sui_getNormalizedMoveFunction`，查看参数/返回类型；`--summarize` 会额外输出 CLI lowering hint 和可复用的 transaction 模板。可选 `--type-arg/--type-args` 会在本地先按具体类型实参特化 summary。`--args` / `--arg` 可以把你已知的显式参数先回填到 preferred template 里；`--sender` / `--signer` / `--from-keystore` 会把 owner 上下文回填到 owned-object discovery hint 里。`--emit-template <kind>` 可以直接把生成好的 `commands` / `request artifact` 单独输出出来；`--dry-run` / `--send` 会直接消费 preferred request artifact 并进入执行路径。
 - `tx simulate [params-json]`: 调用 `sui_devInspectTransactionBlock`。
 - `tx dry-run [tx-bytes|@file]`: 调用 `sui_dryRunTransactionBlock`。
 - `tx send [params-json]`: 调用 `sui_executeTransactionBlock`。
@@ -929,6 +929,11 @@ zig build run -- move function cetus_clmm_mainnet pool swap \
 
 zig build run -- move function cetus_clmm_mainnet pool swap \
   --emit-template preferred-send-request > send-request.json
+
+zig build run -- move function cetus_clmm_mainnet pool swap \
+  --sender 0x... \
+  --arg 7 \
+  --dry-run
 ```
 
 支持的 `--emit-template` 值有：
@@ -944,6 +949,23 @@ zig build run -- move function cetus_clmm_mainnet pool swap \
 如果你在 `move function --summarize` 时已经给了 `--sender` 或 `--signer`，这些值现在会直接回填到 `call_template.tx_dry_run_*` 和 `call_template.tx_send_from_keystore_*`。当只有 `--sender` 时，`tx send --from-keystore` 模板会回退用这个 sender 地址作为 address-compatible signer selector。
 
 真正执行时，你仍然需要自己补 gas 和具体 object id / select token；如果 summary 阶段没有给 sender / signer，上述模板里仍然会保留占位符。
+
+如果你不想再手工中转 `request artifact`，`move function` 现在还支持直接执行：
+
+```bash
+zig build run -- move function cetus_clmm_mainnet pool swap \
+  --sender 0x... \
+  --arg 7 \
+  --dry-run
+
+zig build run -- move function cetus_clmm_mainnet pool swap \
+  --from-keystore \
+  --signer main \
+  --arg 7 \
+  --send
+```
+
+这条直接执行路径只会在 template 已经足够具体时继续往下走；如果 `preferred-*` 里还残留 `<arg...>`、`0x<sender>`、`<alias-or-address>` 这类占位符，CLI 会先报错，要求你继续补 sender / signer / object candidate，而不是把一个注定失败的模板直接送进 tx builder。
 
 如果你给了 `move function --type-arg/--type-args`，summary 还会带：
 - `applied_type_args_json`
