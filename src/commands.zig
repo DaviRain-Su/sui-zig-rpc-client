@@ -2974,10 +2974,22 @@ test "runCommand move function with --summarize fills owner context into owned o
 
     const callback = struct {
         fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
-            std.debug.assert(std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction"));
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"visibility\":\"Public\",\"isEntry\":false,\"typeParameters\":[[],[]],\"parameters\":[{\"MutableReference\":{\"Struct\":{\"address\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb\",\"module\":\"position\",\"name\":\"Position\",\"typeParams\":[]}}}],\"return\":[]}}",
+                );
+            }
+
+            std.debug.assert(std.mem.eql(u8, req.method, "suix_getOwnedObjects"));
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0xowner\"") != null);
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"StructType\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb::position::Position\"") != null);
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"showType\":true") != null);
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"showOwner\":true") != null);
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, ",5]") != null);
             return alloc.dupe(
                 u8,
-                "{\"result\":{\"visibility\":\"Public\",\"isEntry\":false,\"typeParameters\":[[],[]],\"parameters\":[{\"MutableReference\":{\"Struct\":{\"address\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb\",\"module\":\"position\",\"name\":\"Position\",\"typeParams\":[]}}}],\"return\":[]}}",
+                "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xposition1\",\"version\":\"7\",\"digest\":\"position-digest-1\",\"type\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb::position::Position\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
             );
         }
     }.call;
@@ -3013,6 +3025,20 @@ test "runCommand move function with --summarize fills owner context into owned o
     );
     const owned_query_argv = parameter.get("owned_object_query_argv").?.array.items;
     try testing.expectEqualStrings("0xowner", owned_query_argv[2].string);
+    const owned_candidates = parameter.get("owned_object_candidates").?.array.items;
+    try testing.expectEqual(@as(usize, 1), owned_candidates.len);
+    try testing.expectEqualStrings("0xposition1", owned_candidates[0].object.get("object_id").?.string);
+    try testing.expectEqual(@as(i64, 7), owned_candidates[0].object.get("version").?.integer);
+    try testing.expectEqualStrings("position-digest-1", owned_candidates[0].object.get("digest").?.string);
+    try testing.expectEqualStrings(
+        "0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb::position::Position",
+        owned_candidates[0].object.get("type_name").?.string,
+    );
+    try testing.expectEqualStrings("0xowner", owned_candidates[0].object.get("owner_value").?.string);
+    try testing.expectEqualStrings(
+        "select:{\"kind\":\"object_input\",\"objectId\":\"0xposition1\",\"inputKind\":\"imm_or_owned\",\"version\":7,\"digest\":\"position-digest-1\"}",
+        owned_candidates[0].object.get("object_input_select_token").?.string,
+    );
 }
 
 test "runCommand move function with --summarize specializes generic signatures with type arguments" {
@@ -3170,10 +3196,22 @@ test "runCommand move function with --summarize fills owner context into vector 
 
     const callback = struct {
         fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
-            std.debug.assert(std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction"));
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"visibility\":\"Public\",\"isEntry\":true,\"typeParameters\":[[]],\"parameters\":[{\"Vector\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"coin\",\"name\":\"Coin\",\"typeParams\":[{\"TypeParameter\":0}]}}},{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[]}}",
+                );
+            }
+
+            std.debug.assert(std.mem.eql(u8, req.method, "suix_getOwnedObjects"));
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0xowner\"") != null);
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"StructType\":\"0x2::coin::Coin<0x2::sui::SUI>\"") != null);
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"showType\":true") != null);
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"showOwner\":true") != null);
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, ",5]") != null);
             return alloc.dupe(
                 u8,
-                "{\"result\":{\"visibility\":\"Public\",\"isEntry\":true,\"typeParameters\":[[]],\"parameters\":[{\"Vector\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"coin\",\"name\":\"Coin\",\"typeParams\":[{\"TypeParameter\":0}]}}},{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[]}}",
+                "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xcoin1\",\"version\":\"9\",\"digest\":\"coin-digest-1\",\"type\":\"0x2::coin::Coin<0x2::sui::SUI>\",\"owner\":{\"AddressOwner\":\"0xowner\"}}},{\"data\":{\"objectId\":\"0xcoin2\",\"version\":\"10\",\"digest\":\"coin-digest-2\",\"type\":\"0x2::coin::Coin<0x2::sui::SUI>\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
             );
         }
     }.call;
@@ -3210,6 +3248,22 @@ test "runCommand move function with --summarize fills owner context into vector 
     );
     const vector_item_query_argv = parameter.get("vector_item_owned_object_query_argv").?.array.items;
     try testing.expectEqualStrings("0xowner", vector_item_query_argv[2].string);
+    const vector_item_candidates = parameter.get("vector_item_owned_object_candidates").?.array.items;
+    try testing.expectEqual(@as(usize, 2), vector_item_candidates.len);
+    try testing.expectEqualStrings("0xcoin1", vector_item_candidates[0].object.get("object_id").?.string);
+    try testing.expectEqual(@as(i64, 9), vector_item_candidates[0].object.get("version").?.integer);
+    try testing.expectEqualStrings("coin-digest-1", vector_item_candidates[0].object.get("digest").?.string);
+    try testing.expectEqualStrings(
+        "select:{\"kind\":\"object_input\",\"objectId\":\"0xcoin1\",\"inputKind\":\"imm_or_owned\",\"version\":9,\"digest\":\"coin-digest-1\"}",
+        vector_item_candidates[0].object.get("object_input_select_token").?.string,
+    );
+    try testing.expectEqualStrings("0xcoin2", vector_item_candidates[1].object.get("object_id").?.string);
+    try testing.expectEqual(@as(i64, 10), vector_item_candidates[1].object.get("version").?.integer);
+    try testing.expectEqualStrings("coin-digest-2", vector_item_candidates[1].object.get("digest").?.string);
+    try testing.expectEqualStrings(
+        "select:{\"kind\":\"object_input\",\"objectId\":\"0xcoin2\",\"inputKind\":\"imm_or_owned\",\"version\":10,\"digest\":\"coin-digest-2\"}",
+        vector_item_candidates[1].object.get("object_input_select_token").?.string,
+    );
 }
 
 test "runCommand move package resolves aliases before issuing RPC" {

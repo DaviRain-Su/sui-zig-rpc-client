@@ -3722,6 +3722,23 @@ pub const SuiRpcClient = struct {
         };
     }
 
+    fn buildExactImmOrOwnedObjectInputSelectToken(
+        allocator: std.mem.Allocator,
+        object_id: []const u8,
+        version: u64,
+        digest: []const u8,
+    ) ![]u8 {
+        return try std.fmt.allocPrint(
+            allocator,
+            "select:{{\"kind\":\"object_input\",\"objectId\":{f},\"inputKind\":\"imm_or_owned\",\"version\":{},\"digest\":{f}}}",
+            .{
+                std.json.fmt(object_id, .{}),
+                version,
+                std.json.fmt(digest, .{}),
+            },
+        );
+    }
+
     fn buildOwnedObjectSelectToken(
         allocator: std.mem.Allocator,
         owner: ?[]const u8,
@@ -3785,6 +3802,53 @@ pub const SuiRpcClient = struct {
         errdefer allocator.free(argv[5]);
 
         return argv;
+    }
+
+    fn discoverOwnedObjectCandidates(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        owner: []const u8,
+        struct_type: []const u8,
+    ) ![]move_result.OwnedMoveObjectCandidate {
+        var page = try self.getOwnedObjectsPageWithRequest(allocator, owner, .{
+            .filter = .{ .struct_type = struct_type },
+            .options = .{
+                .typed = .{
+                    .show_type = true,
+                    .show_owner = true,
+                },
+            },
+            .limit = 5,
+        });
+        defer page.deinit(allocator);
+
+        var candidates = std.ArrayList(move_result.OwnedMoveObjectCandidate).empty;
+        errdefer {
+            for (candidates.items) |*value| value.deinit(allocator);
+            candidates.deinit(allocator);
+        }
+
+        for (page.entries) |entry| {
+            if (entry.status != .found) continue;
+            const object_id = entry.object_id orelse continue;
+            const version = entry.version orelse continue;
+            const digest = entry.digest orelse continue;
+            try candidates.append(allocator, .{
+                .object_id = try allocator.dupe(u8, object_id),
+                .version = version,
+                .digest = try allocator.dupe(u8, digest),
+                .type_name = if (entry.type_name) |value| try allocator.dupe(u8, value) else null,
+                .owner_value = if (entry.owner_value) |value| try allocator.dupe(u8, value) else null,
+                .object_input_select_token = try buildExactImmOrOwnedObjectInputSelectToken(
+                    allocator,
+                    object_id,
+                    version,
+                    digest,
+                ),
+            });
+        }
+
+        return try candidates.toOwnedSlice(allocator);
     }
 
     fn buildMoveFunctionTypeArgsTemplateJson(
@@ -4018,6 +4082,7 @@ pub const SuiRpcClient = struct {
     }
 
     fn populateMoveFunctionCallTemplate(
+        self: *SuiRpcClient,
         allocator: std.mem.Allocator,
         summary: *move_result.OwnedMoveFunctionSummary,
         parameter_allows_owned_discovery: []const bool,
@@ -4056,6 +4121,13 @@ pub const SuiRpcClient = struct {
                     owner_address,
                     item_struct_type,
                 );
+                if (owner_address) |owner| {
+                    parameter.vector_item_owned_object_candidates = try self.discoverOwnedObjectCandidates(
+                        allocator,
+                        owner,
+                        item_struct_type,
+                    );
+                }
                 continue;
             }
             if (!std.mem.eql(u8, lowering_kind, "object")) continue;
@@ -4101,6 +4173,13 @@ pub const SuiRpcClient = struct {
             const struct_type = concreteObjectStructTypeFromSignature(parameter.signature) orelse continue;
             parameter.owned_object_select_token = try buildOwnedObjectSelectToken(allocator, owner_address, struct_type);
             parameter.owned_object_query_argv = try buildOwnedObjectQueryArgv(allocator, owner_address, struct_type);
+            if (owner_address) |owner| {
+                parameter.owned_object_candidates = try self.discoverOwnedObjectCandidates(
+                    allocator,
+                    owner,
+                    struct_type,
+                );
+            }
         }
 
         const type_args_json = try resolvedMoveFunctionTypeArgsTemplateJson(
@@ -4158,7 +4237,6 @@ pub const SuiRpcClient = struct {
         type_arguments_json: ?[]const u8,
         owner_address: ?[]const u8,
     ) !move_result.OwnedMoveFunctionSummary {
-        _ = self;
         var summary = try move_result.extractMoveFunctionSummary(
             allocator,
             response_json,
@@ -4207,6 +4285,7 @@ pub const SuiRpcClient = struct {
         defer if (resolved_type_arguments_json) |value| allocator.free(value);
 
         try populateMoveFunctionCallTemplate(
+            self,
             allocator,
             &summary,
             parameter_allows_owned_discovery,

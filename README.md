@@ -853,8 +853,10 @@ zig build run -- move function cetus_clmm_mainnet pool add_liquidity_fix_coin \
 - `parameters[*].vector_item_owned_object_select_token`: 如果参数是 `vector<concrete object struct>`，CLI 会给单个元素的 `owned_object_struct_type` 候选
 - `parameters[*].vector_item_object_get_argv`: `vector<object>` 单个元素的 `object get` 查询模板
 - `parameters[*].vector_item_owned_object_query_argv`: `vector<concrete object struct>` 单个元素的 `account objects --struct-type` 查询模板
+- `parameters[*].vector_item_owned_object_candidates`: 如果你同时给了 `--sender`、`--signer` 或 `--from-keystore`，CLI 会尝试直接查出一组单元素对象候选，并回填成精确 `object_input(imm_or_owned, version, digest)` token
 - `parameters[*].owned_object_select_token`: 如果参数类型是 concrete object struct，CLI 会额外给一个 `owned_object_struct_type` 选择 token 候选
 - `parameters[*].owned_object_query_argv`: 对应的 `account objects --struct-type` 查询模板
+- `parameters[*].owned_object_candidates`: 如果有 owner 上下文，CLI 会直接查出一组 concrete owned object 候选，并给出可直接放进 `--args` 的精确 `object_input(imm_or_owned, version, digest)` token
 - `call_template.type_args_json`: 直接可改的 `--type-args` JSON 模板
 - `call_template.args_json`: 直接可改的 `--args` JSON 模板
 - `call_template.move_call_command_json`: 直接可放进 `--commands` / `--command` 的 raw `MoveCall` command 模板
@@ -882,6 +884,8 @@ zig build run -- move function cetus_clmm_mainnet pool add_liquidity_fix_coin \
 这些字段都是“候选调用/发现路径”，不是 ownership 或 sharedness 断言。像 Cetus `Pool<T0,T1>` 这类非 preset shared object，CLI 现在至少会直接给出 `object get` 和 `object_input(shared)` 骨架；而 `Position` 这类 concrete owned object 还会额外带 `account objects --struct-type` 查询模板。
 
 对于 `vector<Coin<T>>` 这类对象向量，summary 现在也会补“单个元素”的 discovery/input skeleton。这对 Cetus 一类要求 coin vector 的接口更实用，因为你可以先拿 `vector_item_owned_object_query_argv` 找一批候选 coin，再把返回的 object id 或 select token 填回 `--args` 数组。
+
+如果你在 `move function --summarize` 时同时给了 `--sender`、`--signer` 或 `--from-keystore`，CLI 现在还会进一步把 owner 上下文带进 discovery 流程。对 concrete owned object 和 `vector<concrete owned object>` 参数，summary 会直接尝试 `suix_getOwnedObjects`，把找到的候选对象填进 `owned_object_candidates` / `vector_item_owned_object_candidates`。这一步不会替你自动做最终选择，但已经把“提示层”推进成了“候选集层”。
 
 当 ABI 显示参数是非 `vector<u8>` 的 `vector<T>` 时，CLI 现在会在本地 programmable builder 路径里自动插入 `MakeMoveVec`。这对 Cetus 一类需要 `vector<Coin<_>>` 的调用很重要，因为你可以直接传：
 

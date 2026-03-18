@@ -1,5 +1,22 @@
 const std = @import("std");
 
+pub const OwnedMoveObjectCandidate = struct {
+    object_id: []u8,
+    version: u64,
+    digest: []u8,
+    type_name: ?[]u8 = null,
+    owner_value: ?[]u8 = null,
+    object_input_select_token: []u8,
+
+    pub fn deinit(self: *OwnedMoveObjectCandidate, allocator: std.mem.Allocator) void {
+        allocator.free(self.object_id);
+        allocator.free(self.digest);
+        if (self.type_name) |value| allocator.free(value);
+        if (self.owner_value) |value| allocator.free(value);
+        allocator.free(self.object_input_select_token);
+    }
+};
+
 pub const OwnedMoveParameterSummary = struct {
     signature: []u8,
     lowering_kind: ?[]const u8 = null,
@@ -13,8 +30,10 @@ pub const OwnedMoveParameterSummary = struct {
     vector_item_owned_object_select_token: ?[]u8 = null,
     vector_item_object_get_argv: ?[][]u8 = null,
     vector_item_owned_object_query_argv: ?[][]u8 = null,
+    vector_item_owned_object_candidates: ?[]OwnedMoveObjectCandidate = null,
     owned_object_select_token: ?[]u8 = null,
     owned_object_query_argv: ?[][]u8 = null,
+    owned_object_candidates: ?[]OwnedMoveObjectCandidate = null,
 
     pub fn deinit(self: *OwnedMoveParameterSummary, allocator: std.mem.Allocator) void {
         allocator.free(self.signature);
@@ -36,10 +55,18 @@ pub const OwnedMoveParameterSummary = struct {
             for (argv) |value| allocator.free(value);
             allocator.free(argv);
         }
+        if (self.vector_item_owned_object_candidates) |values| {
+            for (values) |*value| value.deinit(allocator);
+            allocator.free(values);
+        }
         if (self.owned_object_select_token) |value| allocator.free(value);
         if (self.owned_object_query_argv) |argv| {
             for (argv) |value| allocator.free(value);
             allocator.free(argv);
+        }
+        if (self.owned_object_candidates) |values| {
+            for (values) |*value| value.deinit(allocator);
+            allocator.free(values);
         }
     }
 };
