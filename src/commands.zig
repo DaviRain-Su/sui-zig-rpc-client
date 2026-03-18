@@ -576,16 +576,39 @@ fn resolvedLocalBuilderGasPaymentJson(
     rpc: *client.SuiRpcClient,
     args: *const cli.ParsedArgs,
     sender: []const u8,
+    effective_gas_budget: ?u64,
 ) !?[]u8 {
     return try rpc.ownResolvedGasPaymentJsonWithDefaultOwner(
         allocator,
         args.tx_build_gas_payment,
         sender,
         if (args.tx_build_auto_gas_payment)
-            args.tx_build_gas_payment_min_balance orelse args.tx_build_gas_budget orelse 1
+            args.tx_build_gas_payment_min_balance orelse effective_gas_budget orelse args.tx_build_gas_budget orelse 1
         else
             null,
     );
+}
+
+const provisional_auto_gas_budget: u64 = 100_000_000;
+const auto_gas_budget_min_buffer: u64 = 1_000;
+const auto_gas_budget_buffer_divisor: u64 = 5;
+
+fn estimatedGasBudgetFromInsights(
+    insights: client.tx_result.OwnedExecutionInsights,
+) !u64 {
+    const computation_cost = insights.gas_summary.computation_cost orelse 0;
+    const storage_cost = insights.gas_summary.storage_cost orelse 0;
+    const non_refundable_storage_fee = insights.gas_summary.non_refundable_storage_fee orelse 0;
+
+    const gross_cost = try std.math.add(
+        u64,
+        try std.math.add(u64, computation_cost, storage_cost),
+        non_refundable_storage_fee,
+    );
+    if (gross_cost == 0) return error.InvalidResponse;
+
+    const buffer = @max(auto_gas_budget_min_buffer, gross_cost / auto_gas_budget_buffer_divisor);
+    return try std.math.add(u64, gross_cost, buffer);
 }
 
 fn resolvedLocalBuilderGasPrice(
@@ -1036,7 +1059,10 @@ fn ownLocalCommandSourceBuildContext(
     if (require_signer_source and !hasRealBuilderSignerSource(args) and provider == null) return null;
     if (!cli.supportsProgrammableInput(args)) return null;
 
-    const gas_budget = args.tx_build_gas_budget orelse return null;
+    const requested_gas_budget = args.tx_build_gas_budget orelse if (args.tx_build_auto_gas_budget)
+        provisional_auto_gas_budget
+    else
+        return null;
     const sender = blk: {
         if (try resolvedUnsafeMoveCallSender(allocator, rpc, args)) |value| break :blk value;
         if (provider) |value| {
@@ -1050,6 +1076,7 @@ fn ownLocalCommandSourceBuildContext(
         allocator.free(sender);
         return null;
     };
+    errdefer allocator.free(sender);
 
     const gas_price = try rpc.resolveEffectiveGasPrice(
         args.tx_build_gas_price,
@@ -1059,12 +1086,20 @@ fn ownLocalCommandSourceBuildContext(
         return null;
     };
 
-    const gas_payment_json = try resolvedLocalBuilderGasPaymentJson(allocator, rpc, args, sender) orelse {
+    var gas_payment_json = try resolvedLocalBuilderGasPaymentJson(
+        allocator,
+        rpc,
+        args,
+        sender,
+        requested_gas_budget,
+    ) orelse {
         allocator.free(sender);
         return null;
     };
+    errdefer allocator.free(gas_payment_json);
 
     var owned_source = try resolvedUnsafeCommandSource(allocator, rpc, args, sender);
+    errdefer owned_source.deinit(allocator);
     if (!(try client.SuiRpcClient.commandSourceSupportsLocalProgrammableTransactionBuilder(
         allocator,
         owned_source.source,
@@ -1075,13 +1110,52 @@ fn ownLocalCommandSourceBuildContext(
         return null;
     }
 
+    var effective_gas_budget = requested_gas_budget;
+    if (args.tx_build_auto_gas_budget) {
+        const provisional_tx_bytes = try rpc.buildLocalProgrammableTransactionTxBytesFromCommandSource(
+            allocator,
+            owned_source.source,
+            sender,
+            gas_payment_json,
+            gas_price,
+            requested_gas_budget,
+            null,
+        );
+        defer allocator.free(provisional_tx_bytes);
+
+        const dry_run_payload = try tx_builder.buildDryRunPayload(allocator, provisional_tx_bytes);
+        defer allocator.free(dry_run_payload);
+
+        const dry_run_response = try rpc.sendTxDryRun(dry_run_payload);
+        defer rpc.allocator.free(dry_run_response);
+
+        var insights = try rpc.summarizeExecutionResponse(allocator, dry_run_response);
+        defer insights.deinit(allocator);
+
+        effective_gas_budget = try estimatedGasBudgetFromInsights(insights);
+        if (args.tx_build_auto_gas_payment and effective_gas_budget != requested_gas_budget) {
+            allocator.free(gas_payment_json);
+            gas_payment_json = try resolvedLocalBuilderGasPaymentJson(
+                allocator,
+                rpc,
+                args,
+                sender,
+                effective_gas_budget,
+            ) orelse {
+                owned_source.deinit(allocator);
+                allocator.free(sender);
+                return null;
+            };
+        }
+    }
+
     return .{
         .source = owned_source.source,
         .owned_source_json = owned_source.owned_json,
         .sender = sender,
         .gas_payment_json = gas_payment_json,
         .gas_price = gas_price,
-        .gas_budget = gas_budget,
+        .gas_budget = effective_gas_budget,
     };
 }
 
@@ -3017,7 +3091,7 @@ test "runCommand move function with --summarize prints normalized function summa
         parsed.value.object.get("call_template").?.object.get("commands_json").?.string,
     );
     try testing.expectEqualStrings(
-        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"pool\",\"function\":\"swap\",\"typeArguments\":[],\"arguments\":[\"<arg0-object-id-or-select-token>\",0]}],\"sender\":\"0x<sender>\",\"gasBudget\":100000000,\"gasPrice\":1000,\"autoGasPayment\":true,\"summarize\":true}",
+        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"pool\",\"function\":\"swap\",\"typeArguments\":[],\"arguments\":[\"<arg0-object-id-or-select-token>\",0]}],\"sender\":\"0x<sender>\",\"gasBudget\":100000000,\"gasPrice\":1000,\"autoGasPayment\":true,\"autoGasBudget\":true,\"summarize\":true}",
         parsed.value.object.get("call_template").?.object.get("tx_dry_run_request_json").?.string,
     );
     const dry_run_argv = parsed.value.object.get("call_template").?.object.get("tx_dry_run_argv").?.array.items;
@@ -3036,7 +3110,7 @@ test "runCommand move function with --summarize prints normalized function summa
     try testing.expectEqualStrings("tx", send_argv[0].string);
     try testing.expectEqualStrings("send", send_argv[1].string);
     try testing.expectEqualStrings(
-        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"pool\",\"function\":\"swap\",\"typeArguments\":[],\"arguments\":[\"<arg0-object-id-or-select-token>\",0]}],\"fromKeystore\":true,\"signer\":\"<alias-or-address>\",\"gasBudget\":100000000,\"autoGasPayment\":true,\"wait\":true,\"summarize\":true}",
+        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"pool\",\"function\":\"swap\",\"typeArguments\":[],\"arguments\":[\"<arg0-object-id-or-select-token>\",0]}],\"fromKeystore\":true,\"signer\":\"<alias-or-address>\",\"gasBudget\":100000000,\"autoGasPayment\":true,\"autoGasBudget\":true,\"wait\":true,\"summarize\":true}",
         parsed.value.object.get("call_template").?.object.get("tx_send_from_keystore_request_json").?.string,
     );
     try testing.expectEqualStrings("--from-keystore", send_argv[12].string);
@@ -3454,11 +3528,11 @@ test "runCommand move function with --summarize carries sender and signer contex
     defer parsed.deinit();
     const template = parsed.value.object.get("call_template").?.object;
     try testing.expectEqualStrings(
-        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"pool\",\"function\":\"swap\",\"typeArguments\":[],\"arguments\":[\"<arg0-object-id-or-select-token>\",0]}],\"sender\":\"0xowner\",\"gasBudget\":100000000,\"gasPrice\":1000,\"autoGasPayment\":true,\"summarize\":true}",
+        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"pool\",\"function\":\"swap\",\"typeArguments\":[],\"arguments\":[\"<arg0-object-id-or-select-token>\",0]}],\"sender\":\"0xowner\",\"gasBudget\":100000000,\"gasPrice\":1000,\"autoGasPayment\":true,\"autoGasBudget\":true,\"summarize\":true}",
         template.get("tx_dry_run_request_json").?.string,
     );
     try testing.expectEqualStrings(
-        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"pool\",\"function\":\"swap\",\"typeArguments\":[],\"arguments\":[\"<arg0-object-id-or-select-token>\",0]}],\"fromKeystore\":true,\"signer\":\"builder\",\"gasBudget\":100000000,\"autoGasPayment\":true,\"wait\":true,\"summarize\":true}",
+        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"pool\",\"function\":\"swap\",\"typeArguments\":[],\"arguments\":[\"<arg0-object-id-or-select-token>\",0]}],\"fromKeystore\":true,\"signer\":\"builder\",\"gasBudget\":100000000,\"autoGasPayment\":true,\"autoGasBudget\":true,\"wait\":true,\"summarize\":true}",
         template.get("tx_send_from_keystore_request_json").?.string,
     );
     const dry_run_argv = template.get("tx_dry_run_argv").?.array.items;
@@ -3520,7 +3594,7 @@ test "runCommand move function with --summarize falls back to sender address for
     defer parsed.deinit();
     const template = parsed.value.object.get("call_template").?.object;
     try testing.expectEqualStrings(
-        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"pool\",\"function\":\"swap\",\"typeArguments\":[],\"arguments\":[\"<arg0-object-id-or-select-token>\",0]}],\"fromKeystore\":true,\"signer\":\"0xowner\",\"gasBudget\":100000000,\"autoGasPayment\":true,\"wait\":true,\"summarize\":true}",
+        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"pool\",\"function\":\"swap\",\"typeArguments\":[],\"arguments\":[\"<arg0-object-id-or-select-token>\",0]}],\"fromKeystore\":true,\"signer\":\"0xowner\",\"gasBudget\":100000000,\"autoGasPayment\":true,\"autoGasBudget\":true,\"wait\":true,\"summarize\":true}",
         template.get("tx_send_from_keystore_request_json").?.string,
     );
     const send_argv = template.get("tx_send_from_keystore_argv").?.array.items;
@@ -3581,7 +3655,7 @@ test "runCommand move function with --emit-template prints preferred dry-run req
     try runCommand(allocator, &rpc, &args, output.writer(allocator));
 
     try testing.expectEqualStrings(
-        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"module\":\"pool\",\"function\":\"swap\",\"typeArguments\":[],\"arguments\":[\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xpool1\\\",\\\"inputKind\\\":\\\"shared\\\",\\\"initialSharedVersion\\\":7,\\\"mutable\\\":true}\"]}],\"sender\":\"0x<sender>\",\"gasBudget\":100000000,\"gasPrice\":1000,\"autoGasPayment\":true,\"summarize\":true}\n",
+        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"module\":\"pool\",\"function\":\"swap\",\"typeArguments\":[],\"arguments\":[\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xpool1\\\",\\\"inputKind\\\":\\\"shared\\\",\\\"initialSharedVersion\\\":7,\\\"mutable\\\":true}\"]}],\"sender\":\"0x<sender>\",\"gasBudget\":100000000,\"gasPrice\":1000,\"autoGasPayment\":true,\"autoGasBudget\":true,\"summarize\":true}\n",
         output.items,
     );
 }
@@ -3614,7 +3688,7 @@ test "runCommand move function with --dry-run executes preferred dry-run request
                 state.dry_run += 1;
                 return alloc.dupe(
                     u8,
-                    "{\"result\":{\"effects\":{\"status\":{\"status\":\"success\"}},\"balanceChanges\":[]}}",
+                    "{\"result\":{\"effects\":{\"status\":{\"status\":\"success\"},\"gasUsed\":{\"computationCost\":\"7\",\"storageCost\":\"2\",\"storageRebate\":\"1\"}},\"balanceChanges\":[]}}",
                 );
             }
             if (std.mem.eql(u8, req.method, "suix_getCoins")) {
@@ -3657,8 +3731,8 @@ test "runCommand move function with --dry-run executes preferred dry-run request
 
     try runCommand(allocator, &rpc, &args, output.writer(allocator));
 
-    try testing.expectEqual(@as(usize, 2), counts.normalized);
-    try testing.expectEqual(@as(usize, 1), counts.dry_run);
+    try testing.expectEqual(@as(usize, 3), counts.normalized);
+    try testing.expectEqual(@as(usize, 2), counts.dry_run);
     try testing.expectEqual(@as(usize, 0), counts.unsafe);
 
     try testing.expect(std.mem.indexOf(u8, output.items, "success") != null);
@@ -3697,6 +3771,7 @@ test "runCommand move function with --send executes preferred send request artif
     const State = struct {
         gas_price: usize = 0,
         normalized: usize = 0,
+        dry_run: usize = 0,
         execute_calls: usize = 0,
         unsafe_calls: usize = 0,
     };
@@ -3715,6 +3790,13 @@ test "runCommand move function with --send executes preferred send request artif
             if (std.mem.eql(u8, req.method, "suix_getReferenceGasPrice")) {
                 ctx.gas_price += 1;
                 return alloc.dupe(u8, "{\"result\":\"8\"}");
+            }
+            if (std.mem.eql(u8, req.method, "sui_dryRunTransactionBlock")) {
+                ctx.dry_run += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"effects\":{\"status\":{\"status\":\"success\"},\"gasUsed\":{\"computationCost\":\"9\",\"storageCost\":\"2\",\"storageRebate\":\"1\"}},\"balanceChanges\":[]}}",
+                );
             }
             if (std.mem.eql(u8, req.method, "suix_getCoins")) {
                 return alloc.dupe(
@@ -3771,7 +3853,8 @@ test "runCommand move function with --send executes preferred send request artif
     try runCommand(allocator, &rpc, &args, output.writer(allocator));
 
     try testing.expectEqual(@as(usize, 1), state.gas_price);
-    try testing.expectEqual(@as(usize, 2), state.normalized);
+    try testing.expectEqual(@as(usize, 3), state.normalized);
+    try testing.expectEqual(@as(usize, 1), state.dry_run);
     try testing.expectEqual(@as(usize, 1), state.execute_calls);
     try testing.expectEqual(@as(usize, 0), state.unsafe_calls);
 
@@ -4129,7 +4212,7 @@ test "runCommand move function with --summarize uses queried package for shared 
         parsed.value.object.get("call_template").?.object.get("preferred_commands_json").?.string,
     );
     try testing.expectEqualStrings(
-        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"module\":\"pool\",\"function\":\"swap\",\"typeArguments\":[],\"arguments\":[\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xpool1\\\",\\\"inputKind\\\":\\\"shared\\\",\\\"initialSharedVersion\\\":7,\\\"mutable\\\":true}\"]}],\"sender\":\"0x<sender>\",\"gasBudget\":100000000,\"gasPrice\":1000,\"autoGasPayment\":true,\"summarize\":true}",
+        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"module\":\"pool\",\"function\":\"swap\",\"typeArguments\":[],\"arguments\":[\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xpool1\\\",\\\"inputKind\\\":\\\"shared\\\",\\\"initialSharedVersion\\\":7,\\\"mutable\\\":true}\"]}],\"sender\":\"0x<sender>\",\"gasBudget\":100000000,\"gasPrice\":1000,\"autoGasPayment\":true,\"autoGasBudget\":true,\"summarize\":true}",
         parsed.value.object.get("call_template").?.object.get("preferred_tx_dry_run_request_json").?.string,
     );
 }
@@ -4176,7 +4259,7 @@ test "runCommand move function with --emit-template falls back to base send requ
     try runCommand(allocator, &rpc, &args, output.writer(allocator));
 
     try testing.expectEqualStrings(
-        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"pool\",\"function\":\"swap\",\"typeArguments\":[],\"arguments\":[\"<arg0-object-id-or-select-token>\",0]}],\"fromKeystore\":true,\"signer\":\"<alias-or-address>\",\"gasBudget\":100000000,\"autoGasPayment\":true,\"wait\":true,\"summarize\":true}\n",
+        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"pool\",\"function\":\"swap\",\"typeArguments\":[],\"arguments\":[\"<arg0-object-id-or-select-token>\",0]}],\"fromKeystore\":true,\"signer\":\"<alias-or-address>\",\"gasBudget\":100000000,\"autoGasPayment\":true,\"autoGasBudget\":true,\"wait\":true,\"summarize\":true}\n",
         output.items,
     );
 }
@@ -4439,7 +4522,7 @@ test "runCommand move function with --summarize fills owner context into vector 
         parsed.value.object.get("call_template").?.object.get("preferred_args_json").?.string,
     );
     try testing.expectEqualStrings(
-        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"router\",\"function\":\"deposit_many\",\"typeArguments\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"sui\",\"name\":\"SUI\",\"typeParams\":[]}}],\"arguments\":[[\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xcoin1\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":9,\\\"digest\\\":\\\"coin-digest-1\\\"}\",\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xcoin2\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":10,\\\"digest\\\":\\\"coin-digest-2\\\"}\"]]}],\"fromKeystore\":true,\"signer\":\"0xowner\",\"gasBudget\":100000000,\"autoGasPayment\":true,\"wait\":true,\"summarize\":true}",
+        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"router\",\"function\":\"deposit_many\",\"typeArguments\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"sui\",\"name\":\"SUI\",\"typeParams\":[]}}],\"arguments\":[[\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xcoin1\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":9,\\\"digest\\\":\\\"coin-digest-1\\\"}\",\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xcoin2\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":10,\\\"digest\\\":\\\"coin-digest-2\\\"}\"]]}],\"fromKeystore\":true,\"signer\":\"0xowner\",\"gasBudget\":100000000,\"autoGasPayment\":true,\"autoGasBudget\":true,\"wait\":true,\"summarize\":true}",
         parsed.value.object.get("call_template").?.object.get("preferred_tx_send_from_keystore_request_json").?.string,
     );
 }
@@ -10948,6 +11031,76 @@ test "runCommand tx_dry_run request artifact uses local programmable builder pat
 
     try testing.expectEqual(@as(usize, 1), counts.normalized);
     try testing.expectEqual(@as(usize, 1), counts.dry_run);
+    try testing.expectEqual(@as(usize, 0), counts.unsafe);
+}
+
+test "runCommand tx_dry_run request artifact with auto gas budget estimates before final dry run" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const Counts = struct {
+        normalized: usize = 0,
+        dry_run: usize = 0,
+        unsafe: usize = 0,
+    };
+    var counts = Counts{};
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const state = @as(*Counts, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                state.normalized += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"parameters\":[\"U64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\"}}}]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_dryRunTransactionBlock")) {
+                state.dry_run += 1;
+                return switch (state.dry_run) {
+                    1 => alloc.dupe(
+                        u8,
+                        "{\"result\":{\"effects\":{\"status\":{\"status\":\"success\"},\"gasUsed\":{\"computationCost\":\"10\",\"storageCost\":\"4\",\"storageRebate\":\"1\"}},\"balanceChanges\":[]}}",
+                    ),
+                    else => alloc.dupe(
+                        u8,
+                        "{\"result\":{\"effects\":{\"status\":{\"status\":\"success\"},\"gasUsed\":{\"computationCost\":\"11\",\"storageCost\":\"3\",\"storageRebate\":\"1\"}},\"balanceChanges\":[]}}",
+                    ),
+                };
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall") or std.mem.eql(u8, req.method, "unsafe_batchTransaction")) {
+                state.unsafe += 1;
+                return alloc.dupe(u8, "{\"result\":{\"txBytes\":\"AQIDBA==\"}}");
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "tx",
+        "dry-run",
+        "--request",
+        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"typeArguments\":[],\"arguments\":[7]}],\"sender\":\"0x123\",\"gasBudget\":1200,\"gasPrice\":8,\"gasPayment\":[{\"objectId\":\"0x999\",\"version\":\"3\",\"digest\":\"0x3333333333333333333333333333333333333333333333333333333333333333\"}],\"autoGasBudget\":true,\"summarize\":true}",
+    });
+    defer args.deinit(allocator);
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = &counts,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    try testing.expectEqual(@as(usize, 2), counts.normalized);
+    try testing.expectEqual(@as(usize, 2), counts.dry_run);
     try testing.expectEqual(@as(usize, 0), counts.unsafe);
 }
 

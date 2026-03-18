@@ -4860,7 +4860,7 @@ pub const SuiRpcClient = struct {
     ) ![]u8 {
         return try std.fmt.allocPrint(
             allocator,
-            "{{\"commands\":{s},\"sender\":{f},\"gasBudget\":100000000,\"gasPrice\":1000,\"autoGasPayment\":true,\"summarize\":true}}",
+            "{{\"commands\":{s},\"sender\":{f},\"gasBudget\":100000000,\"gasPrice\":1000,\"autoGasPayment\":true,\"autoGasBudget\":true,\"summarize\":true}}",
             .{
                 commands_json,
                 std.json.fmt(sender orelse "0x<sender>", .{}),
@@ -4877,7 +4877,7 @@ pub const SuiRpcClient = struct {
         const signer_value = signer_selector orelse sender orelse "<alias-or-address>";
         return try std.fmt.allocPrint(
             allocator,
-            "{{\"commands\":{s},\"fromKeystore\":true,\"signer\":{f},\"gasBudget\":100000000,\"autoGasPayment\":true,\"wait\":true,\"summarize\":true}}",
+            "{{\"commands\":{s},\"fromKeystore\":true,\"signer\":{f},\"gasBudget\":100000000,\"autoGasPayment\":true,\"autoGasBudget\":true,\"wait\":true,\"summarize\":true}}",
             .{
                 commands_json,
                 std.json.fmt(signer_value, .{}),
@@ -22194,13 +22194,13 @@ test "runReadQueryAction dispatches summarized move function queries" {
                         value.call_template.?.commands_json,
                     );
                     try testing.expectEqualStrings(
-                        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"pool\",\"function\":\"swap\",\"typeArguments\":[],\"arguments\":[\"<arg0-object-id-or-select-token>\",0]}],\"sender\":\"0x<sender>\",\"gasBudget\":100000000,\"gasPrice\":1000,\"autoGasPayment\":true,\"summarize\":true}",
+                        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"pool\",\"function\":\"swap\",\"typeArguments\":[],\"arguments\":[\"<arg0-object-id-or-select-token>\",0]}],\"sender\":\"0x<sender>\",\"gasBudget\":100000000,\"gasPrice\":1000,\"autoGasPayment\":true,\"autoGasBudget\":true,\"summarize\":true}",
                         value.call_template.?.tx_dry_run_request_json,
                     );
                     try testing.expectEqual(@as(usize, 19), value.call_template.?.tx_dry_run_argv.len);
                     try testing.expectEqualStrings("dry-run", value.call_template.?.tx_dry_run_argv[1]);
                     try testing.expectEqualStrings(
-                        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"pool\",\"function\":\"swap\",\"typeArguments\":[],\"arguments\":[\"<arg0-object-id-or-select-token>\",0]}],\"fromKeystore\":true,\"signer\":\"<alias-or-address>\",\"gasBudget\":100000000,\"autoGasPayment\":true,\"wait\":true,\"summarize\":true}",
+                        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"pool\",\"function\":\"swap\",\"typeArguments\":[],\"arguments\":[\"<arg0-object-id-or-select-token>\",0]}],\"fromKeystore\":true,\"signer\":\"<alias-or-address>\",\"gasBudget\":100000000,\"autoGasPayment\":true,\"autoGasBudget\":true,\"wait\":true,\"summarize\":true}",
                         value.call_template.?.tx_send_from_keystore_request_json,
                     );
                     try testing.expectEqual(@as(usize, 20), value.call_template.?.tx_send_from_keystore_argv.len);

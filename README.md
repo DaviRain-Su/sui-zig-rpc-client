@@ -924,6 +924,8 @@ zig build run -- tx dry-run --request @dry-run-request.json
 zig build run -- tx send --request @send-request.json
 ```
 
+如果 request artifact 带了 `autoGasBudget: true`，CLI 会先用模板里的预算做一次 dry-run 估算，再把估算出的 budget 回填到最终本地构造/执行路径。这条能力现在已经接到 `move function --dry-run` / `--send` 默认产出的 request artifact 上。
+
 如果你不想先拿整个 summary 再从里面手工拷 `call_template.*` 字段，`move function` 现在也支持直接输出单个模板：
 
 ```bash
