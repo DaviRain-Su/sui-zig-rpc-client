@@ -3869,6 +3869,11 @@ test "runCommand move function with --summarize prefers shared candidate with hi
         "\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xpool1\\\",\\\"inputKind\\\":\\\"shared\\\",\\\"initialSharedVersion\\\":7,\\\"mutable\\\":true}\"",
         parameters[0].object.get("auto_selected_arg_json").?.string,
     );
+    const shared_candidates = parameters[0].object.get("shared_object_candidates").?.array.items;
+    try testing.expectEqual(@as(i64, 2), shared_candidates[0].object.get("selection_score").?.integer);
+    try testing.expectEqualStrings("0xpool1", shared_candidates[0].object.get("object_id").?.string);
+    try testing.expectEqual(@as(i64, 1), shared_candidates[1].object.get("selection_score").?.integer);
+    try testing.expectEqualStrings("0xpool2", shared_candidates[1].object.get("object_id").?.string);
     try testing.expectEqual(std.json.Value.null, parameters[1].object.get("auto_selected_arg_json").?);
     try testing.expectEqualStrings(
         "[\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xpool1\\\",\\\"inputKind\\\":\\\"shared\\\",\\\"initialSharedVersion\\\":7,\\\"mutable\\\":true}\",\"<arg1-object-id-or-select-token>\"]",
@@ -3979,6 +3984,13 @@ test "runCommand move function with --summarize prefers owned candidate with hig
         "\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xposition-b\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":8,\\\"digest\\\":\\\"position-digest-b\\\"}\"",
         parameters[1].object.get("auto_selected_arg_json").?.string,
     );
+    const owned_candidates = parameters[1].object.get("owned_object_candidates").?.array.items;
+    try testing.expectEqual(@as(i64, 2), owned_candidates[0].object.get("selection_score").?.integer);
+    try testing.expectEqualStrings("0xposition-b", owned_candidates[0].object.get("object_id").?.string);
+    try testing.expectEqual(@as(i64, 1), owned_candidates[1].object.get("selection_score").?.integer);
+    try testing.expectEqualStrings("0xposition-a", owned_candidates[1].object.get("object_id").?.string);
+    try testing.expectEqual(@as(i64, 1), owned_candidates[2].object.get("selection_score").?.integer);
+    try testing.expectEqualStrings("0xposition-c", owned_candidates[2].object.get("object_id").?.string);
     try testing.expectEqualStrings(
         "[\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xpool1\\\",\\\"inputKind\\\":\\\"shared\\\",\\\"initialSharedVersion\\\":7,\\\"mutable\\\":true}\",\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xposition-b\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":8,\\\"digest\\\":\\\"position-digest-b\\\"}\",\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xvault1\\\",\\\"inputKind\\\":\\\"shared\\\",\\\"initialSharedVersion\\\":5,\\\"mutable\\\":false}\"]",
         parsed.value.object.get("call_template").?.object.get("preferred_args_json").?.string,

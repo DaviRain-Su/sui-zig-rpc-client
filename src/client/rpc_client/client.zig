@@ -4634,6 +4634,50 @@ pub const SuiRpcClient = struct {
         return best_index;
     }
 
+    fn sharedCandidateShouldSortBefore(
+        left: move_result.SharedMoveObjectCandidate,
+        right: move_result.SharedMoveObjectCandidate,
+    ) bool {
+        if (left.selection_score != right.selection_score) {
+            return left.selection_score > right.selection_score;
+        }
+        return std.mem.order(u8, left.object_id, right.object_id) == .lt;
+    }
+
+    fn sortSharedObjectCandidatesByScore(
+        candidates: []move_result.SharedMoveObjectCandidate,
+    ) void {
+        var index: usize = 1;
+        while (index < candidates.len) : (index += 1) {
+            var scan = index;
+            while (scan > 0 and sharedCandidateShouldSortBefore(candidates[scan], candidates[scan - 1])) : (scan -= 1) {
+                std.mem.swap(move_result.SharedMoveObjectCandidate, &candidates[scan], &candidates[scan - 1]);
+            }
+        }
+    }
+
+    fn ownedCandidateShouldSortBefore(
+        left: move_result.OwnedMoveObjectCandidate,
+        right: move_result.OwnedMoveObjectCandidate,
+    ) bool {
+        if (left.selection_score != right.selection_score) {
+            return left.selection_score > right.selection_score;
+        }
+        return std.mem.order(u8, left.object_id, right.object_id) == .lt;
+    }
+
+    fn sortOwnedObjectCandidatesByScore(
+        candidates: []move_result.OwnedMoveObjectCandidate,
+    ) void {
+        var index: usize = 1;
+        while (index < candidates.len) : (index += 1) {
+            var scan = index;
+            while (scan > 0 and ownedCandidateShouldSortBefore(candidates[scan], candidates[scan - 1])) : (scan -= 1) {
+                std.mem.swap(move_result.OwnedMoveObjectCandidate, &candidates[scan], &candidates[scan - 1]);
+            }
+        }
+    }
+
     fn applySharedCandidateSelectionHintsFromOwnedCandidates(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
@@ -4670,14 +4714,22 @@ pub const SuiRpcClient = struct {
                 }
             }
 
-            const index = uniqueHighestScoreIndex(candidate_scores) orelse continue;
-            parameter.auto_selected_arg_json = try buildAutoSelectedScalarArgJson(
-                allocator,
+            const selected_token = if (uniqueHighestScoreIndex(candidate_scores)) |index|
                 if (isMoveMutableReferenceSignature(parameter.signature))
                     candidates[index].mutable_shared_object_input_select_token
                 else
-                    candidates[index].shared_object_input_select_token,
-            );
+                    candidates[index].shared_object_input_select_token
+            else
+                null;
+
+            for (candidates, 0..) |*candidate, index| {
+                candidate.selection_score = candidate_scores[index];
+            }
+            sortSharedObjectCandidatesByScore(candidates);
+
+            if (selected_token) |token| {
+                parameter.auto_selected_arg_json = try buildAutoSelectedScalarArgJson(allocator, token);
+            }
         }
     }
 
@@ -4714,11 +4766,19 @@ pub const SuiRpcClient = struct {
                 );
             }
 
-            const index = uniqueHighestScoreIndex(candidate_scores) orelse continue;
-            parameter.auto_selected_arg_json = try buildAutoSelectedScalarArgJson(
-                allocator,
-                candidates[index].object_input_select_token,
-            );
+            const selected_token = if (uniqueHighestScoreIndex(candidate_scores)) |index|
+                candidates[index].object_input_select_token
+            else
+                null;
+
+            for (candidates, 0..) |*candidate, index| {
+                candidate.selection_score = candidate_scores[index];
+            }
+            sortOwnedObjectCandidatesByScore(candidates);
+
+            if (selected_token) |token| {
+                parameter.auto_selected_arg_json = try buildAutoSelectedScalarArgJson(allocator, token);
+            }
         }
     }
 
@@ -5935,6 +5995,11 @@ pub const SuiRpcClient = struct {
             }
 
             if (!parameter_allows_owned_discovery[index]) continue;
+            if (isMoveReferenceSignature(parameter.signature) and
+                std.mem.indexOfScalar(u8, trimMoveReferenceSignature(parameter.signature), '<') != null)
+            {
+                continue;
+            }
             if (object_preset.inferKindFromTypeSignature(parameter.signature) != null) continue;
             const struct_type = concreteObjectStructTypeFromSignature(parameter.signature) orelse blk: {
                 if (coinTypeFromMoveSignature(parameter.signature) == null) break :blk null;
