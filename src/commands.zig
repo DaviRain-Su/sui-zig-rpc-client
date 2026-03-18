@@ -1884,7 +1884,10 @@ fn objectQueryActionFromArgs(args: *const cli.ParsedArgs) client.rpc_client.Obje
     return if (args.tx_send_summarize) .summarize else .raw;
 }
 
-fn moveQueryFromArgs(args: *const cli.ParsedArgs) !client.rpc_client.MoveQuery {
+fn moveQueryFromArgs(
+    allocator: std.mem.Allocator,
+    args: *const cli.ParsedArgs,
+) !client.rpc_client.MoveQuery {
     return switch (args.command) {
         .move_package => .{
             .package = .{
@@ -1903,6 +1906,7 @@ fn moveQueryFromArgs(args: *const cli.ParsedArgs) !client.rpc_client.MoveQuery {
                 .module = args.move_module orelse return error.InvalidCli,
                 .function_name = args.move_function orelse return error.InvalidCli,
                 .type_arguments_json = args.tx_build_type_args,
+                .owner_address = try resolvedTxBuildSenderFromArgs(allocator, args),
             },
         },
         else => return error.InvalidCli,
@@ -1933,7 +1937,10 @@ fn resourceQueryActionFromArgs(args: *const cli.ParsedArgs) client.rpc_client.Re
     };
 }
 
-fn readQueryFromArgs(args: *const cli.ParsedArgs) !client.rpc_client.ReadQuery {
+fn readQueryFromArgs(
+    allocator: std.mem.Allocator,
+    args: *const cli.ParsedArgs,
+) !client.rpc_client.ReadQuery {
     return switch (args.command) {
         .account_list => .{
             .account = .list,
@@ -1944,7 +1951,7 @@ fn readQueryFromArgs(args: *const cli.ParsedArgs) !client.rpc_client.ReadQuery {
             },
         },
         .move_package, .move_module, .move_function => .{
-            .move = try moveQueryFromArgs(args),
+            .move = try moveQueryFromArgs(allocator, args),
         },
         .account_resources => return error.InvalidCli,
         .account_objects => return error.InvalidCli,
@@ -2184,9 +2191,11 @@ pub fn runCommandWithProgrammaticProvider(
                 else => {},
             }
 
+            var query = try readQueryFromArgs(allocator, args);
+            defer query.deinit(allocator);
             var result = try rpc.runReadQueryAction(
                 allocator,
-                try readQueryFromArgs(args),
+                query,
                 readQueryActionFromArgs(args),
             );
             defer result.deinit(allocator);
@@ -2956,6 +2965,56 @@ test "runCommand move function with --summarize adds owned object discovery temp
     );
 }
 
+test "runCommand move function with --summarize fills owner context into owned object discovery templates" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            std.debug.assert(std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction"));
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"visibility\":\"Public\",\"isEntry\":false,\"typeParameters\":[[],[]],\"parameters\":[{\"MutableReference\":{\"Struct\":{\"address\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb\",\"module\":\"position\",\"name\":\"Position\",\"typeParams\":[]}}}],\"return\":[]}}",
+            );
+        }
+    }.call;
+
+    var args = cli.ParsedArgs{
+        .command = .move_function,
+        .has_command = true,
+        .move_package = client.package_preset.cetus_clmm_mainnet,
+        .move_module = "pool",
+        .move_function = "add_liquidity_fix_coin",
+        .tx_build_sender = "0xowner",
+        .tx_send_summarize = true,
+    };
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    const parameter = parsed.value.object.get("parameters").?.array.items[0].object;
+    try testing.expectEqualStrings(
+        "select:{\"kind\":\"owned_object_struct_type\",\"owner\":\"0xowner\",\"structType\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb::position::Position\"}",
+        parameter.get("owned_object_select_token").?.string,
+    );
+    const owned_query_argv = parameter.get("owned_object_query_argv").?.array.items;
+    try testing.expectEqualStrings("0xowner", owned_query_argv[2].string);
+}
+
 test "runCommand move function with --summarize specializes generic signatures with type arguments" {
     const testing = std.testing;
 
@@ -3100,6 +3159,57 @@ test "runCommand move function with --summarize adds vector object discovery tem
         "[[\"<arg0-item0-object-id-or-select-token>\"]]",
         parsed.value.object.get("call_template").?.object.get("args_json").?.string,
     );
+}
+
+test "runCommand move function with --summarize fills owner context into vector object discovery templates" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            std.debug.assert(std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction"));
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"visibility\":\"Public\",\"isEntry\":true,\"typeParameters\":[[]],\"parameters\":[{\"Vector\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"coin\",\"name\":\"Coin\",\"typeParams\":[{\"TypeParameter\":0}]}}},{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[]}}",
+            );
+        }
+    }.call;
+
+    var args = cli.ParsedArgs{
+        .command = .move_function,
+        .has_command = true,
+        .move_package = "0x2",
+        .move_module = "router",
+        .move_function = "deposit_many",
+        .tx_build_type_args = "[\"0x2::sui::SUI\"]",
+        .tx_build_sender = "0xowner",
+        .tx_send_summarize = true,
+    };
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    const parameter = parsed.value.object.get("parameters").?.array.items[0].object;
+    try testing.expectEqualStrings(
+        "select:{\"kind\":\"owned_object_struct_type\",\"owner\":\"0xowner\",\"structType\":\"0x2::coin::Coin<0x2::sui::SUI>\"}",
+        parameter.get("vector_item_owned_object_select_token").?.string,
+    );
+    const vector_item_query_argv = parameter.get("vector_item_owned_object_query_argv").?.array.items;
+    try testing.expectEqualStrings("0xowner", vector_item_query_argv[2].string);
 }
 
 test "runCommand move package resolves aliases before issuing RPC" {

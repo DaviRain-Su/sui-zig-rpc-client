@@ -3246,6 +3246,34 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
                 i += 1;
                 continue;
             }
+            if (parsed.command == .move_function and std.mem.eql(u8, token, "--sender")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                try setOptionalStringArg(
+                    allocator,
+                    &parsed,
+                    args[i + 1],
+                    &parsed.owned_tx_build_sender,
+                    &parsed.tx_build_sender,
+                );
+                i += 2;
+                continue;
+            }
+            if (parsed.command == .move_function and std.mem.eql(u8, token, "--signer")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                try appendRepeatedLoadedValue(
+                    allocator,
+                    &parsed.signers,
+                    &parsed.owned_signers,
+                    args[i + 1],
+                );
+                i += 2;
+                continue;
+            }
+            if (parsed.command == .move_function and std.mem.eql(u8, token, "--from-keystore")) {
+                parsed.from_keystore = true;
+                i += 1;
+                continue;
+            }
             if (parsed.command == .move_function and std.mem.eql(u8, token, "--type-args")) {
                 if (i + 1 >= args.len) return error.InvalidCli;
                 try setOptionalStringArg(
@@ -3568,6 +3596,9 @@ pub fn printUsage(writer: anytype) !void {
         "                                       Call sui_getNormalizedMoveFunction\n" ++
         "    --type-args <json|@file>            Optional JSON array to specialize generic type parameters locally\n" ++
         "    --type-arg <type>                   Repeatable Move type argument shorthand for --type-args\n" ++
+        "    --sender <address|selector>         Optional owner context for discovery hints and tx templates\n" ++
+        "    --signer <alias|address|key>        Optional signer selector; first address-compatible signer becomes owner context\n" ++
+        "    --from-keystore                     Use the first default keystore address as owner context when needed\n" ++
         "    --summarize                         Print parameter/return signature summary, lowering hints, discovery hints, and tx call templates\n" ++
         "  object get <object-id-or-alias>      Call sui_getObject\n" ++
         "    --options <json|@file>              object read options\n" ++
@@ -6224,6 +6255,36 @@ test "parseCliArgs parses move function command with package alias" {
     try testing.expectEqualStrings(package_preset.cetus_clmm_mainnet, parsed.move_package.?);
     try testing.expectEqualStrings("pool", parsed.move_module.?);
     try testing.expectEqualStrings("swap", parsed.move_function.?);
+    try testing.expect(parsed.tx_send_summarize);
+}
+
+test "parseCliArgs parses move function sender and signer context flags" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "move",
+        "function",
+        "0x2",
+        "pool",
+        "swap",
+        "--sender",
+        "0xabc",
+        "--signer",
+        "builder",
+        "--from-keystore",
+        "--summarize",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.move_function, parsed.command);
+    try testing.expectEqualStrings("0xabc", parsed.tx_build_sender.?);
+    try testing.expectEqual(@as(usize, 1), parsed.signers.items.len);
+    try testing.expectEqualStrings("builder", parsed.signers.items[0]);
+    try testing.expect(parsed.from_keystore);
     try testing.expect(parsed.tx_send_summarize);
 }
 
