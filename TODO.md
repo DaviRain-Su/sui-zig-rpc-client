@@ -45,6 +45,8 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
   candidate has a unique highest score.
 - [x] Owned candidate scoring from selected object references when one
   candidate has a unique highest score.
+- [x] Shared candidate scoring that also prefers already-selected object
+  references over broader owned-candidate hints.
 - [x] Candidate `selection_score` exposure and deterministic score-first
   ordering in summaries.
 - [x] Deterministic tie-break auto-selection for scored shared/owned

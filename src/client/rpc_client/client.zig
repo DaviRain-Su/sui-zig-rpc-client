@@ -5021,6 +5021,23 @@ pub const SuiRpcClient = struct {
         allocator: std.mem.Allocator,
         parameters: []move_result.OwnedMoveParameterSummary,
     ) !void {
+        const selected_object_ids = try collectSelectedObjectIdsFromMoveParameters(allocator, parameters);
+        defer {
+            for (selected_object_ids) |value| allocator.free(value);
+            allocator.free(selected_object_ids);
+        }
+
+        var total_owned_hint_count: usize = 0;
+        for (parameters) |other_parameter| {
+            if (other_parameter.owned_object_candidates) |owned_candidates| {
+                total_owned_hint_count += owned_candidates.len;
+            }
+            if (other_parameter.vector_item_owned_object_candidates) |owned_candidates| {
+                total_owned_hint_count += owned_candidates.len;
+            }
+        }
+        const selected_reference_weight = total_owned_hint_count + 1;
+
         for (parameters) |*parameter| {
             if (parameter.omitted_from_explicit_args) continue;
             if (parameter.explicit_arg_json != null or parameter.auto_selected_arg_json != null) continue;
@@ -5037,18 +5054,45 @@ pub const SuiRpcClient = struct {
             defer allocator.free(candidate_scores);
             @memset(candidate_scores, 0);
 
-            for (parameters) |other_parameter| {
-                const owned_candidates = other_parameter.owned_object_candidates orelse continue;
-                for (owned_candidates) |owned_candidate| {
-                    const response = self.getObjectWithOptions(owned_candidate.object_id, .{ .show_content = true }) catch continue;
-                    defer allocator.free(response);
+            for (selected_object_ids) |selected_object_id| {
+                const response = self.getObjectWithOptions(selected_object_id, .{ .show_content = true }) catch continue;
+                defer allocator.free(response);
 
-                    const candidate_index = objectResponseContentMatchingObjectIdIndex(
-                        allocator,
-                        response,
-                        candidate_object_ids,
-                    ) orelse continue;
-                    candidate_scores[candidate_index] += 1;
+                const candidate_index = objectResponseContentMatchingObjectIdIndex(
+                    allocator,
+                    response,
+                    candidate_object_ids,
+                ) orelse continue;
+                candidate_scores[candidate_index] += selected_reference_weight;
+            }
+
+            for (parameters) |other_parameter| {
+                if (other_parameter.owned_object_candidates) |owned_candidates| {
+                    for (owned_candidates) |owned_candidate| {
+                        const response = self.getObjectWithOptions(owned_candidate.object_id, .{ .show_content = true }) catch continue;
+                        defer allocator.free(response);
+
+                        const candidate_index = objectResponseContentMatchingObjectIdIndex(
+                            allocator,
+                            response,
+                            candidate_object_ids,
+                        ) orelse continue;
+                        candidate_scores[candidate_index] += 1;
+                    }
+                }
+
+                if (other_parameter.vector_item_owned_object_candidates) |owned_candidates| {
+                    for (owned_candidates) |owned_candidate| {
+                        const response = self.getObjectWithOptions(owned_candidate.object_id, .{ .show_content = true }) catch continue;
+                        defer allocator.free(response);
+
+                        const candidate_index = objectResponseContentMatchingObjectIdIndex(
+                            allocator,
+                            response,
+                            candidate_object_ids,
+                        ) orelse continue;
+                        candidate_scores[candidate_index] += 1;
+                    }
                 }
             }
 

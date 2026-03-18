@@ -1006,13 +1006,13 @@ zig build run -- move function cetus_clmm_mainnet pool swap \
 - `parameters[*].owned_object_select_token`
 - `parameters[*].owned_object_query_argv`
 
-这些字段都是“候选调用/发现路径”，不是 ownership 或 sharedness 断言。像 Cetus `Pool<T0,T1>` 这类非 preset shared object，CLI 现在除了 `object get` 和 `object_input(shared)` 骨架，还会给出 `events --package --module` discovery argv；如果 recent event 里能抽出匹配 object id，还会直接带 `shared_object_candidates`。如果事件里没有 usable candidate，但另一个已选/已发现的 owned object 内容里引用了 shared object id，CLI 现在还会把这些引用 id 当成第二层 discovery source，再过滤成匹配类型的 shared candidate。 而 `Position` 这类 concrete owned object 还会额外带 `account objects --struct-type` 查询模板。
+这些字段都是“候选调用/发现路径”，不是 ownership 或 sharedness 断言。像 Cetus `Pool<T0,T1>` 这类非 preset shared object，CLI 现在除了 `object get` 和 `object_input(shared)` 骨架，还会给出 `events --package --module` discovery argv；如果 recent event 里能抽出匹配 object id，还会直接带 `shared_object_candidates`。如果事件里没有 usable candidate，但另一个已选/已发现的 owned object 内容里引用了 shared object id，CLI 现在还会把这些引用 id 当成第二层 discovery source，再过滤成匹配类型的 shared candidate。除此之外，已经显式给出的 object 参数和已自动选中的 object 参数，也会继续参与 shared candidate 打分，所以像 `Position -> Pool` 这种关系在多候选时会更容易自动收口。 而 `Position` 这类 concrete owned object 还会额外带 `account objects --struct-type` 查询模板。
 
 对于 `vector<Coin<T>>` 这类对象向量，summary 现在也会补“单个元素”的 discovery/input skeleton。这对 Cetus 一类要求 coin vector 的接口更实用，因为你可以先拿 `vector_item_owned_object_query_argv` 找一批候选 coin，再把返回的 object id 或 select token 填回 `--args` 数组。
 
 如果你在 `move function --summarize` 时同时给了 `--sender`、`--signer` 或 `--from-keystore`，CLI 现在还会进一步把 owner 上下文带进 discovery 流程。对 concrete owned object 和 `vector<concrete owned object>` 参数，summary 会直接尝试 `suix_getOwnedObjects`，把找到的候选对象填进 `owned_object_candidates` / `vector_item_owned_object_candidates`。这里的 concrete owned object 也包括已经特化完成的 generic struct，例如 `0x2::balance::Balance<0x2::sui::SUI>` 或 receipt 一类类型；只要签名里不再残留 `T0/T1` 这类未解析 type parameter，就会进入同一套 owned discovery。 这一步不会替你自动做最终选择，但已经把“提示层”推进成了“候选集层”。
 
-当某个 shared / owned candidate 已经进入跨参数联动评分时，summary 里的 candidate 现在还会带 `selection_score`，并按“分数降序、object id 升序”排序。这样即使当前还不能安全自动选中，你也能直接从输出里看出 CLI 认为哪组对象更接近最终可执行组合。
+当某个 shared / owned candidate 已经进入跨参数联动评分时，summary 里的 candidate 现在还会带 `selection_score`，并按“分数降序、object id 升序”排序。对 shared candidate，这个分数会同时综合“已选 object 的直接引用”和“owned candidate 的引用提示”，前者权重更高。这样即使当前还不能安全自动选中，你也能直接从输出里看出 CLI 认为哪组对象更接近最终可执行组合。
 
 当 ABI 显示参数是非 `vector<u8>` 的 `vector<T>` 时，CLI 现在会在本地 programmable builder 路径里自动插入 `MakeMoveVec`。这对 Cetus 一类需要 `vector<Coin<_>>` 的调用很重要，因为你可以直接传：
 
