@@ -4488,6 +4488,88 @@ pub const SuiRpcClient = struct {
         return false;
     }
 
+    fn objectResponseContentMatchingObjectIdIndex(
+        allocator: std.mem.Allocator,
+        response_json: []const u8,
+        object_ids: []const []const u8,
+    ) ?usize {
+        if (object_ids.len == 0) return null;
+
+        const parsed = std.json.parseFromSlice(std.json.Value, allocator, response_json, .{}) catch return null;
+        defer parsed.deinit();
+        if (parsed.value != .object) return null;
+        const result = parsed.value.object.get("result") orelse return null;
+        if (result != .object) return null;
+        const data = result.object.get("data") orelse return null;
+        if (data != .object) return null;
+        const content = data.object.get("content") orelse return null;
+
+        var matched_index: ?usize = null;
+        for (object_ids, 0..) |object_id, index| {
+            if (!jsonValueContainsExactString(content, object_id)) continue;
+            if (matched_index != null) return null;
+            matched_index = index;
+        }
+        return matched_index;
+    }
+
+    fn applyReferencedSharedObjectCandidateSelectionHints(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        parameters: []move_result.OwnedMoveParameterSummary,
+    ) !void {
+        const selected_object_ids = try collectSelectedObjectIdsFromMoveParameters(allocator, parameters);
+        defer {
+            for (selected_object_ids) |value| allocator.free(value);
+            allocator.free(selected_object_ids);
+        }
+        if (selected_object_ids.len == 0) return;
+
+        for (parameters) |*parameter| {
+            if (parameter.omitted_from_explicit_args) continue;
+            if (parameter.explicit_arg_json != null or parameter.auto_selected_arg_json != null) continue;
+
+            const candidates = parameter.shared_object_candidates orelse continue;
+            if (candidates.len <= 1) continue;
+
+            const candidate_object_ids = try allocator.alloc([]const u8, candidates.len);
+            defer allocator.free(candidate_object_ids);
+            for (candidates, 0..) |candidate, index| {
+                candidate_object_ids[index] = candidate.object_id;
+            }
+
+            var matched_index: ?usize = null;
+            for (selected_object_ids) |selected_object_id| {
+                const response = self.getObjectWithOptions(selected_object_id, .{ .show_content = true }) catch continue;
+                defer allocator.free(response);
+
+                const candidate_index = objectResponseContentMatchingObjectIdIndex(
+                    allocator,
+                    response,
+                    candidate_object_ids,
+                ) orelse continue;
+
+                if (matched_index) |existing_index| {
+                    if (existing_index != candidate_index) {
+                        matched_index = null;
+                        break;
+                    }
+                    continue;
+                }
+                matched_index = candidate_index;
+            }
+
+            const index = matched_index orelse continue;
+            parameter.auto_selected_arg_json = try buildAutoSelectedScalarArgJson(
+                allocator,
+                if (isMoveMutableReferenceSignature(parameter.signature))
+                    candidates[index].mutable_shared_object_input_select_token
+                else
+                    candidates[index].shared_object_input_select_token,
+            );
+        }
+    }
+
     fn applyReferencedOwnedObjectCandidateSelectionHints(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
@@ -5721,7 +5803,9 @@ pub const SuiRpcClient = struct {
                 summary.parameters,
             );
         }
+        try self.applyReferencedSharedObjectCandidateSelectionHints(allocator, summary.parameters);
         try self.applyReferencedOwnedObjectCandidateSelectionHints(allocator, summary.parameters);
+        try self.applyReferencedSharedObjectCandidateSelectionHints(allocator, summary.parameters);
 
         const type_args_json = try resolvedMoveFunctionTypeArgsTemplateJson(
             allocator,
