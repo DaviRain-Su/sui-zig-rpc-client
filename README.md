@@ -684,7 +684,7 @@ pub fn main() !void {
 - `events`: 调用 `suix_queryEvents`；支持 raw `--filter <json|@file>`，也支持 typed `--package --module`、`--event-type`、`--sender`、`--tx`，可用于协议对象和行为发现。
 - `move package <package-id-or-alias>`: 调用 `sui_getNormalizedMoveModulesByPackage`，发现 package 下有哪些模块。
 - `move module <package-id-or-alias> <module>`: 调用 `sui_getNormalizedMoveModule`，查看模块里的 structs / exposed functions。
-- `move function <package-id-or-alias> <module> <function>`: 调用 `sui_getNormalizedMoveFunction`，查看参数/返回类型；`--summarize` 会额外输出 CLI lowering hint 和可复用的 transaction 模板。可选 `--type-arg/--type-args` 会在本地先按具体类型实参特化 summary。`--sender` / `--signer` / `--from-keystore` 会把 owner 上下文回填到 owned-object discovery hint 里。
+- `move function <package-id-or-alias> <module> <function>`: 调用 `sui_getNormalizedMoveFunction`，查看参数/返回类型；`--summarize` 会额外输出 CLI lowering hint 和可复用的 transaction 模板。可选 `--type-arg/--type-args` 会在本地先按具体类型实参特化 summary。`--args` / `--arg` 可以把你已知的显式参数先回填到 preferred template 里；`--sender` / `--signer` / `--from-keystore` 会把 owner 上下文回填到 owned-object discovery hint 里。
 - `tx simulate [params-json]`: 调用 `sui_devInspectTransactionBlock`。
 - `tx dry-run [tx-bytes|@file]`: 调用 `sui_dryRunTransactionBlock`。
 - `tx send [params-json]`: 调用 `sui_executeTransactionBlock`。
@@ -865,6 +865,7 @@ zig build run -- events \
 
 同一个 summary 里现在还会带两层调用模板：
 - `parameters[*].placeholder_json`: 这个参数建议放进 `--args` JSON 的占位片段
+- `parameters[*].explicit_arg_json`: 如果你在 `move function --summarize` 时同时给了 `--args` / `--arg`，CLI 会把已经能对应上的显式参数先落到这里
 - `parameters[*].auto_selected_arg_json`: 如果 CLI 已经找到确定的 candidate，会把这个参数直接收口成可放进 `--args` 的 JSON 片段
 - `parameters[*].omitted_from_explicit_args`: `true` 表示这是 runtime 注入参数，比如 `TxContext`，不需要你手工传
 - `parameters[*].shared_object_input_select_token`: 如果参数是 by-reference object，CLI 会额外给一个 direct `object_input(shared)` 候选
@@ -897,6 +898,8 @@ zig build run -- events \
 - `call_template.preferred_tx_send_from_keystore_request_json`: 如果存在 auto-selected candidate，则给一份优先回填 candidate 的 `tx send --from-keystore` request artifact
 - `call_template.tx_send_from_keystore_argv`: 直接可改的 `tx send --from-keystore` argv 模板
 - `call_template.preferred_tx_send_from_keystore_argv`: 如果存在 auto-selected candidate，则给一条更接近可执行的 `tx send --from-keystore` argv 模板
+
+如果你在 `move function --summarize` 时给的显式参数少于总参数个数，CLI 会优先把这些值按“非 object 参数位”做稀疏回填，而不是强行占掉前面的 object 参数位。这样像 `Coin<T>, u64, TxContext` 这类常见签名里，只传 `--arg 13` 就会优先落到 `u64` 金额参数上；同时前一个 `Coin<T>` 的 `coin_with_min_balance_select_token` 会把 `minBalance` 自动抬到 `13`。
 
 这层模板现在同时覆盖两条路径：
 - typed `--package/--module/--function` argv

@@ -3691,6 +3691,29 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
                 i += 2;
                 continue;
             }
+            if (parsed.command == .move_function and std.mem.eql(u8, token, "--args")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                try setOptionalStringArg(
+                    allocator,
+                    &parsed,
+                    args[i + 1],
+                    &parsed.owned_tx_build_args,
+                    &parsed.tx_build_args,
+                );
+                i += 2;
+                continue;
+            }
+            if (parsed.command == .move_function and std.mem.eql(u8, token, "--arg")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                try appendRepeatedLoadedValue(
+                    allocator,
+                    &parsed.tx_build_arg_items,
+                    &parsed.owned_tx_build_arg_items,
+                    args[i + 1],
+                );
+                i += 2;
+                continue;
+            }
             return error.InvalidCli;
         }
 
@@ -4020,6 +4043,8 @@ pub fn printUsage(writer: anytype) !void {
         "                                       Call sui_getNormalizedMoveFunction\n" ++
         "    --type-args <json|@file>            Optional JSON array to specialize generic type parameters locally\n" ++
         "    --type-arg <type>                   Repeatable Move type argument shorthand for --type-args\n" ++
+        "    --args <json|@file>                 Optional explicit argument JSON used to specialize preferred templates\n" ++
+        "    --arg <json|bare|@file>             Repeatable explicit argument shorthand for --args\n" ++
         "    --sender <address|selector>         Optional owner context for discovery hints and tx templates\n" ++
         "    --signer <alias|address|key>        Optional signer selector; first address-compatible signer becomes owner context\n" ++
         "    --from-keystore                     Use the first default keystore address as owner context when needed\n" ++
@@ -6881,6 +6906,32 @@ test "parseCliArgs parses move function command with type arguments" {
     try testing.expectEqualStrings("pool", parsed.move_module.?);
     try testing.expectEqualStrings("swap", parsed.move_function.?);
     try testing.expectEqualStrings("[\"0x2::sui::SUI\",\"0x2::sui::SUI\"]", parsed.tx_build_type_args.?);
+    try testing.expect(parsed.tx_send_summarize);
+}
+
+test "parseCliArgs parses move function command with explicit args" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "move",
+        "function",
+        "0x2",
+        "pool",
+        "swap",
+        "--arg",
+        "7",
+        "--arg",
+        "true",
+        "--summarize",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.move_function, parsed.command);
+    try testing.expectEqualStrings("[7,true]", parsed.tx_build_args.?);
     try testing.expect(parsed.tx_send_summarize);
 }
 

@@ -1713,6 +1713,7 @@ pub const MoveQuery = union(enum) {
         module: []const u8,
         function_name: []const u8,
         type_arguments_json: ?[]const u8 = null,
+        arguments_json: ?[]const u8 = null,
         owner_address: ?[]const u8 = null,
         signer_selector: ?[]const u8 = null,
     },
@@ -1727,6 +1728,7 @@ pub const MoveQuery = union(enum) {
     pub fn deinit(self: *MoveQuery, allocator: std.mem.Allocator) void {
         switch (self.*) {
             .function => |*value| {
+                if (value.arguments_json) |arguments| allocator.free(arguments);
                 if (value.owner_address) |owner| allocator.free(owner);
                 if (value.signer_selector) |signer| allocator.free(signer);
             },
@@ -4285,7 +4287,7 @@ pub const SuiRpcClient = struct {
         for (parameters) |parameter| {
             if (parameter.omitted_from_explicit_args) continue;
             const placeholder = if (prefer_auto_selected)
-                parameter.auto_selected_arg_json orelse parameter.placeholder_json orelse continue
+                parameter.explicit_arg_json orelse parameter.auto_selected_arg_json orelse parameter.placeholder_json orelse continue
             else
                 parameter.placeholder_json orelse continue;
             if (needs_separator) try writer.writeAll(",");
@@ -4319,6 +4321,142 @@ pub const SuiRpcClient = struct {
         token: []const u8,
     ) ![]u8 {
         return try std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(token, .{})});
+    }
+
+    fn buildJsonFragmentFromJsonValue(
+        allocator: std.mem.Allocator,
+        value: std.json.Value,
+    ) ![]u8 {
+        return try std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(value, .{})});
+    }
+
+    fn jsonValueLooksLikeObjectArgument(value: std.json.Value) bool {
+        if (value != .string) return false;
+        const trimmed = std.mem.trim(u8, value.string, " \t\r\n");
+        return std.mem.startsWith(u8, trimmed, "select:") or
+            std.mem.startsWith(u8, trimmed, "sel:") or
+            std.mem.startsWith(u8, trimmed, "0x") or
+            std.mem.startsWith(u8, trimmed, "@0x") or
+            std.mem.startsWith(u8, trimmed, "obj:");
+    }
+
+    fn moveParameterSupportsSparseExplicitArg(parameter: move_result.OwnedMoveParameterSummary) bool {
+        if (parameter.omitted_from_explicit_args) return false;
+        const lowering_kind = parameter.lowering_kind orelse return false;
+        if (std.mem.eql(u8, lowering_kind, "object")) return false;
+        if (std.mem.eql(u8, lowering_kind, "vector") and concreteVectorObjectStructTypeFromSignature(parameter.signature) != null) {
+            return false;
+        }
+        return true;
+    }
+
+    fn applyExplicitMoveFunctionArgsToParameters(
+        allocator: std.mem.Allocator,
+        parameters: []move_result.OwnedMoveParameterSummary,
+        arguments_json: []const u8,
+    ) !void {
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, arguments_json, .{});
+        defer parsed.deinit();
+        if (parsed.value != .array) return error.InvalidCli;
+
+        const explicit_args = parsed.value.array.items;
+        if (explicit_args.len == 0) return;
+
+        var explicit_parameter_count: usize = 0;
+        var sparse_parameter_count: usize = 0;
+        for (parameters) |parameter| {
+            if (parameter.omitted_from_explicit_args) continue;
+            explicit_parameter_count += 1;
+            if (moveParameterSupportsSparseExplicitArg(parameter)) sparse_parameter_count += 1;
+        }
+
+        const use_sparse_mapping = blk: {
+            if (explicit_args.len >= explicit_parameter_count) break :blk false;
+            if (explicit_args.len > sparse_parameter_count) break :blk false;
+            for (explicit_args) |value| {
+                if (jsonValueLooksLikeObjectArgument(value)) break :blk false;
+            }
+            break :blk true;
+        };
+
+        var mapped_args: usize = 0;
+        for (parameters) |*parameter| {
+            if (parameter.omitted_from_explicit_args) continue;
+            if (use_sparse_mapping and !moveParameterSupportsSparseExplicitArg(parameter.*)) continue;
+            if (mapped_args >= explicit_args.len) break;
+            parameter.explicit_arg_json = try buildJsonFragmentFromJsonValue(
+                allocator,
+                explicit_args[mapped_args],
+            );
+            mapped_args += 1;
+        }
+
+        if (mapped_args != explicit_args.len) return error.InvalidCli;
+    }
+
+    fn parseExplicitU64ArgJson(
+        allocator: std.mem.Allocator,
+        parameter: move_result.OwnedMoveParameterSummary,
+    ) ?u64 {
+        if (parameter.explicit_arg_json == null) return null;
+        const lowering_kind = parameter.lowering_kind orelse return null;
+        if (!std.mem.eql(u8, lowering_kind, "u64")) return null;
+
+        const parsed = std.json.parseFromSlice(std.json.Value, allocator, parameter.explicit_arg_json.?, .{}) catch return null;
+        defer parsed.deinit();
+        return parseUnsignedJsonValueAs(u64, parsed.value) catch null;
+    }
+
+    fn applyCoinSelectorMinBalanceHintsFromExplicitArgs(
+        allocator: std.mem.Allocator,
+        parameters: []move_result.OwnedMoveParameterSummary,
+        owner_address: ?[]const u8,
+    ) !void {
+        var previous_explicit_index: ?usize = null;
+        for (parameters, 0..) |parameter, index| {
+            if (parameter.omitted_from_explicit_args) continue;
+            if (previous_explicit_index) |previous_index| {
+                const min_balance = parseExplicitU64ArgJson(allocator, parameter) orelse {
+                    previous_explicit_index = index;
+                    continue;
+                };
+                var previous = &parameters[previous_index];
+
+                if (previous.explicit_arg_json == null) {
+                    if (coinTypeFromMoveSignature(previous.signature)) |coin_type| {
+                        if (previous.coin_with_min_balance_select_token) |old_token| allocator.free(old_token);
+                        previous.coin_with_min_balance_select_token = try buildCoinWithMinBalanceSelectToken(
+                            allocator,
+                            owner_address,
+                            coin_type,
+                            min_balance,
+                        );
+                        if (previous.placeholder_json) |old_placeholder| allocator.free(old_placeholder);
+                        previous.placeholder_json = try buildAutoSelectedScalarArgJson(
+                            allocator,
+                            previous.coin_with_min_balance_select_token.?,
+                        );
+                    } else if (vectorElementTypeSignature(previous.signature)) |element_signature| {
+                        if (coinTypeFromCoinStructType(element_signature)) |coin_type| {
+                            if (previous.vector_item_coin_with_min_balance_select_token) |old_token| allocator.free(old_token);
+                            previous.vector_item_coin_with_min_balance_select_token = try buildCoinWithMinBalanceSelectToken(
+                                allocator,
+                                owner_address,
+                                coin_type,
+                                min_balance,
+                            );
+                            if (previous.placeholder_json) |old_placeholder| allocator.free(old_placeholder);
+                            previous.placeholder_json = try std.fmt.allocPrint(
+                                allocator,
+                                "[{f}]",
+                                .{std.json.fmt(previous.vector_item_coin_with_min_balance_select_token.?, .{})},
+                            );
+                        }
+                    }
+                }
+            }
+            previous_explicit_index = index;
+        }
     }
 
     fn populateMoveParameterAutoSelectedArgJson(
@@ -4607,6 +4745,7 @@ pub const SuiRpcClient = struct {
         summary: *move_result.OwnedMoveFunctionSummary,
         parameter_allows_owned_discovery: []const bool,
         concrete_type_arguments_json: ?[]const u8,
+        arguments_json: ?[]const u8,
         owner_address: ?[]const u8,
         signer_selector: ?[]const u8,
     ) !void {
@@ -4782,6 +4921,15 @@ pub const SuiRpcClient = struct {
             try populateMoveParameterAutoSelectedArgJson(allocator, parameter);
         }
 
+        if (arguments_json) |value| {
+            try applyExplicitMoveFunctionArgsToParameters(allocator, summary.parameters, value);
+            try applyCoinSelectorMinBalanceHintsFromExplicitArgs(
+                allocator,
+                summary.parameters,
+                owner_address,
+            );
+        }
+
         const type_args_json = try resolvedMoveFunctionTypeArgsTemplateJson(
             allocator,
             summary.type_parameters.len,
@@ -4929,6 +5077,7 @@ pub const SuiRpcClient = struct {
         function_name: []const u8,
         response_json: []const u8,
         type_arguments_json: ?[]const u8,
+        arguments_json: ?[]const u8,
         owner_address: ?[]const u8,
         signer_selector: ?[]const u8,
     ) !move_result.OwnedMoveFunctionSummary {
@@ -4991,6 +5140,7 @@ pub const SuiRpcClient = struct {
             &summary,
             parameter_allows_owned_discovery,
             resolved_type_arguments_json,
+            arguments_json,
             owner_address,
             signer_selector,
         );
@@ -12325,6 +12475,7 @@ fn buildOwnedObjectsFilterJson(
                         spec.function_name,
                         response,
                         spec.type_arguments_json,
+                        spec.arguments_json,
                         spec.owner_address,
                         spec.signer_selector,
                     ),

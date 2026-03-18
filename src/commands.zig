@@ -1944,6 +1944,7 @@ fn moveQueryFromArgs(
                 .module = args.move_module orelse return error.InvalidCli,
                 .function_name = args.move_function orelse return error.InvalidCli,
                 .type_arguments_json = args.tx_build_type_args,
+                .arguments_json = if (args.tx_build_args) |value| try allocator.dupe(u8, value) else null,
                 .owner_address = try resolvedTxBuildSenderFromArgs(allocator, args),
                 .signer_selector = if (args.signers.items.len == 0)
                     null
@@ -2860,6 +2861,55 @@ test "runCommand move function with --summarize prints normalized function summa
     try testing.expectEqualStrings("--auto-gas-payment", send_argv[17].string);
 }
 
+test "runCommand move function with --summarize applies sparse explicit pure args to preferred templates" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            std.debug.assert(std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction"));
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"visibility\":\"Public\",\"isEntry\":true,\"typeParameters\":[],\"parameters\":[{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"pool\",\"name\":\"Pool\",\"typeParams\":[]}}},\"u64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[]}}",
+            );
+        }
+    }.call;
+
+    var args = cli.ParsedArgs{
+        .command = .move_function,
+        .has_command = true,
+        .move_package = "0x2",
+        .move_module = "pool",
+        .move_function = "swap",
+        .tx_build_args = "[7]",
+        .tx_send_summarize = true,
+    };
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    const parameters = parsed.value.object.get("parameters").?.array.items;
+    try testing.expectEqualStrings("7", parameters[1].object.get("explicit_arg_json").?.string);
+    try testing.expectEqualStrings(
+        "[\"<arg0-object-id-or-select-token>\",7]",
+        parsed.value.object.get("call_template").?.object.get("preferred_args_json").?.string,
+    );
+}
+
 test "runCommand move function with --summarize reports pure wrapper lowering kinds" {
     const testing = std.testing;
 
@@ -3745,6 +3795,64 @@ test "runCommand move function with --summarize prefers largest scalar coin cand
     );
     try testing.expectEqualStrings(
         "[\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xcoin-large\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":10,\\\"digest\\\":\\\"coin-digest-large\\\"}\"]",
+        parsed.value.object.get("call_template").?.object.get("preferred_args_json").?.string,
+    );
+}
+
+test "runCommand move function with --summarize lifts coin selector min balance from explicit u64 args" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            std.debug.assert(std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction"));
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"visibility\":\"Public\",\"isEntry\":true,\"typeParameters\":[[]],\"parameters\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"coin\",\"name\":\"Coin\",\"typeParams\":[{\"TypeParameter\":0}]}},\"u64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[]}}",
+            );
+        }
+    }.call;
+
+    var args = cli.ParsedArgs{
+        .command = .move_function,
+        .has_command = true,
+        .move_package = "0x2",
+        .move_module = "router",
+        .move_function = "deposit_exact",
+        .tx_build_type_args = "[\"0x2::sui::SUI\"]",
+        .tx_build_args = "[13]",
+        .tx_send_summarize = true,
+    };
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    const parameters = parsed.value.object.get("parameters").?.array.items;
+    try testing.expectEqualStrings(
+        "select:{\"kind\":\"coin_with_min_balance\",\"coinType\":\"0x2::sui::SUI\",\"minBalance\":13}",
+        parameters[0].object.get("coin_with_min_balance_select_token").?.string,
+    );
+    try testing.expectEqualStrings(
+        "\"select:{\\\"kind\\\":\\\"coin_with_min_balance\\\",\\\"coinType\\\":\\\"0x2::sui::SUI\\\",\\\"minBalance\\\":13}\"",
+        parameters[0].object.get("placeholder_json").?.string,
+    );
+    try testing.expectEqualStrings("13", parameters[1].object.get("explicit_arg_json").?.string);
+    try testing.expectEqualStrings(
+        "[\"select:{\\\"kind\\\":\\\"coin_with_min_balance\\\",\\\"coinType\\\":\\\"0x2::sui::SUI\\\",\\\"minBalance\\\":13}\",13]",
         parsed.value.object.get("call_template").?.object.get("preferred_args_json").?.string,
     );
 }

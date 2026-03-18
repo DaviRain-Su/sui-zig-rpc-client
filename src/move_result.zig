@@ -37,6 +37,7 @@ pub const OwnedMoveParameterSummary = struct {
     signature: []u8,
     lowering_kind: ?[]const u8 = null,
     placeholder_json: ?[]u8 = null,
+    explicit_arg_json: ?[]u8 = null,
     auto_selected_arg_json: ?[]u8 = null,
     omitted_from_explicit_args: bool = false,
     coin_with_min_balance_select_token: ?[]u8 = null,
@@ -59,6 +60,7 @@ pub const OwnedMoveParameterSummary = struct {
     pub fn deinit(self: *OwnedMoveParameterSummary, allocator: std.mem.Allocator) void {
         allocator.free(self.signature);
         if (self.placeholder_json) |value| allocator.free(value);
+        if (self.explicit_arg_json) |value| allocator.free(value);
         if (self.auto_selected_arg_json) |value| allocator.free(value);
         if (self.coin_with_min_balance_select_token) |value| allocator.free(value);
         if (self.shared_object_input_select_token) |value| allocator.free(value);
