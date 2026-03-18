@@ -356,6 +356,241 @@ fn maybeLoadObjectIdValue(allocator: std.mem.Allocator, raw: []const u8) !Loaded
     return loaded;
 }
 
+fn jsonObjectFieldAny(
+    object: std.json.ObjectMap,
+    comptime names: []const []const u8,
+) ?std.json.Value {
+    inline for (names) |name| {
+        if (object.get(name)) |value| return value;
+    }
+    return null;
+}
+
+fn replaceOwnedOptionalValue(
+    allocator: std.mem.Allocator,
+    owned_slot: *?[]const u8,
+    value_slot: *?[]const u8,
+    value: []u8,
+) void {
+    if (owned_slot.*) |old| allocator.free(old);
+    owned_slot.* = value;
+    value_slot.* = value;
+}
+
+fn appendOwnedRepeatedValue(
+    allocator: std.mem.Allocator,
+    items: *std.ArrayListUnmanaged([]const u8),
+    owned_items: *std.ArrayListUnmanaged([]const u8),
+    value: []const u8,
+) !void {
+    const owned = try allocator.dupe(u8, value);
+    try items.append(allocator, owned);
+    try owned_items.append(allocator, owned);
+}
+
+fn renderJsonValueCompact(
+    allocator: std.mem.Allocator,
+    value: std.json.Value,
+) ![]u8 {
+    var rendered = std.ArrayList(u8){};
+    defer rendered.deinit(allocator);
+    try rendered.writer(allocator).print("{f}", .{std.json.fmt(value, .{})});
+    return try rendered.toOwnedSlice(allocator);
+}
+
+fn parseOptionalRequestJsonBool(
+    object: std.json.ObjectMap,
+    comptime names: []const []const u8,
+) !?bool {
+    const value = jsonObjectFieldAny(object, names) orelse return null;
+    return switch (value) {
+        .null => null,
+        .bool => |flag| flag,
+        else => error.InvalidCli,
+    };
+}
+
+fn parseOptionalRequestJsonU64(
+    object: std.json.ObjectMap,
+    comptime names: []const []const u8,
+) !?u64 {
+    const value = jsonObjectFieldAny(object, names) orelse return null;
+    return switch (value) {
+        .null => null,
+        .integer => |number| blk: {
+            if (number < 0) return error.InvalidCli;
+            break :blk @as(u64, @intCast(number));
+        },
+        .string => |text| try std.fmt.parseInt(u64, text, 10),
+        else => error.InvalidCli,
+    };
+}
+
+fn parseOptionalRequestJsonString(
+    allocator: std.mem.Allocator,
+    object: std.json.ObjectMap,
+    comptime names: []const []const u8,
+) !?[]u8 {
+    const value = jsonObjectFieldAny(object, names) orelse return null;
+    return switch (value) {
+        .null => null,
+        .string => |text| try allocator.dupe(u8, text),
+        else => error.InvalidCli,
+    };
+}
+
+fn parseOptionalRequestJsonText(
+    allocator: std.mem.Allocator,
+    object: std.json.ObjectMap,
+    comptime names: []const []const u8,
+) !?[]u8 {
+    const value = jsonObjectFieldAny(object, names) orelse return null;
+    return switch (value) {
+        .null => null,
+        .string => |text| try allocator.dupe(u8, text),
+        .array, .object => try renderJsonValueCompact(allocator, value),
+        else => return error.InvalidCli,
+    };
+}
+
+fn validateProgrammaticCommandsJsonValue(value: std.json.Value) !void {
+    switch (value) {
+        .array => {
+            if (value.array.items.len == 0) return error.InvalidCli;
+            for (value.array.items) |entry| try validateProgrammaticCommandEntry(entry);
+        },
+        .object => try validateProgrammaticCommandEntry(value),
+        else => return error.InvalidCli,
+    }
+}
+
+fn appendRequestStringItems(
+    allocator: std.mem.Allocator,
+    object: std.json.ObjectMap,
+    comptime singular_names: []const []const u8,
+    comptime plural_names: []const []const u8,
+    items: *std.ArrayListUnmanaged([]const u8),
+    owned_items: *std.ArrayListUnmanaged([]const u8),
+) !void {
+    if (jsonObjectFieldAny(object, singular_names)) |value| {
+        switch (value) {
+            .null => {},
+            .string => |text| try appendOwnedRepeatedValue(allocator, items, owned_items, text),
+            else => return error.InvalidCli,
+        }
+    }
+
+    if (jsonObjectFieldAny(object, plural_names)) |value| {
+        switch (value) {
+            .null => {},
+            .array => {
+                for (value.array.items) |entry| {
+                    if (entry != .string) return error.InvalidCli;
+                    try appendOwnedRepeatedValue(allocator, items, owned_items, entry.string);
+                }
+            },
+            else => return error.InvalidCli,
+        }
+    }
+}
+
+fn applyProgrammaticRequestArtifact(
+    allocator: std.mem.Allocator,
+    parsed: *ParsedArgs,
+    raw: []const u8,
+) !void {
+    const loaded = try maybeLoadFileValue(allocator, raw);
+    defer if (loaded.owned) allocator.free(loaded.value);
+
+    const request_json = std.mem.trim(u8, loaded.value, " \n\r\t");
+    const request = try std.json.parseFromSlice(std.json.Value, allocator, request_json, .{});
+    defer request.deinit();
+    if (request.value != .object) return error.InvalidCli;
+
+    if (jsonObjectFieldAny(request.value.object, &.{ "commands", "command" })) |commands_value| {
+        try validateProgrammaticCommandsJsonValue(commands_value);
+        const commands_json = try renderJsonValueCompact(allocator, commands_value);
+        replaceOwnedOptionalValue(
+            allocator,
+            &parsed.owned_tx_build_commands,
+            &parsed.tx_build_commands,
+            commands_json,
+        );
+    }
+
+    if (try parseOptionalRequestJsonString(allocator, request.value.object, &.{"sender"})) |sender| {
+        replaceOwnedOptionalValue(
+            allocator,
+            &parsed.owned_tx_build_sender,
+            &parsed.tx_build_sender,
+            sender,
+        );
+    }
+    if (try parseOptionalRequestJsonText(allocator, request.value.object, &.{ "gasPayment", "gas_payment", "gasPaymentJson", "gas_payment_json" })) |gas_payment| {
+        replaceOwnedOptionalValue(
+            allocator,
+            &parsed.owned_tx_build_gas_payment,
+            &parsed.tx_build_gas_payment,
+            gas_payment,
+        );
+    }
+    if (try parseOptionalRequestJsonText(allocator, request.value.object, &.{ "options", "optionsJson", "options_json" })) |options_json| {
+        replaceOwnedOptionalValue(
+            allocator,
+            &parsed.owned_tx_options,
+            &parsed.tx_options,
+            options_json,
+        );
+    }
+    if (try parseOptionalRequestJsonU64(request.value.object, &.{ "gasBudget", "gas_budget" })) |gas_budget| {
+        parsed.tx_build_gas_budget = gas_budget;
+    }
+    if (try parseOptionalRequestJsonU64(request.value.object, &.{ "gasPrice", "gas_price" })) |gas_price| {
+        parsed.tx_build_gas_price = gas_price;
+    }
+    if (try parseOptionalRequestJsonU64(request.value.object, &.{ "gasPaymentMinBalance", "gas_payment_min_balance" })) |min_balance| {
+        parsed.tx_build_gas_payment_min_balance = min_balance;
+    }
+    if (try parseOptionalRequestJsonU64(request.value.object, &.{ "confirmTimeoutMs", "confirm_timeout_ms" })) |timeout_ms| {
+        parsed.confirm_timeout_ms = timeout_ms;
+    }
+    if (try parseOptionalRequestJsonU64(request.value.object, &.{ "confirmPollMs", "confirm_poll_ms" })) |poll_ms| {
+        parsed.confirm_poll_ms = poll_ms;
+    }
+    if (try parseOptionalRequestJsonBool(request.value.object, &.{ "fromKeystore", "from_keystore" })) |from_keystore| {
+        parsed.from_keystore = from_keystore;
+    }
+    if (try parseOptionalRequestJsonBool(request.value.object, &.{ "autoGasPayment", "auto_gas_payment" })) |auto_gas| {
+        parsed.tx_build_auto_gas_payment = auto_gas;
+    }
+    if (try parseOptionalRequestJsonBool(request.value.object, &.{ "wait", "waitForConfirmation", "wait_for_confirmation" })) |wait| {
+        parsed.tx_send_wait = wait;
+    }
+    if (try parseOptionalRequestJsonBool(request.value.object, &.{ "summarize", "summary" })) |summarize| {
+        parsed.tx_send_summarize = summarize;
+    }
+    if (try parseOptionalRequestJsonBool(request.value.object, &.{"observe"})) |observe| {
+        parsed.tx_send_observe = observe;
+    }
+
+    try appendRequestStringItems(
+        allocator,
+        request.value.object,
+        &.{"signer"},
+        &.{"signers"},
+        &parsed.signers,
+        &parsed.owned_signers,
+    );
+    try appendRequestStringItems(
+        allocator,
+        request.value.object,
+        &.{ "signature", "sig" },
+        &.{"signatures"},
+        &parsed.signatures,
+        &parsed.owned_signatures,
+    );
+}
+
 fn deinitCommandAliases(allocator: std.mem.Allocator, aliases: *CommandAliasMap) void {
     tx_request_builder.deinitCommandResultAliases(allocator, aliases);
 }
@@ -2354,6 +2589,12 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
                 i += 1;
                 continue;
             }
+            if (std.mem.eql(u8, token, "--request")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                try applyProgrammaticRequestArtifact(allocator, &parsed, args[i + 1]);
+                i += 2;
+                continue;
+            }
             if (std.mem.eql(u8, token, "--package")) {
                 if (i + 1 >= args.len) return error.InvalidCli;
                 try setOptionalPackageArg(
@@ -2517,6 +2758,12 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
 
         if (parsed.command == .tx_send) {
             try maybeFlushPendingTypedCommand(allocator, &parsed, &pending_typed_command, &command_aliases, token);
+            if (std.mem.eql(u8, token, "--request")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                try applyProgrammaticRequestArtifact(allocator, &parsed, args[i + 1]);
+                i += 2;
+                continue;
+            }
             if (std.mem.eql(u8, token, "--package")) {
                 if (i + 1 >= args.len) return error.InvalidCli;
                 try setOptionalPackageArg(
@@ -3857,6 +4104,7 @@ pub fn printUsage(writer: anytype) !void {
         "    --options <json|@file>              optional inspect options\n" ++
         "  tx dry-run [tx-bytes|@file]          Call sui_dryRunTransactionBlock\n" ++
         "    --tx-bytes <base64|@file>           Prebuilt tx bytes for dry-run\n" ++
+        "    --request <json|@file>              Programmatic request artifact with commands/sender/gas fields\n" ++
         "    --package <package-id-or-alias>     Move package id\n" ++
         "    --module <module-name>              Move module name\n" ++
         "    --function <function-name>          Move function name\n" ++
@@ -3888,6 +4136,7 @@ pub fn printUsage(writer: anytype) !void {
         "    --gas-payment-min-balance <amount>  Minimum balance for auto gas selection\n" ++
         "    --summarize                         Print structured dry-run summary instead of raw response\n" ++
         "  tx send [params-json]                Call sui_executeTransactionBlock\n" ++
+        "    --request <json|@file>              Programmatic request artifact with commands/provider fields\n" ++
         "    --package <package-id-or-alias>     Move package id\n" ++
         "    --module <module-name>              Move module name\n" ++
         "    --function <function-name>          Move function name\n" ++
@@ -5279,6 +5528,36 @@ test "parseCliArgs parses tx_dry_run programmable build context" {
     try testing.expectEqual(@as(usize, 1), parsed.signers.items.len);
 }
 
+test "parseCliArgs parses tx_dry_run request artifact" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "tx",
+        "dry-run",
+        "--request",
+        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"typeArguments\":[],\"arguments\":[7]}],\"sender\":\"0xabc\",\"gasBudget\":1200,\"gasPrice\":8,\"gasPayment\":[{\"objectId\":\"0xgas\",\"version\":\"1\",\"digest\":\"0xdigest\"}],\"summarize\":true}",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.tx_dry_run, parsed.command);
+    try testing.expectEqualStrings(
+        "[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"typeArguments\":[],\"arguments\":[7]}]",
+        parsed.tx_build_commands.?,
+    );
+    try testing.expectEqualStrings("0xabc", parsed.tx_build_sender.?);
+    try testing.expectEqual(@as(?u64, 1200), parsed.tx_build_gas_budget);
+    try testing.expectEqual(@as(?u64, 8), parsed.tx_build_gas_price);
+    try testing.expectEqualStrings(
+        "[{\"objectId\":\"0xgas\",\"version\":\"1\",\"digest\":\"0xdigest\"}]",
+        parsed.tx_build_gas_payment.?,
+    );
+    try testing.expect(parsed.tx_send_summarize);
+}
+
 test "parseCliArgs rejects tx_dry_run tx-bytes mixed with move-call args" {
     const testing = std.testing;
 
@@ -5960,6 +6239,59 @@ test "parseCliArgs accepts tx_send with --from-keystore as signature source" {
     try testing.expectEqual(Command.tx_send, parsed.command);
     try testing.expect(parsed.from_keystore);
     try testing.expect(parsed.signatures.items.len == 0);
+}
+
+test "parseCliArgs parses tx_send request artifact from file" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const request_file = "tmp_cli_tx_send_request.json";
+    try std.fs.cwd().writeFile(.{
+        .sub_path = request_file,
+        .data = "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"typeArguments\":[],\"arguments\":[7]}],\"fromKeystore\":true,\"signer\":\"main\",\"gasBudget\":2200,\"autoGasPayment\":true,\"wait\":true,\"summarize\":true}",
+    });
+    defer std.fs.cwd().deleteFile(request_file) catch {};
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "tx",
+        "send",
+        "--request",
+        "@tmp_cli_tx_send_request.json",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.tx_send, parsed.command);
+    try testing.expectEqualStrings(
+        "[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"typeArguments\":[],\"arguments\":[7]}]",
+        parsed.tx_build_commands.?,
+    );
+    try testing.expect(parsed.from_keystore);
+    try testing.expect(parsed.tx_build_auto_gas_payment);
+    try testing.expect(parsed.tx_send_wait);
+    try testing.expect(parsed.tx_send_summarize);
+    try testing.expectEqual(@as(?u64, 2200), parsed.tx_build_gas_budget);
+    try testing.expectEqual(@as(usize, 1), parsed.signers.items.len);
+    try testing.expectEqualStrings("main", parsed.signers.items[0]);
+}
+
+test "parseCliArgs rejects tx_send request artifact mixed with tx-bytes" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    try testing.expectError(error.InvalidCli, parseCliArgs(allocator, &.{
+        "tx",
+        "send",
+        "--request",
+        "{\"commands\":[{\"kind\":\"TransferObjects\",\"objects\":[\"0xcoin\"],\"address\":\"0xreceiver\"}],\"fromKeystore\":true}",
+        "--tx-bytes",
+        "AAAA",
+    }));
 }
 
 test "parseCliArgs returns error for unknown command" {

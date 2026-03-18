@@ -900,7 +900,14 @@ zig build run -- events \
 - typed `--package/--module/--function` argv
 - 更通用的 `--commands` request artifact
 
-真正执行 `tx dry-run` / `tx send` 时，你仍然需要自己补 sender、signer、gas 和具体 object id / select token。
+现在 `tx dry-run` 和 `tx send` 也支持直接吃这类 artifact：
+
+```bash
+zig build run -- tx dry-run --request @dry-run-request.json
+zig build run -- tx send --request @send-request.json
+```
+
+真正执行时，你仍然需要自己补 sender、signer、gas 和具体 object id / select token。
 
 如果你给了 `move function --type-arg/--type-args`，summary 还会带：
 - `applied_type_args_json`
