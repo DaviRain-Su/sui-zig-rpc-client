@@ -114,6 +114,11 @@ pub const ParsedArgs = struct {
     move_function_template_output: ?MoveFunctionTemplateOutput = null,
     move_function_execute_dry_run: bool = false,
     move_function_execute_send: bool = false,
+    move_function_indexed_arg_indices: std.ArrayListUnmanaged(usize) = .{},
+    move_function_indexed_arg_items: std.ArrayListUnmanaged([]const u8) = .{},
+    owned_move_function_indexed_arg_items: std.ArrayListUnmanaged([]const u8) = .{},
+    move_function_indexed_args_json: ?[]const u8 = null,
+    owned_move_function_indexed_args_json: ?[]const u8 = null,
     object_id: ?[]const u8 = null,
     object_parent_id: ?[]const u8 = null,
     object_dynamic_field_name: ?[]const u8 = null,
@@ -211,6 +216,11 @@ pub const ParsedArgs = struct {
         if (self.owned_move_package) |value| allocator.free(value);
         if (self.owned_move_module) |value| allocator.free(value);
         if (self.owned_move_function) |value| allocator.free(value);
+        if (self.owned_move_function_indexed_args_json) |value| allocator.free(value);
+        self.move_function_indexed_arg_indices.deinit(allocator);
+        for (self.owned_move_function_indexed_arg_items.items) |value| allocator.free(value);
+        self.move_function_indexed_arg_items.deinit(allocator);
+        self.owned_move_function_indexed_arg_items.deinit(allocator);
         if (self.owned_object_id) |value| allocator.free(value);
         if (self.owned_object_parent_id) |value| allocator.free(value);
         if (self.owned_object_dynamic_field_name) |value| allocator.free(value);
@@ -433,6 +443,58 @@ fn renderJsonValueCompact(
     defer rendered.deinit(allocator);
     try rendered.writer(allocator).print("{f}", .{std.json.fmt(value, .{})});
     return try rendered.toOwnedSlice(allocator);
+}
+
+fn normalizeSingleArgumentValueToken(
+    allocator: std.mem.Allocator,
+    raw: []const u8,
+) ![]u8 {
+    if (tokenStartsSelectedRequest(raw)) {
+        try validateSelectedRequestToken(allocator, raw);
+        return try std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(raw, .{})});
+    }
+
+    const normalized_array_json = try tx_request_builder.buildArgumentValueTokenArray(
+        allocator,
+        null,
+        &.{raw},
+    );
+    defer allocator.free(normalized_array_json);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, normalized_array_json, .{});
+    defer parsed.deinit();
+    if (parsed.value != .array or parsed.value.array.items.len != 1) return error.InvalidCli;
+    return try renderJsonValueCompact(allocator, parsed.value.array.items[0]);
+}
+
+fn buildMoveFunctionIndexedArgsJson(
+    allocator: std.mem.Allocator,
+    indices: []const usize,
+    raw_values: []const []const u8,
+) ![]u8 {
+    if (indices.len != raw_values.len) return error.InvalidCli;
+
+    var seen = std.AutoHashMap(usize, void).init(allocator);
+    defer seen.deinit();
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+    const writer = output.writer(allocator);
+    try writer.writeAll("[");
+    for (indices, raw_values, 0..) |index, raw_value, item_index| {
+        const entry = try seen.getOrPut(index);
+        if (entry.found_existing) return error.InvalidCli;
+        const normalized_value = try normalizeSingleArgumentValueToken(allocator, raw_value);
+        defer allocator.free(normalized_value);
+
+        if (item_index != 0) try writer.writeAll(",");
+        try writer.print(
+            "{{\"index\":{},\"value\":{s}}}",
+            .{ index, normalized_value },
+        );
+    }
+    try writer.writeAll("]");
+    return try output.toOwnedSlice(allocator);
 }
 
 fn parseOptionalRequestJsonBool(
@@ -728,6 +790,27 @@ fn appendRepeatedLoadedValue(
 ) !void {
     const loaded = try maybeLoadFileValue(allocator, raw);
     try items.append(allocator, loaded.value);
+    if (loaded.owned) try owned_items.append(allocator, loaded.value);
+}
+
+fn appendIndexedRepeatedLoadedValue(
+    allocator: std.mem.Allocator,
+    indices: *std.ArrayListUnmanaged(usize),
+    items: *std.ArrayListUnmanaged([]const u8),
+    owned_items: *std.ArrayListUnmanaged([]const u8),
+    index_raw: []const u8,
+    raw: []const u8,
+) !void {
+    const parsed_index = try parseIntValue(index_raw);
+    if (parsed_index > std.math.maxInt(usize)) return error.InvalidCli;
+
+    const loaded = try maybeLoadFileValue(allocator, raw);
+    errdefer if (loaded.owned) allocator.free(loaded.value);
+
+    try indices.append(allocator, @as(usize, @intCast(parsed_index)));
+    errdefer _ = indices.pop();
+    try items.append(allocator, loaded.value);
+    errdefer _ = items.pop();
     if (loaded.owned) try owned_items.append(allocator, loaded.value);
 }
 
@@ -1987,6 +2070,21 @@ fn finalizeStructuredMoveCallArgs(
         parsed.owned_tx_build_args = value;
         parsed.tx_build_args = value;
     }
+}
+
+fn finalizeMoveFunctionIndexedArgs(
+    allocator: std.mem.Allocator,
+    parsed: *ParsedArgs,
+) !void {
+    if (parsed.move_function_indexed_arg_items.items.len == 0) return;
+    const value = try buildMoveFunctionIndexedArgsJson(
+        allocator,
+        parsed.move_function_indexed_arg_indices.items,
+        parsed.move_function_indexed_arg_items.items,
+    );
+    if (parsed.owned_move_function_indexed_args_json) |owned| allocator.free(owned);
+    parsed.owned_move_function_indexed_args_json = value;
+    parsed.move_function_indexed_args_json = value;
 }
 
 fn tokenStartsSelectedRequest(text: []const u8) bool {
@@ -3751,6 +3849,19 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
                 i += 2;
                 continue;
             }
+            if (parsed.command == .move_function and std.mem.eql(u8, token, "--arg-at")) {
+                if (i + 2 >= args.len) return error.InvalidCli;
+                try appendIndexedRepeatedLoadedValue(
+                    allocator,
+                    &parsed.move_function_indexed_arg_indices,
+                    &parsed.move_function_indexed_arg_items,
+                    &parsed.owned_move_function_indexed_arg_items,
+                    args[i + 1],
+                    args[i + 2],
+                );
+                i += 3;
+                continue;
+            }
             if (parsed.command == .move_function and std.mem.eql(u8, token, "--emit-template")) {
                 if (i + 1 >= args.len) return error.InvalidCli;
                 parsed.move_function_template_output = try parseMoveFunctionTemplateOutput(args[i + 1]);
@@ -3920,6 +4031,7 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
 
     try flushPendingTypedCommand(allocator, &parsed, &pending_typed_command, &command_aliases);
     try finalizeStructuredMoveCallArgs(allocator, &parsed);
+    try finalizeMoveFunctionIndexedArgs(allocator, &parsed);
 
     if (parsed.command == .tx_simulate) {
         if (parsed.tx_build_auto_gas_payment and parsed.tx_build_gas_payment != null) return error.InvalidCli;
@@ -4118,6 +4230,7 @@ pub fn printUsage(writer: anytype) !void {
         "    --type-arg <type>                   Repeatable Move type argument shorthand for --type-args\n" ++
         "    --args <json|@file>                 Optional explicit argument JSON used to specialize preferred templates\n" ++
         "    --arg <json|bare|@file>             Repeatable explicit argument shorthand for --args\n" ++
+        "    --arg-at <index> <json|bare|@file>  Repeatable explicit argument override by parameter index\n" ++
         "    --emit-template <kind>              Print one generated template directly: commands|preferred-commands|dry-run-request|preferred-dry-run-request|send-request|preferred-send-request\n" ++
         "    --dry-run                           Resolve the preferred dry-run request artifact and execute it immediately\n" ++
         "    --send                              Resolve the preferred send request artifact and execute it immediately\n" ++
@@ -7041,6 +7154,59 @@ test "parseCliArgs parses move function command with explicit args" {
     try testing.expectEqual(Command.move_function, parsed.command);
     try testing.expectEqualStrings("[7,true]", parsed.tx_build_args.?);
     try testing.expect(parsed.tx_send_summarize);
+}
+
+test "parseCliArgs parses move function command with indexed explicit args" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "move",
+        "function",
+        "0x2",
+        "pool",
+        "swap",
+        "--arg-at",
+        "0",
+        "select:{\"kind\":\"object_preset\",\"name\":\"clock\"}",
+        "--arg-at",
+        "2",
+        "7",
+        "--summarize",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.move_function, parsed.command);
+    try testing.expectEqualStrings(
+        "[{\"index\":0,\"value\":\"select:{\\\"kind\\\":\\\"object_preset\\\",\\\"name\\\":\\\"clock\\\"}\"},{\"index\":2,\"value\":7}]",
+        parsed.move_function_indexed_args_json.?,
+    );
+    try testing.expect(parsed.tx_send_summarize);
+}
+
+test "parseCliArgs rejects move function duplicate indexed explicit args" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    try testing.expectError(error.InvalidCli, parseCliArgs(allocator, &.{
+        "move",
+        "function",
+        "0x2",
+        "pool",
+        "swap",
+        "--arg-at",
+        "0",
+        "1",
+        "--arg-at",
+        "0",
+        "2",
+    }));
 }
 
 test "parseCliArgs parses move function command with emitted template output" {

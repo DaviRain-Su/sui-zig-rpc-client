@@ -1714,6 +1714,7 @@ pub const MoveQuery = union(enum) {
         function_name: []const u8,
         type_arguments_json: ?[]const u8 = null,
         arguments_json: ?[]const u8 = null,
+        indexed_arguments_json: ?[]const u8 = null,
         owner_address: ?[]const u8 = null,
         signer_selector: ?[]const u8 = null,
     },
@@ -1729,6 +1730,7 @@ pub const MoveQuery = union(enum) {
         switch (self.*) {
             .function => |*value| {
                 if (value.arguments_json) |arguments| allocator.free(arguments);
+                if (value.indexed_arguments_json) |arguments| allocator.free(arguments);
                 if (value.owner_address) |owner| allocator.free(owner);
                 if (value.signer_selector) |signer| allocator.free(signer);
             },
@@ -4394,6 +4396,44 @@ pub const SuiRpcClient = struct {
         if (mapped_args != explicit_args.len) return error.InvalidCli;
     }
 
+    fn applyExplicitIndexedMoveFunctionArgsToParameters(
+        allocator: std.mem.Allocator,
+        parameters: []move_result.OwnedMoveParameterSummary,
+        indexed_arguments_json: []const u8,
+    ) !void {
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, indexed_arguments_json, .{});
+        defer parsed.deinit();
+        if (parsed.value != .array) return error.InvalidCli;
+
+        var seen = std.AutoHashMap(usize, void).init(allocator);
+        defer seen.deinit();
+
+        for (parsed.value.array.items) |entry| {
+            if (entry != .object) return error.InvalidCli;
+            const index_value = entry.object.get("index") orelse return error.InvalidCli;
+            const raw_value = entry.object.get("value") orelse return error.InvalidCli;
+
+            const parameter_index: usize = switch (index_value) {
+                .integer => |number| blk: {
+                    if (number < 0) return error.InvalidCli;
+                    break :blk @as(usize, @intCast(number));
+                },
+                else => return error.InvalidCli,
+            };
+
+            if (parameter_index >= parameters.len) return error.InvalidCli;
+            const seen_entry = try seen.getOrPut(parameter_index);
+            if (seen_entry.found_existing) return error.InvalidCli;
+
+            const parameter = &parameters[parameter_index];
+            if (parameter.omitted_from_explicit_args) return error.InvalidCli;
+
+            const fragment = try buildJsonFragmentFromJsonValue(allocator, raw_value);
+            if (parameter.explicit_arg_json) |old_value| allocator.free(old_value);
+            parameter.explicit_arg_json = fragment;
+        }
+    }
+
     fn parseExplicitCoinBalanceArgJson(
         allocator: std.mem.Allocator,
         parameter: move_result.OwnedMoveParameterSummary,
@@ -4886,6 +4926,7 @@ pub const SuiRpcClient = struct {
         parameter_allows_owned_discovery: []const bool,
         concrete_type_arguments_json: ?[]const u8,
         arguments_json: ?[]const u8,
+        indexed_arguments_json: ?[]const u8,
         owner_address: ?[]const u8,
         signer_selector: ?[]const u8,
     ) !void {
@@ -5063,6 +5104,11 @@ pub const SuiRpcClient = struct {
 
         if (arguments_json) |value| {
             try applyExplicitMoveFunctionArgsToParameters(allocator, summary.parameters, value);
+        }
+        if (indexed_arguments_json) |value| {
+            try applyExplicitIndexedMoveFunctionArgsToParameters(allocator, summary.parameters, value);
+        }
+        if (arguments_json != null or indexed_arguments_json != null) {
             try applyCoinSelectorMinBalanceHintsFromExplicitArgs(
                 allocator,
                 summary.parameters,
@@ -5222,6 +5268,7 @@ pub const SuiRpcClient = struct {
         response_json: []const u8,
         type_arguments_json: ?[]const u8,
         arguments_json: ?[]const u8,
+        indexed_arguments_json: ?[]const u8,
         owner_address: ?[]const u8,
         signer_selector: ?[]const u8,
     ) !move_result.OwnedMoveFunctionSummary {
@@ -5285,6 +5332,7 @@ pub const SuiRpcClient = struct {
             parameter_allows_owned_discovery,
             resolved_type_arguments_json,
             arguments_json,
+            indexed_arguments_json,
             owner_address,
             signer_selector,
         );
@@ -12620,6 +12668,7 @@ fn buildOwnedObjectsFilterJson(
                         response,
                         spec.type_arguments_json,
                         spec.arguments_json,
+                        spec.indexed_arguments_json,
                         spec.owner_address,
                         spec.signer_selector,
                     ),

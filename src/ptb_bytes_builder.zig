@@ -243,7 +243,7 @@ fn encodeTypeTag(
     out: *std.ArrayList(u8),
     allocator: std.mem.Allocator,
     tag: TypeTag,
-) !void {
+) anyerror!void {
     switch (tag) {
         .bool => try appendVariantIndex(out, allocator, 0),
         .u8 => try appendVariantIndex(out, allocator, 1),
@@ -269,7 +269,7 @@ fn encodeStructTag(
     out: *std.ArrayList(u8),
     allocator: std.mem.Allocator,
     tag: StructTag,
-) !void {
+) anyerror!void {
     try appendAddress(out, allocator, tag.address);
     try appendString(out, allocator, tag.module);
     try appendString(out, allocator, tag.name);
@@ -666,6 +666,153 @@ fn parseDigest32JsonValue(
     return decoded;
 }
 
+pub fn encodeSimplifiedTypeTagFromString(
+    out: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    name: []const u8,
+) !void {
+    const type_tag = parseSimplifiedTypeTag(allocator, name) catch return error.InvalidCli;
+    defer deinitOwnedTypeTag(allocator, type_tag);
+    try encodeTypeTag(out, allocator, type_tag);
+}
+
+fn deinitOwnedTypeTagSlice(
+    allocator: std.mem.Allocator,
+    tags: []const TypeTag,
+) void {
+    for (tags) |tag| deinitOwnedTypeTag(allocator, tag);
+    if (tags.len != 0) allocator.free(tags);
+}
+
+fn deinitOwnedTypeTag(
+    allocator: std.mem.Allocator,
+    tag: TypeTag,
+) void {
+    switch (tag) {
+        .vector => |inner| {
+            deinitOwnedTypeTag(allocator, inner.*);
+            allocator.destroy(inner);
+        },
+        .struct_ => |st| {
+            allocator.free(st.module);
+            allocator.free(st.name);
+            deinitOwnedTypeTagSlice(allocator, st.type_params);
+        },
+        else => {},
+    }
+}
+
+pub fn parseSimplifiedTypeTag(
+    allocator: std.mem.Allocator,
+    spec: []const u8,
+) !TypeTag {
+    const trimmed = std.mem.trim(u8, spec, " \n\r\t");
+    if (trimmed.len == 0) return error.InvalidCli;
+
+    if (std.mem.eql(u8, trimmed, "bool")) return .bool;
+    if (std.mem.eql(u8, trimmed, "u8")) return .u8;
+    if (std.mem.eql(u8, trimmed, "u64")) return .u64;
+    if (std.mem.eql(u8, trimmed, "u128")) return .u128;
+    if (std.mem.eql(u8, trimmed, "address")) return .address;
+    if (std.mem.eql(u8, trimmed, "signer")) return .signer;
+    if (std.mem.eql(u8, trimmed, "u16")) return .u16;
+    if (std.mem.eql(u8, trimmed, "u32")) return .u32;
+    if (std.mem.eql(u8, trimmed, "u256")) return .u256;
+
+    if (std.mem.startsWith(u8, trimmed, "vector<") and std.mem.endsWith(u8, trimmed, ">")) {
+        const inner_spec = trimmed[7 .. trimmed.len - 1];
+        const inner = try parseSimplifiedTypeTag(allocator, inner_spec);
+        errdefer deinitOwnedTypeTag(allocator, inner);
+
+        const inner_heap = try allocator.create(TypeTag);
+        errdefer allocator.destroy(inner_heap);
+        inner_heap.* = inner;
+        return .{ .vector = inner_heap };
+    }
+
+    const arrow = std.mem.indexOfScalar(u8, trimmed, '<');
+    const last_gt = std.mem.lastIndexOfScalar(u8, trimmed, '>');
+    if ((arrow == null) != (last_gt == null)) return error.InvalidCli;
+
+    const struct_spec, const type_args_spec = blk: {
+        if (arrow) |arrow_index| {
+            const gt_index = last_gt.?;
+            if (arrow_index >= gt_index) return error.InvalidCli;
+            break :blk .{ trimmed[0..arrow_index], trimmed[arrow_index + 1 .. gt_index] };
+        }
+        break :blk .{ trimmed, "" };
+    };
+
+    const first_sep = std.mem.indexOfScalar(u8, struct_spec, ':') orelse return error.InvalidCli;
+    if (first_sep + 1 >= struct_spec.len or struct_spec[first_sep + 1] != ':' or first_sep + 2 >= struct_spec.len or struct_spec[first_sep + 2] != ':') {
+        return error.InvalidCli;
+    }
+    const second_sep = std.mem.indexOfScalar(u8, struct_spec[first_sep + 3 ..], ':');
+    if (second_sep == null or second_sep.? + first_sep + 3 >= struct_spec.len) {
+        return error.InvalidCli;
+    }
+
+    const addr_str = std.mem.trim(u8, struct_spec[0..first_sep], " \t");
+    const module_str = std.mem.trim(u8, struct_spec[first_sep + 3 .. first_sep + 3 + second_sep.?], " \t");
+    const name_str = std.mem.trim(u8, struct_spec[first_sep + 3 + second_sep.? + 3 ..], " \t");
+    if (addr_str.len == 0 or module_str.len == 0 or name_str.len == 0) return error.InvalidCli;
+
+    const address = try parseHexAddress32(addr_str);
+
+    var type_args: []const TypeTag = &.{};
+    errdefer deinitOwnedTypeTagSlice(allocator, type_args);
+
+    const trimmed_args = std.mem.trim(u8, type_args_spec, " \n\r\t");
+    if (trimmed_args.len > 0) {
+        var args_list = std.ArrayListUnmanaged(TypeTag){};
+        errdefer {
+            for (args_list.items) |item| deinitOwnedTypeTag(allocator, item);
+            args_list.deinit(allocator);
+        }
+
+        var depth: usize = 0;
+        var start: usize = 0;
+        var in_str = false;
+        for (trimmed_args, 0..) |c, i| {
+            if (c == '"' and (i == 0 or trimmed_args[i - 1] != '\\')) {
+                in_str = !in_str;
+            }
+            if (!in_str) {
+                if (c == '<') depth += 1;
+                if (c == '>') {
+                    if (depth == 0) continue;
+                    depth -= 1;
+                }
+                if (c == ',' and depth == 0) {
+                    const arg = try parseSimplifiedTypeTag(allocator, trimmed_args[start..i]);
+                    try args_list.append(allocator, arg);
+                    start = i + 1;
+                }
+            }
+        }
+        if (start < trimmed_args.len) {
+            const arg = try parseSimplifiedTypeTag(allocator, trimmed_args[start..]);
+            try args_list.append(allocator, arg);
+        }
+
+        type_args = try args_list.toOwnedSlice(allocator);
+    }
+
+    const module_heap = try allocator.dupe(u8, module_str);
+    errdefer allocator.free(module_heap);
+    const name_heap = try allocator.dupe(u8, name_str);
+    errdefer allocator.free(name_heap);
+
+    return .{
+        .struct_ = .{
+            .address = address,
+            .module = module_heap,
+            .name = name_heap,
+            .type_params = type_args,
+        },
+    };
+}
+
 fn encodeTypeTagFromJson(
     out: *std.ArrayList(u8),
     allocator: std.mem.Allocator,
@@ -682,7 +829,8 @@ fn encodeTypeTagFromJson(
             if (std.mem.eql(u8, name, "u16")) return try appendVariantIndex(out, allocator, 8);
             if (std.mem.eql(u8, name, "u32")) return try appendVariantIndex(out, allocator, 9);
             if (std.mem.eql(u8, name, "u256")) return try appendVariantIndex(out, allocator, 10);
-            return error.InvalidCli;
+            try encodeSimplifiedTypeTagFromString(out, allocator, name);
+            return;
         },
         .object => |object| {
             if (object.get("Vector")) |inner| {
@@ -755,7 +903,17 @@ fn encodeCallArgFromJson(
 ) !void {
     const object = try requireJsonObject(value);
     if (object.get("Pure")) |pure| {
-        const bytes = try parseRawBytesJsonValue(allocator, pure);
+        var bytes: []u8 = undefined;
+        if (pure == .string) {
+            const raw = pure.string;
+            if (std.mem.startsWith(u8, raw, "bcs:") or std.mem.startsWith(u8, raw, "BCS:")) {
+                bytes = try parseBcsValueSpec(allocator, raw);
+            } else {
+                bytes = try parseRawBytesJsonValue(allocator, pure);
+            }
+        } else {
+            bytes = try parseRawBytesJsonValue(allocator, pure);
+        }
         defer allocator.free(bytes);
         try appendVariantIndex(out, allocator, 0);
         return try appendBytes(out, allocator, bytes);
@@ -1021,6 +1179,212 @@ fn decodeHexNibble(value: u8) !u8 {
     };
 }
 
+pub fn parseBcsValueSpec(allocator: std.mem.Allocator, raw: []const u8) ![]u8 {
+    const trimmed = std.mem.trim(u8, raw, " \n\r\t");
+    if (!std.mem.startsWith(u8, trimmed, "bcs:") and !std.mem.startsWith(u8, trimmed, "BCS:")) {
+        return error.InvalidCli;
+    }
+
+    var spec = trimmed[4..];
+    if (spec.len == 0) return error.InvalidCli;
+
+    const type_end = std.mem.indexOfScalar(u8, spec, ':') orelse return error.InvalidCli;
+    const type_name = std.mem.trim(u8, spec[0..type_end], " \t");
+    const value_str = std.mem.trim(u8, spec[type_end + 1 ..], " \n\r\t");
+
+    return try encodeBcsValue(allocator, type_name, value_str);
+}
+
+pub fn encodeBcsValue(allocator: std.mem.Allocator, type_name: []const u8, value_str: []const u8) ![]u8 {
+    var out = std.ArrayList(u8){};
+    errdefer out.deinit(allocator);
+
+    if (std.mem.eql(u8, type_name, "bool")) {
+        const trimmed = std.mem.trim(u8, value_str, " \n\r\t");
+        if (std.mem.eql(u8, trimmed, "true") or std.mem.eql(u8, trimmed, "1")) {
+            try out.append(allocator, 1);
+        } else if (std.mem.eql(u8, trimmed, "false") or std.mem.eql(u8, trimmed, "0")) {
+            try out.append(allocator, 0);
+        } else {
+            return error.InvalidCli;
+        }
+        return out.toOwnedSlice(allocator);
+    }
+
+    if (std.mem.eql(u8, type_name, "u8")) {
+        const v = try std.fmt.parseInt(u8, std.mem.trim(u8, value_str, " \n\r\t"), 10);
+        try out.append(allocator, v);
+        return out.toOwnedSlice(allocator);
+    }
+
+    if (std.mem.eql(u8, type_name, "u16")) {
+        const v = try std.fmt.parseInt(u16, std.mem.trim(u8, value_str, " \n\r\t"), 10);
+        try appendU16(&out, allocator, v);
+        return out.toOwnedSlice(allocator);
+    }
+
+    if (std.mem.eql(u8, type_name, "u32")) {
+        const v = try std.fmt.parseInt(u32, std.mem.trim(u8, value_str, " \n\r\t"), 10);
+        try appendU32(&out, allocator, v);
+        return out.toOwnedSlice(allocator);
+    }
+
+    if (std.mem.eql(u8, type_name, "u64")) {
+        const v = try std.fmt.parseInt(u64, std.mem.trim(u8, value_str, " \n\r\t"), 10);
+        try appendU64(&out, allocator, v);
+        return out.toOwnedSlice(allocator);
+    }
+
+    if (std.mem.eql(u8, type_name, "u128")) {
+        const v = try std.fmt.parseInt(u128, std.mem.trim(u8, value_str, " \n\r\t"), 10);
+        try appendU128(&out, allocator, v);
+        return out.toOwnedSlice(allocator);
+    }
+
+    if (std.mem.eql(u8, type_name, "u256")) {
+        const v = try std.fmt.parseInt(u256, std.mem.trim(u8, value_str, " \n\r\t"), 10);
+        try appendU256(&out, allocator, v);
+        return out.toOwnedSlice(allocator);
+    }
+
+    if (std.mem.eql(u8, type_name, "address")) {
+        const addr = try parseHexAddress32(std.mem.trim(u8, value_str, " \n\r\t"));
+        try out.appendSlice(allocator, &addr);
+        return out.toOwnedSlice(allocator);
+    }
+
+    if (std.mem.eql(u8, type_name, "signer")) {
+        const addr = try parseHexAddress32(std.mem.trim(u8, value_str, " \n\r\t"));
+        try out.appendSlice(allocator, &addr);
+        return out.toOwnedSlice(allocator);
+    }
+
+    if (std.mem.eql(u8, type_name, "string")) {
+        try appendString(&out, allocator, std.mem.trim(u8, value_str, " \n\r\t"));
+        return out.toOwnedSlice(allocator);
+    }
+
+    if (std.mem.eql(u8, type_name, "utf8_string")) {
+        try appendString(&out, allocator, std.mem.trim(u8, value_str, " \n\r\t"));
+        return out.toOwnedSlice(allocator);
+    }
+
+    if (std.mem.eql(u8, type_name, "ascii_string")) {
+        try appendString(&out, allocator, std.mem.trim(u8, value_str, " \n\r\t"));
+        return out.toOwnedSlice(allocator);
+    }
+
+    if (std.mem.eql(u8, type_name, "object_id")) {
+        const addr = try parseHexAddress32(std.mem.trim(u8, value_str, " \n\r\t"));
+        try out.appendSlice(allocator, &addr);
+        return out.toOwnedSlice(allocator);
+    }
+
+    if (std.mem.startsWith(u8, type_name, "vector<") and std.mem.endsWith(u8, type_name, ">")) {
+        const inner_type = type_name[7 .. type_name.len - 1];
+        const trimmed = std.mem.trim(u8, value_str, " \n\r\t");
+
+        if (std.mem.eql(u8, trimmed, "[]")) {
+            try appendVariantIndex(&out, allocator, 0);
+            return out.toOwnedSlice(allocator);
+        }
+
+        var elements: []const []const u8 = &.{};
+        var owned_elements: std.ArrayListUnmanaged([]const u8) = .{};
+        defer owned_elements.deinit(allocator);
+
+        const trimmed2 = trimmed;
+        if (std.mem.startsWith(u8, trimmed2, "[") and std.mem.endsWith(u8, trimmed2, "]")) {
+            const inner = trimmed2[1 .. trimmed2.len - 1];
+            var parts = std.ArrayList([]const u8){};
+            defer parts.deinit(allocator);
+            var in_string = false;
+            var depth: usize = 0;
+            var start: usize = 0;
+            for (inner, 0..) |c, i| {
+                if (c == '"' and (i == 0 or inner[i - 1] != '\\')) {
+                    in_string = !in_string;
+                }
+                if (!in_string) {
+                    if (c == '[' or c == '{') depth += 1;
+                    if (c == ']' or c == '}') depth -= 1;
+                    if (c == ',' and depth == 0) {
+                        try parts.append(allocator, inner[start..i]);
+                        start = i + 1;
+                    }
+                }
+            }
+            if (start < inner.len) {
+                try parts.append(allocator, inner[start..]);
+            }
+            for (parts.items) |part| {
+                const trimmed_part = std.mem.trim(u8, part, " \n\r\t");
+                const encoded = try encodeBcsValue(allocator, inner_type, trimmed_part);
+                defer allocator.free(encoded);
+                try out.appendSlice(allocator, encoded);
+            }
+            elements = parts.items;
+        } else {
+            const encoded = try encodeBcsValue(allocator, inner_type, trimmed);
+            defer allocator.free(encoded);
+            try out.appendSlice(allocator, encoded);
+        }
+
+        var with_header = std.ArrayList(u8){};
+        errdefer with_header.deinit(allocator);
+        try appendVariantIndex(&with_header, allocator, elements.len);
+        try with_header.appendSlice(allocator, out.items);
+
+        return with_header.toOwnedSlice(allocator);
+    }
+
+    if (std.mem.startsWith(u8, type_name, "option<") and std.mem.endsWith(u8, type_name, ">")) {
+        const inner_type = type_name[7 .. type_name.len - 1];
+        const trimmed = std.mem.trim(u8, value_str, " \n\r\t");
+
+        if (std.mem.eql(u8, trimmed, "null") or std.mem.eql(u8, trimmed, "none") or trimmed.len == 0) {
+            try out.append(allocator, 0);
+            return out.toOwnedSlice(allocator);
+        }
+
+        try out.append(allocator, 1);
+        const encoded = try encodeBcsValue(allocator, inner_type, trimmed);
+        defer allocator.free(encoded);
+        try out.appendSlice(allocator, encoded);
+        return out.toOwnedSlice(allocator);
+    }
+
+    return error.InvalidCli;
+}
+
+pub fn encodeBcsPureValue(allocator: std.mem.Allocator, raw: []const u8) ![]u8 {
+    const trimmed = std.mem.trim(u8, raw, " \n\r\t");
+
+    if (std.mem.startsWith(u8, trimmed, "bcs:") or std.mem.startsWith(u8, trimmed, "BCS:")) {
+        return try parseBcsValueSpec(allocator, trimmed);
+    }
+
+    return try parseRawBytesJsonValueFromString(allocator, trimmed);
+}
+
+pub fn parseRawBytesJsonValueFromString(
+    allocator: std.mem.Allocator,
+    value: []const u8,
+) ![]u8 {
+    const trimmed = std.mem.trim(u8, value, " \n\r\t");
+    if (trimmed.len == 0) return error.InvalidCli;
+
+    if (std.mem.startsWith(u8, trimmed, "0x") or std.mem.startsWith(u8, trimmed, "0X")) {
+        return try parseHexBytesAlloc(allocator, trimmed);
+    }
+
+    const decoded_len = std.base64.standard.Decoder.calcSizeForSlice(trimmed) catch return error.InvalidCli;
+    const decoded = try allocator.alloc(u8, decoded_len);
+    errdefer allocator.free(decoded);
+    std.base64.standard.Decoder.decode(decoded, trimmed) catch return error.InvalidCli;
+    return decoded;
+}
+
 pub fn parseHexAddress32(value: []const u8) !Address {
     const trimmed = std.mem.trim(u8, value, " \n\r\t");
     const raw = if (std.mem.startsWith(u8, trimmed, "0x") or std.mem.startsWith(u8, trimmed, "0X"))
@@ -1125,11 +1489,9 @@ test "buildTransactionDataV1Bytes encodes struct type tags with nested vectors" 
     const expected_suffix = [_]u8{
         0x07,
     } ++ repeatedByteAddress(0xaa) ++ [_]u8{
-        0x04, 'c', 'l', 'm', 'm',
-        0x04, 'P', 'o', 'o', 'l',
-        0x02,
-        0x02,
-        0x06, 0x04,
+        0x04, 'c',  'l',  'm',  'm',
+        0x04, 'P',  'o',  'o',  'l',
+        0x02, 0x02, 0x06, 0x04,
     };
     try testing.expect(std.mem.indexOf(u8, bytes, &expected_suffix) != null);
 }
@@ -1175,7 +1537,7 @@ test "buildTransactionDataV1Bytes encodes a minimal programmable move call exact
     try expected.appendSlice(allocator, &.{ 0x04, 's', 'w', 'a', 'p' });
     try expected.appendSlice(allocator, &.{ 0x00, 0x00 });
     try expected.appendSlice(allocator, &repeatedByteAddress(0x22));
-    try expected.appendSlice(allocator, &.{ 0x01 });
+    try expected.appendSlice(allocator, &.{0x01});
     try expected.appendSlice(allocator, &repeatedByteAddress(0x33));
     try expected.appendSlice(allocator, &.{ 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 });
     try expected.appendSlice(allocator, &repeatedByteDigest(0x44));
@@ -1252,12 +1614,12 @@ test "buildTransactionDataV1Bytes supports all programmable command variants" {
                 .{
                     .merge_coins = .{
                         .destination = .{ .input = 1 },
-                        .sources = &.{ .{ .input = 3 } },
+                        .sources = &.{.{ .input = 3 }},
                     },
                 },
                 .{
                     .publish = .{
-                        .modules = &.{ &.{ 0xaa, 0xbb } },
+                        .modules = &.{&.{ 0xaa, 0xbb }},
                         .dependencies = &.{repeatedByteAddress(0x20)},
                     },
                 },
@@ -1269,7 +1631,7 @@ test "buildTransactionDataV1Bytes supports all programmable command variants" {
                 },
                 .{
                     .upgrade = .{
-                        .modules = &.{ &.{0xcc} },
+                        .modules = &.{&.{0xcc}},
                         .dependencies = &.{repeatedByteAddress(0x21)},
                         .package = repeatedByteAddress(0x22),
                         .ticket = .{ .input = 1 },
@@ -1354,7 +1716,7 @@ test "buildTransactionDataV1BytesFromJson lowers lowerable PTB json into the sam
                 .{
                     .merge_coins = .{
                         .destination = .{ .input = 1 },
-                        .sources = &.{ .{ .input = 3 } },
+                        .sources = &.{.{ .input = 3 }},
                     },
                 },
             },

@@ -684,7 +684,7 @@ pub fn main() !void {
 - `events`: 调用 `suix_queryEvents`；支持 raw `--filter <json|@file>`，也支持 typed `--package --module`、`--event-type`、`--sender`、`--tx`，可用于协议对象和行为发现。
 - `move package <package-id-or-alias>`: 调用 `sui_getNormalizedMoveModulesByPackage`，发现 package 下有哪些模块。
 - `move module <package-id-or-alias> <module>`: 调用 `sui_getNormalizedMoveModule`，查看模块里的 structs / exposed functions。
-- `move function <package-id-or-alias> <module> <function>`: 调用 `sui_getNormalizedMoveFunction`，查看参数/返回类型；`--summarize` 会额外输出 CLI lowering hint 和可复用的 transaction 模板。可选 `--type-arg/--type-args` 会在本地先按具体类型实参特化 summary。`--args` / `--arg` 可以把你已知的显式参数先回填到 preferred template 里；`--sender` / `--signer` / `--from-keystore` 会把 owner 上下文回填到 owned-object discovery hint 里。`--emit-template <kind>` 可以直接把生成好的 `commands` / `request artifact` 单独输出出来；`--dry-run` / `--send` 会直接消费 preferred request artifact 并进入执行路径。
+- `move function <package-id-or-alias> <module> <function>`: 调用 `sui_getNormalizedMoveFunction`，查看参数/返回类型；`--summarize` 会额外输出 CLI lowering hint 和可复用的 transaction 模板。可选 `--type-arg/--type-args` 会在本地先按具体类型实参特化 summary。`--args` / `--arg` 可以把你已知的显式参数先回填到 preferred template 里；`--arg-at <index> <value>` 可以按参数位精确覆盖某个参数；`--sender` / `--signer` / `--from-keystore` 会把 owner 上下文回填到 owned-object discovery hint 里。`--emit-template <kind>` 可以直接把生成好的 `commands` / `request artifact` 单独输出出来；`--dry-run` / `--send` 会直接消费 preferred request artifact 并进入执行路径。
 - `tx simulate [params-json]`: 调用 `sui_devInspectTransactionBlock`。
 - `tx dry-run [tx-bytes|@file]`: 调用 `sui_dryRunTransactionBlock`。
 - `tx send [params-json]`: 调用 `sui_executeTransactionBlock`。
@@ -903,6 +903,8 @@ zig build run -- events \
 
 如果你在 `move function --summarize` 时给的显式参数少于总参数个数，CLI 会优先把这些值按“非 object 参数位”做稀疏回填，而不是强行占掉前面的 object 参数位。这样像 `Coin<T>, u64, TxContext` 这类常见签名里，只传 `--arg 13` 就会优先落到 `u64` 金额参数上；同时前一个 `Coin<T>` 的 `coin_with_min_balance_select_token` 会把 `minBalance` 自动抬到 `13`。
 
+如果你已经知道某个参数应该落到哪个位置，不想依赖稀疏回填，可以直接用 `--arg-at <index> <value>`。这里的 `index` 就是 summary 里 `parameters[*]` 的索引；它会覆盖对应参数位的 `explicit_arg_json`，并继续参与 `preferred_*` 模板生成。`TxContext` 这类 runtime 参数仍然不能手工覆盖。
+
 如果同时又有 owner 上下文和真实 `Coin<T>` 候选，CLI 现在还会把这类显式金额继续用于 `preferred_*` 自动选币：
 - scalar `Coin<T>` 会优先选“最小满足金额”的 coin，而不是盲目选最大余额
 - `vector<Coin<T>>` 会优先收敛成一组能覆盖该金额的 coin 子集
@@ -934,6 +936,12 @@ zig build run -- move function cetus_clmm_mainnet pool swap \
   --sender 0x... \
   --arg 7 \
   --dry-run
+
+zig build run -- move function cetus_clmm_mainnet pool add_liquidity \
+  --arg-at 1 'select:{"kind":"object_input","objectId":"0x...","inputKind":"shared","initialSharedVersion":7,"mutable":true}' \
+  --arg-at 2 '0x...' \
+  --arg 1000 \
+  --emit-template preferred-dry-run-request
 ```
 
 支持的 `--emit-template` 值有：

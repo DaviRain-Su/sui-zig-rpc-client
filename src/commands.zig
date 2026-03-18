@@ -2079,6 +2079,7 @@ fn moveQueryFromArgs(
                 .function_name = args.move_function orelse return error.InvalidCli,
                 .type_arguments_json = args.tx_build_type_args,
                 .arguments_json = if (args.tx_build_args) |value| try allocator.dupe(u8, value) else null,
+                .indexed_arguments_json = if (args.move_function_indexed_args_json) |value| try allocator.dupe(u8, value) else null,
                 .owner_address = try resolvedTxBuildSenderFromArgs(allocator, args),
                 .signer_selector = if (args.signers.items.len == 0)
                     null
@@ -3774,6 +3775,67 @@ test "runCommand move function with --send executes preferred send request artif
     try testing.expectEqual(@as(usize, 0), state.unsafe_calls);
 
     try testing.expect(std.mem.indexOf(u8, output.items, "success") != null);
+}
+
+test "runCommand move function indexed explicit args override parameter positions in preferred templates" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            std.debug.assert(std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction"));
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"visibility\":\"Public\",\"isEntry\":true,\"typeParameters\":[],\"parameters\":[{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"pool\",\"name\":\"Pool\",\"typeParams\":[]}}},\"U64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[]}}",
+            );
+        }
+    }.call;
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "move",
+        "function",
+        "0x2",
+        "pool",
+        "swap",
+        "--arg",
+        "7",
+        "--arg-at",
+        "0",
+        "select:{\"kind\":\"object_input\",\"objectId\":\"0xpool1\",\"inputKind\":\"shared\",\"initialSharedVersion\":7,\"mutable\":true}",
+        "--summarize",
+    });
+    defer args.deinit(allocator);
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    const parameters = parsed.value.object.get("parameters").?.array.items;
+    try testing.expectEqualStrings(
+        "\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xpool1\\\",\\\"inputKind\\\":\\\"shared\\\",\\\"initialSharedVersion\\\":7,\\\"mutable\\\":true}\"",
+        parameters[0].object.get("explicit_arg_json").?.string,
+    );
+    try testing.expectEqualStrings(
+        "7",
+        parameters[1].object.get("explicit_arg_json").?.string,
+    );
+    try testing.expectEqualStrings(
+        "[\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xpool1\\\",\\\"inputKind\\\":\\\"shared\\\",\\\"initialSharedVersion\\\":7,\\\"mutable\\\":true}\",7]",
+        parsed.value.object.get("call_template").?.object.get("preferred_args_json").?.string,
+    );
 }
 
 test "runCommand move function with direct execution rejects unresolved template placeholders" {
