@@ -91,6 +91,39 @@ fn printStructuredJson(writer: anytype, value: anytype, pretty: bool) !void {
     try writer.print("{f}\n", .{std.json.fmt(value, .{})});
 }
 
+fn selectedMoveFunctionTemplateOutput(
+    summary: client.move_result.OwnedMoveFunctionSummary,
+    output: cli.MoveFunctionTemplateOutput,
+) ![]const u8 {
+    const template = summary.call_template orelse return error.InvalidCli;
+    return switch (output) {
+        .commands => template.commands_json,
+        .preferred_commands => template.preferred_commands_json orelse template.commands_json,
+        .tx_dry_run_request => template.tx_dry_run_request_json,
+        .preferred_tx_dry_run_request => template.preferred_tx_dry_run_request_json orelse template.tx_dry_run_request_json,
+        .tx_send_from_keystore_request => template.tx_send_from_keystore_request_json,
+        .preferred_tx_send_from_keystore_request => template.preferred_tx_send_from_keystore_request_json orelse template.tx_send_from_keystore_request_json,
+    };
+}
+
+fn printMoveFunctionTemplateOutput(
+    writer: anytype,
+    result: client.rpc_client.ReadQueryActionResult,
+    output: cli.MoveFunctionTemplateOutput,
+) !void {
+    const text = switch (result) {
+        .summarized => |summary| switch (summary) {
+            .move => |move| switch (move) {
+                .function => |value| try selectedMoveFunctionTemplateOutput(value, output),
+                else => return error.InvalidCli,
+            },
+            else => return error.InvalidCli,
+        },
+        else => return error.InvalidCli,
+    };
+    try writer.print("{s}\n", .{text});
+}
+
 const ParsedSessionChallengeResponse = struct {
     arena: std.heap.ArenaAllocator,
     response: client.tx_request_builder.SessionChallengeResponse,
@@ -2247,6 +2280,12 @@ pub fn runCommandWithProgrammaticProvider(
                 readQueryActionFromArgs(args),
             );
             defer result.deinit(allocator);
+            if (args.command == .move_function) {
+                if (args.move_function_template_output) |output_kind| {
+                    try printMoveFunctionTemplateOutput(writer, result, output_kind);
+                    return;
+                }
+            }
             try printReadQueryActionResult(allocator, writer, result, args.pretty);
         },
         .rpc => {
@@ -3344,6 +3383,65 @@ test "runCommand move function with --summarize falls back to sender address for
     try testing.expectEqualStrings("0xowner", send_argv[14].string);
 }
 
+test "runCommand move function with --emit-template prints preferred dry-run request output" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"visibility\":\"Public\",\"isEntry\":false,\"typeParameters\":[],\"parameters\":[{\"MutableReference\":{\"Struct\":{\"address\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb\",\"module\":\"pool\",\"name\":\"Pool\",\"typeParams\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"sui\",\"name\":\"SUI\",\"typeParams\":[]}},{\"Struct\":{\"address\":\"0x2\",\"module\":\"sui\",\"name\":\"SUI\",\"typeParams\":[]}}]}}}],\"return\":[]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "suix_queryEvents")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xevent1\",\"eventSeq\":\"1\"},\"packageId\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool1\"}}],\"hasNextPage\":false}}",
+                );
+            }
+
+            std.debug.assert(std.mem.eql(u8, req.method, "sui_getObject"));
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":{\"objectId\":\"0xpool1\",\"version\":\"11\",\"digest\":\"pool-digest-1\",\"type\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb::pool::Pool<0x2::sui::SUI, 0x2::sui::SUI>\",\"owner\":{\"Shared\":{\"initial_shared_version\":\"7\"}}}}}",
+            );
+        }
+    }.call;
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "move",
+        "function",
+        client.package_preset.cetus_clmm_mainnet,
+        "pool",
+        "swap",
+        "--emit-template",
+        "preferred-dry-run-request",
+    });
+    defer args.deinit(allocator);
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    try testing.expectEqualStrings(
+        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"module\":\"pool\",\"function\":\"swap\",\"typeArguments\":[],\"arguments\":[\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xpool1\\\",\\\"inputKind\\\":\\\"shared\\\",\\\"initialSharedVersion\\\":7,\\\"mutable\\\":true}\"]}],\"sender\":\"0x<sender>\",\"gasBudget\":100000000,\"gasPrice\":1000,\"summarize\":true}\n",
+        output.items,
+    );
+}
+
 test "runCommand move function with --summarize uses queried package for shared object event discovery and candidates" {
     const testing = std.testing;
 
@@ -3450,6 +3548,53 @@ test "runCommand move function with --summarize uses queried package for shared 
     try testing.expectEqualStrings(
         "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"module\":\"pool\",\"function\":\"swap\",\"typeArguments\":[],\"arguments\":[\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xpool1\\\",\\\"inputKind\\\":\\\"shared\\\",\\\"initialSharedVersion\\\":7,\\\"mutable\\\":true}\"]}],\"sender\":\"0x<sender>\",\"gasBudget\":100000000,\"gasPrice\":1000,\"summarize\":true}",
         parsed.value.object.get("call_template").?.object.get("preferred_tx_dry_run_request_json").?.string,
+    );
+}
+
+test "runCommand move function with --emit-template falls back to base send request output" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            std.debug.assert(std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction"));
+            std.debug.assert(std.mem.eql(u8, req.params_json, "[\"0x2\",\"pool\",\"swap\"]"));
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"visibility\":\"Public\",\"isEntry\":true,\"typeParameters\":[],\"parameters\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"pool\",\"name\":\"Pool\",\"typeParams\":[]}},\"U64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[]}}",
+            );
+        }
+    }.call;
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "move",
+        "function",
+        "0x2",
+        "pool",
+        "swap",
+        "--emit-template",
+        "preferred-send-request",
+    });
+    defer args.deinit(allocator);
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    try testing.expectEqualStrings(
+        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"pool\",\"function\":\"swap\",\"typeArguments\":[],\"arguments\":[\"<arg0-object-id-or-select-token>\",0]}],\"fromKeystore\":true,\"signer\":\"<alias-or-address>\",\"gasBudget\":100000000,\"autoGasPayment\":true,\"wait\":true,\"summarize\":true}\n",
+        output.items,
     );
 }
 

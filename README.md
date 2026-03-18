@@ -684,7 +684,7 @@ pub fn main() !void {
 - `events`: 调用 `suix_queryEvents`；支持 raw `--filter <json|@file>`，也支持 typed `--package --module`、`--event-type`、`--sender`、`--tx`，可用于协议对象和行为发现。
 - `move package <package-id-or-alias>`: 调用 `sui_getNormalizedMoveModulesByPackage`，发现 package 下有哪些模块。
 - `move module <package-id-or-alias> <module>`: 调用 `sui_getNormalizedMoveModule`，查看模块里的 structs / exposed functions。
-- `move function <package-id-or-alias> <module> <function>`: 调用 `sui_getNormalizedMoveFunction`，查看参数/返回类型；`--summarize` 会额外输出 CLI lowering hint 和可复用的 transaction 模板。可选 `--type-arg/--type-args` 会在本地先按具体类型实参特化 summary。`--args` / `--arg` 可以把你已知的显式参数先回填到 preferred template 里；`--sender` / `--signer` / `--from-keystore` 会把 owner 上下文回填到 owned-object discovery hint 里。
+- `move function <package-id-or-alias> <module> <function>`: 调用 `sui_getNormalizedMoveFunction`，查看参数/返回类型；`--summarize` 会额外输出 CLI lowering hint 和可复用的 transaction 模板。可选 `--type-arg/--type-args` 会在本地先按具体类型实参特化 summary。`--args` / `--arg` 可以把你已知的显式参数先回填到 preferred template 里；`--sender` / `--signer` / `--from-keystore` 会把 owner 上下文回填到 owned-object discovery hint 里。`--emit-template <kind>` 可以直接把生成好的 `commands` / `request artifact` 单独输出出来。
 - `tx simulate [params-json]`: 调用 `sui_devInspectTransactionBlock`。
 - `tx dry-run [tx-bytes|@file]`: 调用 `sui_dryRunTransactionBlock`。
 - `tx send [params-json]`: 调用 `sui_executeTransactionBlock`。
@@ -826,6 +826,8 @@ zig build run -- move function cetus_clmm_mainnet pool add_liquidity_fix_coin \
   --type-arg 0x2::sui::SUI \
   --type-arg 0x2::sui::SUI \
   --summarize
+zig build run -- move function cetus_clmm_mainnet pool swap \
+  --emit-template preferred-dry-run-request > dry-run-request.json
 ```
 
 `events` 查询命令示例：
@@ -911,6 +913,29 @@ zig build run -- events \
 zig build run -- tx dry-run --request @dry-run-request.json
 zig build run -- tx send --request @send-request.json
 ```
+
+如果你不想先拿整个 summary 再从里面手工拷 `call_template.*` 字段，`move function` 现在也支持直接输出单个模板：
+
+```bash
+zig build run -- move function cetus_clmm_mainnet pool swap \
+  --emit-template commands
+
+zig build run -- move function cetus_clmm_mainnet pool swap \
+  --emit-template preferred-dry-run-request > dry-run-request.json
+
+zig build run -- move function cetus_clmm_mainnet pool swap \
+  --emit-template preferred-send-request > send-request.json
+```
+
+支持的 `--emit-template` 值有：
+- `commands`
+- `preferred-commands`
+- `dry-run-request`
+- `preferred-dry-run-request`
+- `send-request`
+- `preferred-send-request`
+
+其中 `preferred-*` 会在存在 auto-selected candidate 时优先输出 preferred 版本；如果当前还没有唯一候选，就会自动回退到基础模板，不会输出空值。
 
 如果你在 `move function --summarize` 时已经给了 `--sender` 或 `--signer`，这些值现在会直接回填到 `call_template.tx_dry_run_*` 和 `call_template.tx_send_from_keystore_*`。当只有 `--sender` 时，`tx send --from-keystore` 模板会回退用这个 sender 地址作为 address-compatible signer selector。
 

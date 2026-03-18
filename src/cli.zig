@@ -37,6 +37,15 @@ pub const TxBuildKind = enum {
     programmable,
 };
 
+pub const MoveFunctionTemplateOutput = enum {
+    commands,
+    preferred_commands,
+    tx_dry_run_request,
+    preferred_tx_dry_run_request,
+    tx_send_from_keystore_request,
+    preferred_tx_send_from_keystore_request,
+};
+
 pub const ParsedArgs = struct {
     command: Command = .help,
     has_command: bool = false,
@@ -101,6 +110,7 @@ pub const ParsedArgs = struct {
     move_package: ?[]const u8 = null,
     move_module: ?[]const u8 = null,
     move_function: ?[]const u8 = null,
+    move_function_template_output: ?MoveFunctionTemplateOutput = null,
     object_id: ?[]const u8 = null,
     object_parent_id: ?[]const u8 = null,
     object_dynamic_field_name: ?[]const u8 = null,
@@ -221,6 +231,16 @@ const CommandAliasMap = tx_request_builder.CommandResultAliases;
 
 fn parseIntValue(value: []const u8) !u64 {
     return std.fmt.parseInt(u64, value, 10);
+}
+
+fn parseMoveFunctionTemplateOutput(value: []const u8) !MoveFunctionTemplateOutput {
+    if (std.mem.eql(u8, value, "commands")) return .commands;
+    if (std.mem.eql(u8, value, "preferred-commands")) return .preferred_commands;
+    if (std.mem.eql(u8, value, "dry-run-request")) return .tx_dry_run_request;
+    if (std.mem.eql(u8, value, "preferred-dry-run-request")) return .preferred_tx_dry_run_request;
+    if (std.mem.eql(u8, value, "send-request")) return .tx_send_from_keystore_request;
+    if (std.mem.eql(u8, value, "preferred-send-request")) return .preferred_tx_send_from_keystore_request;
+    return error.InvalidCli;
 }
 
 pub fn hasMoveCallArgs(parsed: *const ParsedArgs) bool {
@@ -3714,6 +3734,13 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
                 i += 2;
                 continue;
             }
+            if (parsed.command == .move_function and std.mem.eql(u8, token, "--emit-template")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                parsed.move_function_template_output = try parseMoveFunctionTemplateOutput(args[i + 1]);
+                parsed.tx_send_summarize = true;
+                i += 2;
+                continue;
+            }
             return error.InvalidCli;
         }
 
@@ -4045,6 +4072,7 @@ pub fn printUsage(writer: anytype) !void {
         "    --type-arg <type>                   Repeatable Move type argument shorthand for --type-args\n" ++
         "    --args <json|@file>                 Optional explicit argument JSON used to specialize preferred templates\n" ++
         "    --arg <json|bare|@file>             Repeatable explicit argument shorthand for --args\n" ++
+        "    --emit-template <kind>              Print one generated template directly: commands|preferred-commands|dry-run-request|preferred-dry-run-request|send-request|preferred-send-request\n" ++
         "    --sender <address|selector>         Optional owner context for discovery hints and tx templates\n" ++
         "    --signer <alias|address|key>        Optional signer selector; first address-compatible signer becomes owner context\n" ++
         "    --from-keystore                     Use the first default keystore address as owner context when needed\n" ++
@@ -6932,6 +6960,29 @@ test "parseCliArgs parses move function command with explicit args" {
 
     try testing.expectEqual(Command.move_function, parsed.command);
     try testing.expectEqualStrings("[7,true]", parsed.tx_build_args.?);
+    try testing.expect(parsed.tx_send_summarize);
+}
+
+test "parseCliArgs parses move function command with emitted template output" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "move",
+        "function",
+        "0x2",
+        "pool",
+        "swap",
+        "--emit-template",
+        "preferred-dry-run-request",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.move_function, parsed.command);
+    try testing.expectEqual(MoveFunctionTemplateOutput.preferred_tx_dry_run_request, parsed.move_function_template_output.?);
     try testing.expect(parsed.tx_send_summarize);
 }
 
