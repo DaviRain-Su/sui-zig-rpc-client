@@ -3143,6 +3143,99 @@ test "runCommand move function with --summarize fills owner context into owned o
     );
 }
 
+test "runCommand move function with --summarize adds shared object event discovery templates and candidates" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"visibility\":\"Public\",\"isEntry\":false,\"typeParameters\":[],\"parameters\":[{\"MutableReference\":{\"Struct\":{\"address\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"module\":\"pool\",\"name\":\"Pool\",\"typeParams\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"sui\",\"name\":\"SUI\",\"typeParams\":[]}},{\"Struct\":{\"address\":\"0x2\",\"module\":\"sui\",\"name\":\"SUI\",\"typeParams\":[]}}]}}}],\"return\":[]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "suix_queryEvents")) {
+                std.debug.assert(std.mem.eql(
+                    u8,
+                    req.params_json,
+                    "[{\"MoveModule\":{\"package\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"module\":\"pool\"}},null,20,true]",
+                ));
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xevent1\",\"eventSeq\":\"1\"},\"packageId\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool1\",\"partner_id\":\"0xpartner\"}}],\"hasNextPage\":false}}",
+                );
+            }
+
+            std.debug.assert(std.mem.eql(u8, req.method, "sui_getObject"));
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"showType\":true") != null);
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"showOwner\":true") != null);
+            if (std.mem.indexOf(u8, req.params_json, "\"0xpool1\"") != null) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":{\"objectId\":\"0xpool1\",\"version\":\"11\",\"digest\":\"pool-digest-1\",\"type\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3::pool::Pool<0x2::sui::SUI, 0x2::sui::SUI>\",\"owner\":{\"Shared\":{\"initial_shared_version\":\"7\"}}}}}",
+                );
+            }
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":{\"objectId\":\"0xpartner\",\"version\":\"12\",\"digest\":\"partner-digest-1\",\"type\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3::partner::Partner\",\"owner\":{\"Shared\":{\"initial_shared_version\":\"3\"}}}}}",
+            );
+        }
+    }.call;
+
+    var args = cli.ParsedArgs{
+        .command = .move_function,
+        .has_command = true,
+        .move_package = client.package_preset.cetus_clmm_mainnet,
+        .move_module = "pool",
+        .move_function = "swap",
+        .tx_send_summarize = true,
+    };
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    const parameter = parsed.value.object.get("parameters").?.array.items[0].object;
+    const shared_event_argv = parameter.get("shared_object_event_query_argv").?.array.items;
+    try testing.expectEqual(@as(usize, 8), shared_event_argv.len);
+    try testing.expectEqualStrings("events", shared_event_argv[0].string);
+    try testing.expectEqualStrings("--package", shared_event_argv[1].string);
+    try testing.expectEqualStrings(client.package_preset.cetus_clmm_mainnet, shared_event_argv[2].string);
+    try testing.expectEqualStrings("--module", shared_event_argv[3].string);
+    try testing.expectEqualStrings("pool", shared_event_argv[4].string);
+    try testing.expectEqualStrings("20", shared_event_argv[6].string);
+    const shared_candidates = parameter.get("shared_object_candidates").?.array.items;
+    try testing.expectEqual(@as(usize, 1), shared_candidates.len);
+    try testing.expectEqualStrings("0xpool1", shared_candidates[0].object.get("object_id").?.string);
+    try testing.expectEqualStrings(
+        "0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3::pool::Pool<0x2::sui::SUI, 0x2::sui::SUI>",
+        shared_candidates[0].object.get("type_name").?.string,
+    );
+    try testing.expectEqual(@as(i64, 7), shared_candidates[0].object.get("initial_shared_version").?.integer);
+    try testing.expectEqualStrings(
+        "select:{\"kind\":\"object_input\",\"objectId\":\"0xpool1\",\"inputKind\":\"shared\",\"initialSharedVersion\":7,\"mutable\":false}",
+        shared_candidates[0].object.get("shared_object_input_select_token").?.string,
+    );
+    try testing.expectEqualStrings(
+        "select:{\"kind\":\"object_input\",\"objectId\":\"0xpool1\",\"inputKind\":\"shared\",\"initialSharedVersion\":7,\"mutable\":true}",
+        shared_candidates[0].object.get("mutable_shared_object_input_select_token").?.string,
+    );
+}
+
 test "runCommand move function with --summarize specializes generic signatures with type arguments" {
     const testing = std.testing;
 
@@ -3152,13 +3245,20 @@ test "runCommand move function with --summarize specializes generic signatures w
 
     const callback = struct {
         fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
-            std.debug.assert(std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction"));
-            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0x2\"") != null);
-            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"pool\"") != null);
-            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"swap_generic\"") != null);
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0x2\"") != null);
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"pool\"") != null);
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"swap_generic\"") != null);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"visibility\":\"Public\",\"isEntry\":true,\"typeParameters\":[[]],\"parameters\":[{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"pool\",\"name\":\"Pool\",\"typeParams\":[{\"TypeParameter\":0}]}}},{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"coin\",\"name\":\"Coin\",\"typeParams\":[{\"TypeParameter\":0}]}}]}}",
+                );
+            }
+
+            std.debug.assert(std.mem.eql(u8, req.method, "suix_queryEvents"));
             return alloc.dupe(
                 u8,
-                "{\"result\":{\"visibility\":\"Public\",\"isEntry\":true,\"typeParameters\":[[]],\"parameters\":[{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"pool\",\"name\":\"Pool\",\"typeParams\":[{\"TypeParameter\":0}]}}},{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"coin\",\"name\":\"Coin\",\"typeParams\":[{\"TypeParameter\":0}]}}]}}",
+                "{\"result\":{\"data\":[],\"hasNextPage\":false}}",
             );
         }
     }.call;

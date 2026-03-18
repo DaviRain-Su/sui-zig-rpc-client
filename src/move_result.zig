@@ -17,12 +17,29 @@ pub const OwnedMoveObjectCandidate = struct {
     }
 };
 
+pub const SharedMoveObjectCandidate = struct {
+    object_id: []u8,
+    type_name: ?[]u8 = null,
+    initial_shared_version: u64,
+    shared_object_input_select_token: []u8,
+    mutable_shared_object_input_select_token: []u8,
+
+    pub fn deinit(self: *SharedMoveObjectCandidate, allocator: std.mem.Allocator) void {
+        allocator.free(self.object_id);
+        if (self.type_name) |value| allocator.free(value);
+        allocator.free(self.shared_object_input_select_token);
+        allocator.free(self.mutable_shared_object_input_select_token);
+    }
+};
+
 pub const OwnedMoveParameterSummary = struct {
     signature: []u8,
     lowering_kind: ?[]const u8 = null,
     placeholder_json: ?[]u8 = null,
     omitted_from_explicit_args: bool = false,
     shared_object_input_select_token: ?[]u8 = null,
+    shared_object_event_query_argv: ?[][]u8 = null,
+    shared_object_candidates: ?[]SharedMoveObjectCandidate = null,
     imm_or_owned_object_input_select_token: ?[]u8 = null,
     receiving_object_input_select_token: ?[]u8 = null,
     object_get_argv: ?[][]u8 = null,
@@ -39,6 +56,14 @@ pub const OwnedMoveParameterSummary = struct {
         allocator.free(self.signature);
         if (self.placeholder_json) |value| allocator.free(value);
         if (self.shared_object_input_select_token) |value| allocator.free(value);
+        if (self.shared_object_event_query_argv) |argv| {
+            for (argv) |value| allocator.free(value);
+            allocator.free(argv);
+        }
+        if (self.shared_object_candidates) |values| {
+            for (values) |*value| value.deinit(allocator);
+            allocator.free(values);
+        }
         if (self.imm_or_owned_object_input_select_token) |value| allocator.free(value);
         if (self.receiving_object_input_select_token) |value| allocator.free(value);
         if (self.object_get_argv) |argv| {

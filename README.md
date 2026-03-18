@@ -867,6 +867,8 @@ zig build run -- events \
 - `parameters[*].placeholder_json`: 这个参数建议放进 `--args` JSON 的占位片段
 - `parameters[*].omitted_from_explicit_args`: `true` 表示这是 runtime 注入参数，比如 `TxContext`，不需要你手工传
 - `parameters[*].shared_object_input_select_token`: 如果参数是 by-reference object，CLI 会额外给一个 direct `object_input(shared)` 候选
+- `parameters[*].shared_object_event_query_argv`: 如果参数是非 preset 的 by-reference object，CLI 会额外给一个 `events --package --module` 的 shared object 发现模板
+- `parameters[*].shared_object_candidates`: 对已经 concrete 的 shared object 类型，CLI 会尝试从 recent module events 里抽取 object id，再用 `object get --summarize` 过滤出类型匹配的 shared object 候选
 - `parameters[*].imm_or_owned_object_input_select_token`: object 参数通用的 direct `object_input(imm_or_owned)` 候选
 - `parameters[*].receiving_object_input_select_token`: 如果参数是 by-value object，CLI 会额外给一个 `object_input(receiving)` 候选
 - `parameters[*].object_get_argv`: 对应的 `object get` 查询模板；preset object 会直接用 alias，其他 object 用 object-id 占位符
@@ -902,7 +904,7 @@ zig build run -- events \
 - `parameters[*].owned_object_select_token`
 - `parameters[*].owned_object_query_argv`
 
-这些字段都是“候选调用/发现路径”，不是 ownership 或 sharedness 断言。像 Cetus `Pool<T0,T1>` 这类非 preset shared object，CLI 现在至少会直接给出 `object get` 和 `object_input(shared)` 骨架；而 `Position` 这类 concrete owned object 还会额外带 `account objects --struct-type` 查询模板。
+这些字段都是“候选调用/发现路径”，不是 ownership 或 sharedness 断言。像 Cetus `Pool<T0,T1>` 这类非 preset shared object，CLI 现在除了 `object get` 和 `object_input(shared)` 骨架，还会给出 `events --package --module` discovery argv；如果 recent event 里能抽出匹配 object id，还会直接带 `shared_object_candidates`。而 `Position` 这类 concrete owned object 还会额外带 `account objects --struct-type` 查询模板。
 
 对于 `vector<Coin<T>>` 这类对象向量，summary 现在也会补“单个元素”的 discovery/input skeleton。这对 Cetus 一类要求 coin vector 的接口更实用，因为你可以先拿 `vector_item_owned_object_query_argv` 找一批候选 coin，再把返回的 object id 或 select token 填回 `--args` 数组。
 
