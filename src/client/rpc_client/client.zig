@@ -4570,6 +4570,61 @@ pub const SuiRpcClient = struct {
         }
     }
 
+    fn applySharedCandidateSelectionHintsFromOwnedCandidates(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        parameters: []move_result.OwnedMoveParameterSummary,
+    ) !void {
+        for (parameters) |*parameter| {
+            if (parameter.omitted_from_explicit_args) continue;
+            if (parameter.explicit_arg_json != null or parameter.auto_selected_arg_json != null) continue;
+
+            const candidates = parameter.shared_object_candidates orelse continue;
+            if (candidates.len <= 1) continue;
+
+            const candidate_object_ids = try allocator.alloc([]const u8, candidates.len);
+            defer allocator.free(candidate_object_ids);
+            for (candidates, 0..) |candidate, index| {
+                candidate_object_ids[index] = candidate.object_id;
+            }
+
+            var matched_index: ?usize = null;
+            var ambiguous = false;
+            outer: for (parameters) |other_parameter| {
+                const owned_candidates = other_parameter.owned_object_candidates orelse continue;
+                for (owned_candidates) |owned_candidate| {
+                    const response = self.getObjectWithOptions(owned_candidate.object_id, .{ .show_content = true }) catch continue;
+                    defer allocator.free(response);
+
+                    const candidate_index = objectResponseContentMatchingObjectIdIndex(
+                        allocator,
+                        response,
+                        candidate_object_ids,
+                    ) orelse continue;
+
+                    if (matched_index) |existing_index| {
+                        if (existing_index != candidate_index) {
+                            ambiguous = true;
+                            break :outer;
+                        }
+                        continue;
+                    }
+                    matched_index = candidate_index;
+                }
+            }
+
+            if (ambiguous) continue;
+            const index = matched_index orelse continue;
+            parameter.auto_selected_arg_json = try buildAutoSelectedScalarArgJson(
+                allocator,
+                if (isMoveMutableReferenceSignature(parameter.signature))
+                    candidates[index].mutable_shared_object_input_select_token
+                else
+                    candidates[index].shared_object_input_select_token,
+            );
+        }
+    }
+
     fn applyReferencedOwnedObjectCandidateSelectionHints(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
@@ -5804,8 +5859,10 @@ pub const SuiRpcClient = struct {
             );
         }
         try self.applyReferencedSharedObjectCandidateSelectionHints(allocator, summary.parameters);
+        try self.applySharedCandidateSelectionHintsFromOwnedCandidates(allocator, summary.parameters);
         try self.applyReferencedOwnedObjectCandidateSelectionHints(allocator, summary.parameters);
         try self.applyReferencedSharedObjectCandidateSelectionHints(allocator, summary.parameters);
+        try self.applyReferencedOwnedObjectCandidateSelectionHints(allocator, summary.parameters);
 
         const type_args_json = try resolvedMoveFunctionTypeArgsTemplateJson(
             allocator,
