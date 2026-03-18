@@ -2,6 +2,34 @@
 
 Zig + `std` 实现的 Sui CLI/RPC 客户端骨架，复用你在 Solana 项目中的分层结构（CLI 解析、命令分发、可复用 RPC transport）。
 
+## 项目介绍
+
+`sui-zig-rpc-client` 是一个面向开发者和基础设施场景的 Sui CLI / RPC / transaction tooling 项目，核心目标不是只覆盖几条固定命令，而是逐步把“任意 Sui 合约调用”这件事做成一条可复用的通路。
+
+这个项目当前重点解决的是：
+- 用 Zig 原生实现可复用的 Sui RPC client surface
+- 用统一 CLI 输入构造通用 Move call / programmable transaction
+- 处理 signer、sender、对象选择、gas、dry-run、send、confirm 这些交易生命周期问题
+- 让任意协议集成不必从零手写一套临时脚本
+
+换句话说，这个仓库的长期价值不在“再多加几个 one-off 命令”，而在于把 Sui 上链交互沉淀成一个通用执行层。对于 Cetus、DeFi 协议、自定义 Move package、自动化脚本、测试工具链，这套能力都可以复用。
+
+## 在 Sui 生态中的定位
+
+如果按 Sui 生态方向来归类，这个项目主要属于：
+- `Developer Tooling`
+- `Infrastructure / RPC Client Tooling`
+- `Contract Invocation / Transaction Automation`
+
+更具体一点说，它不是钱包前端、不是浏览器、也不是某个单一协议 SDK；它更接近：
+- Sui 合约交互工具链
+- Sui 交易构造与执行工具
+- 面向协议集成和自动化脚本的底层基础设施
+
+所以我们的方向可以概括成一句话：
+
+`Sui 开发者基础设施 + 通用合约调用工具链`
+
 ## 目标
 
 以最小可运行状态接入：
