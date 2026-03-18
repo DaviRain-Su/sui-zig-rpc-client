@@ -5530,6 +5530,102 @@ test "runCommand move function with --summarize scores shared candidates from se
     try testing.expect(preferred_resolution.get("parameters").?.array.items[0].object.get("is_executable").?.bool);
 }
 
+test "runCommand move function with --summarize ranks vector owned candidates from selected object references" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"visibility\":\"Public\",\"isEntry\":true,\"typeParameters\":[],\"parameters\":[{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"pool\",\"name\":\"Pool\",\"typeParams\":[]}}},{\"Vector\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"example\",\"name\":\"Receipt\",\"typeParams\":[]}}},{\"Reference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"vault\",\"name\":\"Vault\",\"typeParams\":[]}}},{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "suix_getOwnedObjects")) {
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0xowner\"") != null);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xreceipt-a\",\"version\":\"7\",\"digest\":\"receipt-digest-a\",\"type\":\"0x2::example::Receipt\",\"owner\":{\"AddressOwner\":\"0xowner\"}}},{\"data\":{\"objectId\":\"0xreceipt-b\",\"version\":\"8\",\"digest\":\"receipt-digest-b\",\"type\":\"0x2::example::Receipt\",\"owner\":{\"AddressOwner\":\"0xowner\"}}},{\"data\":{\"objectId\":\"0xreceipt-c\",\"version\":\"9\",\"digest\":\"receipt-digest-c\",\"type\":\"0x2::example::Receipt\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getObject")) {
+                if (std.mem.indexOf(u8, req.params_json, "\"0xreceipt-a\"") != null) {
+                    std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"showContent\":true") != null);
+                    return alloc.dupe(
+                        u8,
+                        "{\"result\":{\"data\":{\"objectId\":\"0xreceipt-a\",\"version\":\"7\",\"digest\":\"receipt-digest-a\",\"content\":{\"dataType\":\"moveObject\",\"fields\":{\"pool_id\":\"0xpool1\"}}}}}",
+                    );
+                }
+                if (std.mem.indexOf(u8, req.params_json, "\"0xreceipt-b\"") != null) {
+                    std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"showContent\":true") != null);
+                    return alloc.dupe(
+                        u8,
+                        "{\"result\":{\"data\":{\"objectId\":\"0xreceipt-b\",\"version\":\"8\",\"digest\":\"receipt-digest-b\",\"content\":{\"dataType\":\"moveObject\",\"fields\":{\"pool_id\":\"0xpool1\",\"vault_id\":\"0xvault1\"}}}}}",
+                    );
+                }
+                if (std.mem.indexOf(u8, req.params_json, "\"0xreceipt-c\"") != null) {
+                    std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"showContent\":true") != null);
+                    return alloc.dupe(
+                        u8,
+                        "{\"result\":{\"data\":{\"objectId\":\"0xreceipt-c\",\"version\":\"9\",\"digest\":\"receipt-digest-c\",\"content\":{\"dataType\":\"moveObject\",\"fields\":{\"vault_id\":\"0xvault1\"}}}}}",
+                    );
+                }
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "move",
+        "function",
+        "0x2",
+        "router",
+        "settle_many",
+        "--sender",
+        "0xowner",
+        "--arg-at",
+        "0",
+        "select:{\"kind\":\"object_input\",\"objectId\":\"0xpool1\",\"inputKind\":\"shared\",\"initialSharedVersion\":7,\"mutable\":true}",
+        "--arg-at",
+        "2",
+        "select:{\"kind\":\"object_input\",\"objectId\":\"0xvault1\",\"inputKind\":\"imm_or_owned\",\"version\":5,\"digest\":\"vault-digest-1\"}",
+        "--summarize",
+    });
+    defer args.deinit(allocator);
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    const parameter = parsed.value.object.get("parameters").?.array.items[1].object;
+    const vector_item_candidates = parameter.get("vector_item_owned_object_candidates").?.array.items;
+    try testing.expectEqual(@as(usize, 3), vector_item_candidates.len);
+    try testing.expectEqualStrings("0xreceipt-b", vector_item_candidates[0].object.get("object_id").?.string);
+    try testing.expectEqual(@as(i64, 2), vector_item_candidates[0].object.get("selection_score").?.integer);
+    try testing.expectEqualStrings("0xreceipt-a", vector_item_candidates[1].object.get("object_id").?.string);
+    try testing.expectEqual(@as(i64, 1), vector_item_candidates[1].object.get("selection_score").?.integer);
+    try testing.expectEqualStrings("0xreceipt-c", vector_item_candidates[2].object.get("object_id").?.string);
+    try testing.expectEqual(@as(i64, 1), vector_item_candidates[2].object.get("selection_score").?.integer);
+    try testing.expectEqualStrings(
+        "[\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xreceipt-b\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":8,\\\"digest\\\":\\\"receipt-digest-b\\\"}\",\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xreceipt-a\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":7,\\\"digest\\\":\\\"receipt-digest-a\\\"}\",\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xreceipt-c\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":9,\\\"digest\\\":\\\"receipt-digest-c\\\"}\"]",
+        parameter.get("auto_selected_arg_json").?.string,
+    );
+}
+
 test "runCommand move function with --summarize chooses covering vector coin candidates from explicit amount" {
     const testing = std.testing;
 

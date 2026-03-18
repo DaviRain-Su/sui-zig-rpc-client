@@ -5161,6 +5161,56 @@ pub const SuiRpcClient = struct {
         }
     }
 
+    fn applyReferencedVectorOwnedObjectCandidateSelectionHints(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        parameters: []move_result.OwnedMoveParameterSummary,
+    ) !void {
+        const selected_object_ids = try collectSelectedObjectIdsFromMoveParameters(allocator, parameters);
+        defer {
+            for (selected_object_ids) |value| allocator.free(value);
+            allocator.free(selected_object_ids);
+        }
+        if (selected_object_ids.len == 0) return;
+
+        for (parameters) |*parameter| {
+            if (parameter.omitted_from_explicit_args) continue;
+            if (parameter.explicit_arg_json != null) continue;
+
+            if (vectorElementTypeSignature(parameter.signature)) |element_signature| {
+                if (coinTypeFromCoinStructType(element_signature) != null) continue;
+            } else continue;
+
+            const candidates = parameter.vector_item_owned_object_candidates orelse continue;
+            if (candidates.len <= 1) continue;
+
+            const candidate_scores = try allocator.alloc(usize, candidates.len);
+            defer allocator.free(candidate_scores);
+            @memset(candidate_scores, 0);
+
+            for (candidates, 0..) |candidate, index| {
+                const response = self.getObjectWithOptions(candidate.object_id, .{ .show_content = true }) catch continue;
+                defer allocator.free(response);
+                candidate_scores[index] = objectResponseContentReferenceScore(
+                    allocator,
+                    response,
+                    selected_object_ids,
+                );
+            }
+
+            for (candidates, 0..) |*candidate, index| {
+                candidate.selection_score = candidate_scores[index];
+            }
+            sortOwnedObjectCandidatesByScore(candidates);
+
+            replaceMoveParameterAutoSelectedArgJson(
+                allocator,
+                parameter,
+                try buildAutoSelectedVectorArgJson(allocator, candidates),
+            );
+        }
+    }
+
     fn moveParameterSplitSourceArgJson(
         parameter: move_result.OwnedMoveParameterSummary,
     ) ?[]const u8 {
@@ -6482,6 +6532,7 @@ pub const SuiRpcClient = struct {
         try self.applyReferencedOwnedObjectCandidateSelectionHints(allocator, summary.parameters);
         try self.applyReferencedSharedObjectCandidateSelectionHints(allocator, summary.parameters);
         try self.applyReferencedOwnedObjectCandidateSelectionHints(allocator, summary.parameters);
+        try self.applyReferencedVectorOwnedObjectCandidateSelectionHints(allocator, summary.parameters);
 
         const type_args_json = try resolvedMoveFunctionTypeArgsTemplateJson(
             allocator,
