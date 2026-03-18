@@ -9,6 +9,7 @@ pub const Kind = enum {
 pub const clock = "0x6";
 pub const cetus_clmm_global_config_mainnet = "0xdaa46292632c3c4d8f31f23ea0f9b36a28ff3677e9684980e4438403a67a3d8f";
 pub const cetus_clmm_global_config_testnet = "0xc6273f844b4bc258952c4e477697aa12c918c8e08106fac6b934811298c9820a";
+pub const cetus_clmm_global_config_mainnet_type = "0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb::config::GlobalConfig";
 
 fn trimPresetPrefix(raw: []const u8) []const u8 {
     if (std.mem.startsWith(u8, raw, "preset:")) return raw["preset:".len..];
@@ -17,11 +18,26 @@ fn trimPresetPrefix(raw: []const u8) []const u8 {
     return raw;
 }
 
+fn trimReferencePrefix(raw: []const u8) []const u8 {
+    const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+    if (std.mem.startsWith(u8, trimmed, "&mut ")) return trimmed["&mut ".len..];
+    if (std.mem.startsWith(u8, trimmed, "&")) return trimmed[1..];
+    return trimmed;
+}
+
 pub fn objectId(kind: Kind) []const u8 {
     return switch (kind) {
         .clock => clock,
         .cetus_clmm_global_config_mainnet => cetus_clmm_global_config_mainnet,
         .cetus_clmm_global_config_testnet => cetus_clmm_global_config_testnet,
+    };
+}
+
+pub fn canonicalName(kind: Kind) []const u8 {
+    return switch (kind) {
+        .clock => "clock",
+        .cetus_clmm_global_config_mainnet => "cetus_clmm_global_config_mainnet",
+        .cetus_clmm_global_config_testnet => "cetus_clmm_global_config_testnet",
     };
 }
 
@@ -60,6 +76,15 @@ pub fn resolveObjectIdAlias(raw: []const u8) ?[]const u8 {
     return objectId(kind);
 }
 
+pub fn inferKindFromTypeSignature(signature: []const u8) ?Kind {
+    const trimmed = trimReferencePrefix(signature);
+    if (std.mem.eql(u8, trimmed, "0x2::clock::Clock")) return .clock;
+    if (std.mem.eql(u8, trimmed, cetus_clmm_global_config_mainnet_type)) {
+        return .cetus_clmm_global_config_mainnet;
+    }
+    return null;
+}
+
 test "resolveKind resolves built-in object preset aliases" {
     const testing = std.testing;
 
@@ -93,4 +118,15 @@ test "resolveObjectIdAlias resolves built-in object preset aliases" {
     );
     try testing.expect(resolveObjectIdAlias("0x6") == null);
     try testing.expect(resolveObjectIdAlias("unknown_alias") == null);
+}
+
+test "inferKindFromTypeSignature resolves known preset object types" {
+    const testing = std.testing;
+
+    try testing.expectEqual(Kind.clock, inferKindFromTypeSignature("&0x2::clock::Clock").?);
+    try testing.expectEqual(
+        Kind.cetus_clmm_global_config_mainnet,
+        inferKindFromTypeSignature("&mut " ++ cetus_clmm_global_config_mainnet_type).?,
+    );
+    try testing.expect(inferKindFromTypeSignature("&0x2::coin::Coin<0x2::sui::SUI>") == null);
 }

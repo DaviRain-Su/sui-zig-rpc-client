@@ -821,6 +821,10 @@ zig build run -- move function cetus_clmm_mainnet pool swap --summarize
 
 这层模板只解决 ABI 到 CLI 输入骨架的映射；真正执行 `tx dry-run` / `tx send` 时，你仍然需要自己补 sender、signer、gas 和具体 object id / select token。
 
+如果参数类型能映射到现有 object preset，`placeholder_json` 现在会直接优先生成 preset token，而不是泛泛的 object id 占位符。例如：
+- `&0x2::clock::Clock` -> `select:{"kind":"object_preset","name":"clock"}`
+- Cetus mainnet `&config::GlobalConfig` -> `select:{"kind":"object_preset","name":"cetus_clmm_global_config_mainnet"}`
+
 当 ABI 显示参数是非 `vector<u8>` 的 `vector<T>` 时，CLI 现在会在本地 programmable builder 路径里自动插入 `MakeMoveVec`。这对 Cetus 一类需要 `vector<Coin<_>>` 的调用很重要，因为你可以直接传：
 
 ```bash

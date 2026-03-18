@@ -3569,6 +3569,16 @@ pub const SuiRpcClient = struct {
             return try std.fmt.allocPrint(allocator, "\"<arg{d}-manual-json-or-token>\"", .{index});
         };
 
+        if (object_preset.inferKindFromTypeSignature(parameter.signature)) |preset_kind| {
+            const token = try std.fmt.allocPrint(
+                allocator,
+                "select:{{\"kind\":\"object_preset\",\"name\":\"{s}\"}}",
+                .{object_preset.canonicalName(preset_kind)},
+            );
+            defer allocator.free(token);
+            return try std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(token, .{})});
+        }
+
         if (std.mem.eql(u8, kind, "runtime")) return null;
         if (std.mem.eql(u8, kind, "object")) {
             return try std.fmt.allocPrint(allocator, "\"<arg{d}-object-id-or-select-token>\"", .{index});
