@@ -418,6 +418,22 @@ pub const OwnedSelectedArgumentValues = struct {
     }
 };
 
+pub const OwnedObjectIdItems = struct {
+    items: std.ArrayListUnmanaged([]u8) = .{},
+
+    pub fn deinit(self: *OwnedObjectIdItems, allocator: std.mem.Allocator) void {
+        for (self.items.items) |value| allocator.free(value);
+        self.items.deinit(allocator);
+    }
+
+    pub fn appendUnique(self: *OwnedObjectIdItems, allocator: std.mem.Allocator, object_id: []const u8) !void {
+        for (self.items.items) |existing| {
+            if (std.mem.eql(u8, existing, object_id)) return;
+        }
+        try self.items.append(allocator, try allocator.dupe(u8, object_id));
+    }
+};
+
 pub const OwnedSelectedArgumentRequest = struct {
     value: SelectedArgumentRequest,
     owned_texts: std.ArrayListUnmanaged([]u8) = .{},
@@ -2180,6 +2196,23 @@ pub const SuiRpcClient = struct {
         default_owner: []const u8,
         auto_gas_payment_min_balance: ?u64,
     ) !?[]u8 {
+        return try self.ownResolvedGasPaymentJsonWithDefaultOwnerAndExclusions(
+            allocator,
+            gas_payment_json,
+            default_owner,
+            auto_gas_payment_min_balance,
+            &.{},
+        );
+    }
+
+    pub fn ownResolvedGasPaymentJsonWithDefaultOwnerAndExclusions(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        gas_payment_json: ?[]const u8,
+        default_owner: []const u8,
+        auto_gas_payment_min_balance: ?u64,
+        excluded_object_ids: []const []u8,
+    ) !?[]u8 {
         if (try self.resolveSelectedGasPaymentJsonWithDefaultOwner(
             allocator,
             gas_payment_json,
@@ -2189,10 +2222,11 @@ pub const SuiRpcClient = struct {
         }
 
         if (auto_gas_payment_min_balance) |min_balance| {
-            return try self.selectGasPaymentJson(
+            return try self.selectGasPaymentJsonExcluding(
                 allocator,
                 default_owner,
                 min_balance,
+                excluded_object_ids,
             ) orelse error.SelectionNotFound;
         }
 
@@ -8153,11 +8187,18 @@ pub const SuiRpcClient = struct {
         }
         defer resolved_source.deinit(allocator);
 
+        var excluded_object_ids = try self.ownReferencedObjectIdsFromCommandSource(
+            allocator,
+            resolved_source.source,
+        );
+        defer excluded_object_ids.deinit(allocator);
+
         const owned_gas_payment_json = if (auto_gas_min_balance_override) |override|
-            try self.selectGasPaymentJson(
+            try self.selectGasPaymentJsonExcluding(
                 allocator,
                 sender,
                 override,
+                excluded_object_ids.items.items,
             ) orelse return error.SelectionNotFound
         else
             try self.resolveSelectedGasPaymentJsonWithDefaultOwner(
@@ -12895,10 +12936,50 @@ pub const SuiRpcClient = struct {
         request: CoinPageRequest,
         min_balance: u64,
     ) !?coin_result.OwnedCoinEntry {
+        return try self.selectCoinWithMinBalanceExcluding(
+            allocator,
+            owner,
+            request,
+            min_balance,
+            &.{},
+        );
+    }
+
+    fn objectIdIsExcluded(
+        excluded_object_ids: []const []u8,
+        object_id: []const u8,
+    ) bool {
+        for (excluded_object_ids) |excluded| {
+            if (std.mem.eql(u8, excluded, object_id)) return true;
+        }
+        return false;
+    }
+
+    pub fn selectCoinWithMinBalanceExcluding(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        owner: []const u8,
+        request: CoinPageRequest,
+        min_balance: u64,
+        excluded_object_ids: []const []u8,
+    ) !?coin_result.OwnedCoinEntry {
         var page = try self.getAllCoinsWithRequest(allocator, owner, request);
         defer page.deinit(allocator);
 
-        const index = page.selectSmallestSufficientCoinIndex(min_balance) orelse return null;
+        var best_index: ?usize = null;
+        var best_balance: u64 = std.math.maxInt(u64);
+        for (page.entries, 0..) |entry, index| {
+            const object_id = entry.coin_object_id orelse continue;
+            if (objectIdIsExcluded(excluded_object_ids, object_id)) continue;
+            const balance = entry.balanceU64() orelse continue;
+            if (balance < min_balance) continue;
+            if (best_index == null or balance < best_balance) {
+                best_index = index;
+                best_balance = balance;
+            }
+        }
+
+        const index = best_index orelse return null;
         return try page.entries[index].clone(allocator);
     }
 
@@ -12908,10 +12989,32 @@ pub const SuiRpcClient = struct {
         owner: []const u8,
         request: CoinPageRequest,
     ) !?coin_result.OwnedCoinEntry {
+        return try self.selectLargestCoinExcluding(allocator, owner, request, &.{});
+    }
+
+    pub fn selectLargestCoinExcluding(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        owner: []const u8,
+        request: CoinPageRequest,
+        excluded_object_ids: []const []u8,
+    ) !?coin_result.OwnedCoinEntry {
         var page = try self.getAllCoinsWithRequest(allocator, owner, request);
         defer page.deinit(allocator);
 
-        const index = page.selectLargestCoinIndex() orelse return null;
+        var best_index: ?usize = null;
+        var best_balance: u64 = 0;
+        for (page.entries, 0..) |entry, index| {
+            const object_id = entry.coin_object_id orelse continue;
+            if (objectIdIsExcluded(excluded_object_ids, object_id)) continue;
+            const balance = entry.balanceU64() orelse continue;
+            if (best_index == null or balance > best_balance) {
+                best_index = index;
+                best_balance = balance;
+            }
+        }
+
+        const index = best_index orelse return null;
         return try page.entries[index].clone(allocator);
     }
 
@@ -12921,11 +13024,22 @@ pub const SuiRpcClient = struct {
         owner: []const u8,
         min_balance: u64,
     ) !?coin_result.OwnedCoinEntry {
-        return try self.selectCoinWithMinBalance(
+        return try self.selectGasCoinExcluding(allocator, owner, min_balance, &.{});
+    }
+
+    pub fn selectGasCoinExcluding(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        owner: []const u8,
+        min_balance: u64,
+        excluded_object_ids: []const []u8,
+    ) !?coin_result.OwnedCoinEntry {
+        return try self.selectCoinWithMinBalanceExcluding(
             allocator,
             owner,
             .{ .coin_type = default_sui_coin_type },
             min_balance,
+            excluded_object_ids,
         );
     }
 
@@ -12956,7 +13070,30 @@ pub const SuiRpcClient = struct {
         request: CoinPageRequest,
         min_balance: u64,
     ) !?[]u8 {
-        var selection = try self.selectCoinWithMinBalance(allocator, owner, request, min_balance);
+        return try self.selectGasPaymentJsonWithMinBalanceExcluding(
+            allocator,
+            owner,
+            request,
+            min_balance,
+            &.{},
+        );
+    }
+
+    pub fn selectGasPaymentJsonWithMinBalanceExcluding(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        owner: []const u8,
+        request: CoinPageRequest,
+        min_balance: u64,
+        excluded_object_ids: []const []u8,
+    ) !?[]u8 {
+        var selection = try self.selectCoinWithMinBalanceExcluding(
+            allocator,
+            owner,
+            request,
+            min_balance,
+            excluded_object_ids,
+        );
         defer if (selection) |*entry| entry.deinit(allocator);
         if (selection == null) return null;
         return try self.buildGasPaymentJsonFromCoin(allocator, selection.?);
@@ -12968,7 +13105,27 @@ pub const SuiRpcClient = struct {
         owner: []const u8,
         min_balance: u64,
     ) !?[]u8 {
-        var selection = try self.selectGasCoin(allocator, owner, min_balance);
+        return try self.selectGasPaymentJsonExcluding(
+            allocator,
+            owner,
+            min_balance,
+            &.{},
+        );
+    }
+
+    pub fn selectGasPaymentJsonExcluding(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        owner: []const u8,
+        min_balance: u64,
+        excluded_object_ids: []const []u8,
+    ) !?[]u8 {
+        var selection = try self.selectGasCoinExcluding(
+            allocator,
+            owner,
+            min_balance,
+            excluded_object_ids,
+        );
         defer if (selection) |*entry| entry.deinit(allocator);
         if (selection == null) return null;
         return try self.buildGasPaymentJsonFromCoin(allocator, selection.?);
@@ -13896,6 +14053,119 @@ pub const SuiRpcClient = struct {
         return try self.resolveSelectedArgumentTokensInCommandSourceWithDefaultOwner(allocator, source, null);
     }
 
+    fn maybeCollectReferencedObjectId(
+        allocator: std.mem.Allocator,
+        current: *OwnedObjectIdItems,
+        field_name: ?[]const u8,
+        value: []const u8,
+    ) !void {
+        if (field_name) |field| {
+            if (std.mem.eql(u8, field, "objectId")) {
+                try current.appendUnique(allocator, value);
+            }
+            return;
+        }
+        if (std.mem.startsWith(u8, value, "0x")) {
+            try current.appendUnique(allocator, value);
+        }
+    }
+
+    fn collectReferencedObjectIdsFromArgumentJsonValue(
+        allocator: std.mem.Allocator,
+        current: *OwnedObjectIdItems,
+        value: std.json.Value,
+        field_name: ?[]const u8,
+    ) !void {
+        switch (value) {
+            .string => |text| try maybeCollectReferencedObjectId(allocator, current, field_name, text),
+            .array => |array| {
+                for (array.items) |item| {
+                    try collectReferencedObjectIdsFromArgumentJsonValue(allocator, current, item, null);
+                }
+            },
+            .object => |object| {
+                var iterator = object.iterator();
+                while (iterator.next()) |entry| {
+                    try collectReferencedObjectIdsFromArgumentJsonValue(
+                        allocator,
+                        current,
+                        entry.value_ptr.*,
+                        entry.key_ptr.*,
+                    );
+                }
+            },
+            else => {},
+        }
+    }
+
+    fn collectReferencedObjectIdsFromCommandJsonValue(
+        allocator: std.mem.Allocator,
+        current: *OwnedObjectIdItems,
+        value: std.json.Value,
+    ) !void {
+        switch (value) {
+            .array => |array| {
+                for (array.items) |item| {
+                    try collectReferencedObjectIdsFromCommandJsonValue(allocator, current, item);
+                }
+            },
+            .object => |object| {
+                const kind_value = object.get("kind");
+                const kind = if (kind_value != null and kind_value.? == .string) kind_value.?.string else null;
+
+                var iterator = object.iterator();
+                while (iterator.next()) |entry| {
+                    if (kind) |kind_text| {
+                        if (commandKindUsesResolvedArgumentField(kind_text, entry.key_ptr.*)) {
+                            try collectReferencedObjectIdsFromArgumentJsonValue(
+                                allocator,
+                                current,
+                                entry.value_ptr.*,
+                                entry.key_ptr.*,
+                            );
+                            continue;
+                        }
+                    }
+                    if (entry.value_ptr.* == .array or entry.value_ptr.* == .object) {
+                        try collectReferencedObjectIdsFromCommandJsonValue(
+                            allocator,
+                            current,
+                            entry.value_ptr.*,
+                        );
+                    }
+                }
+            },
+            else => {},
+        }
+    }
+
+    pub fn ownReferencedObjectIdsFromCommandSource(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        source: tx_builder.CommandSource,
+    ) !OwnedObjectIdItems {
+        _ = self;
+        var current = OwnedObjectIdItems{};
+        errdefer current.deinit(allocator);
+
+        if (source.move_call) |move_call| {
+            if (source.command_items.len == 0 and source.commands_json == null) {
+                const arguments_json = move_call.arguments orelse "[]";
+                const parsed = try std.json.parseFromSlice(std.json.Value, allocator, arguments_json, .{});
+                defer parsed.deinit();
+                try collectReferencedObjectIdsFromArgumentJsonValue(allocator, &current, parsed.value, null);
+                return current;
+            }
+        }
+
+        const commands_json = try tx_builder.resolveCommands(allocator, source);
+        defer allocator.free(commands_json);
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, commands_json, .{});
+        defer parsed.deinit();
+        try collectReferencedObjectIdsFromCommandJsonValue(allocator, &current, parsed.value);
+        return current;
+    }
+
     pub fn ownOptionsResolvingSelectedArgumentTokensWithDefaultOwner(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
@@ -13959,15 +14229,29 @@ pub const SuiRpcClient = struct {
         defer if (inferred_owner) |value| allocator.free(value);
 
         const sender = options.sender orelse inferred_owner orelse return error.InvalidCli;
-        const gas_payment_json = try self.selectGasPaymentJson(
+        var resolved_source = try self.resolveCommandSourceForRealBuilderWithDefaultOwner(
+            allocator,
+            options.source,
+            sender,
+        );
+        defer resolved_source.deinit(allocator);
+
+        var excluded_object_ids = try self.ownReferencedObjectIdsFromCommandSource(
+            allocator,
+            resolved_source.source,
+        );
+        defer excluded_object_ids.deinit(allocator);
+
+        const gas_payment_json = try self.selectGasPaymentJsonExcluding(
             allocator,
             sender,
             min_balance_override orelse options.gas_budget orelse 1,
+            excluded_object_ids.items.items,
         ) orelse return error.SelectionNotFound;
         defer allocator.free(gas_payment_json);
 
-        return try self.ownOptionsResolvingSelectedArgumentTokensWithDefaultOwner(allocator, .{
-            .source = options.source,
+        return try tx_request_builder.ownOptions(allocator, .{
+            .source = resolved_source.source,
             .sender = sender,
             .gas_budget = options.gas_budget,
             .gas_price = options.gas_price,
@@ -13977,7 +14261,7 @@ pub const SuiRpcClient = struct {
             .wait_for_confirmation = options.wait_for_confirmation,
             .confirm_timeout_ms = options.confirm_timeout_ms,
             .confirm_poll_ms = options.confirm_poll_ms,
-        }, sender);
+        });
     }
 
     pub fn ownOptionsFromCommandSourceWithAutoGasPayment(
@@ -19848,6 +20132,64 @@ test "ownOptionsWithAutoGasPayment infers sender from selected owners and stores
     try testing.expect(std.mem.indexOf(u8, owned.gas_payment_json.?, "0x0dd0aa") != null);
     try testing.expect(owned.commands_json != null);
     try testing.expect(std.mem.indexOf(u8, owned.commands_json.?, "0x0dd001") != null);
+}
+
+test "ownOptionsWithAutoGasPayment excludes selected business SUI coin from auto gas payment" {
+    const testing = std.testing;
+    const Counts = struct { coin: usize = 0 };
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const counts = @as(*Counts, @ptrCast(@alignCast(context)));
+            try testing.expectEqualStrings("suix_getCoins", req.method);
+            counts.coin += 1;
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0xowner\"") != null);
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0x2::sui::SUI\"") != null);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xb1b1\",\"version\":\"9\",\"digest\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"balance\":\"150\"},{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xc2c2\",\"version\":\"10\",\"digest\":\"0x2222222222222222222222222222222222222222222222222222222222222222\",\"balance\":\"400\"}],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var counts = Counts{};
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &counts,
+        .callback = callback,
+    };
+
+    var owned = try client_instance.ownOptionsWithAutoGasPayment(
+        allocator,
+        .{
+            .source = .{
+                .move_call = .{
+                    .package_id = "0x2",
+                    .module = "router",
+                    .function_name = "deposit_exact",
+                    .type_args = "[\"0x2::sui::SUI\"]",
+                    .arguments = "[\"select:{\\\"kind\\\":\\\"coin_with_min_balance\\\",\\\"owner\\\":\\\"0xowner\\\",\\\"coinType\\\":\\\"0x2::sui::SUI\\\",\\\"minBalance\\\":100}\",13]",
+                },
+            },
+            .sender = "0xowner",
+            .gas_budget = 50,
+            .signatures = &.{"sig-a"},
+        },
+        50,
+    );
+    defer owned.deinit(allocator);
+
+    try testing.expectEqual(@as(usize, 2), counts.coin);
+    try testing.expect(owned.gas_payment_json != null);
+    try testing.expect(owned.commands_json != null);
+    try testing.expect(std.mem.indexOf(u8, owned.commands_json.?, "0xb1b1") != null);
+    try testing.expect(std.mem.indexOf(u8, owned.gas_payment_json.?, "0xc2c2") != null);
+    try testing.expect(std.mem.indexOf(u8, owned.gas_payment_json.?, "0xb1b1") == null);
 }
 
 test "runCommandsResolvingSelectedArgumentTokensWithAccountProvider builds summarized artifacts from selected command sources" {

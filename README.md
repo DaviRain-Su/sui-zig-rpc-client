@@ -771,6 +771,8 @@ pub fn main() !void {
 
 对于 `tx send/payload --from-keystore`，只要命令源能走本地 programmable builder，并且 gas payment 可显式给出或通过 `--auto-gas-payment` 选出，CLI 现在即使没写 `--gas-price` 也会自动读取 reference gas price，再本地构造 tx bytes 和签名。
 
+当 `--auto-gas-payment` 与已解析的业务对象参数同时存在时，CLI 现在会尽量避开已经被命令参数占用的 object id，避免把同一个 `Coin<SUI>` 同时拿去做业务输入和 gas payment。
+
 `tx build move-call` 常用参数：
 - `--package <package-id>`
 - `--module <module-name>`

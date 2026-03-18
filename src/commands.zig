@@ -577,8 +577,9 @@ fn resolvedLocalBuilderGasPaymentJson(
     args: *const cli.ParsedArgs,
     sender: []const u8,
     effective_gas_budget: ?u64,
+    excluded_object_ids: []const []u8,
 ) !?[]u8 {
-    return try rpc.ownResolvedGasPaymentJsonWithDefaultOwner(
+    return try rpc.ownResolvedGasPaymentJsonWithDefaultOwnerAndExclusions(
         allocator,
         args.tx_build_gas_payment,
         sender,
@@ -586,6 +587,7 @@ fn resolvedLocalBuilderGasPaymentJson(
             args.tx_build_gas_payment_min_balance orelse effective_gas_budget orelse args.tx_build_gas_budget orelse 1
         else
             null,
+        excluded_object_ids,
     );
 }
 
@@ -1086,18 +1088,6 @@ fn ownLocalCommandSourceBuildContext(
         return null;
     };
 
-    var gas_payment_json = try resolvedLocalBuilderGasPaymentJson(
-        allocator,
-        rpc,
-        args,
-        sender,
-        requested_gas_budget,
-    ) orelse {
-        allocator.free(sender);
-        return null;
-    };
-    errdefer allocator.free(gas_payment_json);
-
     var owned_source = try resolvedUnsafeCommandSource(allocator, rpc, args, sender);
     errdefer owned_source.deinit(allocator);
     if (!(try client.SuiRpcClient.commandSourceSupportsLocalProgrammableTransactionBuilder(
@@ -1105,10 +1095,29 @@ fn ownLocalCommandSourceBuildContext(
         owned_source.source,
     ))) {
         owned_source.deinit(allocator);
-        allocator.free(gas_payment_json);
         allocator.free(sender);
         return null;
     }
+
+    var excluded_object_ids = try rpc.ownReferencedObjectIdsFromCommandSource(
+        allocator,
+        owned_source.source,
+    );
+    defer excluded_object_ids.deinit(allocator);
+
+    var gas_payment_json = try resolvedLocalBuilderGasPaymentJson(
+        allocator,
+        rpc,
+        args,
+        sender,
+        requested_gas_budget,
+        excluded_object_ids.items.items,
+    ) orelse {
+        owned_source.deinit(allocator);
+        allocator.free(sender);
+        return null;
+    };
+    errdefer allocator.free(gas_payment_json);
 
     var effective_gas_budget = requested_gas_budget;
     if (args.tx_build_auto_gas_budget) {
@@ -1141,6 +1150,7 @@ fn ownLocalCommandSourceBuildContext(
                 args,
                 sender,
                 effective_gas_budget,
+                excluded_object_ids.items.items,
             ) orelse {
                 owned_source.deinit(allocator);
                 allocator.free(sender);
@@ -6725,6 +6735,89 @@ test "runCommand tx_payload with auto gas payment selects gasPayment from rpc" {
     try testing.expect(payload.value.array.items[0].string.len > 0);
 }
 
+test "runCommand tx_build move-call with auto gas payment excludes selected business SUI coin from gas payment" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const Counts = struct { normalized: usize = 0, coin: usize = 0, object: usize = 0, unsafe: usize = 0 };
+    var counts = Counts{};
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const state = @as(*Counts, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                state.normalized += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"visibility\":\"Public\",\"isEntry\":true,\"typeParameters\":[[]],\"parameters\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"coin\",\"name\":\"Coin\",\"typeParams\":[{\"TypeParameter\":0}]}},\"u64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "suix_getCoins")) {
+                state.coin += 1;
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0xowner\"") != null);
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0x2::sui::SUI\"") != null);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xb1b1\",\"version\":\"9\",\"digest\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"balance\":\"150\"},{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xc2c2\",\"version\":\"10\",\"digest\":\"0x2222222222222222222222222222222222222222222222222222222222222222\",\"balance\":\"500\"}],\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getObject")) {
+                state.object += 1;
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, "0xb1b1") != null);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":{\"objectId\":\"0xb1b1\",\"version\":\"9\",\"digest\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"type\":\"0x2::coin::Coin<0x2::sui::SUI>\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall")) {
+                state.unsafe += 1;
+                return alloc.dupe(u8, "{\"result\":{\"txBytes\":\"AQIDBA==\"}}");
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+
+    var args = cli.ParsedArgs{
+        .command = .tx_build,
+        .has_command = true,
+        .tx_build_kind = .move_call,
+        .tx_build_package = "0x2",
+        .tx_build_module = "router",
+        .tx_build_function = "deposit_exact",
+        .tx_build_type_args = "[\"0x2::sui::SUI\"]",
+        .tx_build_args = "[\"select:{\\\"kind\\\":\\\"coin_with_min_balance\\\",\\\"owner\\\":\\\"0xowner\\\",\\\"coinType\\\":\\\"0x2::sui::SUI\\\",\\\"minBalance\\\":100}\",13]",
+        .tx_build_sender = "0xowner",
+        .tx_build_gas_budget = 50,
+        .tx_build_gas_price = 7,
+        .tx_build_auto_gas_payment = true,
+        .tx_build_emit_tx_block = true,
+    };
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = &counts,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    try testing.expectEqual(@as(usize, 0), counts.normalized);
+    try testing.expectEqual(@as(usize, 2), counts.coin);
+    try testing.expectEqual(@as(usize, 0), counts.object);
+    try testing.expectEqual(@as(usize, 0), counts.unsafe);
+    try testing.expect(std.mem.indexOf(u8, output.items, "\"gasPayment\"") != null);
+    try testing.expect(std.mem.indexOf(u8, output.items, "\"objectId\":\"0xc2c2\"") != null);
+    try testing.expect(std.mem.indexOf(u8, output.items, "\"gasPayment\":[{\"objectId\":\"0xb1b1\"") == null);
+    try testing.expect(std.mem.indexOf(u8, output.items, "0xb1b1") != null);
+}
+
 test "runCommand tx_payload infers sender for auto gas payment from selected owner" {
     const testing = std.testing;
     const Counts = struct { gas_price: usize = 0, owned: usize = 0, coin: usize = 0, normalized: usize = 0, object: usize = 0, unsafe: usize = 0 };
@@ -7073,7 +7166,7 @@ test "runCommand tx_payload with commands resolves selected argument tokens into
     defer output.deinit(allocator);
 
     try runCommand(allocator, &rpc, &args, output.writer(allocator));
-    try testing.expectEqual(@as(usize, 1), counts.owned);
+    try testing.expectEqual(@as(usize, 2), counts.owned);
     try testing.expectEqual(@as(usize, 1), counts.unsafe);
     try testing.expectEqualStrings("[\"AQIDBA==\",[\"sig-a\"]]\n", output.items);
 }
@@ -7199,7 +7292,7 @@ test "runCommand tx_payload move-call resolves selected argument tokens into exe
 
     const payload = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
     defer payload.deinit();
-    try testing.expectEqual(@as(usize, 1), counts.owned);
+    try testing.expectEqual(@as(usize, 2), counts.owned);
     try testing.expectEqual(@as(usize, 1), counts.unsafe);
     try testing.expect(payload.value == .array);
     try testing.expectEqualStrings("AQIDBA==", payload.value.array.items[0].string);
@@ -7294,7 +7387,7 @@ test "runCommand tx_payload move-call resolves ownerless selected tokens from de
 
     const payload = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
     defer payload.deinit();
-    try testing.expectEqual(@as(usize, 2), request_count);
+    try testing.expectEqual(@as(usize, 3), request_count);
     try testing.expect(payload.value == .array);
     try testing.expectEqualStrings("AQIDBA==", payload.value.array.items[0].string);
     const signature = payload.value.array.items[1].array.items[0].string;
