@@ -1715,6 +1715,7 @@ pub const MoveQuery = union(enum) {
         type_arguments_json: ?[]const u8 = null,
         arguments_json: ?[]const u8 = null,
         indexed_arguments_json: ?[]const u8 = null,
+        indexed_object_arguments_json: ?[]const u8 = null,
         owner_address: ?[]const u8 = null,
         signer_selector: ?[]const u8 = null,
     },
@@ -1731,6 +1732,7 @@ pub const MoveQuery = union(enum) {
             .function => |*value| {
                 if (value.arguments_json) |arguments| allocator.free(arguments);
                 if (value.indexed_arguments_json) |arguments| allocator.free(arguments);
+                if (value.indexed_object_arguments_json) |arguments| allocator.free(arguments);
                 if (value.owner_address) |owner| allocator.free(owner);
                 if (value.signer_selector) |signer| allocator.free(signer);
             },
@@ -4434,6 +4436,80 @@ pub const SuiRpcClient = struct {
         }
     }
 
+    fn buildExplicitMoveFunctionObjectArgJson(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        parameter: move_result.OwnedMoveParameterSummary,
+        object_id: []const u8,
+    ) ![]u8 {
+        if (!std.mem.eql(u8, parameter.lowering_kind orelse "", "object")) return error.InvalidCli;
+
+        var summary = try self.getObjectAndSummarizeWithOptions(
+            allocator,
+            object_id,
+            objectDataOptionsForSummaries(.{}),
+        );
+        defer summary.deinit(allocator);
+        if (summary.status != .found) return error.SelectionNotFound;
+
+        const token = switch (summary.owner_kind orelse .unknown) {
+            .shared => blk: {
+                if (!isMoveReferenceSignature(parameter.signature)) return error.InvalidCli;
+                break :blk if (isMoveMutableReferenceSignature(parameter.signature))
+                    summary.mutable_shared_object_input_select_token
+                else
+                    summary.shared_object_input_select_token;
+            },
+            .address_owner, .object_owner, .immutable => summary.imm_or_owned_object_input_select_token,
+            .unknown => null,
+        } orelse return error.InvalidCli;
+
+        return try buildAutoSelectedScalarArgJson(allocator, token);
+    }
+
+    fn applyExplicitIndexedObjectMoveFunctionArgsToParameters(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        parameters: []move_result.OwnedMoveParameterSummary,
+        indexed_object_arguments_json: []const u8,
+    ) !void {
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, indexed_object_arguments_json, .{});
+        defer parsed.deinit();
+        if (parsed.value != .array) return error.InvalidCli;
+
+        var seen = std.AutoHashMap(usize, void).init(allocator);
+        defer seen.deinit();
+
+        for (parsed.value.array.items) |entry| {
+            if (entry != .object) return error.InvalidCli;
+            const index_value = entry.object.get("index") orelse return error.InvalidCli;
+            const object_id_value = entry.object.get("objectId") orelse return error.InvalidCli;
+            if (object_id_value != .string) return error.InvalidCli;
+
+            const parameter_index: usize = switch (index_value) {
+                .integer => |number| blk: {
+                    if (number < 0) return error.InvalidCli;
+                    break :blk @as(usize, @intCast(number));
+                },
+                else => return error.InvalidCli,
+            };
+
+            if (parameter_index >= parameters.len) return error.InvalidCli;
+            const seen_entry = try seen.getOrPut(parameter_index);
+            if (seen_entry.found_existing) return error.InvalidCli;
+
+            const parameter = &parameters[parameter_index];
+            if (parameter.omitted_from_explicit_args) return error.InvalidCli;
+            if (parameter.explicit_arg_json != null) return error.InvalidCli;
+
+            parameter.explicit_arg_json = try self.buildExplicitMoveFunctionObjectArgJson(
+                allocator,
+                parameter.*,
+                object_id_value.string,
+            );
+        }
+    }
+
     fn parseExplicitCoinBalanceArgJson(
         allocator: std.mem.Allocator,
         parameter: move_result.OwnedMoveParameterSummary,
@@ -4927,6 +5003,7 @@ pub const SuiRpcClient = struct {
         concrete_type_arguments_json: ?[]const u8,
         arguments_json: ?[]const u8,
         indexed_arguments_json: ?[]const u8,
+        indexed_object_arguments_json: ?[]const u8,
         owner_address: ?[]const u8,
         signer_selector: ?[]const u8,
     ) !void {
@@ -5108,7 +5185,10 @@ pub const SuiRpcClient = struct {
         if (indexed_arguments_json) |value| {
             try applyExplicitIndexedMoveFunctionArgsToParameters(allocator, summary.parameters, value);
         }
-        if (arguments_json != null or indexed_arguments_json != null) {
+        if (indexed_object_arguments_json) |value| {
+            try self.applyExplicitIndexedObjectMoveFunctionArgsToParameters(allocator, summary.parameters, value);
+        }
+        if (arguments_json != null or indexed_arguments_json != null or indexed_object_arguments_json != null) {
             try applyCoinSelectorMinBalanceHintsFromExplicitArgs(
                 allocator,
                 summary.parameters,
@@ -5269,6 +5349,7 @@ pub const SuiRpcClient = struct {
         type_arguments_json: ?[]const u8,
         arguments_json: ?[]const u8,
         indexed_arguments_json: ?[]const u8,
+        indexed_object_arguments_json: ?[]const u8,
         owner_address: ?[]const u8,
         signer_selector: ?[]const u8,
     ) !move_result.OwnedMoveFunctionSummary {
@@ -5333,6 +5414,7 @@ pub const SuiRpcClient = struct {
             resolved_type_arguments_json,
             arguments_json,
             indexed_arguments_json,
+            indexed_object_arguments_json,
             owner_address,
             signer_selector,
         );
@@ -12669,6 +12751,7 @@ fn buildOwnedObjectsFilterJson(
                         spec.type_arguments_json,
                         spec.arguments_json,
                         spec.indexed_arguments_json,
+                        spec.indexed_object_arguments_json,
                         spec.owner_address,
                         spec.signer_selector,
                     ),
