@@ -4361,6 +4361,28 @@ pub const SuiRpcClient = struct {
         return try std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(token, .{})});
     }
 
+    fn moveParameterPreferredArgJson(
+        parameter: move_result.OwnedMoveParameterSummary,
+    ) ?[]const u8 {
+        return parameter.explicit_arg_json orelse parameter.auto_selected_arg_json orelse parameter.placeholder_json;
+    }
+
+    fn moveParameterSplitSourceArgJson(
+        parameter: move_result.OwnedMoveParameterSummary,
+    ) ?[]const u8 {
+        if (parameter.explicit_arg_json != null) return null;
+        if (coinTypeFromMoveSignature(parameter.signature) == null) return null;
+
+        const value = parameter.auto_selected_arg_json orelse parameter.placeholder_json orelse return null;
+        const trimmed = std.mem.trim(u8, value, " \t\r\n");
+        if (trimmed.len < 2) return null;
+        if (trimmed[0] != '"' or trimmed[trimmed.len - 1] != '"') return null;
+
+        const inner = trimmed[1 .. trimmed.len - 1];
+        if (!std.mem.startsWith(u8, inner, "select:") and !std.mem.startsWith(u8, inner, "sel:")) return null;
+        return value;
+    }
+
     fn buildJsonFragmentFromJsonValue(
         allocator: std.mem.Allocator,
         value: std.json.Value,
@@ -4880,11 +4902,107 @@ pub const SuiRpcClient = struct {
         return output.toOwnedSlice(allocator);
     }
 
+    fn appendCommandJsonToCommandsArray(
+        allocator: std.mem.Allocator,
+        commands_json: []const u8,
+        command_json: []const u8,
+    ) ![]u8 {
+        const trimmed = std.mem.trimRight(u8, commands_json, " \t\r\n");
+        if (trimmed.len < 2 or trimmed[0] != '[' or trimmed[trimmed.len - 1] != ']') return error.InvalidCli;
+        if (trimmed.len == 2) return try buildMoveFunctionCommandsTemplateJson(allocator, command_json);
+        return try std.fmt.allocPrint(
+            allocator,
+            "{s},{s}]",
+            .{
+                trimmed[0 .. trimmed.len - 1],
+                command_json,
+            },
+        );
+    }
+
     fn buildMoveFunctionCommandsTemplateJson(
         allocator: std.mem.Allocator,
         move_call_command_json: []const u8,
     ) ![]u8 {
         return try std.fmt.allocPrint(allocator, "[{s}]", .{move_call_command_json});
+    }
+
+    fn buildMoveFunctionSplitCoinPreferredCommandsJson(
+        allocator: std.mem.Allocator,
+        summary: move_result.OwnedMoveFunctionSummary,
+        type_args_json: []const u8,
+    ) !?[]u8 {
+        _ = summary.package_id orelse return error.InvalidResponse;
+        _ = summary.module_name orelse return error.InvalidResponse;
+        _ = summary.function_name orelse return error.InvalidResponse;
+
+        var split_amount_jsons = try allocator.alloc(?[]const u8, summary.parameters.len);
+        defer allocator.free(split_amount_jsons);
+        for (split_amount_jsons) |*slot| slot.* = null;
+
+        var previous_explicit_index: ?usize = null;
+        var needs_split = false;
+        for (summary.parameters, 0..) |parameter, index| {
+            if (parameter.omitted_from_explicit_args) continue;
+            if (previous_explicit_index) |previous_index| {
+                const min_balance = parseExplicitCoinBalanceArgJson(allocator, parameter) orelse {
+                    previous_explicit_index = index;
+                    continue;
+                };
+                _ = min_balance;
+                if (moveParameterSplitSourceArgJson(summary.parameters[previous_index])) |_| {
+                    split_amount_jsons[previous_index] = parameter.explicit_arg_json orelse return error.InvalidCli;
+                    needs_split = true;
+                }
+            }
+            previous_explicit_index = index;
+        }
+
+        if (!needs_split) return null;
+
+        var builder = tx_request_builder.ProgrammaticDslBuilder.init(allocator);
+        defer builder.deinit();
+
+        var move_call_args = std.ArrayList(tx_request_builder.ArgumentValue).empty;
+        defer move_call_args.deinit(allocator);
+
+        for (summary.parameters, 0..) |parameter, index| {
+            if (parameter.omitted_from_explicit_args) continue;
+            if (split_amount_jsons[index]) |amount_json| {
+                const source_json = moveParameterSplitSourceArgJson(parameter) orelse return error.InvalidCli;
+                const split_handle = try builder.appendSplitCoinsAndGetHandleFromValues(
+                    .{ .raw_json = source_json },
+                    &.{.{ .raw_json = amount_json }},
+                );
+                try move_call_args.append(allocator, split_handle.outputValue(0));
+                continue;
+            }
+
+            const arg_json = moveParameterPreferredArgJson(parameter) orelse return null;
+            try move_call_args.append(allocator, .{ .raw_json = arg_json });
+        }
+
+        const split_move_call_args_json = try tx_request_builder.buildArgumentValueArray(allocator, move_call_args.items);
+        defer allocator.free(split_move_call_args_json);
+
+        const split_move_call_command_json = try buildMoveFunctionCommandTemplateJson(
+            allocator,
+            summary,
+            type_args_json,
+            split_move_call_args_json,
+        );
+        defer allocator.free(split_move_call_command_json);
+
+        var owned = try builder.finish();
+        defer owned.deinit(allocator);
+        const prefix_commands_json = owned.takeCommandsJson() orelse return null;
+        defer allocator.free(prefix_commands_json);
+
+        return try appendCommandJsonToCommandsArray(
+            allocator,
+            prefix_commands_json,
+            split_move_call_command_json,
+        );
     }
 
     fn buildMoveFunctionTxDryRunRequestJson(
@@ -4917,6 +5035,77 @@ pub const SuiRpcClient = struct {
                 std.json.fmt(signer_value, .{}),
             },
         );
+    }
+
+    fn buildMoveFunctionTxDryRunCommandsArgv(
+        allocator: std.mem.Allocator,
+        commands_json: []const u8,
+        sender: ?[]const u8,
+    ) ![][]u8 {
+        const argv = try allocator.alloc([]u8, 11);
+        errdefer allocator.free(argv);
+
+        argv[0] = try allocator.dupe(u8, "tx");
+        errdefer allocator.free(argv[0]);
+        argv[1] = try allocator.dupe(u8, "dry-run");
+        errdefer allocator.free(argv[1]);
+        argv[2] = try allocator.dupe(u8, "--commands");
+        errdefer allocator.free(argv[2]);
+        argv[3] = try allocator.dupe(u8, commands_json);
+        errdefer allocator.free(argv[3]);
+        argv[4] = try allocator.dupe(u8, "--sender");
+        errdefer allocator.free(argv[4]);
+        argv[5] = try allocator.dupe(u8, sender orelse "0x<sender>");
+        errdefer allocator.free(argv[5]);
+        argv[6] = try allocator.dupe(u8, "--gas-budget");
+        errdefer allocator.free(argv[6]);
+        argv[7] = try allocator.dupe(u8, "100000000");
+        errdefer allocator.free(argv[7]);
+        argv[8] = try allocator.dupe(u8, "--gas-price");
+        errdefer allocator.free(argv[8]);
+        argv[9] = try allocator.dupe(u8, "1000");
+        errdefer allocator.free(argv[9]);
+        argv[10] = try allocator.dupe(u8, "--summarize");
+        errdefer allocator.free(argv[10]);
+
+        return argv;
+    }
+
+    fn buildMoveFunctionTxSendFromKeystoreCommandsArgv(
+        allocator: std.mem.Allocator,
+        commands_json: []const u8,
+        signer_selector: ?[]const u8,
+        sender: ?[]const u8,
+    ) ![][]u8 {
+        const argv = try allocator.alloc([]u8, 12);
+        errdefer allocator.free(argv);
+
+        argv[0] = try allocator.dupe(u8, "tx");
+        errdefer allocator.free(argv[0]);
+        argv[1] = try allocator.dupe(u8, "send");
+        errdefer allocator.free(argv[1]);
+        argv[2] = try allocator.dupe(u8, "--commands");
+        errdefer allocator.free(argv[2]);
+        argv[3] = try allocator.dupe(u8, commands_json);
+        errdefer allocator.free(argv[3]);
+        argv[4] = try allocator.dupe(u8, "--from-keystore");
+        errdefer allocator.free(argv[4]);
+        argv[5] = try allocator.dupe(u8, "--signer");
+        errdefer allocator.free(argv[5]);
+        argv[6] = try allocator.dupe(u8, signer_selector orelse sender orelse "<alias-or-address>");
+        errdefer allocator.free(argv[6]);
+        argv[7] = try allocator.dupe(u8, "--gas-budget");
+        errdefer allocator.free(argv[7]);
+        argv[8] = try allocator.dupe(u8, "100000000");
+        errdefer allocator.free(argv[8]);
+        argv[9] = try allocator.dupe(u8, "--auto-gas-payment");
+        errdefer allocator.free(argv[9]);
+        argv[10] = try allocator.dupe(u8, "--wait");
+        errdefer allocator.free(argv[10]);
+        argv[11] = try allocator.dupe(u8, "--summarize");
+        errdefer allocator.free(argv[11]);
+
+        return argv;
     }
 
     fn buildMoveFunctionTxDryRunArgv(
@@ -5345,18 +5534,36 @@ pub const SuiRpcClient = struct {
         else
             null;
         errdefer if (preferred_move_call_command_json) |value| allocator.free(value);
-        const preferred_commands_json = if (preferred_move_call_command_json) |value|
+        var preferred_commands_json = if (preferred_move_call_command_json) |value|
             try buildMoveFunctionCommandsTemplateJson(allocator, value)
         else
             null;
         if (preferred_move_call_command_json) |value| allocator.free(value);
         errdefer if (preferred_commands_json) |value| allocator.free(value);
-        const preferred_tx_dry_run_request_json = if (preferred_commands_json) |value|
+
+        const split_preferred_commands_json = try buildMoveFunctionSplitCoinPreferredCommandsJson(
+            allocator,
+            summary.*,
+            type_args_json,
+        );
+        errdefer if (split_preferred_commands_json) |value| allocator.free(value);
+
+        const final_preferred_commands_json = blk: {
+            if (split_preferred_commands_json) |value| {
+                if (preferred_commands_json) |base_value| {
+                    allocator.free(base_value);
+                    preferred_commands_json = null;
+                }
+                break :blk value;
+            }
+            break :blk preferred_commands_json;
+        };
+        const preferred_tx_dry_run_request_json = if (final_preferred_commands_json) |value|
             try buildMoveFunctionTxDryRunRequestJson(allocator, value, owner_address)
         else
             null;
         errdefer if (preferred_tx_dry_run_request_json) |value| allocator.free(value);
-        const preferred_tx_send_from_keystore_request_json = if (preferred_commands_json) |value|
+        const preferred_tx_send_from_keystore_request_json = if (final_preferred_commands_json) |value|
             try buildMoveFunctionTxSendFromKeystoreRequestJson(
                 allocator,
                 value,
@@ -5366,7 +5573,13 @@ pub const SuiRpcClient = struct {
         else
             null;
         errdefer if (preferred_tx_send_from_keystore_request_json) |value| allocator.free(value);
-        const preferred_tx_dry_run_argv = if (has_preferred_args)
+        const preferred_tx_dry_run_argv = if (split_preferred_commands_json) |value|
+            try buildMoveFunctionTxDryRunCommandsArgv(
+                allocator,
+                value,
+                owner_address,
+            )
+        else if (has_preferred_args)
             try buildMoveFunctionTxDryRunArgv(
                 allocator,
                 summary.*,
@@ -5380,7 +5593,14 @@ pub const SuiRpcClient = struct {
             for (argv) |value| allocator.free(value);
             allocator.free(argv);
         };
-        const preferred_tx_send_from_keystore_argv = if (has_preferred_args)
+        const preferred_tx_send_from_keystore_argv = if (split_preferred_commands_json) |value|
+            try buildMoveFunctionTxSendFromKeystoreCommandsArgv(
+                allocator,
+                value,
+                signer_selector,
+                owner_address,
+            )
+        else if (has_preferred_args)
             try buildMoveFunctionTxSendFromKeystoreArgv(
                 allocator,
                 summary.*,
@@ -5405,7 +5625,7 @@ pub const SuiRpcClient = struct {
             } else preferred_args_json,
             .move_call_command_json = move_call_command_json,
             .commands_json = commands_json,
-            .preferred_commands_json = preferred_commands_json,
+            .preferred_commands_json = final_preferred_commands_json,
             .tx_dry_run_request_json = tx_dry_run_request_json,
             .preferred_tx_dry_run_request_json = preferred_tx_dry_run_request_json,
             .tx_dry_run_argv = tx_dry_run_argv,

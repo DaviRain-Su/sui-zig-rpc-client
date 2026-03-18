@@ -4744,6 +4744,38 @@ test "runCommand move function with --summarize chooses smallest sufficient scal
         "[\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xcoin-fit\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":10,\\\"digest\\\":\\\"coin-digest-fit\\\"}\",13]",
         parsed.value.object.get("call_template").?.object.get("preferred_args_json").?.string,
     );
+
+    const template = parsed.value.object.get("call_template").?.object;
+    const preferred_commands = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        template.get("preferred_commands_json").?.string,
+        .{},
+    );
+    defer preferred_commands.deinit();
+    try testing.expectEqual(@as(usize, 2), preferred_commands.value.array.items.len);
+    try testing.expectEqualStrings("SplitCoins", preferred_commands.value.array.items[0].object.get("kind").?.string);
+    try testing.expectEqualStrings("MoveCall", preferred_commands.value.array.items[1].object.get("kind").?.string);
+    const move_call_args = preferred_commands.value.array.items[1].object.get("arguments").?.array.items;
+    try testing.expectEqual(@as(usize, 2), move_call_args.len);
+    try testing.expectEqual(@as(i64, 0), move_call_args[0].object.get("NestedResult").?.array.items[0].integer);
+    try testing.expectEqual(@as(i64, 0), move_call_args[0].object.get("NestedResult").?.array.items[1].integer);
+    try testing.expectEqual(@as(i64, 13), move_call_args[1].integer);
+
+    const preferred_request = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        template.get("preferred_tx_dry_run_request_json").?.string,
+        .{},
+    );
+    defer preferred_request.deinit();
+    const request_commands = preferred_request.value.object.get("commands").?.array.items;
+    try testing.expectEqualStrings("SplitCoins", request_commands[0].object.get("kind").?.string);
+
+    const preferred_argv = template.get("preferred_tx_dry_run_argv").?.array.items;
+    try testing.expectEqualStrings("tx", preferred_argv[0].string);
+    try testing.expectEqualStrings("dry-run", preferred_argv[1].string);
+    try testing.expectEqualStrings("--commands", preferred_argv[2].string);
 }
 
 test "runCommand move function with --summarize lifts coin selector min balance from explicit u64 args" {
