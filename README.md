@@ -868,7 +868,7 @@ zig build run -- events \
 - `parameters[*].auto_selected_arg_json`: 如果 CLI 已经找到确定的 candidate，会把这个参数直接收口成可放进 `--args` 的 JSON 片段
 - `parameters[*].omitted_from_explicit_args`: `true` 表示这是 runtime 注入参数，比如 `TxContext`，不需要你手工传
 - `parameters[*].shared_object_input_select_token`: 如果参数是 by-reference object，CLI 会额外给一个 direct `object_input(shared)` 候选
-- `parameters[*].shared_object_event_query_argv`: 如果参数是非 preset 的 by-reference object，CLI 会额外给一个 `events --package --module` 的 shared object 发现模板
+- `parameters[*].shared_object_event_query_argv`: 如果参数是非 preset 的 by-reference object，CLI 会额外给一个 `events --package --module` 的 shared object 发现模板；事件来源优先使用当前查询函数的发布包/模块，这样对升级过包地址但保留旧类型地址的协议也更稳
 - `parameters[*].shared_object_candidates`: 对已经 concrete 的 shared object 类型，CLI 会尝试从 recent module events 里抽取 object id，再用 `object get --summarize` 过滤出类型匹配的 shared object 候选
 - `parameters[*].imm_or_owned_object_input_select_token`: object 参数通用的 direct `object_input(imm_or_owned)` 候选
 - `parameters[*].receiving_object_input_select_token`: 如果参数是 by-value object，CLI 会额外给一个 `object_input(receiving)` 候选

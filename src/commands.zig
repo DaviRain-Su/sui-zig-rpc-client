@@ -3294,7 +3294,7 @@ test "runCommand move function with --summarize falls back to sender address for
     try testing.expectEqualStrings("0xowner", send_argv[14].string);
 }
 
-test "runCommand move function with --summarize adds shared object event discovery templates and candidates" {
+test "runCommand move function with --summarize uses queried package for shared object event discovery and candidates" {
     const testing = std.testing;
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -3306,7 +3306,7 @@ test "runCommand move function with --summarize adds shared object event discove
             if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
                 return alloc.dupe(
                     u8,
-                    "{\"result\":{\"visibility\":\"Public\",\"isEntry\":false,\"typeParameters\":[],\"parameters\":[{\"MutableReference\":{\"Struct\":{\"address\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"module\":\"pool\",\"name\":\"Pool\",\"typeParams\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"sui\",\"name\":\"SUI\",\"typeParams\":[]}},{\"Struct\":{\"address\":\"0x2\",\"module\":\"sui\",\"name\":\"SUI\",\"typeParams\":[]}}]}}}],\"return\":[]}}",
+                    "{\"result\":{\"visibility\":\"Public\",\"isEntry\":false,\"typeParameters\":[],\"parameters\":[{\"MutableReference\":{\"Struct\":{\"address\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb\",\"module\":\"pool\",\"name\":\"Pool\",\"typeParams\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"sui\",\"name\":\"SUI\",\"typeParams\":[]}},{\"Struct\":{\"address\":\"0x2\",\"module\":\"sui\",\"name\":\"SUI\",\"typeParams\":[]}}]}}}],\"return\":[]}}",
                 );
             }
             if (std.mem.eql(u8, req.method, "suix_queryEvents")) {
@@ -3327,7 +3327,7 @@ test "runCommand move function with --summarize adds shared object event discove
             if (std.mem.indexOf(u8, req.params_json, "\"0xpool1\"") != null) {
                 return alloc.dupe(
                     u8,
-                    "{\"result\":{\"data\":{\"objectId\":\"0xpool1\",\"version\":\"11\",\"digest\":\"pool-digest-1\",\"type\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3::pool::Pool<0x2::sui::SUI, 0x2::sui::SUI>\",\"owner\":{\"Shared\":{\"initial_shared_version\":\"7\"}}}}}",
+                    "{\"result\":{\"data\":{\"objectId\":\"0xpool1\",\"version\":\"11\",\"digest\":\"pool-digest-1\",\"type\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb::pool::Pool<0x2::sui::SUI, 0x2::sui::SUI>\",\"owner\":{\"Shared\":{\"initial_shared_version\":\"7\"}}}}}",
                 );
             }
             return alloc.dupe(
@@ -3373,7 +3373,7 @@ test "runCommand move function with --summarize adds shared object event discove
     try testing.expectEqual(@as(usize, 1), shared_candidates.len);
     try testing.expectEqualStrings("0xpool1", shared_candidates[0].object.get("object_id").?.string);
     try testing.expectEqualStrings(
-        "0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3::pool::Pool<0x2::sui::SUI, 0x2::sui::SUI>",
+        "0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb::pool::Pool<0x2::sui::SUI, 0x2::sui::SUI>",
         shared_candidates[0].object.get("type_name").?.string,
     );
     try testing.expectEqual(@as(i64, 7), shared_candidates[0].object.get("initial_shared_version").?.integer);

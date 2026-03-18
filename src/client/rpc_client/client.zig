@@ -4019,16 +4019,17 @@ pub const SuiRpcClient = struct {
     fn discoverSharedObjectCandidatesFromModuleEvents(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
+        event_package_id: []const u8,
+        event_module_name: []const u8,
         signature: []const u8,
     ) ![]move_result.SharedMoveObjectCandidate {
-        const package_and_module = moveStructPackageAndModule(signature) orelse return try allocator.alloc(move_result.SharedMoveObjectCandidate, 0);
         const struct_type = trimMoveReferenceSignature(signature);
 
         var page = try self.getEventsPageWithRequest(allocator, .{
             .filter = .{
                 .move_module = .{
-                    .package = package_and_module.package,
-                    .module = package_and_module.module,
+                    .package = event_package_id,
+                    .module = event_module_name,
                 },
             },
             .limit = 20,
@@ -4564,7 +4565,22 @@ pub const SuiRpcClient = struct {
                         isMoveMutableReferenceSignature(parameter.signature),
                     );
                     if (concreteObjectStructTypeFromSignature(parameter.signature) == null) {
-                        if (moveStructPackageAndModule(parameter.signature)) |package_and_module| {
+                        if (summary.package_id) |event_package_id| {
+                            const event_module_name = summary.module_name orelse continue;
+                            parameter.shared_object_event_query_argv = try buildEventQueryArgv(
+                                allocator,
+                                event_package_id,
+                                event_module_name,
+                            );
+                            if (!containsMoveTypeParameterText(trimMoveReferenceSignature(parameter.signature))) {
+                                parameter.shared_object_candidates = try self.discoverSharedObjectCandidatesFromModuleEvents(
+                                    allocator,
+                                    event_package_id,
+                                    event_module_name,
+                                    parameter.signature,
+                                );
+                            }
+                        } else if (moveStructPackageAndModule(parameter.signature)) |package_and_module| {
                             parameter.shared_object_event_query_argv = try buildEventQueryArgv(
                                 allocator,
                                 package_and_module.package,
@@ -4573,6 +4589,8 @@ pub const SuiRpcClient = struct {
                             if (!containsMoveTypeParameterText(trimMoveReferenceSignature(parameter.signature))) {
                                 parameter.shared_object_candidates = try self.discoverSharedObjectCandidatesFromModuleEvents(
                                     allocator,
+                                    package_and_module.package,
+                                    package_and_module.module,
                                     parameter.signature,
                                 );
                             }
