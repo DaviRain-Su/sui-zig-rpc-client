@@ -54,6 +54,8 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
 - [x] Auto `MergeCoins + SplitCoins` for covering scalar coin templates.
 - [x] Ordered pairing of multiple trailing amount args to multiple scalar coin
   parameters for preferred split planning.
+- [x] `MergeCoins + SplitCoins + MakeMoveVec` planning for `vector<Coin<T>>,
+  amount` preferred templates.
 
 ## Highest Priority Remaining Work
 
@@ -72,8 +74,6 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
 
 - [ ] Support dual-coin flows such as liquidity provision with both asset sides
   selected automatically.
-- [ ] Support `vector<Coin<T>>` merge/split planning, not just vector coverage
-  selection.
 - [ ] Support multi-amount and multi-coin merge/split planning in one template.
 - [ ] Keep gas coin exclusion correct in multi-coin scenarios.
 

@@ -915,6 +915,8 @@ zig build run -- events \
 - scalar `Coin<T>` 会优先选“最小满足金额”的 coin，而不是盲目选最大余额
 - `vector<Coin<T>>` 会优先收敛成一组能覆盖该金额的 coin 子集
 
+如果签名是 `vector<Coin<T>>, amount` 这类常见形态，preferred command 模板现在还会继续往前走一步：当需要多枚 coin 才能覆盖金额时，CLI 会自动生成 `MergeCoins -> SplitCoins -> MakeMoveVec -> MoveCall`，把精确金额的 split 结果包装成单元素 coin vector 再传给目标函数。
+
 这层模板现在同时覆盖两条路径：
 - typed `--package/--module/--function` argv
 - 更通用的 `--commands` request artifact

@@ -5339,10 +5339,18 @@ pub const SuiRpcClient = struct {
                 for (summary.parameters[0..index], 0..) |candidate, candidate_index| {
                     if (paired_coin_indices[candidate_index]) continue;
                     if (candidate.omitted_from_explicit_args) continue;
-                    if (coinTypeFromMoveSignature(candidate.signature) == null) continue;
-                    if (moveParameterSplitSourceArgJson(candidate)) |_| break :blk candidate_index;
-                    if (candidate.explicit_arg_json == null and candidate.owned_object_candidates != null) {
-                        break :blk candidate_index;
+                    if (coinTypeFromMoveSignature(candidate.signature) != null) {
+                        if (moveParameterSplitSourceArgJson(candidate)) |_| break :blk candidate_index;
+                        if (candidate.explicit_arg_json == null and candidate.owned_object_candidates != null) {
+                            break :blk candidate_index;
+                        }
+                        continue;
+                    }
+                    if (vectorElementTypeSignature(candidate.signature)) |element_signature| {
+                        if (coinTypeFromCoinStructType(element_signature) == null) continue;
+                        if (candidate.explicit_arg_json == null and candidate.vector_item_owned_object_candidates != null) {
+                            break :blk candidate_index;
+                        }
                     }
                 }
                 break :blk null;
@@ -5407,6 +5415,41 @@ pub const SuiRpcClient = struct {
                                 break :blk destination_json;
                             }
                         }
+                        if (vectorElementTypeSignature(parameter.signature)) |element_signature| {
+                            if (coinTypeFromCoinStructType(element_signature) != null) {
+                                if (parameter.vector_item_owned_object_candidates) |candidates| {
+                                    var selected_tokens = std.ArrayList([]const u8).empty;
+                                    defer selected_tokens.deinit(allocator);
+                                    const found = try appendCoveringCoinCandidateTokens(
+                                        allocator,
+                                        &selected_tokens,
+                                        candidates,
+                                        min_balance,
+                                    );
+                                    if (found and selected_tokens.items.len != 0) {
+                                        for (selected_tokens.items) |token| {
+                                            try owned_source_jsons.append(
+                                                allocator,
+                                                try buildAutoSelectedScalarArgJson(allocator, token),
+                                            );
+                                        }
+                                        const destination_json = owned_source_jsons.items[0];
+                                        if (owned_source_jsons.items.len > 1) {
+                                            var merge_sources = std.ArrayList(tx_request_builder.ArgumentValue).empty;
+                                            defer merge_sources.deinit(allocator);
+                                            for (owned_source_jsons.items[1..]) |source_value| {
+                                                try merge_sources.append(allocator, .{ .raw_json = source_value });
+                                            }
+                                            try builder.appendMergeCoinsFromValues(
+                                                .{ .raw_json = destination_json },
+                                                merge_sources.items,
+                                            );
+                                        }
+                                        break :blk destination_json;
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     if (moveParameterSplitSourceArgJson(parameter)) |value| break :blk value;
@@ -5417,8 +5460,23 @@ pub const SuiRpcClient = struct {
                     .{ .raw_json = source_json },
                     &.{.{ .raw_json = amount_json }},
                 );
-                try move_call_args.append(allocator, split_handle.outputValue(0));
-                continue;
+                if (coinTypeFromMoveSignature(parameter.signature) != null) {
+                    try move_call_args.append(allocator, split_handle.outputValue(0));
+                    continue;
+                }
+
+                if (vectorElementTypeSignature(parameter.signature)) |element_signature| {
+                    if (coinTypeFromCoinStructType(element_signature) != null) {
+                        const vector_value = try builder.appendMakeMoveVecAndGetValueFromValues(
+                            null,
+                            &.{split_handle.outputValue(0)},
+                        );
+                        try move_call_args.append(allocator, vector_value);
+                        continue;
+                    }
+                }
+
+                return null;
             }
 
             const arg_json = moveParameterPreferredArgJson(parameter) orelse return null;
