@@ -93,8 +93,8 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
 
 ### 4. Stronger shared object discovery
 
-- [ ] Add more generic discovery sources beyond presets, object summaries, and
-  recent module events.
+- [x] Add owned-object-content-based shared discovery beyond recent module
+  events.
 - [ ] Improve fallback behavior for protocols that do not expose recent useful
   events.
 - [ ] Improve candidate stability for shared objects such as pools.

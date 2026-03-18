@@ -4142,6 +4142,74 @@ pub const SuiRpcClient = struct {
         }
     }
 
+    fn appendDiscoveredObjectIdsFromObjectResponseContent(
+        allocator: std.mem.Allocator,
+        collected: *std.ArrayList([]u8),
+        response_json: []const u8,
+        max_items: usize,
+    ) !void {
+        if (collected.items.len >= max_items) return;
+
+        const parsed = std.json.parseFromSlice(std.json.Value, allocator, response_json, .{}) catch return;
+        defer parsed.deinit();
+        if (parsed.value != .object) return;
+        const result = parsed.value.object.get("result") orelse return;
+        if (result != .object) return;
+        const data = result.object.get("data") orelse return;
+        if (data != .object) return;
+        const content = data.object.get("content") orelse return;
+        try appendDiscoveredObjectIdsFromJsonValue(allocator, collected, content, max_items);
+    }
+
+    fn appendSharedObjectCandidatesFromObjectIds(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        candidates: *std.ArrayList(move_result.SharedMoveObjectCandidate),
+        object_ids: []const []const u8,
+        signature: []const u8,
+    ) !void {
+        const struct_type = trimMoveReferenceSignature(signature);
+
+        for (object_ids) |object_id| {
+            var summary = self.getObjectAndSummarizeWithOptions(
+                allocator,
+                object_id,
+                .{
+                    .show_type = true,
+                    .show_owner = true,
+                },
+            ) catch continue;
+            defer summary.deinit(allocator);
+
+            if (summary.status != .found) continue;
+            if ((summary.owner_kind orelse .unknown) != .shared) continue;
+            const type_name = summary.type_name orelse continue;
+            if (!std.mem.eql(u8, type_name, struct_type)) continue;
+            const owner_value = summary.owner_value orelse continue;
+            const initial_shared_version = std.fmt.parseInt(u64, owner_value, 10) catch continue;
+            const shared_token = summary.shared_object_input_select_token orelse continue;
+            const mutable_shared_token = summary.mutable_shared_object_input_select_token orelse continue;
+
+            var already_present = false;
+            for (candidates.items) |candidate| {
+                if (std.mem.eql(u8, candidate.object_id, object_id)) {
+                    already_present = true;
+                    break;
+                }
+            }
+            if (already_present) continue;
+
+            try candidates.append(allocator, .{
+                .object_id = try allocator.dupe(u8, object_id),
+                .selection_score = 0,
+                .type_name = try allocator.dupe(u8, type_name),
+                .initial_shared_version = initial_shared_version,
+                .shared_object_input_select_token = try allocator.dupe(u8, shared_token),
+                .mutable_shared_object_input_select_token = try allocator.dupe(u8, mutable_shared_token),
+            });
+        }
+    }
+
     fn discoverSharedObjectCandidatesFromModuleEvents(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
@@ -4149,8 +4217,6 @@ pub const SuiRpcClient = struct {
         event_module_name: []const u8,
         signature: []const u8,
     ) ![]move_result.SharedMoveObjectCandidate {
-        const struct_type = trimMoveReferenceSignature(signature);
-
         var page = try self.getEventsPageWithRequest(allocator, .{
             .filter = .{
                 .move_module = .{
@@ -4183,43 +4249,93 @@ pub const SuiRpcClient = struct {
             candidates.deinit(allocator);
         }
 
-        for (discovered_ids.items) |object_id| {
-            var summary = self.getObjectAndSummarizeWithOptions(
-                allocator,
-                object_id,
-                .{
-                    .show_type = true,
-                    .show_owner = true,
-                },
-            ) catch continue;
-            defer summary.deinit(allocator);
+        try self.appendSharedObjectCandidatesFromObjectIds(
+            allocator,
+            &candidates,
+            discovered_ids.items,
+            signature,
+        );
 
-            if (summary.status != .found) continue;
-            if ((summary.owner_kind orelse .unknown) != .shared) continue;
-            const type_name = summary.type_name orelse continue;
-            if (!std.mem.eql(u8, type_name, struct_type)) continue;
-            const owner_value = summary.owner_value orelse continue;
-            const initial_shared_version = std.fmt.parseInt(u64, owner_value, 10) catch continue;
-            const shared_token = summary.shared_object_input_select_token orelse continue;
-            const mutable_shared_token = summary.mutable_shared_object_input_select_token orelse continue;
+        return try candidates.toOwnedSlice(allocator);
+    }
 
-            var already_present = false;
-            for (candidates.items) |candidate| {
-                if (std.mem.eql(u8, candidate.object_id, object_id)) {
-                    already_present = true;
-                    break;
+    fn collectSharedDiscoverySeedObjectIdsFromMoveParameters(
+        allocator: std.mem.Allocator,
+        parameters: []const move_result.OwnedMoveParameterSummary,
+    ) ![][]u8 {
+        var collected = std.ArrayList([]u8).empty;
+        errdefer {
+            for (collected.items) |value| allocator.free(value);
+            collected.deinit(allocator);
+        }
+
+        const selected_object_ids = try collectSelectedObjectIdsFromMoveParameters(allocator, parameters);
+        defer {
+            for (selected_object_ids) |value| allocator.free(value);
+            allocator.free(selected_object_ids);
+        }
+        for (selected_object_ids) |object_id| {
+            try appendUniqueMoveSelectedObjectId(allocator, &collected, object_id);
+        }
+
+        for (parameters) |parameter| {
+            if (parameter.owned_object_candidates) |candidates| {
+                for (candidates) |candidate| {
+                    try appendUniqueMoveSelectedObjectId(allocator, &collected, candidate.object_id);
                 }
             }
-            if (already_present) continue;
-
-            try candidates.append(allocator, .{
-                .object_id = try allocator.dupe(u8, object_id),
-                .type_name = try allocator.dupe(u8, type_name),
-                .initial_shared_version = initial_shared_version,
-                .shared_object_input_select_token = try allocator.dupe(u8, shared_token),
-                .mutable_shared_object_input_select_token = try allocator.dupe(u8, mutable_shared_token),
-            });
+            if (parameter.vector_item_owned_object_candidates) |candidates| {
+                for (candidates) |candidate| {
+                    try appendUniqueMoveSelectedObjectId(allocator, &collected, candidate.object_id);
+                }
+            }
         }
+
+        return try collected.toOwnedSlice(allocator);
+    }
+
+    fn discoverSharedObjectCandidatesFromMoveParameters(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        parameters: []const move_result.OwnedMoveParameterSummary,
+        signature: []const u8,
+    ) ![]move_result.SharedMoveObjectCandidate {
+        const seed_object_ids = try collectSharedDiscoverySeedObjectIdsFromMoveParameters(allocator, parameters);
+        defer {
+            for (seed_object_ids) |value| allocator.free(value);
+            allocator.free(seed_object_ids);
+        }
+
+        var discovered_ids = std.ArrayList([]u8).empty;
+        defer {
+            for (discovered_ids.items) |value| allocator.free(value);
+            discovered_ids.deinit(allocator);
+        }
+
+        for (seed_object_ids) |object_id| {
+            if (discovered_ids.items.len >= 16) break;
+            const response = self.getObjectWithOptions(object_id, .{ .show_content = true }) catch continue;
+            defer allocator.free(response);
+            try appendDiscoveredObjectIdsFromObjectResponseContent(
+                allocator,
+                &discovered_ids,
+                response,
+                16,
+            );
+        }
+
+        var candidates = std.ArrayList(move_result.SharedMoveObjectCandidate).empty;
+        errdefer {
+            for (candidates.items) |*value| value.deinit(allocator);
+            candidates.deinit(allocator);
+        }
+
+        try self.appendSharedObjectCandidatesFromObjectIds(
+            allocator,
+            &candidates,
+            discovered_ids.items,
+            signature,
+        );
 
         return try candidates.toOwnedSlice(allocator);
     }
@@ -4652,6 +4768,46 @@ pub const SuiRpcClient = struct {
             var scan = index;
             while (scan > 0 and sharedCandidateShouldSortBefore(candidates[scan], candidates[scan - 1])) : (scan -= 1) {
                 std.mem.swap(move_result.SharedMoveObjectCandidate, &candidates[scan], &candidates[scan - 1]);
+            }
+        }
+    }
+
+    fn populateSharedObjectCandidateFallbacksFromMoveParameters(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        parameters: []move_result.OwnedMoveParameterSummary,
+    ) !void {
+        for (parameters) |*parameter| {
+            if (parameter.omitted_from_explicit_args) continue;
+            if (!isMoveReferenceSignature(parameter.signature)) continue;
+            if (std.mem.indexOfScalar(u8, trimMoveReferenceSignature(parameter.signature), '<') == null) continue;
+            if (object_preset.inferKindFromTypeSignature(parameter.signature) != null) continue;
+            if (containsMoveTypeParameterText(trimMoveReferenceSignature(parameter.signature))) continue;
+            if (parameter.shared_object_candidates) |candidates| {
+                if (candidates.len != 0) continue;
+            }
+
+            const discovered_candidates = try self.discoverSharedObjectCandidatesFromMoveParameters(
+                allocator,
+                parameters,
+                parameter.signature,
+            );
+            if (discovered_candidates.len == 0) {
+                allocator.free(discovered_candidates);
+                continue;
+            }
+
+            if (parameter.shared_object_candidates) |old_candidates| {
+                for (old_candidates) |*candidate| candidate.deinit(allocator);
+                allocator.free(old_candidates);
+            }
+            parameter.shared_object_candidates = discovered_candidates;
+            if (parameter.auto_selected_arg_json == null and discovered_candidates.len == 1) {
+                const token = if (isMoveMutableReferenceSignature(parameter.signature))
+                    discovered_candidates[0].mutable_shared_object_input_select_token
+                else
+                    discovered_candidates[0].shared_object_input_select_token;
+                parameter.auto_selected_arg_json = try buildAutoSelectedScalarArgJson(allocator, token);
             }
         }
     }
@@ -6056,6 +6212,7 @@ pub const SuiRpcClient = struct {
                 summary.parameters,
             );
         }
+        try self.populateSharedObjectCandidateFallbacksFromMoveParameters(allocator, summary.parameters);
         try self.applyReferencedSharedObjectCandidateSelectionHints(allocator, summary.parameters);
         try self.applySharedCandidateSelectionHintsFromOwnedCandidates(allocator, summary.parameters);
         try self.applyReferencedOwnedObjectCandidateSelectionHints(allocator, summary.parameters);

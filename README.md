@@ -1003,7 +1003,7 @@ zig build run -- move function cetus_clmm_mainnet pool swap \
 - `parameters[*].owned_object_select_token`
 - `parameters[*].owned_object_query_argv`
 
-这些字段都是“候选调用/发现路径”，不是 ownership 或 sharedness 断言。像 Cetus `Pool<T0,T1>` 这类非 preset shared object，CLI 现在除了 `object get` 和 `object_input(shared)` 骨架，还会给出 `events --package --module` discovery argv；如果 recent event 里能抽出匹配 object id，还会直接带 `shared_object_candidates`。而 `Position` 这类 concrete owned object 还会额外带 `account objects --struct-type` 查询模板。
+这些字段都是“候选调用/发现路径”，不是 ownership 或 sharedness 断言。像 Cetus `Pool<T0,T1>` 这类非 preset shared object，CLI 现在除了 `object get` 和 `object_input(shared)` 骨架，还会给出 `events --package --module` discovery argv；如果 recent event 里能抽出匹配 object id，还会直接带 `shared_object_candidates`。如果事件里没有 usable candidate，但另一个已选/已发现的 owned object 内容里引用了 shared object id，CLI 现在还会把这些引用 id 当成第二层 discovery source，再过滤成匹配类型的 shared candidate。 而 `Position` 这类 concrete owned object 还会额外带 `account objects --struct-type` 查询模板。
 
 对于 `vector<Coin<T>>` 这类对象向量，summary 现在也会补“单个元素”的 discovery/input skeleton。这对 Cetus 一类要求 coin vector 的接口更实用，因为你可以先拿 `vector_item_owned_object_query_argv` 找一批候选 coin，再把返回的 object id 或 select token 填回 `--args` 数组。
 

@@ -4015,7 +4015,7 @@ test "runCommand move function with --summarize links shared object candidates t
             if (std.mem.eql(u8, req.method, "suix_queryEvents")) {
                 return alloc.dupe(
                     u8,
-                    "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xevent1\",\"eventSeq\":\"1\"},\"packageId\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool1\"}},{\"id\":{\"txDigest\":\"0xevent2\",\"eventSeq\":\"2\"},\"packageId\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool2\"}}],\"hasNextPage\":false}}",
+                    "{\"result\":{\"data\":[],\"hasNextPage\":false}}",
                 );
             }
             if (std.mem.eql(u8, req.method, "sui_getObject")) {
@@ -4082,6 +4082,9 @@ test "runCommand move function with --summarize links shared object candidates t
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
     defer parsed.deinit();
     const parameters = parsed.value.object.get("parameters").?.array.items;
+    const shared_candidates = parameters[0].object.get("shared_object_candidates").?.array.items;
+    try testing.expectEqual(@as(usize, 1), shared_candidates.len);
+    try testing.expectEqualStrings("0xpool1", shared_candidates[0].object.get("object_id").?.string);
     try testing.expectEqualStrings(
         "\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xpool1\\\",\\\"inputKind\\\":\\\"shared\\\",\\\"initialSharedVersion\\\":7,\\\"mutable\\\":true}\"",
         parameters[0].object.get("auto_selected_arg_json").?.string,
