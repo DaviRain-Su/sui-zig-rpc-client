@@ -3671,6 +3671,118 @@ pub const SuiRpcClient = struct {
         return output.toOwnedSlice(allocator);
     }
 
+    fn buildMoveFunctionTxDryRunArgv(
+        allocator: std.mem.Allocator,
+        summary: move_result.OwnedMoveFunctionSummary,
+        type_args_json: []const u8,
+        args_json: []const u8,
+    ) ![][]u8 {
+        const package_id = summary.package_id orelse return error.InvalidResponse;
+        const module_name = summary.module_name orelse return error.InvalidResponse;
+        const function_name = summary.function_name orelse return error.InvalidResponse;
+
+        const argv = try allocator.alloc([]u8, 19);
+        errdefer allocator.free(argv);
+
+        argv[0] = try allocator.dupe(u8, "tx");
+        errdefer allocator.free(argv[0]);
+        argv[1] = try allocator.dupe(u8, "dry-run");
+        errdefer allocator.free(argv[1]);
+        argv[2] = try allocator.dupe(u8, "--package");
+        errdefer allocator.free(argv[2]);
+        argv[3] = try allocator.dupe(u8, package_id);
+        errdefer allocator.free(argv[3]);
+        argv[4] = try allocator.dupe(u8, "--module");
+        errdefer allocator.free(argv[4]);
+        argv[5] = try allocator.dupe(u8, module_name);
+        errdefer allocator.free(argv[5]);
+        argv[6] = try allocator.dupe(u8, "--function");
+        errdefer allocator.free(argv[6]);
+        argv[7] = try allocator.dupe(u8, function_name);
+        errdefer allocator.free(argv[7]);
+        argv[8] = try allocator.dupe(u8, "--type-args");
+        errdefer allocator.free(argv[8]);
+        argv[9] = try allocator.dupe(u8, type_args_json);
+        errdefer allocator.free(argv[9]);
+        argv[10] = try allocator.dupe(u8, "--args");
+        errdefer allocator.free(argv[10]);
+        argv[11] = try allocator.dupe(u8, args_json);
+        errdefer allocator.free(argv[11]);
+        argv[12] = try allocator.dupe(u8, "--sender");
+        errdefer allocator.free(argv[12]);
+        argv[13] = try allocator.dupe(u8, "0x<sender>");
+        errdefer allocator.free(argv[13]);
+        argv[14] = try allocator.dupe(u8, "--gas-budget");
+        errdefer allocator.free(argv[14]);
+        argv[15] = try allocator.dupe(u8, "100000000");
+        errdefer allocator.free(argv[15]);
+        argv[16] = try allocator.dupe(u8, "--gas-price");
+        errdefer allocator.free(argv[16]);
+        argv[17] = try allocator.dupe(u8, "1000");
+        errdefer allocator.free(argv[17]);
+        argv[18] = try allocator.dupe(u8, "--summarize");
+        errdefer allocator.free(argv[18]);
+
+        return argv;
+    }
+
+    fn buildMoveFunctionTxSendFromKeystoreArgv(
+        allocator: std.mem.Allocator,
+        summary: move_result.OwnedMoveFunctionSummary,
+        type_args_json: []const u8,
+        args_json: []const u8,
+    ) ![][]u8 {
+        const package_id = summary.package_id orelse return error.InvalidResponse;
+        const module_name = summary.module_name orelse return error.InvalidResponse;
+        const function_name = summary.function_name orelse return error.InvalidResponse;
+
+        const argv = try allocator.alloc([]u8, 20);
+        errdefer allocator.free(argv);
+
+        argv[0] = try allocator.dupe(u8, "tx");
+        errdefer allocator.free(argv[0]);
+        argv[1] = try allocator.dupe(u8, "send");
+        errdefer allocator.free(argv[1]);
+        argv[2] = try allocator.dupe(u8, "--package");
+        errdefer allocator.free(argv[2]);
+        argv[3] = try allocator.dupe(u8, package_id);
+        errdefer allocator.free(argv[3]);
+        argv[4] = try allocator.dupe(u8, "--module");
+        errdefer allocator.free(argv[4]);
+        argv[5] = try allocator.dupe(u8, module_name);
+        errdefer allocator.free(argv[5]);
+        argv[6] = try allocator.dupe(u8, "--function");
+        errdefer allocator.free(argv[6]);
+        argv[7] = try allocator.dupe(u8, function_name);
+        errdefer allocator.free(argv[7]);
+        argv[8] = try allocator.dupe(u8, "--type-args");
+        errdefer allocator.free(argv[8]);
+        argv[9] = try allocator.dupe(u8, type_args_json);
+        errdefer allocator.free(argv[9]);
+        argv[10] = try allocator.dupe(u8, "--args");
+        errdefer allocator.free(argv[10]);
+        argv[11] = try allocator.dupe(u8, args_json);
+        errdefer allocator.free(argv[11]);
+        argv[12] = try allocator.dupe(u8, "--from-keystore");
+        errdefer allocator.free(argv[12]);
+        argv[13] = try allocator.dupe(u8, "--signer");
+        errdefer allocator.free(argv[13]);
+        argv[14] = try allocator.dupe(u8, "<alias-or-address>");
+        errdefer allocator.free(argv[14]);
+        argv[15] = try allocator.dupe(u8, "--gas-budget");
+        errdefer allocator.free(argv[15]);
+        argv[16] = try allocator.dupe(u8, "100000000");
+        errdefer allocator.free(argv[16]);
+        argv[17] = try allocator.dupe(u8, "--auto-gas-payment");
+        errdefer allocator.free(argv[17]);
+        argv[18] = try allocator.dupe(u8, "--wait");
+        errdefer allocator.free(argv[18]);
+        argv[19] = try allocator.dupe(u8, "--summarize");
+        errdefer allocator.free(argv[19]);
+
+        return argv;
+    }
+
     fn populateMoveFunctionCallTemplate(
         allocator: std.mem.Allocator,
         summary: *move_result.OwnedMoveFunctionSummary,
@@ -3691,11 +3803,33 @@ pub const SuiRpcClient = struct {
             args_json,
         );
         errdefer allocator.free(move_call_command_json);
+        const tx_dry_run_argv = try buildMoveFunctionTxDryRunArgv(
+            allocator,
+            summary.*,
+            type_args_json,
+            args_json,
+        );
+        errdefer {
+            for (tx_dry_run_argv) |value| allocator.free(value);
+            allocator.free(tx_dry_run_argv);
+        }
+        const tx_send_from_keystore_argv = try buildMoveFunctionTxSendFromKeystoreArgv(
+            allocator,
+            summary.*,
+            type_args_json,
+            args_json,
+        );
+        errdefer {
+            for (tx_send_from_keystore_argv) |value| allocator.free(value);
+            allocator.free(tx_send_from_keystore_argv);
+        }
 
         summary.call_template = .{
             .type_args_json = type_args_json,
             .args_json = args_json,
             .move_call_command_json = move_call_command_json,
+            .tx_dry_run_argv = tx_dry_run_argv,
+            .tx_send_from_keystore_argv = tx_send_from_keystore_argv,
         };
     }
 
@@ -20081,6 +20215,10 @@ test "runReadQueryAction dispatches summarized move function queries" {
                     try testing.expect(value.parameters[2].omitted_from_explicit_args);
                     try testing.expect(value.call_template != null);
                     try testing.expectEqualStrings("[\"<arg0-object-id-or-select-token>\",0]", value.call_template.?.args_json);
+                    try testing.expectEqual(@as(usize, 19), value.call_template.?.tx_dry_run_argv.len);
+                    try testing.expectEqualStrings("dry-run", value.call_template.?.tx_dry_run_argv[1]);
+                    try testing.expectEqual(@as(usize, 20), value.call_template.?.tx_send_from_keystore_argv.len);
+                    try testing.expectEqualStrings("send", value.call_template.?.tx_send_from_keystore_argv[1]);
                 },
                 else => return error.TestUnexpectedResult,
             },

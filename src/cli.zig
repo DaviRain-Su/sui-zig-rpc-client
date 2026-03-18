@@ -3543,7 +3543,7 @@ pub fn printUsage(writer: anytype) !void {
         "    --summarize                         Print struct/function inventory instead of raw normalized JSON\n" ++
         "  move function <package-id-or-alias> <module> <function>\n" ++
         "                                       Call sui_getNormalizedMoveFunction\n" ++
-        "    --summarize                         Print parameter/return signature summary, lowering hints, and call templates\n" ++
+        "    --summarize                         Print parameter/return signature summary, lowering hints, and tx call templates\n" ++
         "  object get <object-id-or-alias>      Call sui_getObject\n" ++
         "    --options <json|@file>              object read options\n" ++
         "    --show-type|--show-owner|--show-content|--show-bcs\n" ++

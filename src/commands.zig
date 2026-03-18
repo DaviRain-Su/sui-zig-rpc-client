@@ -2712,6 +2712,24 @@ test "runCommand move function with --summarize prints normalized function summa
         "{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"pool\",\"function\":\"swap\",\"typeArguments\":[],\"arguments\":[\"<arg0-object-id-or-select-token>\",0]}",
         parsed.value.object.get("call_template").?.object.get("move_call_command_json").?.string,
     );
+    const dry_run_argv = parsed.value.object.get("call_template").?.object.get("tx_dry_run_argv").?.array.items;
+    try testing.expectEqual(@as(usize, 19), dry_run_argv.len);
+    try testing.expectEqualStrings("tx", dry_run_argv[0].string);
+    try testing.expectEqualStrings("dry-run", dry_run_argv[1].string);
+    try testing.expectEqualStrings("--package", dry_run_argv[2].string);
+    try testing.expectEqualStrings("0x2", dry_run_argv[3].string);
+    try testing.expectEqualStrings("--type-args", dry_run_argv[8].string);
+    try testing.expectEqualStrings("[]", dry_run_argv[9].string);
+    try testing.expectEqualStrings("--args", dry_run_argv[10].string);
+    try testing.expectEqualStrings("[\"<arg0-object-id-or-select-token>\",0]", dry_run_argv[11].string);
+    try testing.expectEqualStrings("0x<sender>", dry_run_argv[13].string);
+    const send_argv = parsed.value.object.get("call_template").?.object.get("tx_send_from_keystore_argv").?.array.items;
+    try testing.expectEqual(@as(usize, 20), send_argv.len);
+    try testing.expectEqualStrings("tx", send_argv[0].string);
+    try testing.expectEqualStrings("send", send_argv[1].string);
+    try testing.expectEqualStrings("--from-keystore", send_argv[12].string);
+    try testing.expectEqualStrings("<alias-or-address>", send_argv[14].string);
+    try testing.expectEqualStrings("--auto-gas-payment", send_argv[17].string);
 }
 
 test "runCommand move function with --summarize reports pure wrapper lowering kinds" {
@@ -2766,6 +2784,7 @@ test "runCommand move function with --summarize reports pure wrapper lowering ki
     try testing.expectEqualStrings("runtime", parsed.value.object.get("parameters").?.array.items[3].object.get("lowering_kind").?.string);
     try testing.expect(parsed.value.object.get("parameters").?.array.items[3].object.get("omitted_from_explicit_args").?.bool);
     try testing.expectEqualStrings("[\"<arg0-utf8-string>\",\"0x<arg1-object-id>\",null]", parsed.value.object.get("call_template").?.object.get("args_json").?.string);
+    try testing.expectEqualStrings("[]", parsed.value.object.get("call_template").?.object.get("type_args_json").?.string);
 }
 
 test "runCommand move package resolves aliases before issuing RPC" {

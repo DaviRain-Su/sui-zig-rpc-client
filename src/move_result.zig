@@ -52,11 +52,17 @@ pub const OwnedMoveFunctionCallTemplate = struct {
     type_args_json: []u8,
     args_json: []u8,
     move_call_command_json: []u8,
+    tx_dry_run_argv: [][]u8,
+    tx_send_from_keystore_argv: [][]u8,
 
     pub fn deinit(self: *OwnedMoveFunctionCallTemplate, allocator: std.mem.Allocator) void {
         allocator.free(self.type_args_json);
         allocator.free(self.args_json);
         allocator.free(self.move_call_command_json);
+        for (self.tx_dry_run_argv) |value| allocator.free(value);
+        allocator.free(self.tx_dry_run_argv);
+        for (self.tx_send_from_keystore_argv) |value| allocator.free(value);
+        allocator.free(self.tx_send_from_keystore_argv);
     }
 };
 

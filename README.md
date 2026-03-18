@@ -655,7 +655,7 @@ pub fn main() !void {
 - `rpc <method> [params-json]`: 发送任意 Sui JSON-RPC 方法。
 - `move package <package-id-or-alias>`: 调用 `sui_getNormalizedMoveModulesByPackage`，发现 package 下有哪些模块。
 - `move module <package-id-or-alias> <module>`: 调用 `sui_getNormalizedMoveModule`，查看模块里的 structs / exposed functions。
-- `move function <package-id-or-alias> <module> <function>`: 调用 `sui_getNormalizedMoveFunction`，查看参数/返回类型；`--summarize` 会额外输出 CLI lowering hint 和可复用的调用模板。
+- `move function <package-id-or-alias> <module> <function>`: 调用 `sui_getNormalizedMoveFunction`，查看参数/返回类型；`--summarize` 会额外输出 CLI lowering hint 和可复用的 transaction 模板。
 - `tx simulate [params-json]`: 调用 `sui_devInspectTransactionBlock`。
 - `tx dry-run [tx-bytes|@file]`: 调用 `sui_dryRunTransactionBlock`。
 - `tx send [params-json]`: 调用 `sui_executeTransactionBlock`。
@@ -816,6 +816,8 @@ zig build run -- move function cetus_clmm_mainnet pool swap --summarize
 - `call_template.type_args_json`: 直接可改的 `--type-args` JSON 模板
 - `call_template.args_json`: 直接可改的 `--args` JSON 模板
 - `call_template.move_call_command_json`: 直接可放进 `--commands` / `--command` 的 raw `MoveCall` command 模板
+- `call_template.tx_dry_run_argv`: 直接可执行的 `tx dry-run` argv 模板
+- `call_template.tx_send_from_keystore_argv`: 直接可改的 `tx send --from-keystore` argv 模板
 
 这层模板只解决 ABI 到 CLI 输入骨架的映射；真正执行 `tx dry-run` / `tx send` 时，你仍然需要自己补 sender、signer、gas 和具体 object id / select token。
 
