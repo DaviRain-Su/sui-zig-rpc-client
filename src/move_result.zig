@@ -3,9 +3,12 @@ const std = @import("std");
 pub const OwnedMoveParameterSummary = struct {
     signature: []u8,
     lowering_kind: ?[]const u8 = null,
+    placeholder_json: ?[]u8 = null,
+    omitted_from_explicit_args: bool = false,
 
     pub fn deinit(self: *OwnedMoveParameterSummary, allocator: std.mem.Allocator) void {
         allocator.free(self.signature);
+        if (self.placeholder_json) |value| allocator.free(value);
     }
 };
 
@@ -28,6 +31,7 @@ pub const OwnedMoveFunctionSummary = struct {
     type_parameters: []OwnedMoveTypeParameter,
     parameters: []OwnedMoveParameterSummary,
     returns: []OwnedMoveParameterSummary,
+    call_template: ?OwnedMoveFunctionCallTemplate = null,
 
     pub fn deinit(self: *OwnedMoveFunctionSummary, allocator: std.mem.Allocator) void {
         if (self.package_id) |value| allocator.free(value);
@@ -40,6 +44,19 @@ pub const OwnedMoveFunctionSummary = struct {
         allocator.free(self.parameters);
         for (self.returns) |*item| item.deinit(allocator);
         allocator.free(self.returns);
+        if (self.call_template) |*value| value.deinit(allocator);
+    }
+};
+
+pub const OwnedMoveFunctionCallTemplate = struct {
+    type_args_json: []u8,
+    args_json: []u8,
+    move_call_command_json: []u8,
+
+    pub fn deinit(self: *OwnedMoveFunctionCallTemplate, allocator: std.mem.Allocator) void {
+        allocator.free(self.type_args_json);
+        allocator.free(self.args_json);
+        allocator.free(self.move_call_command_json);
     }
 };
 
@@ -442,6 +459,8 @@ test "extractMoveFunctionSummary parses normalized function responses" {
     try testing.expectEqualStrings("U64", summary.parameters[1].signature);
     try testing.expectEqualStrings("T0", summary.parameters[2].signature);
     try testing.expectEqualStrings("vector<U8>", summary.returns[0].signature);
+    try testing.expect(summary.parameters[0].placeholder_json == null);
+    try testing.expect(summary.call_template == null);
 }
 
 test "extractMoveModuleSummary collects sorted struct and function names" {

@@ -2700,9 +2700,18 @@ test "runCommand move function with --summarize prints normalized function summa
     try testing.expectEqualStrings("pool", parsed.value.object.get("module_name").?.string);
     try testing.expectEqualStrings("swap", parsed.value.object.get("function_name").?.string);
     try testing.expectEqualStrings("object", parsed.value.object.get("parameters").?.array.items[0].object.get("lowering_kind").?.string);
+    try testing.expectEqualStrings("\"<arg0-object-id-or-select-token>\"", parsed.value.object.get("parameters").?.array.items[0].object.get("placeholder_json").?.string);
     try testing.expectEqualStrings("u64", parsed.value.object.get("parameters").?.array.items[1].object.get("lowering_kind").?.string);
+    try testing.expectEqualStrings("0", parsed.value.object.get("parameters").?.array.items[1].object.get("placeholder_json").?.string);
     try testing.expectEqualStrings("runtime", parsed.value.object.get("parameters").?.array.items[2].object.get("lowering_kind").?.string);
+    try testing.expect(parsed.value.object.get("parameters").?.array.items[2].object.get("omitted_from_explicit_args").?.bool);
     try testing.expectEqualStrings("Bool", parsed.value.object.get("returns").?.array.items[0].object.get("signature").?.string);
+    try testing.expectEqualStrings("[]", parsed.value.object.get("call_template").?.object.get("type_args_json").?.string);
+    try testing.expectEqualStrings("[\"<arg0-object-id-or-select-token>\",0]", parsed.value.object.get("call_template").?.object.get("args_json").?.string);
+    try testing.expectEqualStrings(
+        "{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"pool\",\"function\":\"swap\",\"typeArguments\":[],\"arguments\":[\"<arg0-object-id-or-select-token>\",0]}",
+        parsed.value.object.get("call_template").?.object.get("move_call_command_json").?.string,
+    );
 }
 
 test "runCommand move function with --summarize reports pure wrapper lowering kinds" {
@@ -2749,9 +2758,14 @@ test "runCommand move function with --summarize reports pure wrapper lowering ki
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
     defer parsed.deinit();
     try testing.expectEqualStrings("utf8_string", parsed.value.object.get("parameters").?.array.items[0].object.get("lowering_kind").?.string);
+    try testing.expectEqualStrings("\"<arg0-utf8-string>\"", parsed.value.object.get("parameters").?.array.items[0].object.get("placeholder_json").?.string);
     try testing.expectEqualStrings("object_id", parsed.value.object.get("parameters").?.array.items[1].object.get("lowering_kind").?.string);
+    try testing.expectEqualStrings("\"0x<arg1-object-id>\"", parsed.value.object.get("parameters").?.array.items[1].object.get("placeholder_json").?.string);
     try testing.expectEqualStrings("option", parsed.value.object.get("parameters").?.array.items[2].object.get("lowering_kind").?.string);
+    try testing.expectEqualStrings("null", parsed.value.object.get("parameters").?.array.items[2].object.get("placeholder_json").?.string);
     try testing.expectEqualStrings("runtime", parsed.value.object.get("parameters").?.array.items[3].object.get("lowering_kind").?.string);
+    try testing.expect(parsed.value.object.get("parameters").?.array.items[3].object.get("omitted_from_explicit_args").?.bool);
+    try testing.expectEqualStrings("[\"<arg0-utf8-string>\",\"0x<arg1-object-id>\",null]", parsed.value.object.get("call_template").?.object.get("args_json").?.string);
 }
 
 test "runCommand move package resolves aliases before issuing RPC" {

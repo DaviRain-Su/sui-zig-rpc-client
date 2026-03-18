@@ -3560,6 +3560,145 @@ pub const SuiRpcClient = struct {
         );
     }
 
+    fn placeholderJsonForMoveParameter(
+        allocator: std.mem.Allocator,
+        parameter: move_result.OwnedMoveParameterSummary,
+        index: usize,
+    ) !?[]u8 {
+        const kind = parameter.lowering_kind orelse {
+            return try std.fmt.allocPrint(allocator, "\"<arg{d}-manual-json-or-token>\"", .{index});
+        };
+
+        if (std.mem.eql(u8, kind, "runtime")) return null;
+        if (std.mem.eql(u8, kind, "object")) {
+            return try std.fmt.allocPrint(allocator, "\"<arg{d}-object-id-or-select-token>\"", .{index});
+        }
+        if (std.mem.eql(u8, kind, "vector")) {
+            return try std.fmt.allocPrint(allocator, "[\"<arg{d}-item0>\"]", .{index});
+        }
+        if (std.mem.eql(u8, kind, "vector_u8")) return try allocator.dupe(u8, "\"bytes:0x\"");
+        if (std.mem.eql(u8, kind, "address")) {
+            return try std.fmt.allocPrint(allocator, "\"0x<arg{d}-address>\"", .{index});
+        }
+        if (std.mem.eql(u8, kind, "signer")) {
+            return try std.fmt.allocPrint(allocator, "\"0x<arg{d}-signer>\"", .{index});
+        }
+        if (std.mem.eql(u8, kind, "boolean")) return try allocator.dupe(u8, "false");
+        if (std.mem.eql(u8, kind, "u8") or
+            std.mem.eql(u8, kind, "u16") or
+            std.mem.eql(u8, kind, "u32") or
+            std.mem.eql(u8, kind, "u64"))
+        {
+            return try allocator.dupe(u8, "0");
+        }
+        if (std.mem.eql(u8, kind, "u128") or std.mem.eql(u8, kind, "u256")) {
+            return try allocator.dupe(u8, "\"0\"");
+        }
+        if (std.mem.eql(u8, kind, "utf8_string")) {
+            return try std.fmt.allocPrint(allocator, "\"<arg{d}-utf8-string>\"", .{index});
+        }
+        if (std.mem.eql(u8, kind, "ascii_string")) {
+            return try std.fmt.allocPrint(allocator, "\"<arg{d}-ascii-string>\"", .{index});
+        }
+        if (std.mem.eql(u8, kind, "object_id")) {
+            return try std.fmt.allocPrint(allocator, "\"0x<arg{d}-object-id>\"", .{index});
+        }
+        if (std.mem.eql(u8, kind, "option")) return try allocator.dupe(u8, "null");
+        return try std.fmt.allocPrint(allocator, "\"<arg{d}-manual-json-or-token>\"", .{index});
+    }
+
+    fn buildMoveFunctionTypeArgsTemplateJson(
+        allocator: std.mem.Allocator,
+        type_parameter_count: usize,
+    ) ![]u8 {
+        var output = std.ArrayList(u8){};
+        defer output.deinit(allocator);
+
+        const writer = output.writer(allocator);
+        try writer.writeAll("[");
+        for (0..type_parameter_count) |index| {
+            if (index != 0) try writer.writeAll(",");
+            try writer.print("\"<T{d}>\"", .{index});
+        }
+        try writer.writeAll("]");
+        return output.toOwnedSlice(allocator);
+    }
+
+    fn buildMoveFunctionArgsTemplateJson(
+        allocator: std.mem.Allocator,
+        parameters: []const move_result.OwnedMoveParameterSummary,
+    ) ![]u8 {
+        var output = std.ArrayList(u8){};
+        defer output.deinit(allocator);
+
+        const writer = output.writer(allocator);
+        try writer.writeAll("[");
+        var needs_separator = false;
+        for (parameters) |parameter| {
+            if (parameter.omitted_from_explicit_args) continue;
+            const placeholder = parameter.placeholder_json orelse continue;
+            if (needs_separator) try writer.writeAll(",");
+            try writer.writeAll(placeholder);
+            needs_separator = true;
+        }
+        try writer.writeAll("]");
+        return output.toOwnedSlice(allocator);
+    }
+
+    fn buildMoveFunctionCommandTemplateJson(
+        allocator: std.mem.Allocator,
+        summary: move_result.OwnedMoveFunctionSummary,
+        type_args_json: []const u8,
+        args_json: []const u8,
+    ) ![]u8 {
+        const package_id = summary.package_id orelse return error.InvalidResponse;
+        const module_name = summary.module_name orelse return error.InvalidResponse;
+        const function_name = summary.function_name orelse return error.InvalidResponse;
+
+        var output = std.ArrayList(u8){};
+        defer output.deinit(allocator);
+
+        try output.writer(allocator).print(
+            "{{\"kind\":\"MoveCall\",\"package\":{f},\"module\":{f},\"function\":{f},\"typeArguments\":{s},\"arguments\":{s}}}",
+            .{
+                std.json.fmt(package_id, .{}),
+                std.json.fmt(module_name, .{}),
+                std.json.fmt(function_name, .{}),
+                type_args_json,
+                args_json,
+            },
+        );
+        return output.toOwnedSlice(allocator);
+    }
+
+    fn populateMoveFunctionCallTemplate(
+        allocator: std.mem.Allocator,
+        summary: *move_result.OwnedMoveFunctionSummary,
+    ) !void {
+        for (summary.parameters, 0..) |*parameter, index| {
+            parameter.placeholder_json = try placeholderJsonForMoveParameter(allocator, parameter.*, index);
+            parameter.omitted_from_explicit_args = parameter.placeholder_json == null;
+        }
+
+        const type_args_json = try buildMoveFunctionTypeArgsTemplateJson(allocator, summary.type_parameters.len);
+        errdefer allocator.free(type_args_json);
+        const args_json = try buildMoveFunctionArgsTemplateJson(allocator, summary.parameters);
+        errdefer allocator.free(args_json);
+        const move_call_command_json = try buildMoveFunctionCommandTemplateJson(
+            allocator,
+            summary.*,
+            type_args_json,
+            args_json,
+        );
+        errdefer allocator.free(move_call_command_json);
+
+        summary.call_template = .{
+            .type_args_json = type_args_json,
+            .args_json = args_json,
+            .move_call_command_json = move_call_command_json,
+        };
+    }
+
     pub fn summarizeMoveFunctionResponse(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
@@ -3595,6 +3734,8 @@ pub const SuiRpcClient = struct {
             else
                 "runtime";
         }
+
+        try populateMoveFunctionCallTemplate(allocator, &summary);
 
         return summary;
     }
@@ -19932,8 +20073,14 @@ test "runReadQueryAction dispatches summarized move function queries" {
                     try testing.expectEqualStrings("swap", value.function_name.?);
                     try testing.expectEqual(@as(usize, 3), value.parameters.len);
                     try testing.expectEqualStrings("object", value.parameters[0].lowering_kind.?);
+                    try testing.expectEqualStrings("\"<arg0-object-id-or-select-token>\"", value.parameters[0].placeholder_json.?);
                     try testing.expectEqualStrings("u64", value.parameters[1].lowering_kind.?);
+                    try testing.expectEqualStrings("0", value.parameters[1].placeholder_json.?);
                     try testing.expectEqualStrings("runtime", value.parameters[2].lowering_kind.?);
+                    try testing.expect(value.parameters[2].placeholder_json == null);
+                    try testing.expect(value.parameters[2].omitted_from_explicit_args);
+                    try testing.expect(value.call_template != null);
+                    try testing.expectEqualStrings("[\"<arg0-object-id-or-select-token>\",0]", value.call_template.?.args_json);
                 },
                 else => return error.TestUnexpectedResult,
             },
