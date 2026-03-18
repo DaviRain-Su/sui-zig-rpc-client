@@ -3370,6 +3370,16 @@ test "runCommand object get with --summarize prints structured object summaries"
     try testing.expectEqualStrings("0xobject", parsed.value.object.get("object_id").?.string);
     try testing.expectEqualStrings("address_owner", parsed.value.object.get("owner_kind").?.string);
     try testing.expectEqualStrings("0xowner", parsed.value.object.get("owner_value").?.string);
+    try testing.expectEqualStrings(
+        "select:{\"kind\":\"object_input\",\"objectId\":\"0xobject\",\"inputKind\":\"imm_or_owned\",\"version\":7,\"digest\":\"digest-1\"}",
+        parsed.value.object.get("imm_or_owned_object_input_select_token").?.string,
+    );
+    try testing.expectEqualStrings(
+        "select:{\"kind\":\"object_input\",\"objectId\":\"0xobject\",\"inputKind\":\"receiving\",\"version\":7,\"digest\":\"digest-1\"}",
+        parsed.value.object.get("receiving_object_input_select_token").?.string,
+    );
+    try testing.expectEqual(std.json.Value.null, parsed.value.object.get("shared_object_input_select_token").?);
+    try testing.expectEqual(std.json.Value.null, parsed.value.object.get("mutable_shared_object_input_select_token").?);
 }
 
 test "runCommand account_info prints shared keystore json output" {
@@ -4031,10 +4041,12 @@ test "runCommand object get resolves object preset aliases before issuing RPC" {
         fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
             const ctx = @as(*MockContext, @ptrCast(@alignCast(context)));
             ctx.method_ok.* = std.mem.eql(u8, req.method, "sui_getObject");
-            ctx.params_ok.* = std.mem.indexOf(u8, req.params_json, "\"0x6\"") != null;
+            ctx.params_ok.* = std.mem.indexOf(u8, req.params_json, "\"0x6\"") != null and
+                std.mem.indexOf(u8, req.params_json, "\"showOwner\":true") != null and
+                std.mem.indexOf(u8, req.params_json, "\"showType\":true") != null;
             return alloc.dupe(
                 u8,
-                "{\"result\":{\"data\":{\"objectId\":\"0x6\",\"version\":\"1\",\"digest\":\"digest-clock\",\"owner\":{\"Shared\":{\"initial_shared_version\":1}}}}}",
+                "{\"result\":{\"data\":{\"objectId\":\"0x6\",\"version\":\"1\",\"digest\":\"digest-clock\",\"type\":\"0x2::clock::Clock\",\"owner\":{\"Shared\":{\"initial_shared_version\":1}}}}}",
             );
         }
     }.call;
@@ -4064,8 +4076,23 @@ test "runCommand object get resolves object preset aliases before issuing RPC" {
 
     try runCommand(allocator, &rpc, &args, output.writer(allocator));
 
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
     try testing.expect(method_ok);
     try testing.expect(params_ok);
+    try testing.expectEqualStrings("0x2::clock::Clock", parsed.value.object.get("type_name").?.string);
+    try testing.expectEqualStrings("shared", parsed.value.object.get("owner_kind").?.string);
+    try testing.expectEqualStrings("1", parsed.value.object.get("owner_value").?.string);
+    try testing.expectEqualStrings(
+        "select:{\"kind\":\"object_input\",\"objectId\":\"0x6\",\"inputKind\":\"shared\",\"initialSharedVersion\":1,\"mutable\":false}",
+        parsed.value.object.get("shared_object_input_select_token").?.string,
+    );
+    try testing.expectEqualStrings(
+        "select:{\"kind\":\"object_input\",\"objectId\":\"0x6\",\"inputKind\":\"shared\",\"initialSharedVersion\":1,\"mutable\":true}",
+        parsed.value.object.get("mutable_shared_object_input_select_token").?.string,
+    );
+    try testing.expectEqual(std.json.Value.null, parsed.value.object.get("imm_or_owned_object_input_select_token").?);
+    try testing.expectEqual(std.json.Value.null, parsed.value.object.get("receiving_object_input_select_token").?);
 }
 
 test "runCommand object dynamic-fields with --all prints aggregated summaries" {

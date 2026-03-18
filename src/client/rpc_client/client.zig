@@ -3739,6 +3739,95 @@ pub const SuiRpcClient = struct {
         );
     }
 
+    fn buildExactReceivingObjectInputSelectToken(
+        allocator: std.mem.Allocator,
+        object_id: []const u8,
+        version: u64,
+        digest: []const u8,
+    ) ![]u8 {
+        return try std.fmt.allocPrint(
+            allocator,
+            "select:{{\"kind\":\"object_input\",\"objectId\":{f},\"inputKind\":\"receiving\",\"version\":{},\"digest\":{f}}}",
+            .{
+                std.json.fmt(object_id, .{}),
+                version,
+                std.json.fmt(digest, .{}),
+            },
+        );
+    }
+
+    fn buildExactSharedObjectInputSelectToken(
+        allocator: std.mem.Allocator,
+        object_id: []const u8,
+        initial_shared_version: u64,
+        mutable: bool,
+    ) ![]u8 {
+        return try std.fmt.allocPrint(
+            allocator,
+            "select:{{\"kind\":\"object_input\",\"objectId\":{f},\"inputKind\":\"shared\",\"initialSharedVersion\":{},\"mutable\":{}}}",
+            .{
+                std.json.fmt(object_id, .{}),
+                initial_shared_version,
+                mutable,
+            },
+        );
+    }
+
+    fn populateObjectSummaryInputSelectTokens(
+        allocator: std.mem.Allocator,
+        summary: *object_result.OwnedObjectSummary,
+    ) !void {
+        if (summary.status != .found) return;
+        const object_id = summary.object_id orelse return;
+
+        switch (summary.owner_kind orelse .unknown) {
+            .shared => {
+                const raw_initial_shared_version = summary.owner_value orelse return;
+                const initial_shared_version = std.fmt.parseInt(
+                    u64,
+                    raw_initial_shared_version,
+                    10,
+                ) catch return;
+                summary.shared_object_input_select_token = try buildExactSharedObjectInputSelectToken(
+                    allocator,
+                    object_id,
+                    initial_shared_version,
+                    false,
+                );
+                summary.mutable_shared_object_input_select_token = try buildExactSharedObjectInputSelectToken(
+                    allocator,
+                    object_id,
+                    initial_shared_version,
+                    true,
+                );
+            },
+            .address_owner, .object_owner, .immutable => {
+                const version = summary.version orelse return;
+                const digest = summary.digest orelse return;
+                summary.imm_or_owned_object_input_select_token = try buildExactImmOrOwnedObjectInputSelectToken(
+                    allocator,
+                    object_id,
+                    version,
+                    digest,
+                );
+                summary.receiving_object_input_select_token = try buildExactReceivingObjectInputSelectToken(
+                    allocator,
+                    object_id,
+                    version,
+                    digest,
+                );
+            },
+            .unknown => {},
+        }
+    }
+
+    fn objectDataOptionsForSummaries(options: ObjectDataOptions) ObjectDataOptions {
+        var resolved = options;
+        resolved.show_type = true;
+        resolved.show_owner = true;
+        return resolved;
+    }
+
     fn buildOwnedObjectSelectToken(
         allocator: std.mem.Allocator,
         owner: ?[]const u8,
@@ -11260,7 +11349,10 @@ pub const SuiRpcClient = struct {
         response_json: []const u8,
     ) !object_result.OwnedObjectSummary {
         _ = self;
-        return try object_result.extractObjectSummary(allocator, response_json);
+        var summary = try object_result.extractObjectSummary(allocator, response_json);
+        errdefer summary.deinit(allocator);
+        try populateObjectSummaryInputSelectTokens(allocator, &summary);
+        return summary;
     }
 
     pub fn getObjectAndSummarize(
@@ -11351,13 +11443,21 @@ pub const SuiRpcClient = struct {
         return switch (query) {
             .get => |spec| switch (spec.options) {
                 .none => .{
-                    .object = try self.getObjectAndSummarize(allocator, spec.object_id, null),
+                    .object = try self.getObjectAndSummarizeWithOptions(
+                        allocator,
+                        spec.object_id,
+                        objectDataOptionsForSummaries(.{}),
+                    ),
                 },
                 .json => |options_json| .{
                     .object = try self.getObjectAndSummarize(allocator, spec.object_id, options_json),
                 },
                 .typed => |options| .{
-                    .object = try self.getObjectAndSummarizeWithOptions(allocator, spec.object_id, options),
+                    .object = try self.getObjectAndSummarizeWithOptions(
+                        allocator,
+                        spec.object_id,
+                        objectDataOptionsForSummaries(options),
+                    ),
                 },
             },
             .dynamic_fields_page => |spec| .{

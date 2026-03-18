@@ -24,6 +24,10 @@ pub const OwnedObjectSummary = struct {
     type_name: ?[]u8 = null,
     owner_kind: ?ObjectOwnerKind = null,
     owner_value: ?[]u8 = null,
+    shared_object_input_select_token: ?[]u8 = null,
+    mutable_shared_object_input_select_token: ?[]u8 = null,
+    imm_or_owned_object_input_select_token: ?[]u8 = null,
+    receiving_object_input_select_token: ?[]u8 = null,
     previous_transaction: ?[]u8 = null,
     storage_rebate: ?u64 = null,
     error_code: ?[]u8 = null,
@@ -33,6 +37,10 @@ pub const OwnedObjectSummary = struct {
         if (self.digest) |value| allocator.free(value);
         if (self.type_name) |value| allocator.free(value);
         if (self.owner_value) |value| allocator.free(value);
+        if (self.shared_object_input_select_token) |value| allocator.free(value);
+        if (self.mutable_shared_object_input_select_token) |value| allocator.free(value);
+        if (self.imm_or_owned_object_input_select_token) |value| allocator.free(value);
+        if (self.receiving_object_input_select_token) |value| allocator.free(value);
         if (self.previous_transaction) |value| allocator.free(value);
         if (self.error_code) |value| allocator.free(value);
     }
