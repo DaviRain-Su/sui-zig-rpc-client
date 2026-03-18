@@ -654,9 +654,11 @@ pub fn main() !void {
 - `version`: 打印版本
 - `rpc <method> [params-json]`: 发送任意 Sui JSON-RPC 方法。
 - `tx simulate [params-json]`: 调用 `sui_devInspectTransactionBlock`。
+- `tx dry-run [tx-bytes|@file]`: 调用 `sui_dryRunTransactionBlock`。
 - `tx send [params-json]`: 调用 `sui_executeTransactionBlock`。
 - `tx payload`: 通过 CLI 参数构造 `sui_executeTransactionBlock` 的 params
 - `tx payload --summarize`: 输出 execute payload 的结构化 artifact summary
+- `tx dry-run --summarize`: 输出 dry-run 的结构化 execution summary
 - `tx send --tx-bytes ... --signature ...`: 使用签名+tx bytes 直接调用 `sui_executeTransactionBlock`
 - `tx send --from-keystore`: 当未提供 `--signature` 时，自动追加 `SUI_KEYSTORE` 中首条 key 作为签名参数
 - `tx send/payload --signer`: 按 keystore 记录中的 `alias/address/key` 选择 signer 并追加签名（配合 `--from-keystore`）
@@ -753,6 +755,30 @@ pub fn main() !void {
 - `--signer <alias|address|key>`（可选）：与 `--sender` 互补；未提供 sender 时用于推断 sender
 - `--gas-budget <uint64>`（可选）
 - `--gas-price <uint64>`（可选）
+
+`tx dry-run` 常用参数：
+- `--tx-bytes <base64|@file>`（可选）：已构造好的 tx bytes
+- `--package <package-id-or-alias>` / `--module` / `--function`
+- `--type-args <json array|@file>` / `--args <json array|@file>`
+- `--commands <json-array|@file>`
+- `--sender <address|selector>` / `--signer <alias|address|key>` / `--from-keystore`
+- `--gas-budget <uint64>` / `--gas-price <uint64>`
+- `--gas-payment <json|@file>` / `--auto-gas-payment`
+
+例如：
+
+```bash
+zig build run -- tx dry-run \
+  --package cetus_clmm_mainnet \
+  --module pool \
+  --function swap \
+  --args '[...]' \
+  --sender 0x... \
+  --gas-budget 100000000 \
+  --gas-price 1000 \
+  --gas-payment @gas-payment.json \
+  --summarize
+```
 
 参数 JSON 可以直接内联传入，也可用 `@path/to/file.json` 方式加载。
 

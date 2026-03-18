@@ -634,6 +634,21 @@ pub fn buildExecutePayload(
     return out.toOwnedSlice(allocator);
 }
 
+pub fn buildDryRunPayload(
+    allocator: std.mem.Allocator,
+    tx_bytes: []const u8,
+) ![]u8 {
+    var out = std.ArrayList(u8){};
+    errdefer out.deinit(allocator);
+    var writer = out.writer(allocator);
+
+    try writer.writeAll("[");
+    try writer.print("{f}", .{std.json.fmt(tx_bytes, .{})});
+    try writer.writeAll("]");
+
+    return out.toOwnedSlice(allocator);
+}
+
 pub fn buildProgrammaticTxExecutePayload(
     allocator: std.mem.Allocator,
     commands_json: []const u8,
@@ -1068,6 +1083,19 @@ test "ProgrammaticTxContext builds inspect and execute payloads" {
     defer execute.deinit();
     try testing.expect(execute.value == .array);
     try testing.expectEqual(@as(usize, 3), execute.value.array.items.len);
+}
+
+test "buildDryRunPayload wraps tx bytes in a single-parameter array" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const payload = try buildDryRunPayload(allocator, "base64-tx-bytes");
+    defer allocator.free(payload);
+
+    try testing.expectEqualStrings("[\"base64-tx-bytes\"]", payload);
 }
 
 test "prepareRequest normalizes commands and owns request fields" {

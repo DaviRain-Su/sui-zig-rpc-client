@@ -47,6 +47,29 @@ fn sendExecuteAndMaybeWaitForConfirmation(
     try printResponse(allocator, writer, response, args.pretty);
 }
 
+fn sendDryRunAndMaybeSummarize(
+    allocator: std.mem.Allocator,
+    rpc: *client.SuiRpcClient,
+    args: *const cli.ParsedArgs,
+    tx_bytes: []const u8,
+    writer: anytype,
+) !void {
+    const payload = try tx_builder.buildDryRunPayload(allocator, tx_bytes);
+    defer allocator.free(payload);
+
+    const response = try rpc.sendTxDryRun(payload);
+    defer rpc.allocator.free(response);
+
+    if (args.tx_send_summarize) {
+        var insights = try rpc.summarizeExecutionResponse(allocator, response);
+        defer insights.deinit(allocator);
+        try printStructuredJson(writer, insights, args.pretty);
+        return;
+    }
+
+    try printResponse(allocator, writer, response, args.pretty);
+}
+
 fn printResponse(allocator: std.mem.Allocator, writer: anytype, response: []const u8, pretty: bool) !void {
     if (!pretty) {
         try writer.print("{s}\n", .{response});
@@ -723,6 +746,29 @@ fn buildUnsafeCommandSourceExecutePayload(
     );
 }
 
+fn buildUnsafeCommandSourceTxBytes(
+    allocator: std.mem.Allocator,
+    rpc: *client.SuiRpcClient,
+    args: *const cli.ParsedArgs,
+) ![]u8 {
+    const sender = try resolvedUnsafeMoveCallSender(allocator, rpc, args) orelse return error.InvalidCli;
+    defer allocator.free(sender);
+
+    var owned_source = try resolvedUnsafeCommandSource(allocator, rpc, args, sender);
+    defer owned_source.deinit(allocator);
+
+    const gas_object_id = try resolvedUnsafeMoveCallGasObjectId(allocator, rpc, args, sender);
+    defer if (gas_object_id) |value| allocator.free(value);
+
+    return try rpc.buildCommandSourceTxBytes(
+        allocator,
+        sender,
+        owned_source.source,
+        gas_object_id,
+        args.tx_build_gas_budget orelse return error.InvalidCli,
+    );
+}
+
 fn buildLocalCommandSourceExecutePayload(
     allocator: std.mem.Allocator,
     rpc: *client.SuiRpcClient,
@@ -785,6 +831,34 @@ fn buildLocalCommandSourceExecutePayload(
             .from_keystore = args.from_keystore,
             .infer_sender_from_signers = true,
         },
+    );
+}
+
+fn buildLocalCommandSourceTxBytes(
+    allocator: std.mem.Allocator,
+    rpc: *client.SuiRpcClient,
+    args: *const cli.ParsedArgs,
+    provider: ?client.tx_request_builder.AccountProvider,
+) !?[]u8 {
+    var local = try ownLocalCommandSourceBuildContext(
+        allocator,
+        rpc,
+        args,
+        provider,
+        false,
+        true,
+        false,
+    ) orelse return null;
+    defer local.deinit(allocator);
+
+    return try rpc.buildLocalProgrammableTransactionTxBytesFromCommandSource(
+        allocator,
+        local.source,
+        local.sender,
+        local.gas_payment_json,
+        local.gas_price,
+        local.gas_budget,
+        null,
     );
 }
 
@@ -2242,6 +2316,24 @@ pub fn runCommandWithProgrammaticProvider(
             } else {
                 try printResponse(allocator, writer, response, args.pretty);
             }
+        },
+        .tx_dry_run => {
+            if (cli.supportsProgrammableInput(args)) {
+                if (args.tx_bytes != null) return error.InvalidCli;
+                if (try buildLocalCommandSourceTxBytes(allocator, rpc, args, effective_programmatic_provider)) |tx_bytes| {
+                    defer allocator.free(tx_bytes);
+                    try sendDryRunAndMaybeSummarize(allocator, rpc, args, tx_bytes, writer);
+                    return;
+                }
+
+                const tx_bytes = try buildUnsafeCommandSourceTxBytes(allocator, rpc, args);
+                defer allocator.free(tx_bytes);
+                try sendDryRunAndMaybeSummarize(allocator, rpc, args, tx_bytes, writer);
+                return;
+            }
+
+            const tx_bytes = args.tx_bytes orelse return error.InvalidCli;
+            try sendDryRunAndMaybeSummarize(allocator, rpc, args, tx_bytes, writer);
         },
         .tx_payload => {
             const signatures = if (args.signatures.items.len > 0) args.signatures.items else &.{};
@@ -8273,6 +8365,173 @@ test "runCommand tx_simulate with --summarize prints structured inspect summarie
     try testing.expectEqualStrings("success", parsed.value.object.get("status").?.string);
     try testing.expectEqual(@as(i64, 2), parsed.value.object.get("results_count").?.integer);
     try testing.expectEqual(@as(i64, 1), parsed.value.object.get("events_count").?.integer);
+}
+
+test "runCommand tx_dry_run tx-bytes sends dry-run request" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var method_ok = false;
+    var params_ok = false;
+
+    const MockContext = struct {
+        method_ok: *bool,
+        params_ok: *bool,
+    };
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const ctx = @as(*MockContext, @ptrCast(@alignCast(context)));
+            ctx.method_ok.* = std.mem.eql(u8, req.method, "sui_dryRunTransactionBlock");
+            ctx.params_ok.* = std.mem.eql(u8, req.params_json, "[\"AAAA\"]");
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"effects\":{\"status\":{\"status\":\"success\"}},\"balanceChanges\":[]}}",
+            );
+        }
+    }.call;
+
+    var args = cli.ParsedArgs{
+        .command = .tx_dry_run,
+        .has_command = true,
+        .tx_bytes = "AAAA",
+    };
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    var ctx = MockContext{
+        .method_ok = &method_ok,
+        .params_ok = &params_ok,
+    };
+    rpc.request_sender = .{
+        .context = &ctx,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    try testing.expect(method_ok);
+    try testing.expect(params_ok);
+}
+
+test "runCommand tx_dry_run with --summarize prints structured execution summaries" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            std.debug.assert(std.mem.eql(u8, req.method, "sui_dryRunTransactionBlock"));
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"effects\":{\"status\":{\"status\":\"success\"},\"gasUsed\":{\"computationCost\":\"5\",\"storageCost\":\"2\",\"storageRebate\":\"1\"}},\"balanceChanges\":[{\"owner\":{\"AddressOwner\":\"0xabc\"},\"coinType\":\"0x2::sui::SUI\",\"amount\":\"-6\"}]}}",
+            );
+        }
+    }.call;
+
+    var args = cli.ParsedArgs{
+        .command = .tx_dry_run,
+        .has_command = true,
+        .tx_bytes = "AAAA",
+        .tx_send_summarize = true,
+    };
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    try testing.expectEqualStrings("success", parsed.value.object.get("status").?.string);
+    try testing.expect(parsed.value.object.get("gas_summary") != null);
+    try testing.expect(parsed.value.object.get("balance_changes") != null);
+}
+
+test "runCommand tx_dry_run move-call with explicit gas metadata uses local programmable builder path" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const Counts = struct {
+        normalized: usize = 0,
+        dry_run: usize = 0,
+        unsafe: usize = 0,
+    };
+    var counts = Counts{};
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const state = @as(*Counts, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                state.normalized += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"parameters\":[\"U64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\"}}}]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_dryRunTransactionBlock")) {
+                state.dry_run += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"effects\":{\"status\":{\"status\":\"success\"}},\"balanceChanges\":[]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall") or std.mem.eql(u8, req.method, "unsafe_batchTransaction")) {
+                state.unsafe += 1;
+                return alloc.dupe(u8, "{\"result\":{\"txBytes\":\"AQIDBA==\"}}");
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+
+    var args = cli.ParsedArgs{
+        .command = .tx_dry_run,
+        .has_command = true,
+        .tx_build_package = "0x2",
+        .tx_build_module = "counter",
+        .tx_build_function = "increment",
+        .tx_build_type_args = "[]",
+        .tx_build_args = "[7]",
+        .tx_build_sender = "0x123",
+        .tx_build_gas_budget = 1200,
+        .tx_build_gas_price = 8,
+        .tx_build_gas_payment = "[{\"objectId\":\"0x999\",\"version\":\"3\",\"digest\":\"0x3333333333333333333333333333333333333333333333333333333333333333\"}]",
+        .tx_send_summarize = true,
+    };
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = &counts,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    try testing.expectEqual(@as(usize, 1), counts.normalized);
+    try testing.expectEqual(@as(usize, 1), counts.dry_run);
+    try testing.expectEqual(@as(usize, 0), counts.unsafe);
 }
 
 test "runCommand tx_status with --summarize prints structured summaries" {

@@ -2016,6 +2016,10 @@ pub const SuiRpcClient = struct {
         return try self.call("sui_devInspectTransactionBlock", params_json);
     }
 
+    pub fn sendTxDryRun(self: *SuiRpcClient, params_json: []const u8) ![]u8 {
+        return try self.call("sui_dryRunTransactionBlock", params_json);
+    }
+
     pub fn sendTxExecute(self: *SuiRpcClient, params_json: []const u8) ![]u8 {
         return try self.call("sui_executeTransactionBlock", params_json);
     }

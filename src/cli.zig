@@ -20,6 +20,7 @@ pub const Command = enum {
     object_dynamic_fields,
     object_dynamic_field_object,
     tx_simulate,
+    tx_dry_run,
     tx_build,
     tx_send,
     tx_payload,
@@ -1856,6 +1857,21 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
                     }
                     continue;
                 }
+                if (std.mem.eql(u8, sub, "dry-run") or std.mem.eql(u8, sub, "dry_run") or std.mem.eql(u8, sub, "dryrun")) {
+                    parsed.command = .tx_dry_run;
+                    parsed.has_command = true;
+                    i += 2;
+                    if (i < args.len and !std.mem.startsWith(u8, args[i], "--")) {
+                        try setOptionalFileBackedArg(
+                            allocator,
+                            &parsed.owned_tx_bytes,
+                            &parsed.tx_bytes,
+                            args[i],
+                        );
+                        i += 1;
+                    }
+                    continue;
+                }
                 if (std.mem.eql(u8, sub, "send")) {
                     parsed.command = .tx_send;
                     parsed.has_command = true;
@@ -2210,6 +2226,174 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
                 const raw_params = args[i + 1];
                 try setOptionalStringArg(allocator, &parsed, raw_params, &parsed.owned_params, &parsed.params);
                 i += 2;
+                continue;
+            }
+            return error.InvalidCli;
+        }
+
+        if (parsed.command == .tx_dry_run) {
+            try maybeFlushPendingTypedCommand(allocator, &parsed, &pending_typed_command, &command_aliases, token);
+            if (std.mem.eql(u8, token, "--summarize") or std.mem.eql(u8, token, "--summary")) {
+                parsed.tx_send_summarize = true;
+                i += 1;
+                continue;
+            }
+            if (std.mem.eql(u8, token, "--package")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                try setOptionalPackageArg(
+                    allocator,
+                    &parsed,
+                    args[i + 1],
+                    &parsed.owned_tx_build_package,
+                    &parsed.tx_build_package,
+                );
+                i += 2;
+                continue;
+            }
+            if (std.mem.eql(u8, token, "--module")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                try setOptionalStringArg(
+                    allocator,
+                    &parsed,
+                    args[i + 1],
+                    &parsed.owned_tx_build_module,
+                    &parsed.tx_build_module,
+                );
+                i += 2;
+                continue;
+            }
+            if (std.mem.eql(u8, token, "--function")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                try setOptionalStringArg(
+                    allocator,
+                    &parsed,
+                    args[i + 1],
+                    &parsed.owned_tx_build_function,
+                    &parsed.tx_build_function,
+                );
+                i += 2;
+                continue;
+            }
+            if (std.mem.eql(u8, token, "--type-args")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                try setOptionalStringArg(
+                    allocator,
+                    &parsed,
+                    args[i + 1],
+                    &parsed.owned_tx_build_type_args,
+                    &parsed.tx_build_type_args,
+                );
+                i += 2;
+                continue;
+            }
+            if (std.mem.eql(u8, token, "--type-arg")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                try appendRepeatedLoadedValue(
+                    allocator,
+                    &parsed.tx_build_type_arg_items,
+                    &parsed.owned_tx_build_type_arg_items,
+                    args[i + 1],
+                );
+                i += 2;
+                continue;
+            }
+            if (std.mem.eql(u8, token, "--args")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                try setOptionalStringArg(
+                    allocator,
+                    &parsed,
+                    args[i + 1],
+                    &parsed.owned_tx_build_args,
+                    &parsed.tx_build_args,
+                );
+                i += 2;
+                continue;
+            }
+            if (std.mem.eql(u8, token, "--arg")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                try appendRepeatedLoadedValue(
+                    allocator,
+                    &parsed.tx_build_arg_items,
+                    &parsed.owned_tx_build_arg_items,
+                    args[i + 1],
+                );
+                i += 2;
+                continue;
+            }
+            if (std.mem.eql(u8, token, "--tx-bytes")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                try setOptionalFileBackedArg(allocator, &parsed.owned_tx_bytes, &parsed.tx_bytes, args[i + 1]);
+                i += 2;
+                continue;
+            }
+            if (std.mem.eql(u8, token, "--commands")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                try appendCommandValue(allocator, &parsed, &command_aliases, args[i + 1]);
+                i += 2;
+                continue;
+            }
+            if (std.mem.eql(u8, token, "--command")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                try appendCommandValue(allocator, &parsed, &command_aliases, args[i + 1]);
+                i += 2;
+                continue;
+            }
+            if (try tryParseAssignOption(allocator, &parsed, args, &i, &command_aliases)) {
+                continue;
+            }
+            if (try tryParseTypedCommandOption(allocator, &parsed, args, &i, &pending_typed_command, &command_aliases)) {
+                continue;
+            }
+            if (std.mem.eql(u8, token, "--sender")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                try setOptionalStringArg(
+                    allocator,
+                    &parsed,
+                    args[i + 1],
+                    &parsed.owned_tx_build_sender,
+                    &parsed.tx_build_sender,
+                );
+                i += 2;
+                continue;
+            }
+            if (std.mem.eql(u8, token, "--gas-budget")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                parsed.tx_build_gas_budget = try parseIntValue(args[i + 1]);
+                i += 2;
+                continue;
+            }
+            if (std.mem.eql(u8, token, "--gas-price")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                parsed.tx_build_gas_price = try parseIntValue(args[i + 1]);
+                i += 2;
+                continue;
+            }
+            if (std.mem.eql(u8, token, "--gas-payment")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                try setOptionalFileBackedArg(allocator, &parsed.owned_tx_build_gas_payment, &parsed.tx_build_gas_payment, args[i + 1]);
+                i += 2;
+                continue;
+            }
+            if (std.mem.eql(u8, token, "--auto-gas-payment")) {
+                parsed.tx_build_auto_gas_payment = true;
+                i += 1;
+                continue;
+            }
+            if (std.mem.eql(u8, token, "--gas-payment-min-balance")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                parsed.tx_build_gas_payment_min_balance = try parseIntValue(args[i + 1]);
+                i += 2;
+                continue;
+            }
+            if (std.mem.eql(u8, token, "--signer")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                try appendSignerValue(allocator, &parsed, args[i + 1]);
+                i += 2;
+                continue;
+            }
+            if (std.mem.eql(u8, token, "--from-keystore")) {
+                parsed.from_keystore = true;
+                i += 1;
                 continue;
             }
             return error.InvalidCli;
@@ -3123,6 +3307,18 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
         try validateProgrammaticTxInput(&parsed);
     }
 
+    if (parsed.command == .tx_dry_run) {
+        if (parsed.tx_build_auto_gas_payment and parsed.tx_build_gas_payment != null) return error.InvalidCli;
+        if (parsed.tx_build_gas_payment_min_balance != null and !parsed.tx_build_auto_gas_payment) return error.InvalidCli;
+        if (parsed.tx_bytes == null and !hasProgrammaticTxInput(&parsed)) {
+            return error.InvalidCli;
+        }
+        if (hasProgrammaticTxContext(&parsed) and !hasProgrammaticTxInput(&parsed)) return error.InvalidCli;
+        if (parsed.tx_bytes != null and hasProgrammaticTxInput(&parsed)) return error.InvalidCli;
+        if (parsed.tx_bytes != null and (parsed.signers.items.len != 0 or parsed.from_keystore)) return error.InvalidCli;
+        try validateProgrammaticTxInput(&parsed);
+    }
+
     if (parsed.command == .tx_send) {
         if (parsed.tx_build_auto_gas_payment and parsed.tx_build_gas_payment != null) return error.InvalidCli;
         if (parsed.tx_build_gas_payment_min_balance != null and !parsed.tx_build_auto_gas_payment) return error.InvalidCli;
@@ -3319,6 +3515,38 @@ pub fn printUsage(writer: anytype) !void {
         "    --gas-price <gas>                  Optional gas price\n" ++
         "    --signer <name|address|key>         Optional signer selector/index; first address-compatible signer is used as sender\n" ++
         "    --options <json|@file>              optional inspect options\n" ++
+        "  tx dry-run [tx-bytes|@file]          Call sui_dryRunTransactionBlock\n" ++
+        "    --tx-bytes <base64|@file>           Prebuilt tx bytes for dry-run\n" ++
+        "    --package <package-id-or-alias>     Move package id\n" ++
+        "    --module <module-name>              Move module name\n" ++
+        "    --function <function-name>          Move function name\n" ++
+        "    --type-args <json|@file>            Optional JSON array\n" ++
+        "    --type-arg <type>                   Repeatable Move type argument\n" ++
+        "    --args <json|@file>                 Optional JSON array\n" ++
+        "    --arg <json|bare|@file>             Repeatable Move argument; bare values become JSON strings\n" ++
+        "    --commands <json-array|@file>        JSON array for programmable transaction commands\n" ++
+        "    --command <json-array|json-object|@file> (repeatable) command fragment\n" ++
+        "    --move-call <package> <module> <function> [<type-args-json|@file> <args-json|@file>]\n" ++
+        "    --move-call-type-arg <type>         Repeatable typed command MoveCall type argument\n" ++
+        "    --move-call-arg <json|bare|@file>   Repeatable typed command MoveCall argument\n" ++
+        "    --transfer-objects [<objects-json|@file> <address-json|@file>] append TransferObjects command\n" ++
+        "    --transfer-object <json|bare|@file> repeatable TransferObjects input object\n" ++
+        "    --transfer-address <json|bare|@file> TransferObjects destination value\n" ++
+        "    --split-coins [<coin-json|@file> <amounts-json|@file>]        append SplitCoins command\n" ++
+        "    --split-coin <json|bare|@file>     SplitCoins source coin value\n" ++
+        "    --split-amount <json|bare|@file>   repeatable SplitCoins amount\n" ++
+        "    --merge-coins [<destination-json|@file> <sources-json|@file>] append MergeCoins command\n" ++
+        "    --merge-destination <json|bare|@file> MergeCoins destination value\n" ++
+        "    --merge-source <json|bare|@file>   repeatable MergeCoins source\n" ++
+        "    --sender <address|selector>         Optional sender address or keystore selector/index\n" ++
+        "    --signer <name|address|key>         Optional signer selector/index; first address-compatible signer is used as sender\n" ++
+        "    --from-keystore                     Infer sender from the first default keystore entry when needed\n" ++
+        "    --gas-budget <gas>                  Optional gas budget\n" ++
+        "    --gas-price <gas>                   Optional gas price\n" ++
+        "    --gas-payment <json|@file>          Optional gas payment JSON\n" ++
+        "    --auto-gas-payment                  Select gas payment automatically\n" ++
+        "    --gas-payment-min-balance <amount>  Minimum balance for auto gas selection\n" ++
+        "    --summarize                         Print structured dry-run summary instead of raw response\n" ++
         "  tx send [params-json]                Call sui_executeTransactionBlock\n" ++
         "    --package <package-id-or-alias>     Move package id\n" ++
         "    --module <module-name>              Move module name\n" ++
@@ -4656,6 +4884,96 @@ test "parseCliArgs parses tx_simulate summarize flag" {
 
     try testing.expectEqual(Command.tx_simulate, parsed.command);
     try testing.expect(parsed.tx_send_summarize);
+}
+
+test "parseCliArgs parses tx_dry_run tx-bytes mode" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "tx",
+        "dry-run",
+        "AAAA",
+        "--summarize",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.tx_dry_run, parsed.command);
+    try testing.expectEqualStrings("AAAA", parsed.tx_bytes.?);
+    try testing.expect(parsed.tx_send_summarize);
+}
+
+test "parseCliArgs parses tx_dry_run programmable build context" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "tx",
+        "dry-run",
+        "--package",
+        "cetus_clmm_mainnet",
+        "--module",
+        "pool",
+        "--function",
+        "swap",
+        "--gas-budget",
+        "1200",
+        "--auto-gas-payment",
+        "--signer",
+        "main",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.tx_dry_run, parsed.command);
+    try testing.expectEqualStrings(package_preset.cetus_clmm_mainnet, parsed.tx_build_package.?);
+    try testing.expectEqualStrings("pool", parsed.tx_build_module.?);
+    try testing.expectEqualStrings("swap", parsed.tx_build_function.?);
+    try testing.expectEqual(@as(?u64, 1200), parsed.tx_build_gas_budget);
+    try testing.expect(parsed.tx_build_auto_gas_payment);
+    try testing.expectEqual(@as(usize, 1), parsed.signers.items.len);
+}
+
+test "parseCliArgs rejects tx_dry_run tx-bytes mixed with move-call args" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    try testing.expectError(error.InvalidCli, parseCliArgs(allocator, &.{
+        "tx",
+        "dry-run",
+        "--tx-bytes",
+        "AAAA",
+        "--package",
+        "0x2",
+        "--module",
+        "counter",
+        "--function",
+        "increment",
+    }));
+}
+
+test "parseCliArgs rejects tx_dry_run tx-bytes mixed with signer sources" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    try testing.expectError(error.InvalidCli, parseCliArgs(allocator, &.{
+        "tx",
+        "dry-run",
+        "--tx-bytes",
+        "AAAA",
+        "--from-keystore",
+    }));
 }
 
 test "parseCliArgs parses tx_payload summarize flag" {
