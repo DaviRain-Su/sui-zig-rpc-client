@@ -12,6 +12,7 @@ pub const tx_result = @import("./tx_result.zig");
 pub const inspect_result = @import("./inspect_result.zig");
 pub const artifact_result = @import("./artifact_result.zig");
 pub const object_result = @import("./object_result.zig");
+pub const event_result = @import("./event_result.zig");
 pub const owned_object_result = @import("./owned_object_result.zig");
 pub const dynamic_field_result = @import("./dynamic_field_result.zig");
 pub const coin_result = @import("./coin_result.zig");

@@ -10,6 +10,7 @@ const inspect_result = @import("../../inspect_result.zig");
 const tx_result = @import("../../tx_result.zig");
 const artifact_result = @import("../../artifact_result.zig");
 const object_result = @import("../../object_result.zig");
+const event_result = @import("../../event_result.zig");
 const owned_object_result = @import("../../owned_object_result.zig");
 const dynamic_field_result = @import("../../dynamic_field_result.zig");
 const coin_result = @import("../../coin_result.zig");
@@ -1677,6 +1678,35 @@ pub const ResourceDiscoveryQuery = struct {
     owned_objects: ?OwnedObjectsQuery = null,
 };
 
+pub const EventFilter = union(enum) {
+    none,
+    json: []const u8,
+    move_module: struct {
+        package: []const u8,
+        module: []const u8,
+    },
+    move_event_type: []const u8,
+    sender: []const u8,
+    transaction: []const u8,
+};
+
+pub const EventPageRequest = struct {
+    filter: EventFilter = .none,
+    cursor_tx_digest: ?[]const u8 = null,
+    cursor_event_seq: ?u64 = null,
+    limit: ?u64 = null,
+    descending_order: bool = false,
+};
+
+pub const EventQuery = union(enum) {
+    page: struct {
+        request: EventPageRequest = .{},
+    },
+    all: struct {
+        request: EventPageRequest = .{},
+    },
+};
+
 pub const MoveQuery = union(enum) {
     function: struct {
         package_id: []const u8,
@@ -1737,6 +1767,18 @@ pub const ResourceQuerySummary = union(enum) {
         switch (self.*) {
             .coins => |*value| value.deinit(allocator),
             .owned_objects => |*value| value.deinit(allocator),
+        }
+    }
+};
+
+pub const EventQueryActionResult = union(enum) {
+    raw: []u8,
+    summarized: event_result.OwnedEventPage,
+
+    pub fn deinit(self: *EventQueryActionResult, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .raw => |value| allocator.free(value),
+            .summarized => |*value| value.deinit(allocator),
         }
     }
 };
@@ -1843,6 +1885,7 @@ pub const ReadQuery = union(enum) {
     resources: ResourceDiscoveryQuery,
     coins: CoinQuery,
     owned_objects: OwnedObjectsQuery,
+    events: EventQuery,
     object: ObjectQuery,
     move: MoveQuery,
     transaction_status: struct {
@@ -1873,6 +1916,7 @@ pub const ReadQuerySummary = union(enum) {
     resources: ResourceDiscoverySummary,
     coins: coin_result.OwnedCoinPage,
     owned_objects: owned_object_result.OwnedObjectPage,
+    events: event_result.OwnedEventPage,
     object: ObjectQuerySummary,
     move: MoveQuerySummary,
     transaction: tx_result.OwnedExecutionInsights,
@@ -1883,6 +1927,7 @@ pub const ReadQuerySummary = union(enum) {
             .resources => |*value| value.deinit(allocator),
             .coins => |*value| value.deinit(allocator),
             .owned_objects => |*value| value.deinit(allocator),
+            .events => |*value| value.deinit(allocator),
             .object => |*value| value.deinit(allocator),
             .move => |*value| value.deinit(allocator),
             .transaction => |*value| value.deinit(allocator),
@@ -7932,7 +7977,7 @@ pub const SuiRpcClient = struct {
         return try self.getCoins(owner, request.coin_type, request.cursor, request.limit);
     }
 
-    fn buildOwnedObjectsFilterJson(
+fn buildOwnedObjectsFilterJson(
         allocator: std.mem.Allocator,
         filter: OwnedObjectsFilter,
     ) !?[]u8 {
@@ -7960,6 +8005,55 @@ pub const SuiRpcClient = struct {
                 .{ std.json.fmt(value.package, .{}), std.json.fmt(value.module, .{}) },
             ),
         };
+    }
+
+    fn buildEventFilterJson(
+        allocator: std.mem.Allocator,
+        filter: EventFilter,
+    ) !?[]u8 {
+        return switch (filter) {
+            .none => null,
+            .json => |value| try allocator.dupe(u8, value),
+            .move_module => |value| try std.fmt.allocPrint(
+                allocator,
+                "{{\"MoveModule\":{{\"package\":{f},\"module\":{f}}}}}",
+                .{ std.json.fmt(value.package, .{}), std.json.fmt(value.module, .{}) },
+            ),
+            .move_event_type => |value| try std.fmt.allocPrint(
+                allocator,
+                "{{\"MoveEventType\":{f}}}",
+                .{std.json.fmt(value, .{})},
+            ),
+            .sender => |value| try std.fmt.allocPrint(
+                allocator,
+                "{{\"Sender\":{f}}}",
+                .{std.json.fmt(value, .{})},
+            ),
+            .transaction => |value| try std.fmt.allocPrint(
+                allocator,
+                "{{\"Transaction\":{f}}}",
+                .{std.json.fmt(value, .{})},
+            ),
+        };
+    }
+
+    fn buildEventCursorJson(
+        allocator: std.mem.Allocator,
+        tx_digest: ?[]const u8,
+        event_seq: ?u64,
+    ) !?[]u8 {
+        const resolved_tx_digest = tx_digest orelse return null;
+        const resolved_event_seq = event_seq orelse return null;
+        const event_seq_string = try std.fmt.allocPrint(allocator, "{d}", .{resolved_event_seq});
+        defer allocator.free(event_seq_string);
+        return try std.fmt.allocPrint(
+            allocator,
+            "{{\"txDigest\":{f},\"eventSeq\":{f}}}",
+            .{
+                std.json.fmt(resolved_tx_digest, .{}),
+                std.json.fmt(event_seq_string, .{}),
+            },
+        );
     }
 
     fn buildOwnedObjectsQueryJson(
@@ -8085,6 +8179,51 @@ pub const SuiRpcClient = struct {
         try writer.writeAll("]");
 
         return try self.call("suix_getOwnedObjects", out.items);
+    }
+
+    pub fn getEventsWithRequest(
+        self: *SuiRpcClient,
+        request: EventPageRequest,
+    ) ![]u8 {
+        const filter_json = try buildEventFilterJson(self.allocator, request.filter);
+        defer if (filter_json) |value| self.allocator.free(value);
+
+        const cursor_json = if (request.cursor_tx_digest != null or request.cursor_event_seq != null)
+            if (request.cursor_tx_digest == null or request.cursor_event_seq == null)
+                return error.InvalidCli
+            else
+                try buildEventCursorJson(self.allocator, request.cursor_tx_digest, request.cursor_event_seq)
+        else
+            null;
+        defer if (cursor_json) |value| self.allocator.free(value);
+
+        var out = std.ArrayList(u8){};
+        defer out.deinit(self.allocator);
+
+        const writer = out.writer(self.allocator);
+        try writer.writeAll("[");
+        if (filter_json) |value| {
+            try writer.writeAll(value);
+        } else {
+            try writer.writeAll("null");
+        }
+        try writer.writeAll(",");
+        if (cursor_json) |value| {
+            try writer.writeAll(value);
+        } else {
+            try writer.writeAll("null");
+        }
+        try writer.writeAll(",");
+        if (request.limit) |value| {
+            try writer.print("{d}", .{value});
+        } else {
+            try writer.writeAll("null");
+        }
+        try writer.writeAll(",");
+        try writer.print("{}", .{request.descending_order});
+        try writer.writeAll("]");
+
+        return try self.call("suix_queryEvents", out.items);
     }
 
     pub fn getDynamicFieldObject(
@@ -11399,6 +11538,73 @@ pub const SuiRpcClient = struct {
         return try self.summarizeObjectResponse(allocator, response);
     }
 
+    pub fn summarizeEventsResponse(
+        self: *const SuiRpcClient,
+        allocator: std.mem.Allocator,
+        response_json: []const u8,
+    ) !event_result.OwnedEventPage {
+        _ = self;
+        return try event_result.extractEventPage(allocator, response_json);
+    }
+
+    pub fn getEventsPageWithRequest(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        request: EventPageRequest,
+    ) !event_result.OwnedEventPage {
+        const response = try self.getEventsWithRequest(request);
+        defer allocator.free(response);
+        return try self.summarizeEventsResponse(allocator, response);
+    }
+
+    pub fn getAllEventsWithRequest(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        request: EventPageRequest,
+    ) !event_result.OwnedEventPage {
+        var collected = std.ArrayList(event_result.OwnedEventEntry).empty;
+        errdefer {
+            for (collected.items) |*entry| entry.deinit(allocator);
+            collected.deinit(allocator);
+        }
+
+        var cursor_tx_digest_owned: ?[]u8 = if (request.cursor_tx_digest) |value| try allocator.dupe(u8, value) else null;
+        defer if (cursor_tx_digest_owned) |value| allocator.free(value);
+        var cursor_event_seq = request.cursor_event_seq;
+
+        while (true) {
+            var page = try self.getEventsPageWithRequest(
+                allocator,
+                .{
+                    .filter = request.filter,
+                    .cursor_tx_digest = if (cursor_tx_digest_owned) |value| value else null,
+                    .cursor_event_seq = cursor_event_seq,
+                    .limit = request.limit,
+                    .descending_order = request.descending_order,
+                },
+            );
+            defer page.deinit(allocator);
+
+            for (page.entries) |entry| {
+                try collected.append(allocator, try entry.clone(allocator));
+            }
+
+            if (!page.has_next_page) break;
+            const next_tx_digest = page.next_cursor_tx_digest orelse return error.InvalidResponse;
+            const next_event_seq = page.next_cursor_event_seq orelse return error.InvalidResponse;
+            if (cursor_tx_digest_owned) |value| allocator.free(value);
+            cursor_tx_digest_owned = try allocator.dupe(u8, next_tx_digest);
+            cursor_event_seq = next_event_seq;
+        }
+
+        return .{
+            .entries = try collected.toOwnedSlice(allocator),
+            .next_cursor_tx_digest = null,
+            .next_cursor_event_seq = null,
+            .has_next_page = false,
+        };
+    }
+
     pub fn runObjectQuery(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
@@ -13390,6 +13596,48 @@ pub const SuiRpcClient = struct {
         };
     }
 
+    pub fn runEventQuery(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        query: EventQuery,
+    ) ![]u8 {
+        return switch (query) {
+            .page => |spec| try dupeOwnedJsonResponse(
+                self.allocator,
+                allocator,
+                try self.getEventsWithRequest(spec.request),
+            ),
+            .all => |spec| blk: {
+                var page = try self.getAllEventsWithRequest(allocator, spec.request);
+                defer page.deinit(allocator);
+                break :blk try std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(page, .{})});
+            },
+        };
+    }
+
+    pub fn runEventQueryAndSummarize(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        query: EventQuery,
+    ) !event_result.OwnedEventPage {
+        return switch (query) {
+            .page => |spec| try self.getEventsPageWithRequest(allocator, spec.request),
+            .all => |spec| try self.getAllEventsWithRequest(allocator, spec.request),
+        };
+    }
+
+    pub fn runEventQueryAction(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        query: EventQuery,
+        action: ObjectQueryAction,
+    ) !EventQueryActionResult {
+        return switch (action) {
+            .raw => .{ .raw = try self.runEventQuery(allocator, query) },
+            .summarize => .{ .summarized = try self.runEventQueryAndSummarize(allocator, query) },
+        };
+    }
+
     pub fn runResourceQuery(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
@@ -13560,6 +13808,15 @@ pub const SuiRpcClient = struct {
                             .owned_objects => |value| .{ .summarized = .{ .owned_objects = value } },
                         },
                     };
+                },
+                .observe => return error.UnsupportedQueryAction,
+            },
+            .events => |event_query| switch (action) {
+                .raw => .{ .raw = try self.runEventQuery(allocator, event_query) },
+                .summarize => .{
+                    .summarized = .{
+                        .events = try self.runEventQueryAndSummarize(allocator, event_query),
+                    },
                 },
                 .observe => return error.UnsupportedQueryAction,
             },
@@ -20699,6 +20956,120 @@ test "selectOwnedObjectByModule uses typed move-module filters" {
 
     try testing.expect(selection != null);
     try testing.expectEqualStrings("0xmodule-object", selection.?.object_id.?);
+}
+
+test "getEventsWithRequest uses typed move-module event requests" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            std.debug.assert(std.mem.eql(u8, req.method, "suix_queryEvents"));
+            std.debug.assert(std.mem.eql(
+                u8,
+                req.params_json,
+                "[{\"MoveModule\":{\"package\":\"0x2\",\"module\":\"coin\"}},null,25,true]",
+            ));
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xdigest\",\"eventSeq\":\"7\"}}],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    const response = try client_instance.getEventsWithRequest(.{
+        .filter = .{
+            .move_module = .{
+                .package = "0x2",
+                .module = "coin",
+            },
+        },
+        .limit = 25,
+        .descending_order = true,
+    });
+    defer allocator.free(response);
+
+    try testing.expect(std.mem.indexOf(u8, response, "\"eventSeq\":\"7\"") != null);
+}
+
+test "runReadQueryAction dispatches summarized event queries" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            std.debug.assert(std.mem.eql(u8, req.method, "suix_queryEvents"));
+            std.debug.assert(std.mem.eql(
+                u8,
+                req.params_json,
+                "[{\"MoveModule\":{\"package\":\"0x2\",\"module\":\"coin\"}},null,10,false]",
+            ));
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xdigest\",\"eventSeq\":\"7\"},\"packageId\":\"0x2\",\"transactionModule\":\"coin\",\"sender\":\"0xsender\",\"type\":\"0x2::coin::Minted\",\"parsedJson\":{\"amount\":\"9\"},\"timestampMs\":\"42\"}],\"nextCursor\":{\"txDigest\":\"0xnext\",\"eventSeq\":\"8\"},\"hasNextPage\":true}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var result = try client_instance.runReadQueryAction(
+        allocator,
+        .{
+            .events = .{
+                .page = .{
+                    .request = .{
+                        .filter = .{
+                            .move_module = .{
+                                .package = "0x2",
+                                .module = "coin",
+                            },
+                        },
+                        .limit = 10,
+                    },
+                },
+            },
+        },
+        .summarize,
+    );
+    defer result.deinit(allocator);
+
+    switch (result) {
+        .summarized => |summary| switch (summary) {
+            .events => |value| {
+                try testing.expectEqual(@as(usize, 1), value.entries.len);
+                try testing.expectEqualStrings("0xdigest", value.entries[0].tx_digest.?);
+                try testing.expectEqual(@as(?u64, 7), value.entries[0].event_seq);
+                try testing.expectEqualStrings("0x2", value.entries[0].package_id.?);
+                try testing.expectEqualStrings("coin", value.entries[0].transaction_module.?);
+                try testing.expectEqualStrings("0xsender", value.entries[0].sender.?);
+                try testing.expectEqualStrings("0x2::coin::Minted", value.entries[0].type_name.?);
+                try testing.expectEqualStrings("{\"amount\":\"9\"}", value.entries[0].parsed_json.?);
+                try testing.expectEqual(@as(?u64, 42), value.entries[0].timestamp_ms);
+                try testing.expectEqualStrings("0xnext", value.next_cursor_tx_digest.?);
+                try testing.expectEqual(@as(?u64, 8), value.next_cursor_event_seq);
+                try testing.expect(value.has_next_page);
+            },
+            else => return error.TestUnexpectedResult,
+        },
+        else => return error.TestUnexpectedResult,
+    }
 }
 
 test "runReadQueryAction dispatches summarized move function queries" {

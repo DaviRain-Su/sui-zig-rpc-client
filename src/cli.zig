@@ -16,6 +16,7 @@ pub const Command = enum {
     account_coins,
     account_objects,
     account_resources,
+    events,
     move_package,
     move_module,
     move_function,
@@ -70,6 +71,7 @@ pub const ParsedArgs = struct {
     account_coins_json: bool = false,
     account_objects_json: bool = false,
     account_resources_json: bool = false,
+    events_json: bool = false,
     account_selector: ?[]const u8 = null,
     account_coin_type: ?[]const u8 = null,
     account_coins_cursor: ?[]const u8 = null,
@@ -85,6 +87,17 @@ pub const ParsedArgs = struct {
     account_objects_all: bool = false,
     account_resources_limit: ?u64 = null,
     account_resources_all: bool = false,
+    event_filter: ?[]const u8 = null,
+    event_package: ?[]const u8 = null,
+    event_module: ?[]const u8 = null,
+    event_type: ?[]const u8 = null,
+    event_sender: ?[]const u8 = null,
+    event_tx_digest_filter: ?[]const u8 = null,
+    event_cursor_tx_digest: ?[]const u8 = null,
+    event_cursor_event_seq: ?u64 = null,
+    event_limit: ?u64 = null,
+    event_all: bool = false,
+    event_descending: bool = false,
     move_package: ?[]const u8 = null,
     move_module: ?[]const u8 = null,
     move_function: ?[]const u8 = null,
@@ -130,6 +143,13 @@ pub const ParsedArgs = struct {
     owned_tx_session_response: ?[]const u8 = null,
     owned_account_objects_filter: ?[]const u8 = null,
     owned_account_objects_package: ?[]const u8 = null,
+    owned_event_filter: ?[]const u8 = null,
+    owned_event_package: ?[]const u8 = null,
+    owned_event_module: ?[]const u8 = null,
+    owned_event_type: ?[]const u8 = null,
+    owned_event_sender: ?[]const u8 = null,
+    owned_event_tx_digest_filter: ?[]const u8 = null,
+    owned_event_cursor_tx_digest: ?[]const u8 = null,
     owned_move_package: ?[]const u8 = null,
     owned_move_module: ?[]const u8 = null,
     owned_move_function: ?[]const u8 = null,
@@ -168,6 +188,13 @@ pub const ParsedArgs = struct {
         if (self.owned_tx_session_response) |value| allocator.free(value);
         if (self.owned_account_objects_filter) |value| allocator.free(value);
         if (self.owned_account_objects_package) |value| allocator.free(value);
+        if (self.owned_event_filter) |value| allocator.free(value);
+        if (self.owned_event_package) |value| allocator.free(value);
+        if (self.owned_event_module) |value| allocator.free(value);
+        if (self.owned_event_type) |value| allocator.free(value);
+        if (self.owned_event_sender) |value| allocator.free(value);
+        if (self.owned_event_tx_digest_filter) |value| allocator.free(value);
+        if (self.owned_event_cursor_tx_digest) |value| allocator.free(value);
         if (self.owned_move_package) |value| allocator.free(value);
         if (self.owned_move_module) |value| allocator.free(value);
         if (self.owned_move_function) |value| allocator.free(value);
@@ -1990,6 +2017,13 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
                 return error.InvalidCli;
             }
 
+            if (std.mem.eql(u8, token, "events")) {
+                parsed.command = .events;
+                parsed.has_command = true;
+                i += 1;
+                continue;
+            }
+
             if (std.mem.eql(u8, token, "move")) {
                 if (i + 1 >= args.len) return error.InvalidCli;
                 const sub = args[i + 1];
@@ -3240,6 +3274,119 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
             }
         }
 
+        if (parsed.command == .events) {
+            if (std.mem.eql(u8, token, "--json")) {
+                parsed.events_json = true;
+                i += 1;
+                continue;
+            }
+            if (std.mem.eql(u8, token, "--filter")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                try setOptionalFileBackedArg(
+                    allocator,
+                    &parsed.owned_event_filter,
+                    &parsed.event_filter,
+                    args[i + 1],
+                );
+                i += 2;
+                continue;
+            }
+            if (std.mem.eql(u8, token, "--package")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                try setOptionalPackageArg(
+                    allocator,
+                    &parsed,
+                    args[i + 1],
+                    &parsed.owned_event_package,
+                    &parsed.event_package,
+                );
+                i += 2;
+                continue;
+            }
+            if (std.mem.eql(u8, token, "--module")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                try setOptionalStringArg(
+                    allocator,
+                    &parsed,
+                    args[i + 1],
+                    &parsed.owned_event_module,
+                    &parsed.event_module,
+                );
+                i += 2;
+                continue;
+            }
+            if (std.mem.eql(u8, token, "--event-type")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                try setOptionalStringArg(
+                    allocator,
+                    &parsed,
+                    args[i + 1],
+                    &parsed.owned_event_type,
+                    &parsed.event_type,
+                );
+                i += 2;
+                continue;
+            }
+            if (std.mem.eql(u8, token, "--sender")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                try setOptionalStringArg(
+                    allocator,
+                    &parsed,
+                    args[i + 1],
+                    &parsed.owned_event_sender,
+                    &parsed.event_sender,
+                );
+                i += 2;
+                continue;
+            }
+            if (std.mem.eql(u8, token, "--tx")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                try setOptionalStringArg(
+                    allocator,
+                    &parsed,
+                    args[i + 1],
+                    &parsed.owned_event_tx_digest_filter,
+                    &parsed.event_tx_digest_filter,
+                );
+                i += 2;
+                continue;
+            }
+            if (std.mem.eql(u8, token, "--cursor-tx")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                try setOptionalStringArg(
+                    allocator,
+                    &parsed,
+                    args[i + 1],
+                    &parsed.owned_event_cursor_tx_digest,
+                    &parsed.event_cursor_tx_digest,
+                );
+                i += 2;
+                continue;
+            }
+            if (std.mem.eql(u8, token, "--cursor-event")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                parsed.event_cursor_event_seq = try parseIntValue(args[i + 1]);
+                i += 2;
+                continue;
+            }
+            if (std.mem.eql(u8, token, "--limit")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                parsed.event_limit = try parseIntValue(args[i + 1]);
+                i += 2;
+                continue;
+            }
+            if (std.mem.eql(u8, token, "--descending")) {
+                parsed.event_descending = true;
+                i += 1;
+                continue;
+            }
+            if (std.mem.eql(u8, token, "--all")) {
+                parsed.event_all = true;
+                i += 1;
+                continue;
+            }
+        }
+
         if (parsed.command == .move_package or parsed.command == .move_module or parsed.command == .move_function) {
             if (std.mem.eql(u8, token, "--summarize") or std.mem.eql(u8, token, "--summary")) {
                 parsed.tx_send_summarize = true;
@@ -3567,6 +3714,23 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
         if (has_object_id_filter and (has_package_filter or has_module_filter)) return error.InvalidCli;
         if (has_module_filter and !has_package_filter) return error.InvalidCli;
     }
+    if (parsed.command == .events) {
+        const has_raw_filter = parsed.event_filter != null;
+        const has_module_filter = parsed.event_package != null or parsed.event_module != null;
+        const has_type_filter = parsed.event_type != null;
+        const has_sender_filter = parsed.event_sender != null;
+        const has_tx_filter = parsed.event_tx_digest_filter != null;
+        const typed_filter_count: u8 =
+            @intFromBool(has_module_filter) +
+            @intFromBool(has_type_filter) +
+            @intFromBool(has_sender_filter) +
+            @intFromBool(has_tx_filter);
+        if (has_raw_filter and typed_filter_count != 0) return error.InvalidCli;
+        if (parsed.event_module != null and parsed.event_package == null) return error.InvalidCli;
+        if (parsed.event_package != null and parsed.event_module == null) return error.InvalidCli;
+        if (typed_filter_count > 1) return error.InvalidCli;
+        if ((parsed.event_cursor_tx_digest == null) != (parsed.event_cursor_event_seq == null)) return error.InvalidCli;
+    }
     if (parsed.command == .object_dynamic_field_object) {
         if (parsed.object_parent_id == null) return error.InvalidCli;
         const has_raw_name = parsed.object_dynamic_field_name != null;
@@ -3587,6 +3751,19 @@ pub fn printUsage(writer: anytype) !void {
         "  help                                Show this help\n" ++
         "  version                             Print version\n" ++
         "  rpc <method> [params-json]          Send a raw JSON-RPC request\n" ++
+        "  events                              Call suix_queryEvents\n" ++
+        "    --filter <json|@file>               Raw event filter JSON\n" ++
+        "    --package <package-id-or-alias> --module <module>\n" ++
+        "                                       Typed MoveModule event filter\n" ++
+        "    --event-type <type>                 Typed MoveEventType filter\n" ++
+        "    --sender <address>                  Typed Sender filter\n" ++
+        "    --tx <digest>                       Typed Transaction filter\n" ++
+        "    --cursor-tx <digest> --cursor-event <seq>\n" ++
+        "                                       Pagination cursor\n" ++
+        "    --limit <n>                         Page size\n" ++
+        "    --descending                        Query newest events first\n" ++
+        "    --all                               Aggregate all pages\n" ++
+        "    --json                              Emit raw RPC JSON instead of summarized output\n" ++
         "  move package <package-id-or-alias>  Call sui_getNormalizedMoveModulesByPackage\n" ++
         "    --summarize                         Print module counts instead of raw normalized JSON\n" ++
         "  move module <package-id-or-alias> <module>\n" ++
@@ -6192,6 +6369,64 @@ test "parseCliArgs parses account resources object-id filters" {
     try testing.expectEqual(Command.account_resources, parsed.command);
     try testing.expectEqualStrings("0xobject-1", parsed.account_objects_object_id.?);
     try testing.expectEqual(@as(?u64, 25), parsed.account_resources_limit);
+}
+
+test "parseCliArgs parses events move-module command with package alias" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "events",
+        "--package",
+        "cetus_clmm_mainnet",
+        "--module",
+        "pool",
+        "--limit",
+        "5",
+        "--descending",
+        "--all",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.events, parsed.command);
+    try testing.expectEqualStrings(package_preset.cetus_clmm_mainnet, parsed.event_package.?);
+    try testing.expectEqualStrings("pool", parsed.event_module.?);
+    try testing.expectEqual(@as(?u64, 5), parsed.event_limit);
+    try testing.expect(parsed.event_descending);
+    try testing.expect(parsed.event_all);
+}
+
+test "parseCliArgs rejects events package filter without module" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    try testing.expectError(error.InvalidCli, parseCliArgs(allocator, &.{
+        "events",
+        "--package",
+        "cetus_clmm_mainnet",
+    }));
+}
+
+test "parseCliArgs rejects events raw and typed filters together" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    try testing.expectError(error.InvalidCli, parseCliArgs(allocator, &.{
+        "events",
+        "--filter",
+        "{\"MoveEventType\":\"0x2::coin::Thing\"}",
+        "--event-type",
+        "0x2::coin::Thing",
+    }));
 }
 
 test "parseCliArgs parses move package summarize command" {

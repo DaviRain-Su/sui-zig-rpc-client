@@ -681,6 +681,7 @@ pub fn main() !void {
 - `help`: 打印用法
 - `version`: 打印版本
 - `rpc <method> [params-json]`: 发送任意 Sui JSON-RPC 方法。
+- `events`: 调用 `suix_queryEvents`；支持 raw `--filter <json|@file>`，也支持 typed `--package --module`、`--event-type`、`--sender`、`--tx`，可用于协议对象和行为发现。
 - `move package <package-id-or-alias>`: 调用 `sui_getNormalizedMoveModulesByPackage`，发现 package 下有哪些模块。
 - `move module <package-id-or-alias> <module>`: 调用 `sui_getNormalizedMoveModule`，查看模块里的 structs / exposed functions。
 - `move function <package-id-or-alias> <module> <function>`: 调用 `sui_getNormalizedMoveFunction`，查看参数/返回类型；`--summarize` 会额外输出 CLI lowering hint 和可复用的 transaction 模板。可选 `--type-arg/--type-args` 会在本地先按具体类型实参特化 summary。`--sender` / `--signer` / `--from-keystore` 会把 owner 上下文回填到 owned-object discovery hint 里。
@@ -826,6 +827,26 @@ zig build run -- move function cetus_clmm_mainnet pool add_liquidity_fix_coin \
   --type-arg 0x2::sui::SUI \
   --summarize
 ```
+
+`events` 查询命令示例：
+
+```bash
+zig build run -- events \
+  --package cetus_clmm_mainnet \
+  --module pool \
+  --limit 5 \
+  --descending
+
+zig build run -- events \
+  --event-type 0x2::coin::Minted \
+  --limit 10
+
+zig build run -- events \
+  --filter @event-filter.json \
+  --json
+```
+
+这个命令面向通用协议发现，不是 Cetus 特例。像 Cetus 这类大量依赖 shared object 的协议，`events --package --module` 可以先帮你看到真实模块事件流，再配合 `move function --summarize`、`object get --summarize` 和现有 `object_input` token 继续收敛到具体对象和交易参数。
 
 对于 `move function --summarize`，输出里的 `parameters[*].lowering_kind` 会告诉你当前 CLI 对这个参数的本地 lowering 能力：
 - `object`

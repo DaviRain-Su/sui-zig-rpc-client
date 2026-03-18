@@ -1884,6 +1884,44 @@ fn objectQueryActionFromArgs(args: *const cli.ParsedArgs) client.rpc_client.Obje
     return if (args.tx_send_summarize) .summarize else .raw;
 }
 
+fn eventFilterFromArgs(args: *const cli.ParsedArgs) client.rpc_client.EventFilter {
+    if (args.event_module) |module_name| {
+        return .{
+            .move_module = .{
+                .package = args.event_package orelse return .none,
+                .module = module_name,
+            },
+        };
+    }
+    if (args.event_type) |type_name| {
+        return .{ .move_event_type = type_name };
+    }
+    if (args.event_sender) |sender| {
+        return .{ .sender = sender };
+    }
+    if (args.event_tx_digest_filter) |digest| {
+        return .{ .transaction = digest };
+    }
+    if (args.event_filter) |filter_json| {
+        return .{ .json = filter_json };
+    }
+    return .none;
+}
+
+fn eventQueryFromArgs(args: *const cli.ParsedArgs) client.rpc_client.EventQuery {
+    const request: client.rpc_client.EventPageRequest = .{
+        .filter = eventFilterFromArgs(args),
+        .cursor_tx_digest = args.event_cursor_tx_digest,
+        .cursor_event_seq = args.event_cursor_event_seq,
+        .limit = args.event_limit,
+        .descending_order = args.event_descending,
+    };
+    return if (args.event_all)
+        .{ .all = .{ .request = request } }
+    else
+        .{ .page = .{ .request = request } };
+}
+
 fn moveQueryFromArgs(
     allocator: std.mem.Allocator,
     args: *const cli.ParsedArgs,
@@ -1920,6 +1958,7 @@ fn readQueryActionFromArgs(args: *const cli.ParsedArgs) client.rpc_client.ReadQu
         .account_resources => if (args.account_resources_json) .raw else .summarize,
         .account_coins => if (args.account_coins_json) .raw else .summarize,
         .account_objects => if (args.account_objects_json) .raw else .summarize,
+        .events => if (args.events_json) .raw else .summarize,
         else => blk: {
             if (args.tx_send_observe) break :blk .observe;
             if (args.tx_send_summarize) break :blk .summarize;
@@ -1949,6 +1988,9 @@ fn readQueryFromArgs(
             .account = .{
                 .info = args.account_selector orelse return error.InvalidCli,
             },
+        },
+        .events => .{
+            .events = eventQueryFromArgs(args),
         },
         .move_package, .move_module, .move_function => .{
             .move = try moveQueryFromArgs(allocator, args),
@@ -2089,6 +2131,7 @@ fn printReadQuerySummary(
         .resources => |value| try printStructuredJson(writer, value, pretty),
         .coins => |value| try printStructuredJson(writer, value, pretty),
         .owned_objects => |value| try printStructuredJson(writer, value, pretty),
+        .events => |value| try printStructuredJson(writer, value, pretty),
         .object => |object| switch (object) {
             .object => |value| try printStructuredJson(writer, value, pretty),
             .dynamic_fields => |value| try printStructuredJson(writer, value, pretty),
@@ -2182,7 +2225,7 @@ pub fn runCommandWithProgrammaticProvider(
             defer result.deinit(allocator);
             try printResourceQueryActionResult(allocator, writer, result, args.pretty);
         },
-        .account_list, .account_info, .move_package, .move_module, .move_function, .object_get, .object_dynamic_fields, .object_dynamic_field_object, .tx_status, .tx_confirm => {
+        .account_list, .account_info, .events, .move_package, .move_module, .move_function, .object_get, .object_dynamic_fields, .object_dynamic_field_object, .tx_status, .tx_confirm => {
             switch (args.command) {
                 .tx_status, .tx_confirm => {
                     const digest = args.tx_digest orelse return error.InvalidCli;
@@ -2661,6 +2704,65 @@ test "runCommand help writes usage" {
 
     try runCommand(allocator, &rpc, &args, output.writer(allocator));
     try testing.expect(std.mem.indexOf(u8, output.items, "Usage:") != null);
+}
+
+test "runCommand events with summarized move-module filter prints event summaries" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            std.debug.assert(std.mem.eql(u8, req.method, "suix_queryEvents"));
+            std.debug.assert(std.mem.eql(
+                u8,
+                req.params_json,
+                "[{\"MoveModule\":{\"package\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"module\":\"pool\"}},null,5,true]",
+            ));
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xdigest\",\"eventSeq\":\"7\"},\"packageId\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"transactionModule\":\"pool\",\"sender\":\"0xsender\",\"type\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3::pool::LiquidityAdded\",\"parsedJson\":{\"pool\":\"0xpool\"},\"timestampMs\":\"42\"}],\"nextCursor\":{\"txDigest\":\"0xnext\",\"eventSeq\":\"8\"},\"hasNextPage\":true}}",
+            );
+        }
+    }.call;
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "events",
+        "--package",
+        "cetus_clmm_mainnet",
+        "--module",
+        "pool",
+        "--limit",
+        "5",
+        "--descending",
+    });
+    defer args.deinit(allocator);
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    const entries = parsed.value.object.get("entries").?.array.items;
+    try testing.expectEqual(@as(usize, 1), entries.len);
+    try testing.expectEqualStrings("0xdigest", entries[0].object.get("tx_digest").?.string);
+    try testing.expectEqual(@as(i64, 7), entries[0].object.get("event_seq").?.integer);
+    try testing.expectEqualStrings("pool", entries[0].object.get("transaction_module").?.string);
+    try testing.expectEqualStrings("{\"pool\":\"0xpool\"}", entries[0].object.get("parsed_json").?.string);
+    try testing.expectEqualStrings("0xnext", parsed.value.object.get("next_cursor_tx_digest").?.string);
+    try testing.expectEqual(@as(i64, 8), parsed.value.object.get("next_cursor_event_seq").?.integer);
+    try testing.expect(parsed.value.object.get("has_next_page").?.bool);
 }
 
 test "runCommand move function with --summarize prints normalized function summary" {
