@@ -2815,8 +2815,131 @@ pub const SuiRpcClient = struct {
         u128,
         u256,
         vector_u8,
+        utf8_string,
+        ascii_string,
+        object_id,
+        option,
         unsupported,
     };
+
+    fn normalizedStructTypeArguments(
+        struct_object: std.json.ObjectMap,
+    ) ![]const std.json.Value {
+        const type_params_value = struct_object.get("typeArguments") orelse
+            struct_object.get("type_arguments") orelse
+            struct_object.get("typeParams") orelse
+            struct_object.get("type_params") orelse
+            return &.{};
+        if (type_params_value != .array) return error.InvalidCli;
+        return type_params_value.array.items;
+    }
+
+    fn normalizedStructMatches(
+        struct_object: std.json.ObjectMap,
+        target_address: []const u8,
+        target_module: []const u8,
+        target_name: []const u8,
+    ) !bool {
+        const address_value = struct_object.get("address") orelse return error.InvalidCli;
+        const module_value = struct_object.get("module") orelse return error.InvalidCli;
+        const name_value = struct_object.get("name") orelse return error.InvalidCli;
+        if (address_value != .string or module_value != .string or name_value != .string) return error.InvalidCli;
+
+        const target = try ptb_bytes_builder.parseHexAddress32(target_address);
+        const candidate = try ptb_bytes_builder.parseHexAddress32(address_value.string);
+        return std.mem.eql(u8, &candidate, &target) and
+            std.mem.eql(u8, module_value.string, target_module) and
+            std.mem.eql(u8, name_value.string, target_name);
+    }
+
+    fn isKnownPureStructFamily(
+        struct_object: std.json.ObjectMap,
+    ) !bool {
+        return try normalizedStructMatches(struct_object, "0x1", "string", "String") or
+            try normalizedStructMatches(struct_object, "0x1", "ascii", "String") or
+            try normalizedStructMatches(struct_object, "0x2", "object", "ID") or
+            try normalizedStructMatches(struct_object, "0x1", "option", "Option");
+    }
+
+    fn normalizedTypeSupportsPureValueEncoding(
+        value: std.json.Value,
+    ) !bool {
+        switch (value) {
+            .string => |name| {
+                const canonical = canonicalPrimitiveMoveTypeName(name) orelse return false;
+                return !std.mem.eql(u8, canonical, "signer");
+            },
+            .object => |object| {
+                if (object.get("Reference")) |inner| {
+                    return try normalizedTypeSupportsPureValueEncoding(inner);
+                }
+                if (object.get("MutableReference")) |inner| {
+                    return try normalizedTypeSupportsPureValueEncoding(inner);
+                }
+                if (object.get("TypeParameter") != null) return false;
+                if (object.get("Vector")) |inner| {
+                    return try normalizedTypeSupportsPureValueEncoding(inner);
+                }
+                if (object.get("Struct")) |struct_value| {
+                    if (struct_value != .object) return false;
+                    const struct_object = struct_value.object;
+                    const type_params = try normalizedStructTypeArguments(struct_object);
+
+                    if (try normalizedStructMatches(struct_object, "0x1", "string", "String")) {
+                        return type_params.len == 0;
+                    }
+                    if (try normalizedStructMatches(struct_object, "0x1", "ascii", "String")) {
+                        return type_params.len == 0;
+                    }
+                    if (try normalizedStructMatches(struct_object, "0x2", "object", "ID")) {
+                        return type_params.len == 0;
+                    }
+                    if (try normalizedStructMatches(struct_object, "0x1", "option", "Option")) {
+                        return type_params.len == 1 and try normalizedTypeSupportsPureValueEncoding(type_params[0]);
+                    }
+                }
+                return false;
+            },
+            else => return false,
+        }
+    }
+
+    fn classifyKnownPureStructType(
+        value: std.json.Value,
+    ) !?LocalMoveCallParameterKind {
+        switch (value) {
+            .object => |object| {
+                if (object.get("Reference")) |inner| {
+                    return try classifyKnownPureStructType(inner);
+                }
+                if (object.get("MutableReference")) |inner| {
+                    return try classifyKnownPureStructType(inner);
+                }
+                const struct_value = object.get("Struct") orelse return null;
+                if (struct_value != .object) return null;
+                const struct_object = struct_value.object;
+                const type_params = try normalizedStructTypeArguments(struct_object);
+
+                if (try normalizedStructMatches(struct_object, "0x1", "string", "String")) {
+                    return if (type_params.len == 0) .utf8_string else .unsupported;
+                }
+                if (try normalizedStructMatches(struct_object, "0x1", "ascii", "String")) {
+                    return if (type_params.len == 0) .ascii_string else .unsupported;
+                }
+                if (try normalizedStructMatches(struct_object, "0x2", "object", "ID")) {
+                    return if (type_params.len == 0) .object_id else .unsupported;
+                }
+                if (try normalizedStructMatches(struct_object, "0x1", "option", "Option")) {
+                    return if (type_params.len == 1 and try normalizedTypeSupportsPureValueEncoding(type_params[0]))
+                        .option
+                    else
+                        .unsupported;
+                }
+                return null;
+            },
+            else => return null,
+        }
+    }
 
     fn classifyNormalizedMoveType(
         allocator: std.mem.Allocator,
@@ -2849,18 +2972,11 @@ pub const SuiRpcClient = struct {
                 }
                 if (object.get("Struct")) |struct_value| {
                     if (struct_value != .object) return .unsupported;
-                    const address_value = struct_value.object.get("address") orelse return .unsupported;
-                    const module_value = struct_value.object.get("module") orelse return .unsupported;
-                    const name_value = struct_value.object.get("name") orelse return .unsupported;
-                    if (address_value != .string or module_value != .string or name_value != .string) return .unsupported;
-                    const tx_context_address = try ptb_bytes_builder.parseHexAddress32("0x2");
-                    const candidate_address = ptb_bytes_builder.parseHexAddress32(address_value.string) catch return .object;
-                    if (std.mem.eql(u8, &candidate_address, &tx_context_address) and
-                        std.mem.eql(u8, module_value.string, "tx_context") and
-                        std.mem.eql(u8, name_value.string, "TxContext"))
-                    {
+                    if (try normalizedStructMatches(struct_value.object, "0x2", "tx_context", "TxContext")) {
                         return null;
                     }
+                    if (try classifyKnownPureStructType(value)) |kind| return kind;
+                    if (try isKnownPureStructFamily(struct_value.object)) return .unsupported;
                     return .object;
                 }
                 return .unsupported;
@@ -2977,6 +3093,155 @@ pub const SuiRpcClient = struct {
         errdefer out.deinit(allocator);
         try writeCanonicalNormalizedMoveTypeJson(allocator, out.writer(allocator), value);
         return try out.toOwnedSlice(allocator);
+    }
+
+    fn appendUleb128(
+        out: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+        value: usize,
+    ) !void {
+        var remaining = value;
+        while (true) {
+            var byte: u8 = @intCast(remaining & 0x7f);
+            remaining >>= 7;
+            if (remaining != 0) byte |= 0x80;
+            try out.append(allocator, byte);
+            if (remaining == 0) return;
+        }
+    }
+
+    fn appendLengthPrefixedBytes(
+        out: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+        bytes: []const u8,
+    ) !void {
+        try appendUleb128(out, allocator, bytes.len);
+        try out.appendSlice(allocator, bytes);
+    }
+
+    fn appendNormalizedPureValueBytes(
+        allocator: std.mem.Allocator,
+        out: *std.ArrayList(u8),
+        value: std.json.Value,
+        parameter_type: std.json.Value,
+    ) !void {
+        switch (parameter_type) {
+            .string => |name| {
+                const canonical = canonicalPrimitiveMoveTypeName(name) orelse return error.InvalidCli;
+                if (std.mem.eql(u8, canonical, "bool")) {
+                    if (value != .bool) return error.InvalidCli;
+                    try out.append(allocator, if (value.bool) 1 else 0);
+                    return;
+                }
+                if (std.mem.eql(u8, canonical, "u8")) {
+                    try out.append(allocator, try parseUnsignedJsonValueAs(u8, value));
+                    return;
+                }
+                if (std.mem.eql(u8, canonical, "u16")) {
+                    var bytes: [2]u8 = undefined;
+                    std.mem.writeInt(u16, &bytes, try parseUnsignedJsonValueAs(u16, value), .little);
+                    try out.appendSlice(allocator, &bytes);
+                    return;
+                }
+                if (std.mem.eql(u8, canonical, "u32")) {
+                    var bytes: [4]u8 = undefined;
+                    std.mem.writeInt(u32, &bytes, try parseUnsignedJsonValueAs(u32, value), .little);
+                    try out.appendSlice(allocator, &bytes);
+                    return;
+                }
+                if (std.mem.eql(u8, canonical, "u64")) {
+                    var bytes: [8]u8 = undefined;
+                    std.mem.writeInt(u64, &bytes, try parseUnsignedJsonValueAs(u64, value), .little);
+                    try out.appendSlice(allocator, &bytes);
+                    return;
+                }
+                if (std.mem.eql(u8, canonical, "u128")) {
+                    var bytes: [16]u8 = undefined;
+                    std.mem.writeInt(u128, &bytes, try parseUnsignedJsonValueAs(u128, value), .little);
+                    try out.appendSlice(allocator, &bytes);
+                    return;
+                }
+                if (std.mem.eql(u8, canonical, "u256")) {
+                    var bytes: [32]u8 = undefined;
+                    std.mem.writeInt(u256, &bytes, try parseUnsignedJsonValueAs(u256, value), .little);
+                    try out.appendSlice(allocator, &bytes);
+                    return;
+                }
+                if (std.mem.eql(u8, canonical, "address")) {
+                    if (value != .string) return error.InvalidCli;
+                    const address = try ptb_bytes_builder.parseHexAddress32(value.string);
+                    try out.appendSlice(allocator, &address);
+                    return;
+                }
+                return error.InvalidCli;
+            },
+            .object => |object| {
+                if (object.get("Reference")) |inner| {
+                    return try appendNormalizedPureValueBytes(allocator, out, value, inner);
+                }
+                if (object.get("MutableReference")) |inner| {
+                    return try appendNormalizedPureValueBytes(allocator, out, value, inner);
+                }
+                if (object.get("Vector")) |inner| {
+                    if ((try classifyNormalizedMoveType(allocator, inner)) == .u8) {
+                        const bytes = try ptb_bytes_builder.parseRawBytesJsonValue(allocator, value);
+                        defer allocator.free(bytes);
+                        return try appendLengthPrefixedBytes(out, allocator, bytes);
+                    }
+                    if (value != .array) return error.InvalidCli;
+                    try appendUleb128(out, allocator, value.array.items.len);
+                    for (value.array.items) |item| {
+                        try appendNormalizedPureValueBytes(allocator, out, item, inner);
+                    }
+                    return;
+                }
+                const struct_kind = (try classifyKnownPureStructType(parameter_type)) orelse return error.InvalidCli;
+                const struct_value = object.get("Struct") orelse return error.InvalidCli;
+                if (struct_value != .object) return error.InvalidCli;
+                const type_params = try normalizedStructTypeArguments(struct_value.object);
+
+                switch (struct_kind) {
+                    .utf8_string => {
+                        if (value != .string) return error.InvalidCli;
+                        return try appendLengthPrefixedBytes(out, allocator, value.string);
+                    },
+                    .ascii_string => {
+                        if (value != .string) return error.InvalidCli;
+                        for (value.string) |char| {
+                            if (char > 0x7f) return error.InvalidCli;
+                        }
+                        return try appendLengthPrefixedBytes(out, allocator, value.string);
+                    },
+                    .object_id => {
+                        if (value != .string) return error.InvalidCli;
+                        const address = try ptb_bytes_builder.parseHexAddress32(value.string);
+                        try out.appendSlice(allocator, &address);
+                        return;
+                    },
+                    .option => {
+                        if (type_params.len != 1) return error.InvalidCli;
+                        if (value == .null) {
+                            return try appendUleb128(out, allocator, 0);
+                        }
+                        try appendUleb128(out, allocator, 1);
+                        return try appendNormalizedPureValueBytes(allocator, out, value, type_params[0]);
+                    },
+                    else => return error.InvalidCli,
+                }
+            },
+            else => return error.InvalidCli,
+        }
+    }
+
+    fn buildPureNormalizedValueInputJson(
+        allocator: std.mem.Allocator,
+        value: std.json.Value,
+        parameter_type: std.json.Value,
+    ) ![]u8 {
+        var bytes = std.ArrayList(u8){};
+        defer bytes.deinit(allocator);
+        try appendNormalizedPureValueBytes(allocator, &bytes, value, parameter_type);
+        return try buildPureBytesInputJson(allocator, bytes.items);
     }
 
     fn buildNormalizedMoveFunctionParams(
@@ -3430,6 +3695,7 @@ pub const SuiRpcClient = struct {
                         },
                         else => error.InvalidCli,
                     },
+                    .utf8_string, .ascii_string, .object_id, .option => return error.InvalidCli,
                     .vector => return error.InvalidCli,
                     .unsupported => return switch (value) {
                         .object => |object| blk: {
@@ -3514,6 +3780,26 @@ pub const SuiRpcClient = struct {
                             const nested_kind = try classifyNormalizedMoveType(ctx.allocator, inner);
                             if (nested_kind == .u8) return try ctx.lowerMoveCallArgumentForKind(value, .vector_u8);
                             return try ctx.lowerVectorMoveCallArgument(value, inner);
+                        }
+                        if (try classifyKnownPureStructType(parameter_type)) |_| {
+                            switch (value) {
+                                .object => |argument_object| {
+                                    if (argument_object.get("Object") != null) return error.InvalidCli;
+                                    if (argument_object.get("Input") != null or
+                                        argument_object.get("Result") != null or
+                                        argument_object.get("NestedResult") != null or
+                                        argument_object.get("Pure") != null)
+                                    {
+                                        return try ctx.normalizePtbRefOrAddExplicitInput(value, false);
+                                    }
+                                },
+                                else => {},
+                            }
+
+                            const input_json = try buildPureNormalizedValueInputJson(ctx.allocator, value, parameter_type);
+                            errdefer ctx.allocator.free(input_json);
+                            const input_index = try ctx.appendInput(input_json);
+                            return try ctx.buildInputRefJson(input_index);
                         }
 
                         const kind = (try classifyNormalizedMoveType(ctx.allocator, parameter_type)) orelse return error.InvalidCli;
@@ -3789,6 +4075,7 @@ pub const SuiRpcClient = struct {
                     .u128 => try ctx.lowerMoveCallArgumentForKind(value, .u128),
                     .u256 => try ctx.lowerMoveCallArgumentForKind(value, .u256),
                     .vector_u8 => try ctx.lowerMoveCallArgumentForKind(value, .vector_u8),
+                    .utf8_string, .ascii_string, .object_id, .option => error.InvalidCli,
                     .vector, .signer, .unsupported => error.InvalidCli,
                 };
             }
@@ -5025,6 +5312,96 @@ pub const SuiRpcClient = struct {
         try testing.expectEqual(@as(usize, 2), inputs.value.array.items.len);
         try testing.expect(inputs.value.array.items[0].object.get("Pure") != null);
         try testing.expect(inputs.value.array.items[1].object.get("Pure") != null);
+    }
+
+    test "local move-call lowering supports common pure wrapper structs from ABI" {
+        const testing = std.testing;
+
+        var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+        defer _ = gpa.deinit();
+        const allocator = gpa.allocator();
+
+        const State = struct {
+            normalized_calls: usize = 0,
+            object_calls: usize = 0,
+        };
+
+        var rpc = SuiRpcClient.init(allocator, "https://rpc.invalid");
+        defer rpc.deinit();
+
+        var state = State{};
+        rpc.request_sender = .{
+            .context = &state,
+            .callback = struct {
+                fn send(
+                    ctx: *anyopaque,
+                    alloc: std.mem.Allocator,
+                    req: RpcRequest,
+                ) error{OutOfMemory}![]u8 {
+                    const local_state: *State = @ptrCast(@alignCast(ctx));
+                    if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                        local_state.normalized_calls += 1;
+                        return try alloc.dupe(
+                            u8,
+                            "{\"result\":{\"parameters\":[{\"Struct\":{\"address\":\"0x1\",\"module\":\"string\",\"name\":\"String\",\"typeParams\":[]}},{\"Struct\":{\"address\":\"0x2\",\"module\":\"object\",\"name\":\"ID\",\"typeParams\":[]}},{\"Struct\":{\"address\":\"0x1\",\"module\":\"option\",\"name\":\"Option\",\"typeParams\":[\"U64\"]}},{\"Struct\":{\"address\":\"0x1\",\"module\":\"ascii\",\"name\":\"String\",\"typeParams\":[]}},{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[],\"typeParameters\":[],\"visibility\":\"Public\",\"isEntry\":true}}",
+                        );
+                    }
+                    if (std.mem.eql(u8, req.method, "sui_getObject")) {
+                        local_state.object_calls += 1;
+                    }
+                    return error.OutOfMemory;
+                }
+            }.send,
+        };
+
+        var parts = try rpc.ownLocalProgrammableTransactionPartsFromCommandSource(
+            allocator,
+            .{
+                .move_call = .{
+                    .package_id = "0x2",
+                    .module = "pure_helpers",
+                    .function_name = "submit",
+                    .type_args = "[]",
+                    .arguments = "[\"hello\",\"0x1111111111111111111111111111111111111111111111111111111111111111\",7,\"ASCII\"]",
+                },
+            },
+            "0xsender",
+            "[{\"objectId\":\"0xgas\",\"version\":\"5\",\"digest\":\"gas-digest\"}]",
+            7,
+            1200,
+            null,
+        );
+        defer parts.deinit(allocator);
+
+        const inputs = try std.json.parseFromSlice(std.json.Value, allocator, parts.inputs_json, .{});
+        defer inputs.deinit();
+        try testing.expectEqual(@as(usize, 4), inputs.value.array.items.len);
+
+        const expected_id = try ptb_bytes_builder.parseHexAddress32("0x1111111111111111111111111111111111111111111111111111111111111111");
+
+        inline for (.{ 0, 1, 2, 3 }) |index| {
+            try testing.expect(inputs.value.array.items[index].object.get("Pure") != null);
+        }
+
+        const expected = [_][]const u8{
+            &.{ 5, 'h', 'e', 'l', 'l', 'o' },
+            &expected_id,
+            &.{ 1, 7, 0, 0, 0, 0, 0, 0, 0 },
+            &.{ 5, 'A', 'S', 'C', 'I', 'I' },
+        };
+
+        for (expected, 0..) |expected_bytes, index| {
+            const pure_value = inputs.value.array.items[index].object.get("Pure").?;
+            try testing.expect(pure_value == .string);
+            const decoded_len = try std.base64.standard.Decoder.calcSizeForSlice(pure_value.string);
+            const decoded = try allocator.alloc(u8, decoded_len);
+            defer allocator.free(decoded);
+            try std.base64.standard.Decoder.decode(decoded, pure_value.string);
+            try testing.expectEqualSlices(u8, expected_bytes, decoded);
+        }
+
+        try testing.expectEqual(@as(usize, 1), state.normalized_calls);
+        try testing.expectEqual(@as(usize, 0), state.object_calls);
     }
 
     test "local move-call lowering auto-inserts make-move-vec commands for non-u8 vector arguments" {

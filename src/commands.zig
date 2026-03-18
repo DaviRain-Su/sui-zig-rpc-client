@@ -2693,6 +2693,55 @@ test "runCommand move function with --summarize prints normalized function summa
     try testing.expectEqualStrings("Bool", parsed.value.object.get("returns").?.array.items[0].object.get("signature").?.string);
 }
 
+test "runCommand move function with --summarize reports pure wrapper lowering kinds" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            std.debug.assert(std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction"));
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0x2\"") != null);
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"pure_helpers\"") != null);
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"submit\"") != null);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"visibility\":\"Public\",\"isEntry\":true,\"typeParameters\":[],\"parameters\":[{\"Struct\":{\"address\":\"0x1\",\"module\":\"string\",\"name\":\"String\",\"typeParams\":[]}},{\"Struct\":{\"address\":\"0x2\",\"module\":\"object\",\"name\":\"ID\",\"typeParams\":[]}},{\"Struct\":{\"address\":\"0x1\",\"module\":\"option\",\"name\":\"Option\",\"typeParams\":[\"U64\"]}},{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[\"Bool\"]}}",
+            );
+        }
+    }.call;
+
+    var args = cli.ParsedArgs{
+        .command = .move_function,
+        .has_command = true,
+        .move_package = "0x2",
+        .move_module = "pure_helpers",
+        .move_function = "submit",
+        .tx_send_summarize = true,
+    };
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    try testing.expectEqualStrings("utf8_string", parsed.value.object.get("parameters").?.array.items[0].object.get("lowering_kind").?.string);
+    try testing.expectEqualStrings("object_id", parsed.value.object.get("parameters").?.array.items[1].object.get("lowering_kind").?.string);
+    try testing.expectEqualStrings("option", parsed.value.object.get("parameters").?.array.items[2].object.get("lowering_kind").?.string);
+    try testing.expectEqualStrings("runtime", parsed.value.object.get("parameters").?.array.items[3].object.get("lowering_kind").?.string);
+}
+
 test "runCommand move package resolves aliases before issuing RPC" {
     const testing = std.testing;
 
@@ -8759,6 +8808,86 @@ test "runCommand tx_dry_run auto-lowers vector object args without unsafe fallba
 
     try testing.expectEqual(@as(usize, 1), counts.normalized);
     try testing.expectEqual(@as(usize, 2), counts.objects);
+    try testing.expectEqual(@as(usize, 1), counts.dry_run);
+    try testing.expectEqual(@as(usize, 0), counts.unsafe);
+}
+
+test "runCommand tx_dry_run auto-lowers common pure wrapper args without unsafe fallback" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const Counts = struct {
+        normalized: usize = 0,
+        objects: usize = 0,
+        dry_run: usize = 0,
+        unsafe: usize = 0,
+    };
+    var counts = Counts{};
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const state = @as(*Counts, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                state.normalized += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"parameters\":[{\"Struct\":{\"address\":\"0x1\",\"module\":\"string\",\"name\":\"String\",\"typeParams\":[]}},{\"Struct\":{\"address\":\"0x2\",\"module\":\"object\",\"name\":\"ID\",\"typeParams\":[]}},{\"Struct\":{\"address\":\"0x1\",\"module\":\"option\",\"name\":\"Option\",\"typeParams\":[\"U64\"]}},{\"Struct\":{\"address\":\"0x1\",\"module\":\"ascii\",\"name\":\"String\",\"typeParams\":[]}},{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\"}}}]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getObject")) {
+                state.objects += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":{\"objectId\":\"0xshould-not-be-used\",\"version\":\"1\",\"digest\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"owner\":{\"AddressOwner\":\"0x123\"}}}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_dryRunTransactionBlock")) {
+                state.dry_run += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"effects\":{\"status\":{\"status\":\"success\"}},\"balanceChanges\":[]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall") or std.mem.eql(u8, req.method, "unsafe_batchTransaction")) {
+                state.unsafe += 1;
+                return alloc.dupe(u8, "{\"result\":{\"txBytes\":\"AQIDBA==\"}}");
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+
+    var args = cli.ParsedArgs{
+        .command = .tx_dry_run,
+        .has_command = true,
+        .tx_build_package = "0x2",
+        .tx_build_module = "pure_helpers",
+        .tx_build_function = "submit",
+        .tx_build_type_args = "[]",
+        .tx_build_args = "[\"hello\",\"0x1111111111111111111111111111111111111111111111111111111111111111\",7,\"ASCII\"]",
+        .tx_build_sender = "0x123",
+        .tx_build_gas_budget = 1200,
+        .tx_build_gas_price = 8,
+        .tx_build_gas_payment = "[{\"objectId\":\"0x999\",\"version\":\"3\",\"digest\":\"0x3333333333333333333333333333333333333333333333333333333333333333\"}]",
+        .tx_send_summarize = true,
+    };
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = &counts,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    try testing.expectEqual(@as(usize, 1), counts.normalized);
+    try testing.expectEqual(@as(usize, 0), counts.objects);
     try testing.expectEqual(@as(usize, 1), counts.dry_run);
     try testing.expectEqual(@as(usize, 0), counts.unsafe);
 }

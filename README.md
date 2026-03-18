@@ -801,6 +801,10 @@ zig build run -- move function cetus_clmm_mainnet pool swap --summarize
 - `boolean`
 - `u8/u16/u32/u64/u128/u256`
 - `vector_u8`
+- `utf8_string`（`0x1::string::String`）
+- `ascii_string`（`0x1::ascii::String`）
+- `object_id`（`0x2::object::ID`）
+- `option`（`0x1::option::Option<T>`，当前要求 `T` 已经是具体 pure 类型）
 - `runtime`（例如 `TxContext`，CLI 不要求你显式提供）
 - `unsupported`
 
@@ -813,6 +817,23 @@ zig build run -- move function cetus_clmm_mainnet pool swap --summarize
 ```
 
 而不必先手工写一条额外的 `MakeMoveVec` PTB 命令。只有空向量且元素类型仍然无法从 ABI 推导成具体 `TypeTag` 时，才会继续拒绝本地 lowering。
+
+对于常见 pure wrapper struct，CLI 现在也会直接按 ABI 做本地 BCS lowering，而不再把它们误判成 object。比如：
+
+```bash
+--args '[
+  "hello",
+  "0x1111111111111111111111111111111111111111111111111111111111111111",
+  7,
+  "ASCII"
+]'
+```
+
+可以直接覆盖：
+- `0x1::string::String`
+- `0x2::object::ID`
+- `0x1::option::Option<u64>`（`null`/`option:none` 表示 none，普通值或 `some(...)` 表示 some）
+- `0x1::ascii::String`
 
 `--package <package-id-or-alias>` 现在已经支持内置 alias：
 - `sui` / `sui_framework` / `framework` -> `0x2`
