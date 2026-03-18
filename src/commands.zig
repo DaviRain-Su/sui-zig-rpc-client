@@ -2835,10 +2835,22 @@ test "runCommand move function with --summarize prefers known object preset toke
         "\"select:{\\\"kind\\\":\\\"object_preset\\\",\\\"name\\\":\\\"cetus_clmm_global_config_mainnet\\\"}\"",
         parsed.value.object.get("parameters").?.array.items[0].object.get("placeholder_json").?.string,
     );
+    const global_config_get_argv = parsed.value.object.get("parameters").?.array.items[0].object.get("object_get_argv").?.array.items;
+    try testing.expectEqual(@as(usize, 4), global_config_get_argv.len);
+    try testing.expectEqualStrings("object", global_config_get_argv[0].string);
+    try testing.expectEqualStrings("get", global_config_get_argv[1].string);
+    try testing.expectEqualStrings("cetus_clmm_global_config_mainnet", global_config_get_argv[2].string);
+    try testing.expectEqualStrings("--summarize", global_config_get_argv[3].string);
     try testing.expectEqualStrings(
         "\"select:{\\\"kind\\\":\\\"object_preset\\\",\\\"name\\\":\\\"clock\\\"}\"",
         parsed.value.object.get("parameters").?.array.items[1].object.get("placeholder_json").?.string,
     );
+    const clock_get_argv = parsed.value.object.get("parameters").?.array.items[1].object.get("object_get_argv").?.array.items;
+    try testing.expectEqual(@as(usize, 4), clock_get_argv.len);
+    try testing.expectEqualStrings("object", clock_get_argv[0].string);
+    try testing.expectEqualStrings("get", clock_get_argv[1].string);
+    try testing.expectEqualStrings("clock", clock_get_argv[2].string);
+    try testing.expectEqualStrings("--summarize", clock_get_argv[3].string);
     try testing.expectEqualStrings(
         "[\"select:{\\\"kind\\\":\\\"object_preset\\\",\\\"name\\\":\\\"cetus_clmm_global_config_mainnet\\\"}\",\"select:{\\\"kind\\\":\\\"object_preset\\\",\\\"name\\\":\\\"clock\\\"}\"]",
         parsed.value.object.get("call_template").?.object.get("args_json").?.string,
@@ -2892,14 +2904,46 @@ test "runCommand move function with --summarize adds owned object discovery temp
         std.json.Value.null,
         parsed.value.object.get("parameters").?.array.items[0].object.get("owned_object_select_token").?,
     );
+    try testing.expectEqualStrings(
+        "select:{\"kind\":\"object_input\",\"objectId\":\"0x<arg0-object-id>\",\"inputKind\":\"shared\",\"mutable\":true}",
+        parsed.value.object.get("parameters").?.array.items[0].object.get("shared_object_input_select_token").?.string,
+    );
+    try testing.expectEqualStrings(
+        "select:{\"kind\":\"object_input\",\"objectId\":\"0x<arg0-object-id>\",\"inputKind\":\"imm_or_owned\"}",
+        parsed.value.object.get("parameters").?.array.items[0].object.get("imm_or_owned_object_input_select_token").?.string,
+    );
+    try testing.expectEqual(
+        std.json.Value.null,
+        parsed.value.object.get("parameters").?.array.items[0].object.get("receiving_object_input_select_token").?,
+    );
+    const pool_get_argv = parsed.value.object.get("parameters").?.array.items[0].object.get("object_get_argv").?.array.items;
+    try testing.expectEqual(@as(usize, 4), pool_get_argv.len);
+    try testing.expectEqualStrings("object", pool_get_argv[0].string);
+    try testing.expectEqualStrings("get", pool_get_argv[1].string);
+    try testing.expectEqualStrings("0x<arg0-object-id>", pool_get_argv[2].string);
+    try testing.expectEqualStrings("--summarize", pool_get_argv[3].string);
     try testing.expectEqual(
         std.json.Value.null,
         parsed.value.object.get("parameters").?.array.items[0].object.get("owned_object_query_argv").?,
     );
     try testing.expectEqualStrings(
+        "select:{\"kind\":\"object_input\",\"objectId\":\"0x<arg1-object-id>\",\"inputKind\":\"shared\",\"mutable\":true}",
+        parsed.value.object.get("parameters").?.array.items[1].object.get("shared_object_input_select_token").?.string,
+    );
+    try testing.expectEqualStrings(
+        "select:{\"kind\":\"object_input\",\"objectId\":\"0x<arg1-object-id>\",\"inputKind\":\"imm_or_owned\"}",
+        parsed.value.object.get("parameters").?.array.items[1].object.get("imm_or_owned_object_input_select_token").?.string,
+    );
+    try testing.expectEqualStrings(
         "select:{\"kind\":\"owned_object_struct_type\",\"structType\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb::position::Position\"}",
         parsed.value.object.get("parameters").?.array.items[1].object.get("owned_object_select_token").?.string,
     );
+    const position_get_argv = parsed.value.object.get("parameters").?.array.items[1].object.get("object_get_argv").?.array.items;
+    try testing.expectEqual(@as(usize, 4), position_get_argv.len);
+    try testing.expectEqualStrings("object", position_get_argv[0].string);
+    try testing.expectEqualStrings("get", position_get_argv[1].string);
+    try testing.expectEqualStrings("0x<arg1-object-id>", position_get_argv[2].string);
+    try testing.expectEqualStrings("--summarize", position_get_argv[3].string);
     const position_query_argv = parsed.value.object.get("parameters").?.array.items[1].object.get("owned_object_query_argv").?.array.items;
     try testing.expectEqual(@as(usize, 6), position_query_argv.len);
     try testing.expectEqualStrings("account", position_query_argv[0].string);

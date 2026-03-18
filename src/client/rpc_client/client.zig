@@ -3625,11 +3625,47 @@ pub const SuiRpcClient = struct {
         return trimmed;
     }
 
+    fn isMoveReferenceSignature(signature: []const u8) bool {
+        return std.mem.startsWith(u8, std.mem.trim(u8, signature, " \t\r\n"), "&");
+    }
+
+    fn isMoveMutableReferenceSignature(signature: []const u8) bool {
+        return std.mem.startsWith(u8, std.mem.trim(u8, signature, " \t\r\n"), "&mut ");
+    }
+
     fn concreteObjectStructTypeFromSignature(signature: []const u8) ?[]const u8 {
         const trimmed = trimMoveReferenceSignature(signature);
         if (std.mem.indexOf(u8, trimmed, "::") == null) return null;
         if (std.mem.indexOfScalar(u8, trimmed, '<') != null) return null;
         return trimmed;
+    }
+
+    fn buildObjectInputSelectToken(
+        allocator: std.mem.Allocator,
+        object_id: []const u8,
+        input_kind: ObjectInputKind,
+        mutable: bool,
+    ) ![]u8 {
+        return switch (input_kind) {
+            .shared => try std.fmt.allocPrint(
+                allocator,
+                "select:{{\"kind\":\"object_input\",\"objectId\":{f},\"inputKind\":\"shared\",\"mutable\":{}}}",
+                .{
+                    std.json.fmt(object_id, .{}),
+                    mutable,
+                },
+            ),
+            .imm_or_owned => try std.fmt.allocPrint(
+                allocator,
+                "select:{{\"kind\":\"object_input\",\"objectId\":{f},\"inputKind\":\"imm_or_owned\"}}",
+                .{std.json.fmt(object_id, .{})},
+            ),
+            .receiving => try std.fmt.allocPrint(
+                allocator,
+                "select:{{\"kind\":\"object_input\",\"objectId\":{f},\"inputKind\":\"receiving\"}}",
+                .{std.json.fmt(object_id, .{})},
+            ),
+        };
     }
 
     fn buildOwnedObjectSelectToken(
@@ -3641,6 +3677,25 @@ pub const SuiRpcClient = struct {
             "select:{{\"kind\":\"owned_object_struct_type\",\"structType\":{f}}}",
             .{std.json.fmt(struct_type, .{})},
         );
+    }
+
+    fn buildObjectGetArgv(
+        allocator: std.mem.Allocator,
+        object_id_or_alias: []const u8,
+    ) ![][]u8 {
+        const argv = try allocator.alloc([]u8, 4);
+        errdefer allocator.free(argv);
+
+        argv[0] = try allocator.dupe(u8, "object");
+        errdefer allocator.free(argv[0]);
+        argv[1] = try allocator.dupe(u8, "get");
+        errdefer allocator.free(argv[1]);
+        argv[2] = try allocator.dupe(u8, object_id_or_alias);
+        errdefer allocator.free(argv[2]);
+        argv[3] = try allocator.dupe(u8, "--summarize");
+        errdefer allocator.free(argv[3]);
+
+        return argv;
     }
 
     fn buildOwnedObjectQueryArgv(
@@ -3909,6 +3964,43 @@ pub const SuiRpcClient = struct {
             if (parameter.omitted_from_explicit_args) continue;
             const lowering_kind = parameter.lowering_kind orelse continue;
             if (!std.mem.eql(u8, lowering_kind, "object")) continue;
+            if (object_preset.inferKindFromTypeSignature(parameter.signature)) |preset_kind| {
+                parameter.object_get_argv = try buildObjectGetArgv(
+                    allocator,
+                    object_preset.canonicalName(preset_kind),
+                );
+            } else {
+                const object_id_placeholder = try std.fmt.allocPrint(
+                    allocator,
+                    "0x<arg{d}-object-id>",
+                    .{index},
+                );
+                defer allocator.free(object_id_placeholder);
+
+                parameter.object_get_argv = try buildObjectGetArgv(allocator, object_id_placeholder);
+                parameter.imm_or_owned_object_input_select_token = try buildObjectInputSelectToken(
+                    allocator,
+                    object_id_placeholder,
+                    .imm_or_owned,
+                    false,
+                );
+                if (isMoveReferenceSignature(parameter.signature)) {
+                    parameter.shared_object_input_select_token = try buildObjectInputSelectToken(
+                        allocator,
+                        object_id_placeholder,
+                        .shared,
+                        isMoveMutableReferenceSignature(parameter.signature),
+                    );
+                } else {
+                    parameter.receiving_object_input_select_token = try buildObjectInputSelectToken(
+                        allocator,
+                        object_id_placeholder,
+                        .receiving,
+                        false,
+                    );
+                }
+            }
+
             if (!parameter_allows_owned_discovery[index]) continue;
             if (object_preset.inferKindFromTypeSignature(parameter.signature) != null) continue;
             const struct_type = concreteObjectStructTypeFromSignature(parameter.signature) orelse continue;
@@ -20381,16 +20473,32 @@ test "runReadQueryAction dispatches summarized move function queries" {
                     try testing.expect(value.applied_type_args_json == null);
                     try testing.expectEqualStrings("object", value.parameters[0].lowering_kind.?);
                     try testing.expectEqualStrings("\"<arg0-object-id-or-select-token>\"", value.parameters[0].placeholder_json.?);
+                    try testing.expect(value.parameters[0].shared_object_input_select_token == null);
+                    try testing.expectEqualStrings(
+                        "select:{\"kind\":\"object_input\",\"objectId\":\"0x<arg0-object-id>\",\"inputKind\":\"imm_or_owned\"}",
+                        value.parameters[0].imm_or_owned_object_input_select_token.?,
+                    );
+                    try testing.expectEqualStrings(
+                        "select:{\"kind\":\"object_input\",\"objectId\":\"0x<arg0-object-id>\",\"inputKind\":\"receiving\"}",
+                        value.parameters[0].receiving_object_input_select_token.?,
+                    );
+                    try testing.expectEqual(@as(usize, 4), value.parameters[0].object_get_argv.?.len);
+                    try testing.expectEqualStrings("object", value.parameters[0].object_get_argv.?[0]);
+                    try testing.expectEqualStrings("get", value.parameters[0].object_get_argv.?[1]);
+                    try testing.expectEqualStrings("0x<arg0-object-id>", value.parameters[0].object_get_argv.?[2]);
+                    try testing.expectEqualStrings("--summarize", value.parameters[0].object_get_argv.?[3]);
                     try testing.expectEqualStrings(
                         "select:{\"kind\":\"owned_object_struct_type\",\"structType\":\"0x2::pool::Pool\"}",
                         value.parameters[0].owned_object_select_token.?,
                     );
                     try testing.expectEqualStrings("u64", value.parameters[1].lowering_kind.?);
                     try testing.expectEqualStrings("0", value.parameters[1].placeholder_json.?);
+                    try testing.expect(value.parameters[1].object_get_argv == null);
                     try testing.expect(value.parameters[1].owned_object_select_token == null);
                     try testing.expectEqualStrings("runtime", value.parameters[2].lowering_kind.?);
                     try testing.expect(value.parameters[2].placeholder_json == null);
                     try testing.expect(value.parameters[2].omitted_from_explicit_args);
+                    try testing.expect(value.parameters[2].object_get_argv == null);
                     try testing.expect(value.call_template != null);
                     try testing.expectEqualStrings("[\"<arg0-object-id-or-select-token>\",0]", value.call_template.?.args_json);
                     try testing.expectEqual(@as(usize, 19), value.call_template.?.tx_dry_run_argv.len);
