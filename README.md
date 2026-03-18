@@ -840,6 +840,14 @@ zig build run -- move function cetus_clmm_mainnet pool swap --summarize
 - `0x1::option::Option<T>` 在 `T = u64` 这类 concrete pure 类型时直接按 BCS 编码
 - `vector<Coin<T>>` 在 `T = 0x2::sui::SUI` 这类 concrete struct type arg 时按对象向量处理，而不再因为泛型参数卡住
 
+手写 raw PTB 的 `MakeMoveVec` 现在也支持 concrete Move type 字符串，并会在本地 builder 路径里自动 canonicalize 成可编码的 type tag。比如：
+
+```bash
+--commands '[{"kind":"MakeMoveVec","type":"0x1::string::String","elements":["hello","world"]}]'
+```
+
+这样即使不是 move-call 参数自动 lowering，任意协议需要的独立向量构造也能直接走本地 tx bytes / dry-run 路径。
+
 `--package <package-id-or-alias>` 现在已经支持内置 alias：
 - `sui` / `sui_framework` / `framework` -> `0x2`
 - `sui_system` / `system` -> `0x3`

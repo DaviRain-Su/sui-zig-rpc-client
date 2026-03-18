@@ -9729,6 +9729,63 @@ test "runCommand tx_build programmable resolves selected gas payment tokens into
     try testing.expect(std.mem.indexOf(u8, output.items, "0xgas-build") != null);
 }
 
+test "runCommand tx_dry_run raw make-move-vec with struct type uses local programmable builder path" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var args = cli.ParsedArgs{
+        .command = .tx_dry_run,
+        .has_command = true,
+        .tx_build_kind = .programmable,
+        .tx_build_commands = "[{\"kind\":\"MakeMoveVec\",\"type\":\"0x1::string::String\",\"elements\":[\"hello\",\"world\"]}]",
+        .tx_build_sender = "0x123",
+        .tx_build_gas_budget = 1200,
+        .tx_build_gas_price = 8,
+        .tx_build_gas_payment = "[{\"objectId\":\"0x999\",\"version\":\"3\",\"digest\":\"0x3333333333333333333333333333333333333333333333333333333333333333\"}]",
+        .tx_send_summarize = true,
+    };
+
+    const Counts = struct { dry_run: usize = 0, unsafe: usize = 0 };
+    var counts = Counts{};
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const state = @as(*Counts, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "sui_dryRunTransactionBlock")) {
+                state.dry_run += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"effects\":{\"status\":{\"status\":\"success\"}},\"balanceChanges\":[]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall") or std.mem.eql(u8, req.method, "unsafe_batchTransaction")) {
+                state.unsafe += 1;
+                return alloc.dupe(u8, "{\"result\":{\"txBytes\":\"AQIDBA==\"}}");
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+
+    rpc.request_sender = .{
+        .context = &counts,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    try testing.expectEqual(@as(usize, 1), counts.dry_run);
+    try testing.expectEqual(@as(usize, 0), counts.unsafe);
+}
+
 test "runCommand tx_build move-call with emit-tx-block and explicit gas payment uses local programmable builder path" {
     const testing = std.testing;
 

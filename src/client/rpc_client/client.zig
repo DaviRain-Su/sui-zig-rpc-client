@@ -4284,37 +4284,36 @@ pub const SuiRpcClient = struct {
                 };
             }
 
-            fn classifyMakeMoveVecElementKind(
-                ctx: *@This(),
-                value: ?std.json.Value,
-            ) !LocalMoveCallParameterKind {
-                const raw = value orelse return .object;
-                if (raw == .null) return .object;
-                return switch ((try classifyNormalizedMoveType(ctx.allocator, raw)) orelse .object) {
-                    .signer => .unsupported,
-                    else => |kind| kind,
-                };
-            }
-
-            fn lowerMakeMoveVecElementForKind(
+            fn lowerMakeMoveVecElementForType(
                 ctx: *@This(),
                 value: std.json.Value,
-                kind: LocalMoveCallParameterKind,
+                element_type: ?std.json.Value,
+            ) anyerror![]u8 {
+                if (element_type) |resolved_type| {
+                    const kind = (try classifyNormalizedMoveType(ctx.allocator, resolved_type)) orelse .object;
+                    return switch (kind) {
+                        .signer => error.InvalidCli,
+                        else => try ctx.lowerMoveCallArgumentForNormalizedType(value, resolved_type),
+                    };
+                }
+                return try ctx.lowerMakeMoveVecElement(value);
+            }
+
+            fn canonicalizeMakeMoveVecTypeJson(
+                ctx: *@This(),
+                raw_type: ?std.json.Value,
             ) ![]u8 {
-                return switch (kind) {
-                    .object => try ctx.lowerMakeMoveVecElement(value),
-                    .address => try ctx.lowerMoveCallArgumentForKind(value, .address),
-                    .boolean => try ctx.lowerMoveCallArgumentForKind(value, .boolean),
-                    .u8 => try ctx.lowerMoveCallArgumentForKind(value, .u8),
-                    .u16 => try ctx.lowerMoveCallArgumentForKind(value, .u16),
-                    .u32 => try ctx.lowerMoveCallArgumentForKind(value, .u32),
-                    .u64 => try ctx.lowerMoveCallArgumentForKind(value, .u64),
-                    .u128 => try ctx.lowerMoveCallArgumentForKind(value, .u128),
-                    .u256 => try ctx.lowerMoveCallArgumentForKind(value, .u256),
-                    .vector_u8 => try ctx.lowerMoveCallArgumentForKind(value, .vector_u8),
-                    .utf8_string, .ascii_string, .object_id, .option => error.InvalidCli,
-                    .vector, .signer, .unsupported => error.InvalidCli,
-                };
+                const value = raw_type orelse return try ctx.allocator.dupe(u8, "null");
+                if (value == .null) return try ctx.allocator.dupe(u8, "null");
+                return try canonicalMoveTypeArgumentJson(ctx.allocator, value);
+            }
+
+            fn parseOptionalCanonicalMakeMoveVecType(
+                ctx: *@This(),
+                canonical_type_json: []const u8,
+            ) !?std.json.Parsed(std.json.Value) {
+                if (std.mem.eql(u8, canonical_type_json, "null")) return null;
+                return try std.json.parseFromSlice(std.json.Value, ctx.allocator, canonical_type_json, .{});
             }
 
             fn lowerMakeMoveVecCommand(
@@ -4324,13 +4323,12 @@ pub const SuiRpcClient = struct {
                 const object = command.object;
                 const elements_value = object.get("elements") orelse return error.InvalidCli;
                 if (elements_value != .array) return error.InvalidCli;
-                const element_kind = try ctx.classifyMakeMoveVecElementKind(object.get("type"));
-
-                const type_json = if (object.get("type")) |raw_type|
-                    try stringifyJsonValueAlloc(ctx.allocator, raw_type)
-                else
-                    try ctx.allocator.dupe(u8, "null");
+                const type_json = try ctx.canonicalizeMakeMoveVecTypeJson(object.get("type"));
                 defer ctx.allocator.free(type_json);
+
+                const parsed_type = try ctx.parseOptionalCanonicalMakeMoveVecType(type_json);
+                defer if (parsed_type) |*value| value.deinit();
+                const element_type = if (parsed_type) |value| value.value else null;
 
                 var lowered_elements = std.ArrayListUnmanaged([]u8){};
                 defer {
@@ -4339,7 +4337,10 @@ pub const SuiRpcClient = struct {
                 }
 
                 for (elements_value.array.items) |entry| {
-                    try lowered_elements.append(ctx.allocator, try ctx.lowerMakeMoveVecElementForKind(entry, element_kind));
+                    try lowered_elements.append(
+                        ctx.allocator,
+                        try ctx.lowerMakeMoveVecElementForType(entry, element_type),
+                    );
                 }
 
                 const elements_json = try ctx.appendJsonArray(lowered_elements.items);
@@ -5378,6 +5379,53 @@ pub const SuiRpcClient = struct {
         try testing.expectEqual(@as(i64, 2), commands.value.array.items[1].object.get("elements").?.array.items[0].object.get("Input").?.integer);
         try testing.expectEqual(@as(i64, 3), commands.value.array.items[1].object.get("elements").?.array.items[1].object.get("Input").?.integer);
         try testing.expectEqual(@as(i64, 4), commands.value.array.items[2].object.get("elements").?.array.items[0].object.get("Input").?.integer);
+    }
+
+    test "ownLocalProgrammableTransactionPartsFromCommandSource canonicalizes make-move-vec struct types and pure wrapper elements" {
+        const testing = std.testing;
+
+        var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+        defer _ = gpa.deinit();
+        const allocator = gpa.allocator();
+
+        var rpc = SuiRpcClient.init(allocator, "https://rpc.invalid");
+        defer rpc.deinit();
+
+        var parts = try rpc.ownLocalProgrammableTransactionPartsFromCommandSource(
+            allocator,
+            .{
+                .commands_json =
+                \\[
+                \\  {"kind":"MakeMoveVec","type":"0x1::string::String","elements":["hello","world"]}
+                \\]
+                ,
+            },
+            "0xabc",
+            "[{\"objectId\":\"0x999\",\"version\":\"3\",\"digest\":\"0x3333333333333333333333333333333333333333333333333333333333333333\"}]",
+            8,
+            1200,
+            null,
+        );
+        defer parts.deinit(allocator);
+
+        const inputs = try std.json.parseFromSlice(std.json.Value, allocator, parts.inputs_json, .{});
+        defer inputs.deinit();
+        const commands = try std.json.parseFromSlice(std.json.Value, allocator, parts.commands_json, .{});
+        defer commands.deinit();
+
+        try testing.expectEqual(@as(usize, 2), inputs.value.array.items.len);
+        try testing.expect(inputs.value.array.items[0].object.get("Pure") != null);
+        try testing.expect(inputs.value.array.items[1].object.get("Pure") != null);
+
+        const make_move_vec = commands.value.array.items[0];
+        try testing.expectEqualStrings("MakeMoveVec", make_move_vec.object.get("kind").?.string);
+        const type_value = make_move_vec.object.get("type").?;
+        try testing.expect(type_value == .object);
+        const struct_value = type_value.object.get("Struct").?;
+        try testing.expectEqualStrings("0x1", struct_value.object.get("address").?.string);
+        try testing.expectEqualStrings("string", struct_value.object.get("module").?.string);
+        try testing.expectEqualStrings("String", struct_value.object.get("name").?.string);
+        try testing.expectEqual(@as(usize, 0), struct_value.object.get("typeParams").?.array.items.len);
     }
 
     test "buildLocalProgrammableTransactionTxBytesFromCommandSource rejects unsupported move-call raw literals without explicit wrappers" {
