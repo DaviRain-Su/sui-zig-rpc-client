@@ -10368,6 +10368,75 @@ test "runCommand tx_dry_run request artifact uses local programmable builder pat
     try testing.expectEqual(@as(usize, 0), counts.unsafe);
 }
 
+test "runCommand tx_dry_run request artifact from stdin uses local programmable builder path" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const old_override = cli.test_stdin_value_override;
+    defer cli.test_stdin_value_override = old_override;
+    cli.test_stdin_value_override =
+        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"typeArguments\":[],\"arguments\":[7]}],\"sender\":\"0x123\",\"gasBudget\":1200,\"gasPrice\":8,\"gasPayment\":[{\"objectId\":\"0x999\",\"version\":\"3\",\"digest\":\"0x3333333333333333333333333333333333333333333333333333333333333333\"}],\"summarize\":true}";
+
+    const Counts = struct {
+        normalized: usize = 0,
+        dry_run: usize = 0,
+        unsafe: usize = 0,
+    };
+    var counts = Counts{};
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const state = @as(*Counts, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                state.normalized += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"parameters\":[\"U64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\"}}}]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_dryRunTransactionBlock")) {
+                state.dry_run += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"effects\":{\"status\":{\"status\":\"success\"}},\"balanceChanges\":[]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall") or std.mem.eql(u8, req.method, "unsafe_batchTransaction")) {
+                state.unsafe += 1;
+                return alloc.dupe(u8, "{\"result\":{\"txBytes\":\"AQIDBA==\"}}");
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "tx",
+        "dry-run",
+        "--request",
+        "@-",
+    });
+    defer args.deinit(allocator);
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = &counts,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    try testing.expectEqual(@as(usize, 1), counts.normalized);
+    try testing.expectEqual(@as(usize, 1), counts.dry_run);
+    try testing.expectEqual(@as(usize, 0), counts.unsafe);
+}
+
 test "runCommand tx_dry_run auto-lowers vector object args without unsafe fallback" {
     const testing = std.testing;
 

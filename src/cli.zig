@@ -6,6 +6,7 @@ const tx_builder = sui.tx_builder;
 const tx_request_builder = sui.tx_request_builder;
 
 pub const default_rpc_url = "https://fullnode.mainnet.sui.io:443";
+pub var test_stdin_value_override: ?[]const u8 = null;
 
 pub const Command = enum {
     help,
@@ -339,6 +340,20 @@ fn maybeLoadFileValue(allocator: std.mem.Allocator, value: []const u8) !LoadedAr
             }
         }
         const path = value[1..];
+        if (std.mem.eql(u8, path, "-")) {
+            const stdin_value = if (test_stdin_value_override) |override|
+                override
+            else blk: {
+                var file = std.fs.File.stdin();
+                const loaded = try file.readToEndAlloc(allocator, 10 * 1024 * 1024);
+                defer allocator.free(loaded);
+                break :blk std.mem.trim(u8, loaded, " \n\r\t");
+            };
+            return .{
+                .value = try allocator.dupe(u8, stdin_value),
+                .owned = true,
+            };
+        }
         const loaded = try std.fs.cwd().readFileAlloc(allocator, path, 10 * 1024 * 1024);
         const trimmed = std.mem.trim(u8, loaded, " \n\r\t");
         const owned_value = try allocator.dupe(u8, trimmed);
@@ -4313,6 +4328,7 @@ pub fn printUsage(writer: anytype) !void {
         "  --confirm-timeout-ms <ms>             Confirm timeout\n" ++
         "  --poll-ms <ms>                       Polling interval for tx confirm\n" ++
         "  --pretty                             Pretty-print response JSON\n" ++
+        "  @-                                   For any file-backed arg, read the value from stdin\n" ++
         "  SUI_CONFIG=<path>                    Path to config file (default: ~/.sui/sui_config/client.yaml)\n" ++
         "                                       Supports rpc_url/json_rpc_url and Sui yaml envs format\n" ++
         "  SUI_KEYSTORE=<path>                  Path to keystore file (default: ~/.sui/sui_config/sui.keystore)\n" ++
@@ -6328,6 +6344,36 @@ test "parseCliArgs parses tx_send request artifact from file" {
     try testing.expectEqual(@as(?u64, 2200), parsed.tx_build_gas_budget);
     try testing.expectEqual(@as(usize, 1), parsed.signers.items.len);
     try testing.expectEqualStrings("main", parsed.signers.items[0]);
+}
+
+test "parseCliArgs parses tx_send request artifact from stdin" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const old_override = test_stdin_value_override;
+    defer test_stdin_value_override = old_override;
+    test_stdin_value_override =
+        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"typeArguments\":[],\"arguments\":[7]}],\"fromKeystore\":true,\"signer\":\"stdin\",\"gasBudget\":2200,\"autoGasPayment\":true,\"wait\":true,\"summarize\":true}";
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "tx",
+        "send",
+        "--request",
+        "@-",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.tx_send, parsed.command);
+    try testing.expectEqualStrings(
+        "[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"typeArguments\":[],\"arguments\":[7]}]",
+        parsed.tx_build_commands.?,
+    );
+    try testing.expect(parsed.from_keystore);
+    try testing.expectEqual(@as(usize, 1), parsed.signers.items.len);
+    try testing.expectEqualStrings("stdin", parsed.signers.items[0]);
 }
 
 test "parseCliArgs rejects tx_send request artifact mixed with tx-bytes" {

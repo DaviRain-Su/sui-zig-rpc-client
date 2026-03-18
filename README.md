@@ -814,7 +814,7 @@ zig build run -- tx dry-run \
   --summarize
 ```
 
-参数 JSON 可以直接内联传入，也可用 `@path/to/file.json` 方式加载。
+参数 JSON 可以直接内联传入，也可用 `@path/to/file.json` 方式加载；写成 `@-` 时会直接从 stdin 读取，这样可以把 `move function --emit-template ...` 直接管道给 `tx dry-run/send --request @-`。
 
 `move` ABI 发现命令示例：
 
