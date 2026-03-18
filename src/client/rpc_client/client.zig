@@ -4467,6 +4467,42 @@ pub const SuiRpcClient = struct {
         return try buildAutoSelectedScalarArgJson(allocator, token);
     }
 
+    fn buildExplicitMoveFunctionVectorObjectArgJson(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        parameter: move_result.OwnedMoveParameterSummary,
+        object_id_values: []const std.json.Value,
+    ) ![]u8 {
+        if (!std.mem.eql(u8, parameter.lowering_kind orelse "", "vector")) return error.InvalidCli;
+        if (concreteVectorObjectStructTypeFromSignature(parameter.signature) == null) return error.InvalidCli;
+
+        var output = std.ArrayList(u8){};
+        defer output.deinit(allocator);
+        const writer = output.writer(allocator);
+        try writer.writeAll("[");
+        for (object_id_values, 0..) |value, index| {
+            if (value != .string) return error.InvalidCli;
+
+            var summary = try self.getObjectAndSummarizeWithOptions(
+                allocator,
+                value.string,
+                objectDataOptionsForSummaries(.{}),
+            );
+            defer summary.deinit(allocator);
+            if (summary.status != .found) return error.SelectionNotFound;
+
+            const token = switch (summary.owner_kind orelse .unknown) {
+                .address_owner, .object_owner, .immutable => summary.imm_or_owned_object_input_select_token,
+                .shared, .unknown => null,
+            } orelse return error.InvalidCli;
+
+            if (index != 0) try writer.writeAll(",");
+            try writer.print("{f}", .{std.json.fmt(token, .{})});
+        }
+        try writer.writeAll("]");
+        return try output.toOwnedSlice(allocator);
+    }
+
     fn applyExplicitIndexedObjectMoveFunctionArgsToParameters(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
@@ -4483,8 +4519,7 @@ pub const SuiRpcClient = struct {
         for (parsed.value.array.items) |entry| {
             if (entry != .object) return error.InvalidCli;
             const index_value = entry.object.get("index") orelse return error.InvalidCli;
-            const object_id_value = entry.object.get("objectId") orelse return error.InvalidCli;
-            if (object_id_value != .string) return error.InvalidCli;
+            const object_id_value = entry.object.get("value") orelse return error.InvalidCli;
 
             const parameter_index: usize = switch (index_value) {
                 .integer => |number| blk: {
@@ -4502,11 +4537,26 @@ pub const SuiRpcClient = struct {
             if (parameter.omitted_from_explicit_args) return error.InvalidCli;
             if (parameter.explicit_arg_json != null) return error.InvalidCli;
 
-            parameter.explicit_arg_json = try self.buildExplicitMoveFunctionObjectArgJson(
-                allocator,
-                parameter.*,
-                object_id_value.string,
-            );
+            parameter.explicit_arg_json = switch (object_id_value) {
+                .string => if (std.mem.eql(u8, parameter.lowering_kind orelse "", "vector"))
+                    try self.buildExplicitMoveFunctionVectorObjectArgJson(
+                        allocator,
+                        parameter.*,
+                        &.{object_id_value},
+                    )
+                else
+                    try self.buildExplicitMoveFunctionObjectArgJson(
+                        allocator,
+                        parameter.*,
+                        object_id_value.string,
+                    ),
+                .array => try self.buildExplicitMoveFunctionVectorObjectArgJson(
+                    allocator,
+                    parameter.*,
+                    object_id_value.array.items,
+                ),
+                else => return error.InvalidCli,
+            };
         }
     }
 
@@ -5034,32 +5084,29 @@ pub const SuiRpcClient = struct {
                     owner_address,
                     item_struct_type,
                 );
-                parameter.vector_item_owned_object_query_argv = if (coinTypeFromCoinStructType(item_struct_type)) |coin_type|
-                    blk: {
-                        parameter.vector_item_coin_with_min_balance_select_token = try buildCoinWithMinBalanceSelectToken(
-                            allocator,
-                            owner_address,
-                            coin_type,
-                            1,
-                        );
-                        allocator.free(parameter.placeholder_json.?);
-                        parameter.placeholder_json = try std.fmt.allocPrint(
-                            allocator,
-                            "[{f}]",
-                            .{std.json.fmt(parameter.vector_item_coin_with_min_balance_select_token.?, .{})},
-                        );
-                        break :blk try buildCoinQueryArgv(
-                            allocator,
-                            owner_address,
-                            coin_type,
-                        );
-                    }
-                else
-                    try buildOwnedObjectQueryArgv(
+                parameter.vector_item_owned_object_query_argv = if (coinTypeFromCoinStructType(item_struct_type)) |coin_type| blk: {
+                    parameter.vector_item_coin_with_min_balance_select_token = try buildCoinWithMinBalanceSelectToken(
                         allocator,
                         owner_address,
-                        item_struct_type,
+                        coin_type,
+                        1,
                     );
+                    allocator.free(parameter.placeholder_json.?);
+                    parameter.placeholder_json = try std.fmt.allocPrint(
+                        allocator,
+                        "[{f}]",
+                        .{std.json.fmt(parameter.vector_item_coin_with_min_balance_select_token.?, .{})},
+                    );
+                    break :blk try buildCoinQueryArgv(
+                        allocator,
+                        owner_address,
+                        coin_type,
+                    );
+                } else try buildOwnedObjectQueryArgv(
+                    allocator,
+                    owner_address,
+                    item_struct_type,
+                );
                 if (owner_address) |owner| {
                     parameter.vector_item_owned_object_candidates = try self.discoverOwnedObjectCandidates(
                         allocator,
@@ -5146,23 +5193,20 @@ pub const SuiRpcClient = struct {
                 break :blk trimMoveReferenceSignature(parameter.signature);
             } orelse continue;
             parameter.owned_object_select_token = try buildOwnedObjectSelectToken(allocator, owner_address, struct_type);
-            parameter.owned_object_query_argv = if (coinTypeFromCoinStructType(struct_type)) |coin_type|
-                blk: {
-                    parameter.coin_with_min_balance_select_token = try buildCoinWithMinBalanceSelectToken(
-                        allocator,
-                        owner_address,
-                        coin_type,
-                        1,
-                    );
-                    allocator.free(parameter.placeholder_json.?);
-                    parameter.placeholder_json = try buildAutoSelectedScalarArgJson(
-                        allocator,
-                        parameter.coin_with_min_balance_select_token.?,
-                    );
-                    break :blk try buildCoinQueryArgv(allocator, owner_address, coin_type);
-                }
-            else
-                try buildOwnedObjectQueryArgv(allocator, owner_address, struct_type);
+            parameter.owned_object_query_argv = if (coinTypeFromCoinStructType(struct_type)) |coin_type| blk: {
+                parameter.coin_with_min_balance_select_token = try buildCoinWithMinBalanceSelectToken(
+                    allocator,
+                    owner_address,
+                    coin_type,
+                    1,
+                );
+                allocator.free(parameter.placeholder_json.?);
+                parameter.placeholder_json = try buildAutoSelectedScalarArgJson(
+                    allocator,
+                    parameter.coin_with_min_balance_select_token.?,
+                );
+                break :blk try buildCoinQueryArgv(allocator, owner_address, coin_type);
+            } else try buildOwnedObjectQueryArgv(allocator, owner_address, struct_type);
             if (owner_address) |owner| {
                 parameter.owned_object_candidates = try self.discoverOwnedObjectCandidates(
                     allocator,
@@ -8969,7 +9013,7 @@ pub const SuiRpcClient = struct {
         return try self.getCoins(owner, request.coin_type, request.cursor, request.limit);
     }
 
-fn buildOwnedObjectsFilterJson(
+    fn buildOwnedObjectsFilterJson(
         allocator: std.mem.Allocator,
         filter: OwnedObjectsFilter,
     ) !?[]u8 {

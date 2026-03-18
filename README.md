@@ -907,6 +907,8 @@ zig build run -- events \
 
 如果你手上只有裸 `object id` 或 alias，不想自己先跑 `object get --summarize` 再抄 `select:{...}`，可以直接用 `--object-arg-at <index> <object-id-or-alias>`。CLI 会按该参数的 Move 签名自动查询对象 owner/version/digest/shared version，并把它落成精确 `object_input` token；对 shared object 会自动选对 `mutable`，对 owned/immutable object 会落成 exact `imm_or_owned` token。
 
+如果目标参数是 `vector<object>`，`--object-arg-at` 也可以直接传 JSON 字符串数组，例如 `--object-arg-at 0 '["0xcoin1","0xcoin2"]'`。CLI 会逐个查对象元数据，再把整组参数落成 `["select:{...}","select:{...}"]` 这种可直接执行的向量参数。
+
 如果同时又有 owner 上下文和真实 `Coin<T>` 候选，CLI 现在还会把这类显式金额继续用于 `preferred_*` 自动选币：
 - scalar `Coin<T>` 会优先选“最小满足金额”的 coin，而不是盲目选最大余额
 - `vector<Coin<T>>` 会优先收敛成一组能覆盖该金额的 coin 子集

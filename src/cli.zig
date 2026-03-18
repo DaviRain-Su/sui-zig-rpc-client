@@ -413,6 +413,45 @@ fn maybeLoadObjectIdValue(allocator: std.mem.Allocator, raw: []const u8) !Loaded
     return loaded;
 }
 
+fn normalizeMoveFunctionObjectArgValueJson(
+    allocator: std.mem.Allocator,
+    raw: []const u8,
+) ![]u8 {
+    const loaded = try maybeLoadFileValue(allocator, raw);
+    defer if (loaded.owned) allocator.free(loaded.value);
+
+    const trimmed = std.mem.trim(u8, loaded.value, " \n\r\t");
+    if (trimmed.len != 0 and (trimmed[0] == '[' or trimmed[0] == '"')) {
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, trimmed, .{});
+        defer parsed.deinit();
+
+        switch (parsed.value) {
+            .string => |value| {
+                const resolved = object_preset.resolveObjectIdAlias(value) orelse value;
+                return try std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(resolved, .{})});
+            },
+            .array => |values| {
+                var output = std.ArrayList(u8){};
+                defer output.deinit(allocator);
+                const writer = output.writer(allocator);
+                try writer.writeAll("[");
+                for (values.items, 0..) |item, index| {
+                    if (item != .string) return error.InvalidCli;
+                    const resolved = object_preset.resolveObjectIdAlias(item.string) orelse item.string;
+                    if (index != 0) try writer.writeAll(",");
+                    try writer.print("{f}", .{std.json.fmt(resolved, .{})});
+                }
+                try writer.writeAll("]");
+                return try output.toOwnedSlice(allocator);
+            },
+            else => return error.InvalidCli,
+        }
+    }
+
+    const resolved = object_preset.resolveObjectIdAlias(trimmed) orelse trimmed;
+    return try std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(resolved, .{})});
+}
+
 fn jsonObjectFieldAny(
     object: std.json.ObjectMap,
     comptime names: []const []const u8,
@@ -510,9 +549,9 @@ fn buildMoveFunctionIndexedArgsJson(
 fn buildMoveFunctionIndexedObjectArgsJson(
     allocator: std.mem.Allocator,
     indices: []const usize,
-    object_ids: []const []const u8,
+    raw_values: []const []const u8,
 ) ![]u8 {
-    if (indices.len != object_ids.len) return error.InvalidCli;
+    if (indices.len != raw_values.len) return error.InvalidCli;
 
     var seen = std.AutoHashMap(usize, void).init(allocator);
     defer seen.deinit();
@@ -521,14 +560,17 @@ fn buildMoveFunctionIndexedObjectArgsJson(
     defer output.deinit(allocator);
     const writer = output.writer(allocator);
     try writer.writeAll("[");
-    for (indices, object_ids, 0..) |index, object_id, item_index| {
+    for (indices, raw_values, 0..) |index, raw_value, item_index| {
         const entry = try seen.getOrPut(index);
         if (entry.found_existing) return error.InvalidCli;
 
+        const normalized_value = try normalizeMoveFunctionObjectArgValueJson(allocator, raw_value);
+        defer allocator.free(normalized_value);
+
         if (item_index != 0) try writer.writeAll(",");
         try writer.print(
-            "{{\"index\":{},\"objectId\":{f}}}",
-            .{ index, std.json.fmt(object_id, .{}) },
+            "{{\"index\":{},\"value\":{s}}}",
+            .{ index, normalized_value },
         );
     }
     try writer.writeAll("]");
@@ -4319,7 +4361,7 @@ pub fn printUsage(writer: anytype) !void {
         "    --args <json|@file>                 Optional explicit argument JSON used to specialize preferred templates\n" ++
         "    --arg <json|bare|@file>             Repeatable explicit argument shorthand for --args\n" ++
         "    --arg-at <index> <json|bare|@file>  Repeatable explicit argument override by parameter index\n" ++
-        "    --object-arg-at <index> <object>    Repeatable object-id-or-alias override by parameter index\n" ++
+        "    --object-arg-at <index> <object>    Repeatable object-id-or-alias or JSON string array override by parameter index\n" ++
         "    --emit-template <kind>              Print one generated template directly: commands|preferred-commands|dry-run-request|preferred-dry-run-request|send-request|preferred-send-request\n" ++
         "    --dry-run                           Resolve the preferred dry-run request artifact and execute it immediately\n" ++
         "    --send                              Resolve the preferred send request artifact and execute it immediately\n" ++
@@ -7320,10 +7362,36 @@ test "parseCliArgs parses move function command with indexed object args" {
 
     try testing.expectEqual(Command.move_function, parsed.command);
     try testing.expectEqualStrings(
-        "[{\"index\":0,\"objectId\":\"0x6\"}]",
+        "[{\"index\":0,\"value\":\"0x6\"}]",
         parsed.move_function_indexed_object_args_json.?,
     );
     try testing.expect(parsed.tx_send_summarize);
+}
+
+test "parseCliArgs parses move function command with indexed vector object args" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "move",
+        "function",
+        "0x2",
+        "router",
+        "deposit_many",
+        "--object-arg-at",
+        "0",
+        "[\"clock\",\"0x1\"]",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.move_function, parsed.command);
+    try testing.expectEqualStrings(
+        "[{\"index\":0,\"value\":[\"0x6\",\"0x1\"]}]",
+        parsed.move_function_indexed_object_args_json.?,
+    );
 }
 
 test "parseCliArgs rejects move function duplicate indexed object args" {
