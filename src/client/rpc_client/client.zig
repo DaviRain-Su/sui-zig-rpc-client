@@ -3076,7 +3076,7 @@ pub const SuiRpcClient = struct {
                         }
                     }
 
-                    try writer.writeAll("]}}}");
+                    try writer.writeAll("]}}");
                     return;
                 }
                 return error.InvalidCli;
@@ -3093,6 +3093,234 @@ pub const SuiRpcClient = struct {
         errdefer out.deinit(allocator);
         try writeCanonicalNormalizedMoveTypeJson(allocator, out.writer(allocator), value);
         return try out.toOwnedSlice(allocator);
+    }
+
+    fn parseMoveTypeTextCanonicalJson(
+        allocator: std.mem.Allocator,
+        raw_text: []const u8,
+    ) ![]u8 {
+        const Parser = struct {
+            allocator: std.mem.Allocator,
+            input: []const u8,
+            index: usize = 0,
+
+            fn skipWhitespace(self: *@This()) void {
+                while (self.index < self.input.len and std.ascii.isWhitespace(self.input[self.index])) : (self.index += 1) {}
+            }
+
+            fn parseSegment(self: *@This()) ![]const u8 {
+                self.skipWhitespace();
+                const start = self.index;
+                while (self.index < self.input.len) : (self.index += 1) {
+                    const char = self.input[self.index];
+                    if (char == '<' or char == '>' or char == ',' or char == ':' or std.ascii.isWhitespace(char)) break;
+                }
+                if (start == self.index) return error.InvalidCli;
+                return self.input[start..self.index];
+            }
+
+            fn consumeChar(self: *@This(), expected: u8) bool {
+                self.skipWhitespace();
+                if (self.index >= self.input.len or self.input[self.index] != expected) return false;
+                self.index += 1;
+                return true;
+            }
+
+            fn expectChar(self: *@This(), expected: u8) !void {
+                if (!self.consumeChar(expected)) return error.InvalidCli;
+            }
+
+            fn consumeDoubleColon(self: *@This()) bool {
+                self.skipWhitespace();
+                if (self.index + 1 >= self.input.len) return false;
+                if (self.input[self.index] != ':' or self.input[self.index + 1] != ':') return false;
+                self.index += 2;
+                return true;
+            }
+
+            fn expectDoubleColon(self: *@This()) !void {
+                if (!self.consumeDoubleColon()) return error.InvalidCli;
+            }
+
+            fn parseStructTypeJson(
+                self: *@This(),
+                address: []const u8,
+                module: []const u8,
+                name: []const u8,
+            ) anyerror![]u8 {
+                var type_args = std.ArrayListUnmanaged([]u8){};
+                defer {
+                    for (type_args.items) |item| self.allocator.free(item);
+                    type_args.deinit(self.allocator);
+                }
+
+                if (self.consumeChar('<')) {
+                    while (true) {
+                        try type_args.append(self.allocator, try self.parseTypeJson());
+                        if (self.consumeChar(',')) continue;
+                        try self.expectChar('>');
+                        break;
+                    }
+                }
+
+                var out = std.ArrayList(u8){};
+                errdefer out.deinit(self.allocator);
+                const writer = out.writer(self.allocator);
+                try writer.print(
+                    "{{\"Struct\":{{\"address\":{f},\"module\":{f},\"name\":{f},\"typeParams\":[",
+                    .{
+                        std.json.fmt(address, .{}),
+                        std.json.fmt(module, .{}),
+                        std.json.fmt(name, .{}),
+                    },
+                );
+                for (type_args.items, 0..) |item, index| {
+                    if (index != 0) try writer.writeAll(",");
+                    try writer.writeAll(item);
+                }
+                try writer.writeAll("]}}");
+                return try out.toOwnedSlice(self.allocator);
+            }
+
+            fn parseTypeJson(self: *@This()) anyerror![]u8 {
+                const head = try self.parseSegment();
+                if (canonicalPrimitiveMoveTypeName(head)) |primitive| {
+                    return try std.fmt.allocPrint(self.allocator, "{f}", .{std.json.fmt(primitive, .{})});
+                }
+
+                if (std.ascii.eqlIgnoreCase(head, "vector")) {
+                    try self.expectChar('<');
+                    const inner = try self.parseTypeJson();
+                    defer self.allocator.free(inner);
+                    try self.expectChar('>');
+                    return try std.fmt.allocPrint(self.allocator, "{{\"Vector\":{s}}}", .{inner});
+                }
+
+                try self.expectDoubleColon();
+                const module = try self.parseSegment();
+                try self.expectDoubleColon();
+                const name = try self.parseSegment();
+                return try self.parseStructTypeJson(head, module, name);
+            }
+        };
+
+        var parser = Parser{
+            .allocator = allocator,
+            .input = std.mem.trim(u8, raw_text, " \n\r\t"),
+        };
+        const parsed = try parser.parseTypeJson();
+        errdefer allocator.free(parsed);
+        parser.skipWhitespace();
+        if (parser.index != parser.input.len) return error.InvalidCli;
+        return parsed;
+    }
+
+    fn canonicalMoveTypeArgumentJson(
+        allocator: std.mem.Allocator,
+        value: std.json.Value,
+    ) ![]u8 {
+        return switch (value) {
+            .string => |text| try parseMoveTypeTextCanonicalJson(allocator, text),
+            .object => try canonicalNormalizedMoveTypeJson(allocator, value),
+            else => error.InvalidCli,
+        };
+    }
+
+    fn canonicalMoveTypeArgumentsJson(
+        allocator: std.mem.Allocator,
+        items: []const std.json.Value,
+    ) ![]u8 {
+        var out = std.ArrayList(u8){};
+        errdefer out.deinit(allocator);
+        const writer = out.writer(allocator);
+        try writer.writeAll("[");
+        for (items, 0..) |item, index| {
+            const canonical = try canonicalMoveTypeArgumentJson(allocator, item);
+            defer allocator.free(canonical);
+            if (index != 0) try writer.writeAll(",");
+            try writer.writeAll(canonical);
+        }
+        try writer.writeAll("]");
+        return try out.toOwnedSlice(allocator);
+    }
+
+    fn parseNormalizedTypeParameterIndex(
+        value: std.json.Value,
+    ) !usize {
+        return switch (value) {
+            .integer => |number| blk: {
+                if (number < 0) return error.InvalidCli;
+                break :blk @intCast(number);
+            },
+            .string => |text| try std.fmt.parseInt(usize, text, 10),
+            else => error.InvalidCli,
+        };
+    }
+
+    fn substituteNormalizedMoveTypeJson(
+        allocator: std.mem.Allocator,
+        value: std.json.Value,
+        raw_type_arguments: []const std.json.Value,
+    ) ![]u8 {
+        switch (value) {
+            .string => |name| {
+                const canonical = canonicalPrimitiveMoveTypeName(name) orelse return error.InvalidCli;
+                return try std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(canonical, .{})});
+            },
+            .object => |object| {
+                if (object.get("Reference")) |inner| {
+                    const resolved = try substituteNormalizedMoveTypeJson(allocator, inner, raw_type_arguments);
+                    defer allocator.free(resolved);
+                    return try std.fmt.allocPrint(allocator, "{{\"Reference\":{s}}}", .{resolved});
+                }
+                if (object.get("MutableReference")) |inner| {
+                    const resolved = try substituteNormalizedMoveTypeJson(allocator, inner, raw_type_arguments);
+                    defer allocator.free(resolved);
+                    return try std.fmt.allocPrint(allocator, "{{\"MutableReference\":{s}}}", .{resolved});
+                }
+                if (object.get("Vector")) |inner| {
+                    const resolved = try substituteNormalizedMoveTypeJson(allocator, inner, raw_type_arguments);
+                    defer allocator.free(resolved);
+                    return try std.fmt.allocPrint(allocator, "{{\"Vector\":{s}}}", .{resolved});
+                }
+                if (object.get("TypeParameter")) |raw_index| {
+                    const index = try parseNormalizedTypeParameterIndex(raw_index);
+                    if (index >= raw_type_arguments.len) return error.InvalidCli;
+                    return try canonicalMoveTypeArgumentJson(allocator, raw_type_arguments[index]);
+                }
+                if (object.get("Struct")) |struct_value| {
+                    if (struct_value != .object) return error.InvalidCli;
+                    const address_value = struct_value.object.get("address") orelse return error.InvalidCli;
+                    const module_value = struct_value.object.get("module") orelse return error.InvalidCli;
+                    const name_value = struct_value.object.get("name") orelse return error.InvalidCli;
+                    if (address_value != .string or module_value != .string or name_value != .string) return error.InvalidCli;
+
+                    var out = std.ArrayList(u8){};
+                    errdefer out.deinit(allocator);
+                    const writer = out.writer(allocator);
+                    try writer.print(
+                        "{{\"Struct\":{{\"address\":{f},\"module\":{f},\"name\":{f},\"typeParams\":[",
+                        .{
+                            std.json.fmt(address_value.string, .{}),
+                            std.json.fmt(module_value.string, .{}),
+                            std.json.fmt(name_value.string, .{}),
+                        },
+                    );
+
+                    const type_params = try normalizedStructTypeArguments(struct_value.object);
+                    for (type_params, 0..) |item, index| {
+                        const resolved = try substituteNormalizedMoveTypeJson(allocator, item, raw_type_arguments);
+                        defer allocator.free(resolved);
+                        if (index != 0) try writer.writeAll(",");
+                        try writer.writeAll(resolved);
+                    }
+                    try writer.writeAll("]}}");
+                    return try out.toOwnedSlice(allocator);
+                }
+                return error.InvalidCli;
+            },
+            else => return error.InvalidCli,
+        }
     }
 
     fn appendUleb128(
@@ -3891,6 +4119,10 @@ pub const SuiRpcClient = struct {
                 if (normalized_result != .object) return error.InvalidResponse;
                 const parameters_value = normalized_result.object.get("parameters") orelse return error.InvalidResponse;
                 if (parameters_value != .array) return error.InvalidResponse;
+                const raw_type_arguments = if (object.get("typeArguments")) |raw_type_arguments| blk: {
+                    if (raw_type_arguments != .array) return error.InvalidCli;
+                    break :blk raw_type_arguments.array.items;
+                } else &.{};
 
                 var lowered_arguments = std.ArrayListUnmanaged([]u8){};
                 defer {
@@ -3905,27 +4137,32 @@ pub const SuiRpcClient = struct {
 
                 var user_parameter_count: usize = 0;
                 for (parameters_value.array.items) |parameter| {
-                    if ((try classifyNormalizedMoveType(ctx.allocator, parameter)) == null) continue;
+                    const resolved_parameter_json = try substituteNormalizedMoveTypeJson(ctx.allocator, parameter, raw_type_arguments);
+                    defer ctx.allocator.free(resolved_parameter_json);
+                    const resolved_parameter_parsed = try std.json.parseFromSlice(std.json.Value, ctx.allocator, resolved_parameter_json, .{});
+                    defer resolved_parameter_parsed.deinit();
+                    if ((try classifyNormalizedMoveType(ctx.allocator, resolved_parameter_parsed.value)) == null) continue;
                     user_parameter_count += 1;
                 }
                 if (arguments.len != user_parameter_count) return error.InvalidCli;
 
                 var argument_index: usize = 0;
                 for (parameters_value.array.items) |parameter| {
-                    if ((try classifyNormalizedMoveType(ctx.allocator, parameter)) == null) continue;
+                    const resolved_parameter_json = try substituteNormalizedMoveTypeJson(ctx.allocator, parameter, raw_type_arguments);
+                    defer ctx.allocator.free(resolved_parameter_json);
+                    const resolved_parameter_parsed = try std.json.parseFromSlice(std.json.Value, ctx.allocator, resolved_parameter_json, .{});
+                    defer resolved_parameter_parsed.deinit();
+                    if ((try classifyNormalizedMoveType(ctx.allocator, resolved_parameter_parsed.value)) == null) continue;
                     try lowered_arguments.append(
                         ctx.allocator,
-                        try ctx.lowerMoveCallArgumentForNormalizedType(arguments[argument_index], parameter),
+                        try ctx.lowerMoveCallArgumentForNormalizedType(arguments[argument_index], resolved_parameter_parsed.value),
                     );
                     argument_index += 1;
                 }
                 const arguments_json = try ctx.appendJsonArray(lowered_arguments.items);
                 defer ctx.allocator.free(arguments_json);
 
-                const type_arguments_json = if (object.get("typeArguments")) |raw_type_arguments|
-                    try stringifyJsonValueAlloc(ctx.allocator, raw_type_arguments)
-                else
-                    try ctx.allocator.dupe(u8, "[]");
+                const type_arguments_json = try canonicalMoveTypeArgumentsJson(ctx.allocator, raw_type_arguments);
                 defer ctx.allocator.free(type_arguments_json);
 
                 return try std.fmt.allocPrint(
@@ -5399,6 +5636,87 @@ pub const SuiRpcClient = struct {
             try std.base64.standard.Decoder.decode(decoded, pure_value.string);
             try testing.expectEqualSlices(u8, expected_bytes, decoded);
         }
+
+        try testing.expectEqual(@as(usize, 1), state.normalized_calls);
+        try testing.expectEqual(@as(usize, 0), state.object_calls);
+    }
+
+    test "local move-call lowering substitutes concrete type arguments for generic pure parameters" {
+        const testing = std.testing;
+
+        var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+        defer _ = gpa.deinit();
+        const allocator = gpa.allocator();
+
+        const State = struct {
+            normalized_calls: usize = 0,
+            object_calls: usize = 0,
+        };
+
+        var rpc = SuiRpcClient.init(allocator, "https://rpc.invalid");
+        defer rpc.deinit();
+
+        var state = State{};
+        rpc.request_sender = .{
+            .context = &state,
+            .callback = struct {
+                fn send(
+                    ctx: *anyopaque,
+                    alloc: std.mem.Allocator,
+                    req: RpcRequest,
+                ) error{OutOfMemory}![]u8 {
+                    const local_state: *State = @ptrCast(@alignCast(ctx));
+                    if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                        local_state.normalized_calls += 1;
+                        return try alloc.dupe(
+                            u8,
+                            "{\"result\":{\"parameters\":[{\"Struct\":{\"address\":\"0x1\",\"module\":\"option\",\"name\":\"Option\",\"typeParams\":[{\"TypeParameter\":0}]}},{\"Vector\":{\"TypeParameter\":0}},{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[],\"typeParameters\":[{\"constraints\":[]}],\"visibility\":\"Public\",\"isEntry\":true}}",
+                        );
+                    }
+                    if (std.mem.eql(u8, req.method, "sui_getObject")) {
+                        local_state.object_calls += 1;
+                    }
+                    return error.OutOfMemory;
+                }
+            }.send,
+        };
+
+        var parts = try rpc.ownLocalProgrammableTransactionPartsFromCommandSource(
+            allocator,
+            .{
+                .move_call = .{
+                    .package_id = "0x2",
+                    .module = "generic_helpers",
+                    .function_name = "submit",
+                    .type_args = "[\"u64\"]",
+                    .arguments = "[7,[8,9]]",
+                },
+            },
+            "0xsender",
+            "[{\"objectId\":\"0xgas\",\"version\":\"5\",\"digest\":\"gas-digest\"}]",
+            7,
+            1200,
+            null,
+        );
+        defer parts.deinit(allocator);
+
+        const inputs = try std.json.parseFromSlice(std.json.Value, allocator, parts.inputs_json, .{});
+        defer inputs.deinit();
+        const commands = try std.json.parseFromSlice(std.json.Value, allocator, parts.commands_json, .{});
+        defer commands.deinit();
+
+        try testing.expectEqual(@as(usize, 3), inputs.value.array.items.len);
+        try testing.expect(inputs.value.array.items[0].object.get("Pure") != null);
+        try testing.expect(inputs.value.array.items[1].object.get("Pure") != null);
+        try testing.expect(inputs.value.array.items[2].object.get("Pure") != null);
+
+        try testing.expectEqual(@as(usize, 2), commands.value.array.items.len);
+        try testing.expectEqualStrings("MakeMoveVec", commands.value.array.items[0].object.get("kind").?.string);
+        try testing.expect(commands.value.array.items[0].object.get("type").? == .null);
+        try testing.expectEqualStrings("MoveCall", commands.value.array.items[1].object.get("kind").?.string);
+        try testing.expectEqualStrings("u64", commands.value.array.items[1].object.get("typeArguments").?.array.items[0].string);
+        try testing.expectEqual(@as(i64, 0), commands.value.array.items[1].object.get("arguments").?.array.items[0].object.get("Input").?.integer);
+        try testing.expectEqual(@as(i64, 0), commands.value.array.items[1].object.get("arguments").?.array.items[1].object.get("Result").?.integer);
 
         try testing.expectEqual(@as(usize, 1), state.normalized_calls);
         try testing.expectEqual(@as(usize, 0), state.object_calls);

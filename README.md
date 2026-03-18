@@ -835,6 +835,11 @@ zig build run -- move function cetus_clmm_mainnet pool swap --summarize
 - `0x1::option::Option<u64>`（`null`/`option:none` 表示 none，普通值或 `some(...)` 表示 some）
 - `0x1::ascii::String`
 
+如果函数本身是泛型的，只要你传入的是 concrete `typeArguments`，CLI 现在也会先用这些类型实参替换 ABI 里的 `TypeParameter`，再做本地 lowering。典型场景包括：
+- `vector<T>` 在 `T = u64` 时自动 lower 成 `MakeMoveVec`
+- `0x1::option::Option<T>` 在 `T = u64` 这类 concrete pure 类型时直接按 BCS 编码
+- `vector<Coin<T>>` 在 `T = 0x2::sui::SUI` 这类 concrete struct type arg 时按对象向量处理，而不再因为泛型参数卡住
+
 `--package <package-id-or-alias>` 现在已经支持内置 alias：
 - `sui` / `sui_framework` / `framework` -> `0x2`
 - `sui_system` / `system` -> `0x3`

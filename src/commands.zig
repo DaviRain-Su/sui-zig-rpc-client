@@ -8892,6 +8892,92 @@ test "runCommand tx_dry_run auto-lowers common pure wrapper args without unsafe 
     try testing.expectEqual(@as(usize, 0), counts.unsafe);
 }
 
+test "runCommand tx_dry_run substitutes concrete struct type args for generic object vectors without unsafe fallback" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const Counts = struct {
+        normalized: usize = 0,
+        objects: usize = 0,
+        dry_run: usize = 0,
+        unsafe: usize = 0,
+    };
+    var counts = Counts{};
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const state = @as(*Counts, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                state.normalized += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"parameters\":[{\"Vector\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"coin\",\"name\":\"Coin\",\"typeParams\":[{\"TypeParameter\":0}]}}},{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"typeParameters\":[{\"constraints\":[]}],\"return\":[]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getObject")) {
+                state.objects += 1;
+                return if (std.mem.indexOf(u8, req.params_json, "\"0x1111111111111111111111111111111111111111111111111111111111111111\"") != null)
+                    alloc.dupe(
+                        u8,
+                        "{\"result\":{\"data\":{\"objectId\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"version\":\"7\",\"digest\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"owner\":{\"AddressOwner\":\"0x123\"}}}}",
+                    )
+                else
+                    alloc.dupe(
+                        u8,
+                        "{\"result\":{\"data\":{\"objectId\":\"0x2222222222222222222222222222222222222222222222222222222222222222\",\"version\":\"8\",\"digest\":\"0x2222222222222222222222222222222222222222222222222222222222222222\",\"owner\":{\"AddressOwner\":\"0x123\"}}}}",
+                    );
+            }
+            if (std.mem.eql(u8, req.method, "sui_dryRunTransactionBlock")) {
+                state.dry_run += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"effects\":{\"status\":{\"status\":\"success\"}},\"balanceChanges\":[]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall") or std.mem.eql(u8, req.method, "unsafe_batchTransaction")) {
+                state.unsafe += 1;
+                return alloc.dupe(u8, "{\"result\":{\"txBytes\":\"AQIDBA==\"}}");
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+
+    var args = cli.ParsedArgs{
+        .command = .tx_dry_run,
+        .has_command = true,
+        .tx_build_package = "0x2",
+        .tx_build_module = "router",
+        .tx_build_function = "submit_generic_coins",
+        .tx_build_type_args = "[\"0x2::sui::SUI\"]",
+        .tx_build_args = "[[\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"0x2222222222222222222222222222222222222222222222222222222222222222\"]]",
+        .tx_build_sender = "0x123",
+        .tx_build_gas_budget = 1200,
+        .tx_build_gas_price = 8,
+        .tx_build_gas_payment = "[{\"objectId\":\"0x999\",\"version\":\"3\",\"digest\":\"0x3333333333333333333333333333333333333333333333333333333333333333\"}]",
+        .tx_send_summarize = true,
+    };
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = &counts,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    try testing.expectEqual(@as(usize, 1), counts.normalized);
+    try testing.expectEqual(@as(usize, 2), counts.objects);
+    try testing.expectEqual(@as(usize, 1), counts.dry_run);
+    try testing.expectEqual(@as(usize, 0), counts.unsafe);
+}
+
 test "runCommand tx_status with --summarize prints structured summaries" {
     const testing = std.testing;
 
