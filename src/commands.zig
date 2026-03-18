@@ -2886,6 +2886,81 @@ test "runCommand account_objects supports typed move-module filters" {
     try testing.expect(params_ok);
 }
 
+test "runCommand account_objects resolves package aliases inside typed move-module filters" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const keystore_path = try std.fmt.allocPrint(allocator, "tmp_commands_account_objects_module_alias_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(keystore_path);
+
+    const old_override = client.keystore.test_keystore_path_override;
+    client.keystore.test_keystore_path_override = keystore_path;
+    defer client.keystore.test_keystore_path_override = old_override;
+
+    var file = try std.fs.cwd().createFile(keystore_path, .{ .truncate = true });
+    defer file.close();
+    defer _ = std.fs.cwd().deleteFile(keystore_path) catch {};
+    try file.writeAll("[{\"alias\":\"main\",\"privateKey\":\"sk_obj\",\"address\":\"0x123\"}]");
+
+    var method_ok = false;
+    var params_ok = false;
+
+    const MockContext = struct {
+        method_ok: *bool,
+        params_ok: *bool,
+    };
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) error{OutOfMemory}![]u8 {
+            const ctx = @as(*MockContext, @ptrCast(@alignCast(context)));
+            ctx.method_ok.* = std.mem.eql(u8, req.method, "suix_getOwnedObjects");
+            ctx.params_ok.* = std.mem.indexOf(
+                u8,
+                req.params_json,
+                "\"MoveModule\":{\"package\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"module\":\"pool\"}",
+            ) != null;
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer rpc.deinit();
+    var ctx = MockContext{
+        .method_ok = &method_ok,
+        .params_ok = &params_ok,
+    };
+    rpc.request_sender = .{
+        .context = &ctx,
+        .callback = callback,
+    };
+
+    const argv = [_][]const u8{
+        "account",
+        "objects",
+        "main",
+        "--package",
+        "cetus_clmm_mainnet",
+        "--module",
+        "pool",
+    };
+    var args = try cli.parseCliArgs(allocator, &argv);
+    defer args.deinit(allocator);
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    try testing.expect(method_ok);
+    try testing.expect(params_ok);
+}
+
 test "runCommand account_objects supports typed object-id filters" {
     const testing = std.testing;
 

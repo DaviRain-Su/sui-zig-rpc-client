@@ -121,6 +121,7 @@ pub const ParsedArgs = struct {
     owned_tx_build_gas_payment: ?[]const u8 = null,
     owned_tx_session_response: ?[]const u8 = null,
     owned_account_objects_filter: ?[]const u8 = null,
+    owned_account_objects_package: ?[]const u8 = null,
     owned_object_dynamic_field_name: ?[]const u8 = null,
     owned_object_dynamic_field_name_value: ?[]const u8 = null,
     owned_object_options: ?[]const u8 = null,
@@ -153,6 +154,7 @@ pub const ParsedArgs = struct {
         if (self.owned_tx_build_gas_payment) |value| allocator.free(value);
         if (self.owned_tx_session_response) |value| allocator.free(value);
         if (self.owned_account_objects_filter) |value| allocator.free(value);
+        if (self.owned_account_objects_package) |value| allocator.free(value);
         if (self.owned_object_dynamic_field_name) |value| allocator.free(value);
         if (self.owned_object_dynamic_field_name_value) |value| allocator.free(value);
         if (self.owned_object_options) |value| allocator.free(value);
@@ -2819,7 +2821,13 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
             }
             if (std.mem.eql(u8, token, "--package")) {
                 if (i + 1 >= args.len) return error.InvalidCli;
-                parsed.account_objects_package = args[i + 1];
+                try setOptionalPackageArg(
+                    allocator,
+                    &parsed,
+                    args[i + 1],
+                    &parsed.owned_account_objects_package,
+                    &parsed.account_objects_package,
+                );
                 i += 2;
                 continue;
             }
@@ -2885,7 +2893,13 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
             }
             if (std.mem.eql(u8, token, "--package")) {
                 if (i + 1 >= args.len) return error.InvalidCli;
-                parsed.account_objects_package = args[i + 1];
+                try setOptionalPackageArg(
+                    allocator,
+                    &parsed,
+                    args[i + 1],
+                    &parsed.owned_account_objects_package,
+                    &parsed.account_objects_package,
+                );
                 i += 2;
                 continue;
             }
@@ -3337,7 +3351,7 @@ pub fn printUsage(writer: anytype) !void {
             "    --filter <json|@file>                 Optional Sui object filter\n" ++
             "    --struct-type <type>                  Typed filter: StructType\n" ++
             "    --object-id <id>                      Typed filter: ObjectId\n" ++
-            "    --package <package-id>                Typed filter: Package\n" ++
+            "    --package <package-id-or-alias>       Typed filter: Package\n" ++
             "    --module <module-name>                Typed filter: MoveModule (requires --package)\n" ++
             "    --options <json|@file>                Optional object data options\n" ++
             "    --show-type                           Typed option: include object type\n" ++
@@ -3356,7 +3370,7 @@ pub fn printUsage(writer: anytype) !void {
             "    --filter <json|@file>                 Optional owned-object filter\n" ++
             "    --struct-type <type>                  Typed owned-object StructType filter\n" ++
             "    --object-id <id>                      Typed owned-object ObjectId filter\n" ++
-            "    --package <package-id>                Typed owned-object Package filter\n" ++
+            "    --package <package-id-or-alias>       Typed owned-object Package filter\n" ++
             "    --module <module-name>                Typed owned-object MoveModule filter (requires --package)\n" ++
             "    --options <json|@file>                Optional owned-object data options\n" ++
             "    --show-type                           Typed option: include object type\n" ++
@@ -5446,6 +5460,29 @@ test "parseCliArgs parses account objects package and module filters" {
     try testing.expectEqual(@as(?u64, 25), parsed.account_objects_limit);
 }
 
+test "parseCliArgs resolves account objects package aliases" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "account",
+        "objects",
+        "main",
+        "--package",
+        "cetus_clmm_mainnet",
+        "--module",
+        "pool",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.account_objects, parsed.command);
+    try testing.expectEqualStrings(package_preset.cetus_clmm_mainnet, parsed.account_objects_package.?);
+    try testing.expectEqualStrings("pool", parsed.account_objects_module.?);
+}
+
 test "parseCliArgs parses account objects object-id filters" {
     const testing = std.testing;
 
@@ -5577,6 +5614,29 @@ test "parseCliArgs parses account resources package and module filters" {
     try testing.expectEqualStrings("0x2", parsed.account_objects_package.?);
     try testing.expectEqualStrings("coin", parsed.account_objects_module.?);
     try testing.expectEqual(@as(?u64, 25), parsed.account_resources_limit);
+}
+
+test "parseCliArgs resolves account resources package aliases" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "account",
+        "resources",
+        "main",
+        "--package",
+        "preset:cetus.mainnet.clmm",
+        "--module",
+        "pool",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.account_resources, parsed.command);
+    try testing.expectEqualStrings(package_preset.cetus_clmm_mainnet, parsed.account_objects_package.?);
+    try testing.expectEqualStrings("pool", parsed.account_objects_module.?);
 }
 
 test "parseCliArgs parses account resources object-id filters" {

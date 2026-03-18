@@ -676,9 +676,9 @@ pub fn main() !void {
 - `account objects <selector|0xaddress>`: 查询 owner 的 owned objects；支持 raw filter JSON 和 typed filters：
   - `--struct-type`
   - `--object-id`
-  - `--package`
+  - `--package <package-id-or-alias>`
   - `--package --module`
-- `account resources <selector|0xaddress>`: 一次查询 `coins + owned_objects`，适合 transaction build 前的资源发现。
+- `account resources <selector|0xaddress>`: 一次查询 `coins + owned_objects`，适合 transaction build 前的资源发现；`--package` 同样支持 package alias。
 
 ## 通用参数
 
