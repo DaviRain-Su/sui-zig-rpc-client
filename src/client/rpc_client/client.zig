@@ -4383,6 +4383,22 @@ pub const SuiRpcClient = struct {
         return value;
     }
 
+    fn moveParameterAutoSelectedSplitSourceArgJson(
+        parameter: move_result.OwnedMoveParameterSummary,
+    ) ?[]const u8 {
+        if (parameter.explicit_arg_json != null) return null;
+        if (coinTypeFromMoveSignature(parameter.signature) == null) return null;
+
+        const value = parameter.auto_selected_arg_json orelse return null;
+        const trimmed = std.mem.trim(u8, value, " \t\r\n");
+        if (trimmed.len < 2) return null;
+        if (trimmed[0] != '"' or trimmed[trimmed.len - 1] != '"') return null;
+
+        const inner = trimmed[1 .. trimmed.len - 1];
+        if (!std.mem.startsWith(u8, inner, "select:") and !std.mem.startsWith(u8, inner, "sel:")) return null;
+        return value;
+    }
+
     fn buildJsonFragmentFromJsonValue(
         allocator: std.mem.Allocator,
         value: std.json.Value,
@@ -4680,21 +4696,20 @@ pub const SuiRpcClient = struct {
         return selected_token;
     }
 
-    fn buildCoveringCoinVectorArgJson(
+    fn appendCoveringCoinCandidateTokens(
         allocator: std.mem.Allocator,
+        selected_tokens: *std.ArrayList([]const u8),
         candidates: []const move_result.OwnedMoveObjectCandidate,
         min_balance: u64,
-    ) !?[]u8 {
+    ) !bool {
         if (selectSmallestSufficientCoinCandidateToken(candidates, min_balance)) |token| {
-            return try buildAutoSelectedVectorArgJsonFromTokens(allocator, &.{token});
+            try selected_tokens.append(allocator, token);
+            return true;
         }
 
         var used = try allocator.alloc(bool, candidates.len);
         defer allocator.free(used);
         @memset(used, false);
-
-        var selected_tokens = std.ArrayList([]const u8).empty;
-        defer selected_tokens.deinit(allocator);
 
         var total_balance: u64 = 0;
         while (total_balance < min_balance) {
@@ -4708,11 +4723,29 @@ pub const SuiRpcClient = struct {
                     next_balance = balance;
                 }
             }
-            const index = next_index orelse return null;
+            const index = next_index orelse return false;
             used[index] = true;
             try selected_tokens.append(allocator, candidates[index].object_input_select_token);
             total_balance +|= next_balance;
         }
+
+        return true;
+    }
+
+    fn buildCoveringCoinVectorArgJson(
+        allocator: std.mem.Allocator,
+        candidates: []const move_result.OwnedMoveObjectCandidate,
+        min_balance: u64,
+    ) !?[]u8 {
+        var selected_tokens = std.ArrayList([]const u8).empty;
+        defer selected_tokens.deinit(allocator);
+        const found = try appendCoveringCoinCandidateTokens(
+            allocator,
+            &selected_tokens,
+            candidates,
+            min_balance,
+        );
+        if (!found) return null;
 
         return try buildAutoSelectedVectorArgJsonFromTokens(allocator, selected_tokens.items);
     }
@@ -4939,6 +4972,9 @@ pub const SuiRpcClient = struct {
         var split_amount_jsons = try allocator.alloc(?[]const u8, summary.parameters.len);
         defer allocator.free(split_amount_jsons);
         for (split_amount_jsons) |*slot| slot.* = null;
+        var split_amount_values = try allocator.alloc(?u64, summary.parameters.len);
+        defer allocator.free(split_amount_values);
+        for (split_amount_values) |*slot| slot.* = null;
 
         var previous_explicit_index: ?usize = null;
         var needs_split = false;
@@ -4949,10 +4985,20 @@ pub const SuiRpcClient = struct {
                     previous_explicit_index = index;
                     continue;
                 };
-                _ = min_balance;
                 if (moveParameterSplitSourceArgJson(summary.parameters[previous_index])) |_| {
                     split_amount_jsons[previous_index] = parameter.explicit_arg_json orelse return error.InvalidCli;
+                    split_amount_values[previous_index] = min_balance;
                     needs_split = true;
+                } else {
+                    const previous = summary.parameters[previous_index];
+                    if (previous.explicit_arg_json == null and
+                        coinTypeFromMoveSignature(previous.signature) != null and
+                        previous.owned_object_candidates != null)
+                    {
+                        split_amount_jsons[previous_index] = parameter.explicit_arg_json orelse return error.InvalidCli;
+                        split_amount_values[previous_index] = min_balance;
+                        needs_split = true;
+                    }
                 }
             }
             previous_explicit_index = index;
@@ -4969,7 +5015,54 @@ pub const SuiRpcClient = struct {
         for (summary.parameters, 0..) |parameter, index| {
             if (parameter.omitted_from_explicit_args) continue;
             if (split_amount_jsons[index]) |amount_json| {
-                const source_json = moveParameterSplitSourceArgJson(parameter) orelse return error.InvalidCli;
+                const min_balance = split_amount_values[index] orelse return error.InvalidCli;
+                var owned_source_jsons = std.ArrayList([]u8).empty;
+                defer {
+                    for (owned_source_jsons.items) |value| allocator.free(value);
+                    owned_source_jsons.deinit(allocator);
+                }
+
+                const source_json = if (moveParameterAutoSelectedSplitSourceArgJson(parameter)) |value|
+                    value
+                else blk: {
+                    if (parameter.explicit_arg_json == null) {
+                        if (parameter.owned_object_candidates) |candidates| {
+                            var selected_tokens = std.ArrayList([]const u8).empty;
+                            defer selected_tokens.deinit(allocator);
+                            const found = try appendCoveringCoinCandidateTokens(
+                                allocator,
+                                &selected_tokens,
+                                candidates,
+                                min_balance,
+                            );
+                            if (found and selected_tokens.items.len != 0) {
+                                for (selected_tokens.items) |token| {
+                                    try owned_source_jsons.append(
+                                        allocator,
+                                        try buildAutoSelectedScalarArgJson(allocator, token),
+                                    );
+                                }
+                                const destination_json = owned_source_jsons.items[0];
+                                if (owned_source_jsons.items.len > 1) {
+                                    var merge_sources = std.ArrayList(tx_request_builder.ArgumentValue).empty;
+                                    defer merge_sources.deinit(allocator);
+                                    for (owned_source_jsons.items[1..]) |source_value| {
+                                        try merge_sources.append(allocator, .{ .raw_json = source_value });
+                                    }
+                                    try builder.appendMergeCoinsFromValues(
+                                        .{ .raw_json = destination_json },
+                                        merge_sources.items,
+                                    );
+                                }
+                                break :blk destination_json;
+                            }
+                        }
+                    }
+
+                    if (moveParameterSplitSourceArgJson(parameter)) |value| break :blk value;
+                    return null;
+                };
+
                 const split_handle = try builder.appendSplitCoinsAndGetHandleFromValues(
                     .{ .raw_json = source_json },
                     &.{.{ .raw_json = amount_json }},

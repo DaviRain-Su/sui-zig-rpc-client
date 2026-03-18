@@ -4778,6 +4778,89 @@ test "runCommand move function with --summarize chooses smallest sufficient scal
     try testing.expectEqualStrings("--commands", preferred_argv[2].string);
 }
 
+test "runCommand move function with --summarize merges covering scalar coin candidates before split" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"visibility\":\"Public\",\"isEntry\":true,\"typeParameters\":[[]],\"parameters\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"coin\",\"name\":\"Coin\",\"typeParams\":[{\"TypeParameter\":0}]}},\"u64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[]}}",
+                );
+            }
+
+            std.debug.assert(std.mem.eql(u8, req.method, "suix_getCoins"));
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0xowner\"") != null);
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0x2::sui::SUI\"") != null);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xcoin-small\",\"version\":\"9\",\"digest\":\"coin-digest-small\",\"balance\":\"3\"},{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xcoin-mid\",\"version\":\"10\",\"digest\":\"coin-digest-mid\",\"balance\":\"5\"},{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xcoin-large\",\"version\":\"11\",\"digest\":\"coin-digest-large\",\"balance\":\"9\"}],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var args = cli.ParsedArgs{
+        .command = .move_function,
+        .has_command = true,
+        .move_package = "0x2",
+        .move_module = "router",
+        .move_function = "deposit_exact",
+        .tx_build_type_args = "[\"0x2::sui::SUI\"]",
+        .tx_build_sender = "0xowner",
+        .tx_build_args = "[13]",
+        .tx_send_summarize = true,
+    };
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    const template = parsed.value.object.get("call_template").?.object;
+    const preferred_commands = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        template.get("preferred_commands_json").?.string,
+        .{},
+    );
+    defer preferred_commands.deinit();
+    try testing.expectEqual(@as(usize, 3), preferred_commands.value.array.items.len);
+    try testing.expectEqualStrings("MergeCoins", preferred_commands.value.array.items[0].object.get("kind").?.string);
+    try testing.expectEqualStrings("SplitCoins", preferred_commands.value.array.items[1].object.get("kind").?.string);
+    try testing.expectEqualStrings("MoveCall", preferred_commands.value.array.items[2].object.get("kind").?.string);
+    try testing.expectEqualStrings(
+        "select:{\"kind\":\"object_input\",\"objectId\":\"0xcoin-large\",\"inputKind\":\"imm_or_owned\",\"version\":11,\"digest\":\"coin-digest-large\"}",
+        preferred_commands.value.array.items[0].object.get("destination").?.string,
+    );
+    const merge_sources = preferred_commands.value.array.items[0].object.get("sources").?.array.items;
+    try testing.expectEqual(@as(usize, 1), merge_sources.len);
+    try testing.expectEqualStrings(
+        "select:{\"kind\":\"object_input\",\"objectId\":\"0xcoin-mid\",\"inputKind\":\"imm_or_owned\",\"version\":10,\"digest\":\"coin-digest-mid\"}",
+        merge_sources[0].string,
+    );
+    const move_call_args = preferred_commands.value.array.items[2].object.get("arguments").?.array.items;
+    try testing.expectEqual(@as(i64, 1), move_call_args[0].object.get("NestedResult").?.array.items[0].integer);
+    try testing.expectEqual(@as(i64, 0), move_call_args[0].object.get("NestedResult").?.array.items[1].integer);
+    try testing.expectEqual(@as(i64, 13), move_call_args[1].integer);
+
+    const preferred_argv = template.get("preferred_tx_dry_run_argv").?.array.items;
+    try testing.expectEqualStrings("--commands", preferred_argv[2].string);
+}
+
 test "runCommand move function with --summarize lifts coin selector min balance from explicit u64 args" {
     const testing = std.testing;
 
