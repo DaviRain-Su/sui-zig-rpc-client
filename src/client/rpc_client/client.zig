@@ -3707,6 +3707,20 @@ pub const SuiRpcClient = struct {
         return trimmed;
     }
 
+    fn coinTypeFromCoinStructType(struct_type: []const u8) ?[]const u8 {
+        const trimmed = std.mem.trim(u8, struct_type, " \t\r\n");
+        const prefix = "0x2::coin::Coin<";
+        if (!std.mem.startsWith(u8, trimmed, prefix)) return null;
+        if (trimmed.len <= prefix.len or trimmed[trimmed.len - 1] != '>') return null;
+        const coin_type = std.mem.trim(u8, trimmed[prefix.len .. trimmed.len - 1], " \t\r\n");
+        if (coin_type.len == 0 or containsMoveTypeParameterText(coin_type)) return null;
+        return coin_type;
+    }
+
+    fn coinTypeFromMoveSignature(signature: []const u8) ?[]const u8 {
+        return coinTypeFromCoinStructType(trimMoveReferenceSignature(signature));
+    }
+
     fn vectorElementTypeSignature(signature: []const u8) ?[]const u8 {
         const trimmed = std.mem.trim(u8, signature, " \t\r\n");
         if (!std.mem.startsWith(u8, trimmed, "vector<")) return null;
@@ -3940,6 +3954,30 @@ pub const SuiRpcClient = struct {
         return argv;
     }
 
+    fn buildCoinQueryArgv(
+        allocator: std.mem.Allocator,
+        owner: ?[]const u8,
+        coin_type: []const u8,
+    ) ![][]u8 {
+        const argv = try allocator.alloc([]u8, 6);
+        errdefer allocator.free(argv);
+
+        argv[0] = try allocator.dupe(u8, "account");
+        errdefer allocator.free(argv[0]);
+        argv[1] = try allocator.dupe(u8, "coins");
+        errdefer allocator.free(argv[1]);
+        argv[2] = try allocator.dupe(u8, owner orelse "0x<owner>");
+        errdefer allocator.free(argv[2]);
+        argv[3] = try allocator.dupe(u8, "--coin-type");
+        errdefer allocator.free(argv[3]);
+        argv[4] = try allocator.dupe(u8, coin_type);
+        errdefer allocator.free(argv[4]);
+        argv[5] = try allocator.dupe(u8, "--summarize");
+        errdefer allocator.free(argv[5]);
+
+        return argv;
+    }
+
     fn moveStructPackageAndModule(signature: []const u8) ?struct { package: []const u8, module: []const u8 } {
         const trimmed = trimMoveReferenceSignature(signature);
         const first_sep = std.mem.indexOf(u8, trimmed, "::") orelse return null;
@@ -4104,6 +4142,42 @@ pub const SuiRpcClient = struct {
         owner: []const u8,
         struct_type: []const u8,
     ) ![]move_result.OwnedMoveObjectCandidate {
+        if (coinTypeFromCoinStructType(struct_type)) |coin_type| {
+            var coin_page = try self.getAllCoinsWithRequest(allocator, owner, .{
+                .coin_type = coin_type,
+                .limit = 20,
+            });
+            defer coin_page.deinit(allocator);
+
+            var coin_candidates = std.ArrayList(move_result.OwnedMoveObjectCandidate).empty;
+            errdefer {
+                for (coin_candidates.items) |*value| value.deinit(allocator);
+                coin_candidates.deinit(allocator);
+            }
+
+            for (coin_page.entries) |entry| {
+                const object_id = entry.coin_object_id orelse continue;
+                const version = entry.version orelse continue;
+                const digest = entry.digest orelse continue;
+                try coin_candidates.append(allocator, .{
+                    .object_id = try allocator.dupe(u8, object_id),
+                    .version = version,
+                    .digest = try allocator.dupe(u8, digest),
+                    .balance = entry.balanceU64(),
+                    .type_name = try allocator.dupe(u8, struct_type),
+                    .owner_value = try allocator.dupe(u8, owner),
+                    .object_input_select_token = try buildExactImmOrOwnedObjectInputSelectToken(
+                        allocator,
+                        object_id,
+                        version,
+                        digest,
+                    ),
+                });
+            }
+
+            return try coin_candidates.toOwnedSlice(allocator);
+        }
+
         var page = try self.getOwnedObjectsPageWithRequest(allocator, owner, .{
             .filter = .{ .struct_type = struct_type },
             .options = .{
@@ -4131,6 +4205,7 @@ pub const SuiRpcClient = struct {
                 .object_id = try allocator.dupe(u8, object_id),
                 .version = version,
                 .digest = try allocator.dupe(u8, digest),
+                .balance = null,
                 .type_name = if (entry.type_name) |value| try allocator.dupe(u8, value) else null,
                 .owner_value = if (entry.owner_value) |value| try allocator.dupe(u8, value) else null,
                 .object_input_select_token = try buildExactImmOrOwnedObjectInputSelectToken(
@@ -4248,6 +4323,19 @@ pub const SuiRpcClient = struct {
                     allocator,
                     candidates[0].object_input_select_token,
                 );
+            } else if (coinTypeFromMoveSignature(parameter.signature) != null) {
+                var selected_token: ?[]const u8 = null;
+                var selected_balance: u64 = 0;
+                for (candidates) |candidate| {
+                    const balance = candidate.balance orelse continue;
+                    if (selected_token == null or balance > selected_balance) {
+                        selected_token = candidate.object_input_select_token;
+                        selected_balance = balance;
+                    }
+                }
+                if (selected_token) |token| {
+                    parameter.auto_selected_arg_json = try buildAutoSelectedScalarArgJson(allocator, token);
+                }
             }
         }
     }
@@ -4522,11 +4610,18 @@ pub const SuiRpcClient = struct {
                     owner_address,
                     item_struct_type,
                 );
-                parameter.vector_item_owned_object_query_argv = try buildOwnedObjectQueryArgv(
-                    allocator,
-                    owner_address,
-                    item_struct_type,
-                );
+                parameter.vector_item_owned_object_query_argv = if (coinTypeFromCoinStructType(item_struct_type)) |coin_type|
+                    try buildCoinQueryArgv(
+                        allocator,
+                        owner_address,
+                        coin_type,
+                    )
+                else
+                    try buildOwnedObjectQueryArgv(
+                        allocator,
+                        owner_address,
+                        item_struct_type,
+                    );
                 if (owner_address) |owner| {
                     parameter.vector_item_owned_object_candidates = try self.discoverOwnedObjectCandidates(
                         allocator,
@@ -4608,9 +4703,15 @@ pub const SuiRpcClient = struct {
 
             if (!parameter_allows_owned_discovery[index]) continue;
             if (object_preset.inferKindFromTypeSignature(parameter.signature) != null) continue;
-            const struct_type = concreteObjectStructTypeFromSignature(parameter.signature) orelse continue;
+            const struct_type = concreteObjectStructTypeFromSignature(parameter.signature) orelse blk: {
+                if (coinTypeFromMoveSignature(parameter.signature) == null) break :blk null;
+                break :blk trimMoveReferenceSignature(parameter.signature);
+            } orelse continue;
             parameter.owned_object_select_token = try buildOwnedObjectSelectToken(allocator, owner_address, struct_type);
-            parameter.owned_object_query_argv = try buildOwnedObjectQueryArgv(allocator, owner_address, struct_type);
+            parameter.owned_object_query_argv = if (coinTypeFromCoinStructType(struct_type)) |coin_type|
+                try buildCoinQueryArgv(allocator, owner_address, coin_type)
+            else
+                try buildOwnedObjectQueryArgv(allocator, owner_address, struct_type);
             if (owner_address) |owner| {
                 parameter.owned_object_candidates = try self.discoverOwnedObjectCandidates(
                     allocator,
@@ -4823,6 +4924,12 @@ pub const SuiRpcClient = struct {
             break :blk null;
         };
         defer if (resolved_type_arguments_json) |value| allocator.free(value);
+
+        for (summary.parameters, 0..) |parameter, index| {
+            if (coinTypeFromMoveSignature(parameter.signature) != null) {
+                parameter_allows_owned_discovery[index] = true;
+            }
+        }
 
         try populateMoveFunctionCallTemplate(
             self,

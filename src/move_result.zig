@@ -4,6 +4,7 @@ pub const OwnedMoveObjectCandidate = struct {
     object_id: []u8,
     version: u64,
     digest: []u8,
+    balance: ?u64 = null,
     type_name: ?[]u8 = null,
     owner_value: ?[]u8 = null,
     object_input_select_token: []u8,

@@ -3548,10 +3548,10 @@ test "runCommand move function with --summarize adds vector object discovery tem
     const vector_item_query_argv = parameter.get("vector_item_owned_object_query_argv").?.array.items;
     try testing.expectEqual(@as(usize, 6), vector_item_query_argv.len);
     try testing.expectEqualStrings("account", vector_item_query_argv[0].string);
-    try testing.expectEqualStrings("objects", vector_item_query_argv[1].string);
+    try testing.expectEqualStrings("coins", vector_item_query_argv[1].string);
     try testing.expectEqualStrings("0x<owner>", vector_item_query_argv[2].string);
-    try testing.expectEqualStrings("--struct-type", vector_item_query_argv[3].string);
-    try testing.expectEqualStrings("0x2::coin::Coin<0x2::sui::SUI>", vector_item_query_argv[4].string);
+    try testing.expectEqualStrings("--coin-type", vector_item_query_argv[3].string);
+    try testing.expectEqualStrings("0x2::sui::SUI", vector_item_query_argv[4].string);
     try testing.expectEqualStrings(
         "[[\"<arg0-item0-object-id-or-select-token>\"]]",
         parsed.value.object.get("call_template").?.object.get("args_json").?.string,
@@ -3576,15 +3576,13 @@ test "runCommand move function with --summarize fills owner context into vector 
                 );
             }
 
-            std.debug.assert(std.mem.eql(u8, req.method, "suix_getOwnedObjects"));
+            std.debug.assert(std.mem.eql(u8, req.method, "suix_getCoins"));
             std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0xowner\"") != null);
-            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"StructType\":\"0x2::coin::Coin<0x2::sui::SUI>\"") != null);
-            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"showType\":true") != null);
-            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"showOwner\":true") != null);
-            std.debug.assert(std.mem.indexOf(u8, req.params_json, ",5]") != null);
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0x2::sui::SUI\"") != null);
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, ",20]") != null);
             return alloc.dupe(
                 u8,
-                "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xcoin1\",\"version\":\"9\",\"digest\":\"coin-digest-1\",\"type\":\"0x2::coin::Coin<0x2::sui::SUI>\",\"owner\":{\"AddressOwner\":\"0xowner\"}}},{\"data\":{\"objectId\":\"0xcoin2\",\"version\":\"10\",\"digest\":\"coin-digest-2\",\"type\":\"0x2::coin::Coin<0x2::sui::SUI>\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
+                "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xcoin1\",\"version\":\"9\",\"digest\":\"coin-digest-1\",\"balance\":\"7\"},{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xcoin2\",\"version\":\"10\",\"digest\":\"coin-digest-2\",\"balance\":\"42\"}],\"hasNextPage\":false}}",
             );
         }
     }.call;
@@ -3620,12 +3618,16 @@ test "runCommand move function with --summarize fills owner context into vector 
         parameter.get("vector_item_owned_object_select_token").?.string,
     );
     const vector_item_query_argv = parameter.get("vector_item_owned_object_query_argv").?.array.items;
+    try testing.expectEqualStrings("coins", vector_item_query_argv[1].string);
     try testing.expectEqualStrings("0xowner", vector_item_query_argv[2].string);
+    try testing.expectEqualStrings("--coin-type", vector_item_query_argv[3].string);
+    try testing.expectEqualStrings("0x2::sui::SUI", vector_item_query_argv[4].string);
     const vector_item_candidates = parameter.get("vector_item_owned_object_candidates").?.array.items;
     try testing.expectEqual(@as(usize, 2), vector_item_candidates.len);
     try testing.expectEqualStrings("0xcoin1", vector_item_candidates[0].object.get("object_id").?.string);
     try testing.expectEqual(@as(i64, 9), vector_item_candidates[0].object.get("version").?.integer);
     try testing.expectEqualStrings("coin-digest-1", vector_item_candidates[0].object.get("digest").?.string);
+    try testing.expectEqual(@as(i64, 7), vector_item_candidates[0].object.get("balance").?.integer);
     try testing.expectEqualStrings(
         "select:{\"kind\":\"object_input\",\"objectId\":\"0xcoin1\",\"inputKind\":\"imm_or_owned\",\"version\":9,\"digest\":\"coin-digest-1\"}",
         vector_item_candidates[0].object.get("object_input_select_token").?.string,
@@ -3633,6 +3635,7 @@ test "runCommand move function with --summarize fills owner context into vector 
     try testing.expectEqualStrings("0xcoin2", vector_item_candidates[1].object.get("object_id").?.string);
     try testing.expectEqual(@as(i64, 10), vector_item_candidates[1].object.get("version").?.integer);
     try testing.expectEqualStrings("coin-digest-2", vector_item_candidates[1].object.get("digest").?.string);
+    try testing.expectEqual(@as(i64, 42), vector_item_candidates[1].object.get("balance").?.integer);
     try testing.expectEqualStrings(
         "select:{\"kind\":\"object_input\",\"objectId\":\"0xcoin2\",\"inputKind\":\"imm_or_owned\",\"version\":10,\"digest\":\"coin-digest-2\"}",
         vector_item_candidates[1].object.get("object_input_select_token").?.string,
@@ -3648,6 +3651,81 @@ test "runCommand move function with --summarize fills owner context into vector 
     try testing.expectEqualStrings(
         "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"router\",\"function\":\"deposit_many\",\"typeArguments\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"sui\",\"name\":\"SUI\",\"typeParams\":[]}}],\"arguments\":[[\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xcoin1\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":9,\\\"digest\\\":\\\"coin-digest-1\\\"}\",\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xcoin2\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":10,\\\"digest\\\":\\\"coin-digest-2\\\"}\"]]}],\"fromKeystore\":true,\"signer\":\"0xowner\",\"gasBudget\":100000000,\"autoGasPayment\":true,\"wait\":true,\"summarize\":true}",
         parsed.value.object.get("call_template").?.object.get("preferred_tx_send_from_keystore_request_json").?.string,
+    );
+}
+
+test "runCommand move function with --summarize prefers largest scalar coin candidate" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"visibility\":\"Public\",\"isEntry\":true,\"typeParameters\":[[]],\"parameters\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"coin\",\"name\":\"Coin\",\"typeParams\":[{\"TypeParameter\":0}]}},{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[]}}",
+                );
+            }
+
+            std.debug.assert(std.mem.eql(u8, req.method, "suix_getCoins"));
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0xowner\"") != null);
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0x2::sui::SUI\"") != null);
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, ",20]") != null);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xcoin-small\",\"version\":\"9\",\"digest\":\"coin-digest-small\",\"balance\":\"7\"},{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xcoin-large\",\"version\":\"10\",\"digest\":\"coin-digest-large\",\"balance\":\"42\"}],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var args = cli.ParsedArgs{
+        .command = .move_function,
+        .has_command = true,
+        .move_package = "0x2",
+        .move_module = "router",
+        .move_function = "deposit_one",
+        .tx_build_type_args = "[\"0x2::sui::SUI\"]",
+        .tx_build_sender = "0xowner",
+        .tx_send_summarize = true,
+    };
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    const parameter = parsed.value.object.get("parameters").?.array.items[0].object;
+    try testing.expectEqualStrings(
+        "select:{\"kind\":\"owned_object_struct_type\",\"owner\":\"0xowner\",\"structType\":\"0x2::coin::Coin<0x2::sui::SUI>\"}",
+        parameter.get("owned_object_select_token").?.string,
+    );
+    const owned_query_argv = parameter.get("owned_object_query_argv").?.array.items;
+    try testing.expectEqualStrings("coins", owned_query_argv[1].string);
+    try testing.expectEqualStrings("--coin-type", owned_query_argv[3].string);
+    try testing.expectEqualStrings("0x2::sui::SUI", owned_query_argv[4].string);
+    const owned_candidates = parameter.get("owned_object_candidates").?.array.items;
+    try testing.expectEqual(@as(usize, 2), owned_candidates.len);
+    try testing.expectEqual(@as(i64, 7), owned_candidates[0].object.get("balance").?.integer);
+    try testing.expectEqual(@as(i64, 42), owned_candidates[1].object.get("balance").?.integer);
+    try testing.expectEqualStrings(
+        "\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xcoin-large\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":10,\\\"digest\\\":\\\"coin-digest-large\\\"}\"",
+        parameter.get("auto_selected_arg_json").?.string,
+    );
+    try testing.expectEqualStrings(
+        "[\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xcoin-large\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":10,\\\"digest\\\":\\\"coin-digest-large\\\"}\"]",
+        parsed.value.object.get("call_template").?.object.get("preferred_args_json").?.string,
     );
 }
 
