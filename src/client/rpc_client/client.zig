@@ -13,6 +13,7 @@ const object_result = @import("../../object_result.zig");
 const owned_object_result = @import("../../owned_object_result.zig");
 const dynamic_field_result = @import("../../dynamic_field_result.zig");
 const coin_result = @import("../../coin_result.zig");
+const move_result = @import("../../move_result.zig");
 
 pub const ClientError = error{
     Timeout,
@@ -1676,6 +1677,21 @@ pub const ResourceDiscoveryQuery = struct {
     owned_objects: ?OwnedObjectsQuery = null,
 };
 
+pub const MoveQuery = union(enum) {
+    function: struct {
+        package_id: []const u8,
+        module: []const u8,
+        function_name: []const u8,
+    },
+    module: struct {
+        package_id: []const u8,
+        module: []const u8,
+    },
+    package: struct {
+        package_id: []const u8,
+    },
+};
+
 pub const ObjectQuerySummary = union(enum) {
     object: object_result.OwnedObjectSummary,
     dynamic_fields: dynamic_field_result.OwnedDynamicFieldPage,
@@ -1684,6 +1700,20 @@ pub const ObjectQuerySummary = union(enum) {
         switch (self.*) {
             .object => |*value| value.deinit(allocator),
             .dynamic_fields => |*value| value.deinit(allocator),
+        }
+    }
+};
+
+pub const MoveQuerySummary = union(enum) {
+    function: move_result.OwnedMoveFunctionSummary,
+    module: move_result.OwnedMoveModuleSummary,
+    package: move_result.OwnedMovePackageSummary,
+
+    pub fn deinit(self: *MoveQuerySummary, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .function => |*value| value.deinit(allocator),
+            .module => |*value| value.deinit(allocator),
+            .package => |*value| value.deinit(allocator),
         }
     }
 };
@@ -1715,6 +1745,11 @@ pub const ObjectQueryAction = enum {
     summarize,
 };
 
+pub const MoveQueryAction = enum {
+    raw,
+    summarize,
+};
+
 pub const ResourceQueryAction = enum {
     raw,
     summarize,
@@ -1725,6 +1760,18 @@ pub const ObjectQueryActionResult = union(enum) {
     summarized: ObjectQuerySummary,
 
     pub fn deinit(self: *ObjectQueryActionResult, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .raw => |value| allocator.free(value),
+            .summarized => |*value| value.deinit(allocator),
+        }
+    }
+};
+
+pub const MoveQueryActionResult = union(enum) {
+    raw: []u8,
+    summarized: MoveQuerySummary,
+
+    pub fn deinit(self: *MoveQueryActionResult, allocator: std.mem.Allocator) void {
         switch (self.*) {
             .raw => |value| allocator.free(value),
             .summarized => |*value| value.deinit(allocator),
@@ -1786,6 +1833,7 @@ pub const ReadQuery = union(enum) {
     coins: CoinQuery,
     owned_objects: OwnedObjectsQuery,
     object: ObjectQuery,
+    move: MoveQuery,
     transaction_status: struct {
         digest: []const u8,
     },
@@ -1808,6 +1856,7 @@ pub const ReadQuerySummary = union(enum) {
     coins: coin_result.OwnedCoinPage,
     owned_objects: owned_object_result.OwnedObjectPage,
     object: ObjectQuerySummary,
+    move: MoveQuerySummary,
     transaction: tx_result.OwnedExecutionInsights,
 
     pub fn deinit(self: *ReadQuerySummary, allocator: std.mem.Allocator) void {
@@ -1817,6 +1866,7 @@ pub const ReadQuerySummary = union(enum) {
             .coins => |*value| value.deinit(allocator),
             .owned_objects => |*value| value.deinit(allocator),
             .object => |*value| value.deinit(allocator),
+            .move => |*value| value.deinit(allocator),
             .transaction => |*value| value.deinit(allocator),
         }
     }
@@ -2818,14 +2868,13 @@ pub const SuiRpcClient = struct {
         }
     }
 
-    pub fn getMoveCallUserParameterKinds(
-        self: *SuiRpcClient,
+    fn buildNormalizedMoveFunctionParams(
         allocator: std.mem.Allocator,
         package_id: []const u8,
         module: []const u8,
         function_name: []const u8,
-    ) ![]LocalMoveCallParameterKind {
-        const params = try std.fmt.allocPrint(
+    ) ![]u8 {
+        return try std.fmt.allocPrint(
             allocator,
             "[{f},{f},{f}]",
             .{
@@ -2834,10 +2883,153 @@ pub const SuiRpcClient = struct {
                 std.json.fmt(function_name, .{}),
             },
         );
-        defer allocator.free(params);
+    }
 
-        const response = try self.call("sui_getNormalizedMoveFunction", params);
-        defer self.allocator.free(response);
+    fn buildNormalizedMoveModuleParams(
+        allocator: std.mem.Allocator,
+        package_id: []const u8,
+        module: []const u8,
+    ) ![]u8 {
+        return try std.fmt.allocPrint(
+            allocator,
+            "[{f},{f}]",
+            .{
+                std.json.fmt(package_id, .{}),
+                std.json.fmt(module, .{}),
+            },
+        );
+    }
+
+    fn buildNormalizedMovePackageParams(
+        allocator: std.mem.Allocator,
+        package_id: []const u8,
+    ) ![]u8 {
+        return try std.fmt.allocPrint(
+            allocator,
+            "[{f}]",
+            .{std.json.fmt(package_id, .{})},
+        );
+    }
+
+    pub fn getNormalizedMoveFunction(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        package_id: []const u8,
+        module: []const u8,
+        function_name: []const u8,
+    ) ![]u8 {
+        const params = try buildNormalizedMoveFunctionParams(allocator, package_id, module, function_name);
+        defer allocator.free(params);
+        return try dupeOwnedJsonResponse(
+            self.allocator,
+            allocator,
+            try self.call("sui_getNormalizedMoveFunction", params),
+        );
+    }
+
+    pub fn getNormalizedMoveModule(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        package_id: []const u8,
+        module: []const u8,
+    ) ![]u8 {
+        const params = try buildNormalizedMoveModuleParams(allocator, package_id, module);
+        defer allocator.free(params);
+        return try dupeOwnedJsonResponse(
+            self.allocator,
+            allocator,
+            try self.call("sui_getNormalizedMoveModule", params),
+        );
+    }
+
+    pub fn getNormalizedMoveModulesByPackage(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        package_id: []const u8,
+    ) ![]u8 {
+        const params = try buildNormalizedMovePackageParams(allocator, package_id);
+        defer allocator.free(params);
+        return try dupeOwnedJsonResponse(
+            self.allocator,
+            allocator,
+            try self.call("sui_getNormalizedMoveModulesByPackage", params),
+        );
+    }
+
+    pub fn summarizeMoveFunctionResponse(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        package_id: []const u8,
+        module: []const u8,
+        function_name: []const u8,
+        response_json: []const u8,
+    ) !move_result.OwnedMoveFunctionSummary {
+        _ = self;
+        var summary = try move_result.extractMoveFunctionSummary(
+            allocator,
+            response_json,
+            package_id,
+            module,
+            function_name,
+        );
+        errdefer summary.deinit(allocator);
+
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, response_json, .{});
+        defer parsed.deinit();
+
+        if (parsed.value != .object) return error.InvalidResponse;
+        const result = parsed.value.object.get("result") orelse return error.InvalidResponse;
+        if (result != .object) return error.InvalidResponse;
+        const parameters = result.object.get("parameters") orelse return error.InvalidResponse;
+        if (parameters != .array) return error.InvalidResponse;
+        if (parameters.array.items.len != summary.parameters.len) return error.InvalidResponse;
+
+        for (parameters.array.items, 0..) |item, index| {
+            const classified = try classifyNormalizedMoveType(allocator, item);
+            summary.parameters[index].lowering_kind = if (classified) |kind|
+                @tagName(kind)
+            else
+                "runtime";
+        }
+
+        return summary;
+    }
+
+    pub fn summarizeMoveModuleResponse(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        package_id: []const u8,
+        module: []const u8,
+        response_json: []const u8,
+    ) !move_result.OwnedMoveModuleSummary {
+        _ = self;
+        return try move_result.extractMoveModuleSummary(
+            allocator,
+            response_json,
+            package_id,
+            module,
+        );
+    }
+
+    pub fn summarizeMovePackageResponse(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        package_id: []const u8,
+        response_json: []const u8,
+    ) !move_result.OwnedMovePackageSummary {
+        _ = self;
+        return try move_result.extractMovePackageSummary(allocator, response_json, package_id);
+    }
+
+    pub fn getMoveCallUserParameterKinds(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        package_id: []const u8,
+        module: []const u8,
+        function_name: []const u8,
+    ) ![]LocalMoveCallParameterKind {
+        const response = try self.getNormalizedMoveFunction(allocator, package_id, module, function_name);
+        defer allocator.free(response);
 
         const parsed = try std.json.parseFromSlice(std.json.Value, allocator, response, .{});
         defer parsed.deinit();
@@ -9386,6 +9578,99 @@ pub const SuiRpcClient = struct {
         };
     }
 
+    pub fn runMoveQuery(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        query: MoveQuery,
+    ) ![]u8 {
+        return switch (query) {
+            .function => |spec| try self.getNormalizedMoveFunction(
+                allocator,
+                spec.package_id,
+                spec.module,
+                spec.function_name,
+            ),
+            .module => |spec| try self.getNormalizedMoveModule(
+                allocator,
+                spec.package_id,
+                spec.module,
+            ),
+            .package => |spec| try self.getNormalizedMoveModulesByPackage(
+                allocator,
+                spec.package_id,
+            ),
+        };
+    }
+
+    pub fn runMoveQueryAndSummarize(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        query: MoveQuery,
+    ) !MoveQuerySummary {
+        return switch (query) {
+            .function => |spec| blk: {
+                const response = try self.getNormalizedMoveFunction(
+                    allocator,
+                    spec.package_id,
+                    spec.module,
+                    spec.function_name,
+                );
+                defer allocator.free(response);
+                break :blk .{
+                    .function = try self.summarizeMoveFunctionResponse(
+                        allocator,
+                        spec.package_id,
+                        spec.module,
+                        spec.function_name,
+                        response,
+                    ),
+                };
+            },
+            .module => |spec| blk: {
+                const response = try self.getNormalizedMoveModule(
+                    allocator,
+                    spec.package_id,
+                    spec.module,
+                );
+                defer allocator.free(response);
+                break :blk .{
+                    .module = try self.summarizeMoveModuleResponse(
+                        allocator,
+                        spec.package_id,
+                        spec.module,
+                        response,
+                    ),
+                };
+            },
+            .package => |spec| blk: {
+                const response = try self.getNormalizedMoveModulesByPackage(
+                    allocator,
+                    spec.package_id,
+                );
+                defer allocator.free(response);
+                break :blk .{
+                    .package = try self.summarizeMovePackageResponse(
+                        allocator,
+                        spec.package_id,
+                        response,
+                    ),
+                };
+            },
+        };
+    }
+
+    pub fn runMoveQueryAction(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        query: MoveQuery,
+        action: MoveQueryAction,
+    ) !MoveQueryActionResult {
+        return switch (action) {
+            .raw => .{ .raw = try self.runMoveQuery(allocator, query) },
+            .summarize => .{ .summarized = try self.runMoveQueryAndSummarize(allocator, query) },
+        };
+    }
+
     pub fn runCoinQuery(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
@@ -11354,6 +11639,15 @@ pub const SuiRpcClient = struct {
                 .summarize => .{
                     .summarized = .{
                         .object = try self.runObjectQueryAndSummarize(allocator, object_query),
+                    },
+                },
+                .observe => return error.UnsupportedQueryAction,
+            },
+            .move => |move_query| switch (action) {
+                .raw => .{ .raw = try self.runMoveQuery(allocator, move_query) },
+                .summarize => .{
+                    .summarized = .{
+                        .move = try self.runMoveQueryAndSummarize(allocator, move_query),
                     },
                 },
                 .observe => return error.UnsupportedQueryAction,
@@ -18476,6 +18770,104 @@ test "selectOwnedObjectByModule uses typed move-module filters" {
 
     try testing.expect(selection != null);
     try testing.expectEqualStrings("0xmodule-object", selection.?.object_id.?);
+}
+
+test "runReadQueryAction dispatches summarized move function queries" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            try testing.expectEqualStrings("sui_getNormalizedMoveFunction", req.method);
+            try testing.expectEqualStrings("[\"0x2\",\"pool\",\"swap\"]", req.params_json);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"visibility\":\"Public\",\"isEntry\":true,\"typeParameters\":[],\"parameters\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"pool\",\"name\":\"Pool\",\"typeParams\":[]}},\"U64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[]}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var result = try client_instance.runReadQueryAction(
+        allocator,
+        .{
+            .move = .{
+                .function = .{
+                    .package_id = "0x2",
+                    .module = "pool",
+                    .function_name = "swap",
+                },
+            },
+        },
+        .summarize,
+    );
+    defer result.deinit(allocator);
+
+    switch (result) {
+        .summarized => |summary| switch (summary) {
+            .move => |move_summary| switch (move_summary) {
+                .function => |value| {
+                    try testing.expectEqualStrings("0x2", value.package_id.?);
+                    try testing.expectEqualStrings("swap", value.function_name.?);
+                    try testing.expectEqual(@as(usize, 3), value.parameters.len);
+                    try testing.expectEqualStrings("object", value.parameters[0].lowering_kind.?);
+                    try testing.expectEqualStrings("u64", value.parameters[1].lowering_kind.?);
+                    try testing.expectEqualStrings("runtime", value.parameters[2].lowering_kind.?);
+                },
+                else => return error.TestUnexpectedResult,
+            },
+            else => return error.TestUnexpectedResult,
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "runReadQueryAction dispatches raw move package queries" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            try testing.expectEqualStrings("sui_getNormalizedMoveModulesByPackage", req.method);
+            try testing.expectEqualStrings("[\"0x2\"]", req.params_json);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"coin\":{\"structs\":{\"Coin\":{}},\"exposedFunctions\":{\"join\":{},\"split\":{}}}}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var result = try client_instance.runReadQueryAction(
+        allocator,
+        .{
+            .move = .{
+                .package = .{
+                    .package_id = "0x2",
+                },
+            },
+        },
+        .raw,
+    );
+    defer result.deinit(allocator);
+
+    try testing.expect(std.mem.indexOf(u8, result.raw, "\"coin\"") != null);
 }
 
 test "runReadQueryAction dispatches raw transaction-status queries" {

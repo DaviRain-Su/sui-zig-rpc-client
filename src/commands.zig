@@ -1872,6 +1872,30 @@ fn objectQueryActionFromArgs(args: *const cli.ParsedArgs) client.rpc_client.Obje
     return if (args.tx_send_summarize) .summarize else .raw;
 }
 
+fn moveQueryFromArgs(args: *const cli.ParsedArgs) !client.rpc_client.MoveQuery {
+    return switch (args.command) {
+        .move_package => .{
+            .package = .{
+                .package_id = args.move_package orelse return error.InvalidCli,
+            },
+        },
+        .move_module => .{
+            .module = .{
+                .package_id = args.move_package orelse return error.InvalidCli,
+                .module = args.move_module orelse return error.InvalidCli,
+            },
+        },
+        .move_function => .{
+            .function = .{
+                .package_id = args.move_package orelse return error.InvalidCli,
+                .module = args.move_module orelse return error.InvalidCli,
+                .function_name = args.move_function orelse return error.InvalidCli,
+            },
+        },
+        else => return error.InvalidCli,
+    };
+}
+
 fn readQueryActionFromArgs(args: *const cli.ParsedArgs) client.rpc_client.ReadQueryAction {
     return switch (args.command) {
         .account_list => if (args.account_list_json) .raw else .summarize,
@@ -1905,6 +1929,9 @@ fn readQueryFromArgs(args: *const cli.ParsedArgs) !client.rpc_client.ReadQuery {
             .account = .{
                 .info = args.account_selector orelse return error.InvalidCli,
             },
+        },
+        .move_package, .move_module, .move_function => .{
+            .move = try moveQueryFromArgs(args),
         },
         .account_resources => return error.InvalidCli,
         .account_objects => return error.InvalidCli,
@@ -2046,6 +2073,11 @@ fn printReadQuerySummary(
             .object => |value| try printStructuredJson(writer, value, pretty),
             .dynamic_fields => |value| try printStructuredJson(writer, value, pretty),
         },
+        .move => |move| switch (move) {
+            .function => |value| try printStructuredJson(writer, value, pretty),
+            .module => |value| try printStructuredJson(writer, value, pretty),
+            .package => |value| try printStructuredJson(writer, value, pretty),
+        },
         .transaction => |value| try printStructuredJson(writer, value, pretty),
     }
 }
@@ -2130,7 +2162,7 @@ pub fn runCommandWithProgrammaticProvider(
             defer result.deinit(allocator);
             try printResourceQueryActionResult(allocator, writer, result, args.pretty);
         },
-        .account_list, .account_info, .object_get, .object_dynamic_fields, .object_dynamic_field_object, .tx_status, .tx_confirm => {
+        .account_list, .account_info, .move_package, .move_module, .move_function, .object_get, .object_dynamic_fields, .object_dynamic_field_object, .tx_status, .tx_confirm => {
             switch (args.command) {
                 .tx_status, .tx_confirm => {
                     const digest = args.tx_digest orelse return error.InvalidCli;
@@ -2607,6 +2639,117 @@ test "runCommand help writes usage" {
 
     try runCommand(allocator, &rpc, &args, output.writer(allocator));
     try testing.expect(std.mem.indexOf(u8, output.items, "Usage:") != null);
+}
+
+test "runCommand move function with --summarize prints normalized function summary" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            std.debug.assert(std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction"));
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0x2\"") != null);
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"pool\"") != null);
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"swap\"") != null);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"visibility\":\"Public\",\"isEntry\":true,\"typeParameters\":[],\"parameters\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"pool\",\"name\":\"Pool\",\"typeParams\":[]}},\"U64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[\"Bool\"]}}",
+            );
+        }
+    }.call;
+
+    var args = cli.ParsedArgs{
+        .command = .move_function,
+        .has_command = true,
+        .move_package = "0x2",
+        .move_module = "pool",
+        .move_function = "swap",
+        .tx_send_summarize = true,
+    };
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    try testing.expectEqualStrings("0x2", parsed.value.object.get("package_id").?.string);
+    try testing.expectEqualStrings("pool", parsed.value.object.get("module_name").?.string);
+    try testing.expectEqualStrings("swap", parsed.value.object.get("function_name").?.string);
+    try testing.expectEqualStrings("object", parsed.value.object.get("parameters").?.array.items[0].object.get("lowering_kind").?.string);
+    try testing.expectEqualStrings("u64", parsed.value.object.get("parameters").?.array.items[1].object.get("lowering_kind").?.string);
+    try testing.expectEqualStrings("runtime", parsed.value.object.get("parameters").?.array.items[2].object.get("lowering_kind").?.string);
+    try testing.expectEqualStrings("Bool", parsed.value.object.get("returns").?.array.items[0].object.get("signature").?.string);
+}
+
+test "runCommand move package resolves aliases before issuing RPC" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var method_ok = false;
+    var params_ok = false;
+    const MockContext = struct {
+        method_ok: *bool,
+        params_ok: *bool,
+    };
+
+    const callback = struct {
+        fn call(ctx: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const mock: *MockContext = @ptrCast(@alignCast(ctx));
+            mock.method_ok.* = std.mem.eql(u8, req.method, "sui_getNormalizedMoveModulesByPackage");
+            mock.params_ok.* = std.mem.indexOf(u8, req.params_json, "\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\"") != null;
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"pool\":{\"structs\":{\"Pool\":{},\"Tick\":{}},\"exposedFunctions\":{\"swap\":{},\"add_liquidity\":{}}}}}",
+            );
+        }
+    }.call;
+
+    var args = cli.ParsedArgs{
+        .command = .move_package,
+        .has_command = true,
+        .move_package = client.package_preset.cetus_clmm_mainnet,
+        .tx_send_summarize = true,
+    };
+    var mock_ctx = MockContext{
+        .method_ok = &method_ok,
+        .params_ok = &params_ok,
+    };
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = &mock_ctx,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    try testing.expect(method_ok);
+    try testing.expect(params_ok);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    try testing.expectEqualStrings(client.package_preset.cetus_clmm_mainnet, parsed.value.object.get("package_id").?.string);
+    try testing.expectEqualStrings("pool", parsed.value.object.get("modules").?.array.items[0].object.get("module_name").?.string);
+    try testing.expectEqual(@as(i64, 2), parsed.value.object.get("modules").?.array.items[0].object.get("struct_count").?.integer);
 }
 
 test "runCommand object get with --summarize prints structured object summaries" {

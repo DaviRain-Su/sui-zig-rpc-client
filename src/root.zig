@@ -15,6 +15,7 @@ pub const object_result = @import("./object_result.zig");
 pub const owned_object_result = @import("./owned_object_result.zig");
 pub const dynamic_field_result = @import("./dynamic_field_result.zig");
 pub const coin_result = @import("./coin_result.zig");
+pub const move_result = @import("./move_result.zig");
 pub const tx_request_builder = @import("./tx_request_builder.zig");
 pub const ptb_bytes_builder = @import("./ptb_bytes_builder.zig");
 pub const keystore = @import("./keystore.zig");

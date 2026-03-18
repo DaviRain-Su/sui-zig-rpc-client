@@ -653,6 +653,9 @@ pub fn main() !void {
 - `help`: 打印用法
 - `version`: 打印版本
 - `rpc <method> [params-json]`: 发送任意 Sui JSON-RPC 方法。
+- `move package <package-id-or-alias>`: 调用 `sui_getNormalizedMoveModulesByPackage`，发现 package 下有哪些模块。
+- `move module <package-id-or-alias> <module>`: 调用 `sui_getNormalizedMoveModule`，查看模块里的 structs / exposed functions。
+- `move function <package-id-or-alias> <module> <function>`: 调用 `sui_getNormalizedMoveFunction`，查看参数/返回类型；`--summarize` 会额外输出 CLI lowering hint。
 - `tx simulate [params-json]`: 调用 `sui_devInspectTransactionBlock`。
 - `tx dry-run [tx-bytes|@file]`: 调用 `sui_dryRunTransactionBlock`。
 - `tx send [params-json]`: 调用 `sui_executeTransactionBlock`。
@@ -781,6 +784,24 @@ zig build run -- tx dry-run \
 ```
 
 参数 JSON 可以直接内联传入，也可用 `@path/to/file.json` 方式加载。
+
+`move` ABI 发现命令示例：
+
+```bash
+zig build run -- move package cetus_clmm_mainnet --summarize
+zig build run -- move module cetus_clmm_mainnet pool --summarize
+zig build run -- move function cetus_clmm_mainnet pool swap --summarize
+```
+
+对于 `move function --summarize`，输出里的 `parameters[*].lowering_kind` 会告诉你当前 CLI 对这个参数的本地 lowering 能力：
+- `object`
+- `address`
+- `signer`
+- `boolean`
+- `u8/u16/u32/u64/u128/u256`
+- `vector_u8`
+- `runtime`（例如 `TxContext`，CLI 不要求你显式提供）
+- `unsupported`
 
 `--package <package-id-or-alias>` 现在已经支持内置 alias：
 - `sui` / `sui_framework` / `framework` -> `0x2`

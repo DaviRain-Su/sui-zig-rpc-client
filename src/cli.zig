@@ -16,6 +16,9 @@ pub const Command = enum {
     account_coins,
     account_objects,
     account_resources,
+    move_package,
+    move_module,
+    move_function,
     object_get,
     object_dynamic_fields,
     object_dynamic_field_object,
@@ -82,6 +85,9 @@ pub const ParsedArgs = struct {
     account_objects_all: bool = false,
     account_resources_limit: ?u64 = null,
     account_resources_all: bool = false,
+    move_package: ?[]const u8 = null,
+    move_module: ?[]const u8 = null,
+    move_function: ?[]const u8 = null,
     object_id: ?[]const u8 = null,
     object_parent_id: ?[]const u8 = null,
     object_dynamic_field_name: ?[]const u8 = null,
@@ -124,6 +130,9 @@ pub const ParsedArgs = struct {
     owned_tx_session_response: ?[]const u8 = null,
     owned_account_objects_filter: ?[]const u8 = null,
     owned_account_objects_package: ?[]const u8 = null,
+    owned_move_package: ?[]const u8 = null,
+    owned_move_module: ?[]const u8 = null,
+    owned_move_function: ?[]const u8 = null,
     owned_object_id: ?[]const u8 = null,
     owned_object_parent_id: ?[]const u8 = null,
     owned_object_dynamic_field_name: ?[]const u8 = null,
@@ -159,6 +168,9 @@ pub const ParsedArgs = struct {
         if (self.owned_tx_session_response) |value| allocator.free(value);
         if (self.owned_account_objects_filter) |value| allocator.free(value);
         if (self.owned_account_objects_package) |value| allocator.free(value);
+        if (self.owned_move_package) |value| allocator.free(value);
+        if (self.owned_move_module) |value| allocator.free(value);
+        if (self.owned_move_function) |value| allocator.free(value);
         if (self.owned_object_id) |value| allocator.free(value);
         if (self.owned_object_parent_id) |value| allocator.free(value);
         if (self.owned_object_dynamic_field_name) |value| allocator.free(value);
@@ -1978,6 +1990,76 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
                 return error.InvalidCli;
             }
 
+            if (std.mem.eql(u8, token, "move")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                const sub = args[i + 1];
+                if (std.mem.eql(u8, sub, "package")) {
+                    if (i + 2 >= args.len) return error.InvalidCli;
+                    parsed.command = .move_package;
+                    parsed.has_command = true;
+                    try setOptionalPackageArg(
+                        allocator,
+                        &parsed,
+                        args[i + 2],
+                        &parsed.owned_move_package,
+                        &parsed.move_package,
+                    );
+                    i += 3;
+                    continue;
+                }
+                if (std.mem.eql(u8, sub, "module")) {
+                    if (i + 3 >= args.len) return error.InvalidCli;
+                    parsed.command = .move_module;
+                    parsed.has_command = true;
+                    try setOptionalPackageArg(
+                        allocator,
+                        &parsed,
+                        args[i + 2],
+                        &parsed.owned_move_package,
+                        &parsed.move_package,
+                    );
+                    try setOptionalStringArg(
+                        allocator,
+                        &parsed,
+                        args[i + 3],
+                        &parsed.owned_move_module,
+                        &parsed.move_module,
+                    );
+                    i += 4;
+                    continue;
+                }
+                if (std.mem.eql(u8, sub, "function")) {
+                    if (i + 4 >= args.len) return error.InvalidCli;
+                    parsed.command = .move_function;
+                    parsed.has_command = true;
+                    try setOptionalPackageArg(
+                        allocator,
+                        &parsed,
+                        args[i + 2],
+                        &parsed.owned_move_package,
+                        &parsed.move_package,
+                    );
+                    try setOptionalStringArg(
+                        allocator,
+                        &parsed,
+                        args[i + 3],
+                        &parsed.owned_move_module,
+                        &parsed.move_module,
+                    );
+                    try setOptionalStringArg(
+                        allocator,
+                        &parsed,
+                        args[i + 4],
+                        &parsed.owned_move_function,
+                        &parsed.move_function,
+                    );
+                    i += 5;
+                    continue;
+                }
+
+                return error.InvalidCli;
+            }
+
             if (std.mem.eql(u8, token, "object")) {
                 if (i + 1 >= args.len) return error.InvalidCli;
                 const sub = args[i + 1];
@@ -3158,6 +3240,15 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
             }
         }
 
+        if (parsed.command == .move_package or parsed.command == .move_module or parsed.command == .move_function) {
+            if (std.mem.eql(u8, token, "--summarize") or std.mem.eql(u8, token, "--summary")) {
+                parsed.tx_send_summarize = true;
+                i += 1;
+                continue;
+            }
+            return error.InvalidCli;
+        }
+
         if (parsed.command == .object_get or parsed.command == .account_objects or parsed.command == .account_resources) {
             if (std.mem.eql(u8, token, "--options")) {
                 if (i + 1 >= args.len) return error.InvalidCli;
@@ -3371,6 +3462,14 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
         if (parsed.tx_session_response != null and !parsed.tx_build_emit_tx_block) return error.InvalidCli;
     }
 
+    if (parsed.command == .move_package and parsed.move_package == null) return error.InvalidCli;
+    if (parsed.command == .move_module) {
+        if (parsed.move_package == null or parsed.move_module == null) return error.InvalidCli;
+    }
+    if (parsed.command == .move_function) {
+        if (parsed.move_package == null or parsed.move_module == null or parsed.move_function == null) return error.InvalidCli;
+    }
+
     if (parsed.command == .object_get and parsed.object_id == null) return error.InvalidCli;
     if ((parsed.command == .object_get or parsed.command == .account_objects or parsed.command == .account_resources) and
         parsed.object_options != null and
@@ -3437,6 +3536,14 @@ pub fn printUsage(writer: anytype) !void {
         "  help                                Show this help\n" ++
         "  version                             Print version\n" ++
         "  rpc <method> [params-json]          Send a raw JSON-RPC request\n" ++
+        "  move package <package-id-or-alias>  Call sui_getNormalizedMoveModulesByPackage\n" ++
+        "    --summarize                         Print module counts instead of raw normalized JSON\n" ++
+        "  move module <package-id-or-alias> <module>\n" ++
+        "                                       Call sui_getNormalizedMoveModule\n" ++
+        "    --summarize                         Print struct/function inventory instead of raw normalized JSON\n" ++
+        "  move function <package-id-or-alias> <module> <function>\n" ++
+        "                                       Call sui_getNormalizedMoveFunction\n" ++
+        "    --summarize                         Print parameter/return signature summary with CLI lowering hints\n" ++
         "  object get <object-id-or-alias>      Call sui_getObject\n" ++
         "    --options <json|@file>              object read options\n" ++
         "    --show-type|--show-owner|--show-content|--show-bcs\n" ++
@@ -6029,6 +6136,70 @@ test "parseCliArgs parses account resources object-id filters" {
     try testing.expectEqual(Command.account_resources, parsed.command);
     try testing.expectEqualStrings("0xobject-1", parsed.account_objects_object_id.?);
     try testing.expectEqual(@as(?u64, 25), parsed.account_resources_limit);
+}
+
+test "parseCliArgs parses move package summarize command" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "move",
+        "package",
+        "cetus_clmm_mainnet",
+        "--summarize",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.move_package, parsed.command);
+    try testing.expectEqualStrings(package_preset.cetus_clmm_mainnet, parsed.move_package.?);
+    try testing.expect(parsed.tx_send_summarize);
+}
+
+test "parseCliArgs parses move module command" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "move",
+        "module",
+        "0x2",
+        "coin",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.move_module, parsed.command);
+    try testing.expectEqualStrings("0x2", parsed.move_package.?);
+    try testing.expectEqualStrings("coin", parsed.move_module.?);
+}
+
+test "parseCliArgs parses move function command with package alias" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "move",
+        "function",
+        "cetus.mainnet.clmm",
+        "pool",
+        "swap",
+        "--summarize",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.move_function, parsed.command);
+    try testing.expectEqualStrings(package_preset.cetus_clmm_mainnet, parsed.move_package.?);
+    try testing.expectEqualStrings("pool", parsed.move_module.?);
+    try testing.expectEqualStrings("swap", parsed.move_function.?);
+    try testing.expect(parsed.tx_send_summarize);
 }
 
 test "parseCliArgs parses object get summarize options" {
