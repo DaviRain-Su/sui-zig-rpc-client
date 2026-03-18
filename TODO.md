@@ -42,6 +42,8 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
   candidates.
 - [x] Shared candidate scoring from owned candidate references when one
   candidate has a unique highest score.
+- [x] Owned candidate scoring from selected object references when one
+  candidate has a unique highest score.
 
 ### Coin automation
 

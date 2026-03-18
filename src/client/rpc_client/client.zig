@@ -4488,6 +4488,29 @@ pub const SuiRpcClient = struct {
         return false;
     }
 
+    fn objectResponseContentReferenceScore(
+        allocator: std.mem.Allocator,
+        response_json: []const u8,
+        object_ids: []const []const u8,
+    ) usize {
+        if (object_ids.len == 0) return 0;
+
+        const parsed = std.json.parseFromSlice(std.json.Value, allocator, response_json, .{}) catch return 0;
+        defer parsed.deinit();
+        if (parsed.value != .object) return 0;
+        const result = parsed.value.object.get("result") orelse return 0;
+        if (result != .object) return 0;
+        const data = result.object.get("data") orelse return 0;
+        if (data != .object) return 0;
+        const content = data.object.get("content") orelse return 0;
+
+        var score: usize = 0;
+        for (object_ids) |object_id| {
+            if (jsonValueContainsExactString(content, object_id)) score += 1;
+        }
+        return score;
+    }
+
     fn objectResponseContentMatchingObjectIdIndex(
         allocator: std.mem.Allocator,
         response_json: []const u8,
@@ -4657,20 +4680,20 @@ pub const SuiRpcClient = struct {
             const candidates = parameter.owned_object_candidates orelse continue;
             if (candidates.len <= 1) continue;
 
-            var matched_index: ?usize = null;
+            const candidate_scores = try allocator.alloc(usize, candidates.len);
+            defer allocator.free(candidate_scores);
+            @memset(candidate_scores, 0);
             for (candidates, 0..) |candidate, index| {
                 const response = self.getObjectWithOptions(candidate.object_id, .{ .show_content = true }) catch continue;
                 defer allocator.free(response);
-                if (!objectResponseContentReferencesAnyObjectId(allocator, response, selected_object_ids)) continue;
-
-                if (matched_index != null) {
-                    matched_index = null;
-                    break;
-                }
-                matched_index = index;
+                candidate_scores[index] = objectResponseContentReferenceScore(
+                    allocator,
+                    response,
+                    selected_object_ids,
+                );
             }
 
-            const index = matched_index orelse continue;
+            const index = uniqueHighestScoreIndex(candidate_scores) orelse continue;
             parameter.auto_selected_arg_json = try buildAutoSelectedScalarArgJson(
                 allocator,
                 candidates[index].object_input_select_token,
