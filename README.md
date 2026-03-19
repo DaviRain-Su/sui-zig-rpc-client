@@ -934,6 +934,8 @@ zig build run -- events \
 
 普通 owned object 现在也有同类的跨参数去重。像 `Position, Position` 或 `Position, vector<Position>` 这类签名里，后面的 auto-selected 参数会优先避开前面已经占用的同一 owned object，尽量不再生成“同一个 object input 被多个业务参数重复使用”的坏模板。
 
+这层去重现在也会先尊重整条调用里所有显式给出的 object 参数。也就是说，如果你用 `--object-arg-at` 把后面的某个 `Position` 明确锁成 `0xabc...`，前面的 auto-selection 会先把这枚对象预留出去，不会先一步把它抢走。
+
 这层模板现在同时覆盖两条路径：
 - typed `--package/--module/--function` argv
 - 更通用的 `--commands` request artifact

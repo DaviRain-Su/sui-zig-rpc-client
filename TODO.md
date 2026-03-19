@@ -73,6 +73,8 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
   explicit/selected transaction objects outrank otherwise similar candidates.
 - [x] Avoid reusing the same non-coin owned object across later scalar/vector
   object parameters during auto-selection.
+- [x] Reserve explicit owned object arguments before cross-parameter owned
+  auto-selection runs.
 
 ### Coin automation
 

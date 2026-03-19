@@ -6428,17 +6428,21 @@ pub const SuiRpcClient = struct {
             reserved_object_ids.deinit(allocator);
         }
 
+        for (parameters) |parameter| {
+            if (parameter.omitted_from_explicit_args) continue;
+            if (parameter.explicit_arg_json) |value| {
+                try appendReservedMoveObjectIdsFromArgumentJsonText(
+                    allocator,
+                    &reserved_object_ids,
+                    value,
+                );
+            }
+        }
+
         for (parameters) |*parameter| {
             if (parameter.omitted_from_explicit_args) continue;
 
-            if (parameter.explicit_arg_json) |value| {
-                if (isNonCoinOwnedMoveParameter(parameter.*) or isNonCoinVectorOwnedMoveParameter(parameter.*)) {
-                    try appendReservedMoveObjectIdsFromArgumentJsonText(
-                        allocator,
-                        &reserved_object_ids,
-                        value,
-                    );
-                }
+            if (parameter.explicit_arg_json != null) {
                 continue;
             }
 
