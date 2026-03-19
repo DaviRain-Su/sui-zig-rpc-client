@@ -1,0 +1,6 @@
+[package]
+name = "generic_vault"
+edition = "2024"
+
+[addresses]
+generic_vault = "0x0"

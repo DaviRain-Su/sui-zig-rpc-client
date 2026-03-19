@@ -252,7 +252,7 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
   invocation coverage.
 - [x] Add a `shared_state_lab` package for shared object and versioned shared
   object coverage.
-- [ ] Add a `generic_vault` package for generic object and generic pure struct
+- [x] Add a `generic_vault` package for generic object and generic pure struct
   coverage.
 - [ ] Add a `vector_router` package for `vector<object>`, `vector<Coin<T>>`,
   and `MakeMoveVec` coverage.

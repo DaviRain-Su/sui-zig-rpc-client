@@ -64,6 +64,10 @@
 
 用途：专门打 generic type substitution 和 generic pure/object lowering。
 
+当前状态：
+- 已落地：[`fixtures/move/generic_vault`](/Users/davirian/dev/zig/sui-zig-rpc-client/fixtures/move/generic_vault)
+- 已验证：`sui move test --path fixtures/move/generic_vault`
+
 建议覆盖：
 - `Vault<T>`
 - `Balance<T>`
