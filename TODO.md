@@ -190,6 +190,8 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
   across fixed-point scoring passes.
 - [x] Reuse selected-object id buckets across repeated fixed-point scoring
   passes until the explicit/auto-selected parameter state actually changes.
+- [x] Reuse normalized move-function ABI responses across repeated identical
+  local programmable `MoveCall` lowerings inside one transaction build.
 - [x] Reuse repeated initial owner-context owned-object discovery reads across
   a single `move function` template build instead of requerying the same
   `(owner, struct type)` for multiple identical parameters.

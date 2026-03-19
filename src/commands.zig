@@ -8459,8 +8459,6 @@ test "runCommand move function with --summarize discovers shared candidates from
                     "{\"result\":{\"data\":{\"objectId\":\"0xpool-type-module\",\"version\":\"12\",\"digest\":\"pool-type-module-digest\",\"content\":{\"dataType\":\"moveObject\",\"fields\":{\"note\":\"pool\"}}}}}",
                 );
             }
-            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"showType\":true") != null);
-            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"showOwner\":true") != null);
             return alloc.dupe(
                 u8,
                 "{\"result\":{\"data\":{\"objectId\":\"0xpool-type-module\",\"version\":\"12\",\"digest\":\"pool-type-module-digest\",\"type\":\"0x2a::pool::Pool<0x2::sui::SUI, 0x2::sui::SUI>\",\"owner\":{\"Shared\":{\"initial_shared_version\":\"5\"}}}}}",

@@ -11321,11 +11321,26 @@ pub const SuiRpcClient = struct {
         if (parsed.value != .array) return error.InvalidCli;
 
         const LoweringContext = struct {
+            const NormalizedMoveFunctionResponseCacheEntry = struct {
+                package_id: []u8,
+                module: []u8,
+                function_name: []u8,
+                response_json: []u8,
+
+                fn deinit(entry: *@This(), arena: std.mem.Allocator) void {
+                    arena.free(entry.package_id);
+                    arena.free(entry.module);
+                    arena.free(entry.function_name);
+                    arena.free(entry.response_json);
+                }
+            };
+
             rpc: *SuiRpcClient,
             allocator: std.mem.Allocator,
             inputs: std.ArrayListUnmanaged([]u8) = .{},
             commands: std.ArrayListUnmanaged([]u8) = .{},
             normalized_module_cache: std.ArrayList(NormalizedMoveModuleResponseCacheEntry) = .empty,
+            normalized_function_cache: std.ArrayList(NormalizedMoveFunctionResponseCacheEntry) = .empty,
 
             fn deinit(ctx: *@This()) void {
                 for (ctx.inputs.items) |item| ctx.allocator.free(item);
@@ -11333,6 +11348,40 @@ pub const SuiRpcClient = struct {
                 ctx.inputs.deinit(ctx.allocator);
                 ctx.commands.deinit(ctx.allocator);
                 deinitNormalizedMoveModuleResponseCache(ctx.allocator, &ctx.normalized_module_cache);
+                for (ctx.normalized_function_cache.items) |*entry| entry.deinit(ctx.allocator);
+                ctx.normalized_function_cache.deinit(ctx.allocator);
+            }
+
+            fn getNormalizedMoveFunctionResponseCachedBorrowed(
+                ctx: *@This(),
+                package_id: []const u8,
+                module: []const u8,
+                function_name: []const u8,
+            ) ![]const u8 {
+                for (ctx.normalized_function_cache.items) |entry| {
+                    if (std.mem.eql(u8, entry.package_id, package_id) and
+                        std.mem.eql(u8, entry.module, module) and
+                        std.mem.eql(u8, entry.function_name, function_name))
+                    {
+                        return entry.response_json;
+                    }
+                }
+
+                const response_json = try ctx.rpc.getNormalizedMoveFunction(
+                    ctx.allocator,
+                    package_id,
+                    module,
+                    function_name,
+                );
+                errdefer ctx.allocator.free(response_json);
+
+                try ctx.normalized_function_cache.append(ctx.allocator, .{
+                    .package_id = try ctx.allocator.dupe(u8, package_id),
+                    .module = try ctx.allocator.dupe(u8, module),
+                    .function_name = try ctx.allocator.dupe(u8, function_name),
+                    .response_json = response_json,
+                });
+                return response_json;
             }
 
             fn appendInput(ctx: *@This(), input_json: []u8) !u16 {
@@ -11736,14 +11785,11 @@ pub const SuiRpcClient = struct {
                 const function_name = object.get("function") orelse return error.InvalidCli;
                 if (package_id != .string or module != .string or function_name != .string) return error.InvalidCli;
 
-                const normalized_response = try ctx.rpc.getNormalizedMoveFunction(
-                    ctx.allocator,
+                const normalized_response = try ctx.getNormalizedMoveFunctionResponseCachedBorrowed(
                     package_id.string,
                     module.string,
                     function_name.string,
                 );
-                defer ctx.allocator.free(normalized_response);
-
                 const normalized_parsed = try std.json.parseFromSlice(std.json.Value, ctx.allocator, normalized_response, .{});
                 defer normalized_parsed.deinit();
                 if (normalized_parsed.value != .object) return error.InvalidResponse;
@@ -13229,6 +13275,66 @@ pub const SuiRpcClient = struct {
         try testing.expectEqual(@as(usize, 2), inputs.value.array.items.len);
         try testing.expect(inputs.value.array.items[0].object.get("Pure") != null);
         try testing.expect(inputs.value.array.items[1].object.get("Pure") != null);
+    }
+
+    test "local programmable lowering caches repeated normalized function lookups across identical move calls" {
+        const testing = std.testing;
+
+        var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+        defer _ = gpa.deinit();
+        const allocator = gpa.allocator();
+
+        const State = struct {
+            normalized_calls: usize = 0,
+        };
+
+        var rpc = SuiRpcClient.init(allocator, "https://rpc.invalid");
+        defer rpc.deinit();
+
+        var state = State{};
+        rpc.request_sender = .{
+            .context = &state,
+            .callback = struct {
+                fn send(
+                    ctx: *anyopaque,
+                    alloc: std.mem.Allocator,
+                    req: RpcRequest,
+                ) error{OutOfMemory}![]u8 {
+                    const local_state: *State = @ptrCast(@alignCast(ctx));
+                    std.debug.assert(std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction"));
+                    local_state.normalized_calls += 1;
+                    return try alloc.dupe(
+                        u8,
+                        "{\"result\":{\"parameters\":[\"U64\",\"Address\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[],\"typeParameters\":[],\"visibility\":\"Public\",\"isEntry\":true}}",
+                    );
+                }
+            }.send,
+        };
+
+        var parts = try rpc.ownLocalProgrammableTransactionPartsFromCommandSource(
+            allocator,
+            .{
+                .commands_json =
+                \\[
+                \\  {"kind":"MoveCall","package":"0x2","module":"counter","function":"set_values","typeArguments":[],"arguments":[7,"0x1111111111111111111111111111111111111111111111111111111111111111"]},
+                \\  {"kind":"MoveCall","package":"0x2","module":"counter","function":"set_values","typeArguments":[],"arguments":[8,"0x2222222222222222222222222222222222222222222222222222222222222222"]}
+                \\]
+                ,
+            },
+            "0xsender",
+            "[{\"objectId\":\"0xgas\",\"version\":\"5\",\"digest\":\"gas-digest\"}]",
+            7,
+            1200,
+            null,
+        );
+        defer parts.deinit(allocator);
+
+        const commands = try std.json.parseFromSlice(std.json.Value, allocator, parts.commands_json, .{});
+        defer commands.deinit();
+        try testing.expectEqual(@as(usize, 2), commands.value.array.items.len);
+        try testing.expectEqualStrings("MoveCall", commands.value.array.items[0].object.get("kind").?.string);
+        try testing.expectEqualStrings("MoveCall", commands.value.array.items[1].object.get("kind").?.string);
+        try testing.expectEqual(@as(usize, 1), state.normalized_calls);
     }
 
     test "local move-call lowering supports common pure wrapper structs from ABI" {
