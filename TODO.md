@@ -180,6 +180,9 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
 - [x] Reuse borrowed cached content-derived object ids inside move discovery
   and scoring hot paths instead of recloning temporary discovery lists on each
   lookup.
+- [x] Reuse collected seed object ids across a single shared/owned fallback
+  pass, and only rebuild them when the current round actually changes a
+  parameter's candidates or automatic selection.
 - [x] Reuse repeated initial owner-context owned-object discovery reads across
   a single `move function` template build instead of requerying the same
   `(owner, struct type)` for multiple identical parameters.

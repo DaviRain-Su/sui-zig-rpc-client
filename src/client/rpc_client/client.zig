@@ -5053,23 +5053,15 @@ pub const SuiRpcClient = struct {
         return try collected.toOwnedSlice(allocator);
     }
 
-    fn discoverSharedObjectCandidatesFromMoveParameters(
+    fn discoverObjectIdsFromSeedObjectIds(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
         object_content_cache: *std.ArrayList(MoveObjectContentResponseCacheEntry),
         object_content_discovery_cache: *std.ArrayList(MoveObjectContentDiscoveryCacheEntry),
         dynamic_field_cache: *std.ArrayList(MoveDynamicFieldDiscoveryCacheEntry),
-        object_summary_cache: *std.ArrayList(MoveObjectSummaryCacheEntry),
-        parameters: []const move_result.OwnedMoveParameterSummary,
-        signature: []const u8,
+        seed_object_ids: []const []const u8,
         allow_dynamic_field_fallback: bool,
-    ) ![]move_result.SharedMoveObjectCandidate {
-        const seed_object_ids = try collectObjectDiscoverySeedObjectIdsFromMoveParameters(allocator, parameters);
-        defer {
-            for (seed_object_ids) |value| allocator.free(value);
-            allocator.free(seed_object_ids);
-        }
-
+    ) ![][]u8 {
         var discovered_ids = std.ArrayList([]u8).empty;
         defer {
             for (discovered_ids.items) |value| allocator.free(value);
@@ -5105,6 +5097,30 @@ pub const SuiRpcClient = struct {
             }
         }
 
+        return try discovered_ids.toOwnedSlice(allocator);
+    }
+
+    fn discoverSharedObjectCandidatesFromSeedObjectIds(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        object_content_cache: *std.ArrayList(MoveObjectContentResponseCacheEntry),
+        object_content_discovery_cache: *std.ArrayList(MoveObjectContentDiscoveryCacheEntry),
+        dynamic_field_cache: *std.ArrayList(MoveDynamicFieldDiscoveryCacheEntry),
+        object_summary_cache: *std.ArrayList(MoveObjectSummaryCacheEntry),
+        seed_object_ids: []const []const u8,
+        signature: []const u8,
+        allow_dynamic_field_fallback: bool,
+    ) ![]move_result.SharedMoveObjectCandidate {
+        const discovered_ids = try self.discoverObjectIdsFromSeedObjectIds(
+            allocator,
+            object_content_cache,
+            object_content_discovery_cache,
+            dynamic_field_cache,
+            seed_object_ids,
+            allow_dynamic_field_fallback,
+        );
+        defer freeMoveDiscoveredObjectIds(allocator, discovered_ids);
+
         var candidates = std.ArrayList(move_result.SharedMoveObjectCandidate).empty;
         errdefer {
             for (candidates.items) |*value| value.deinit(allocator);
@@ -5115,11 +5131,37 @@ pub const SuiRpcClient = struct {
             allocator,
             object_summary_cache,
             &candidates,
-            discovered_ids.items,
+            discovered_ids,
             signature,
         );
 
         return try candidates.toOwnedSlice(allocator);
+    }
+
+    fn discoverSharedObjectCandidatesFromMoveParameters(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        object_content_cache: *std.ArrayList(MoveObjectContentResponseCacheEntry),
+        object_content_discovery_cache: *std.ArrayList(MoveObjectContentDiscoveryCacheEntry),
+        dynamic_field_cache: *std.ArrayList(MoveDynamicFieldDiscoveryCacheEntry),
+        object_summary_cache: *std.ArrayList(MoveObjectSummaryCacheEntry),
+        parameters: []const move_result.OwnedMoveParameterSummary,
+        signature: []const u8,
+        allow_dynamic_field_fallback: bool,
+    ) ![]move_result.SharedMoveObjectCandidate {
+        const seed_object_ids = try collectObjectDiscoverySeedObjectIdsFromMoveParameters(allocator, parameters);
+        defer freeMoveDiscoveredObjectIds(allocator, seed_object_ids);
+
+        return try self.discoverSharedObjectCandidatesFromSeedObjectIds(
+            allocator,
+            object_content_cache,
+            object_content_discovery_cache,
+            dynamic_field_cache,
+            object_summary_cache,
+            seed_object_ids,
+            signature,
+            allow_dynamic_field_fallback,
+        );
     }
 
     fn appendOwnedObjectCandidatesFromObjectIds(
@@ -5183,45 +5225,42 @@ pub const SuiRpcClient = struct {
         allow_dynamic_field_fallback: bool,
     ) ![]move_result.OwnedMoveObjectCandidate {
         const seed_object_ids = try collectObjectDiscoverySeedObjectIdsFromMoveParameters(allocator, parameters);
-        defer {
-            for (seed_object_ids) |value| allocator.free(value);
-            allocator.free(seed_object_ids);
-        }
+        defer freeMoveDiscoveredObjectIds(allocator, seed_object_ids);
 
-        var discovered_ids = std.ArrayList([]u8).empty;
-        defer {
-            for (discovered_ids.items) |value| allocator.free(value);
-            discovered_ids.deinit(allocator);
-        }
+        return try self.discoverOwnedObjectCandidatesFromSeedObjectIds(
+            allocator,
+            object_content_cache,
+            object_content_discovery_cache,
+            dynamic_field_cache,
+            object_summary_cache,
+            seed_object_ids,
+            owner,
+            struct_type,
+            allow_dynamic_field_fallback,
+        );
+    }
 
-        for (seed_object_ids) |object_id| {
-            if (discovered_ids.items.len >= 16) break;
-            const seed_discovered_object_ids = self.getMoveObjectContentDiscoveredObjectIdsCachedBorrowed(
-                allocator,
-                object_content_cache,
-                object_content_discovery_cache,
-                object_id,
-            ) catch continue;
-            for (seed_discovered_object_ids) |discovered_object_id| {
-                if (discovered_ids.items.len >= 16) break;
-                try appendUniqueMoveSelectedObjectId(allocator, &discovered_ids, discovered_object_id);
-            }
-        }
-
-        if (allow_dynamic_field_fallback and discovered_ids.items.len < 16) {
-            for (seed_object_ids) |object_id| {
-                if (discovered_ids.items.len >= 16) break;
-                const dynamic_field_object_ids = self.getMoveDynamicFieldDiscoveredObjectIdsCachedBorrowed(
-                    allocator,
-                    dynamic_field_cache,
-                    object_id,
-                ) catch continue;
-                for (dynamic_field_object_ids) |dynamic_field_object_id| {
-                    if (discovered_ids.items.len >= 16) break;
-                    try appendUniqueMoveSelectedObjectId(allocator, &discovered_ids, dynamic_field_object_id);
-                }
-            }
-        }
+    fn discoverOwnedObjectCandidatesFromSeedObjectIds(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        object_content_cache: *std.ArrayList(MoveObjectContentResponseCacheEntry),
+        object_content_discovery_cache: *std.ArrayList(MoveObjectContentDiscoveryCacheEntry),
+        dynamic_field_cache: *std.ArrayList(MoveDynamicFieldDiscoveryCacheEntry),
+        object_summary_cache: *std.ArrayList(MoveObjectSummaryCacheEntry),
+        seed_object_ids: []const []const u8,
+        owner: []const u8,
+        struct_type: []const u8,
+        allow_dynamic_field_fallback: bool,
+    ) ![]move_result.OwnedMoveObjectCandidate {
+        const discovered_ids = try self.discoverObjectIdsFromSeedObjectIds(
+            allocator,
+            object_content_cache,
+            object_content_discovery_cache,
+            dynamic_field_cache,
+            seed_object_ids,
+            allow_dynamic_field_fallback,
+        );
+        defer freeMoveDiscoveredObjectIds(allocator, discovered_ids);
 
         var candidates = std.ArrayList(move_result.OwnedMoveObjectCandidate).empty;
         errdefer {
@@ -5233,7 +5272,7 @@ pub const SuiRpcClient = struct {
             allocator,
             object_summary_cache,
             &candidates,
-            discovered_ids.items,
+            discovered_ids,
             owner,
             struct_type,
         );
@@ -6223,6 +6262,11 @@ pub const SuiRpcClient = struct {
         object_summary_cache: *std.ArrayList(MoveObjectSummaryCacheEntry),
         parameters: []move_result.OwnedMoveParameterSummary,
     ) !void {
+        var cached_seed_object_ids: ?[][]u8 = null;
+        defer if (cached_seed_object_ids) |seed_object_ids| {
+            freeMoveDiscoveredObjectIds(allocator, seed_object_ids);
+        };
+
         for (parameters) |*parameter| {
             if (parameter.omitted_from_explicit_args) continue;
             if (!isMoveReferenceSignature(parameter.signature)) continue;
@@ -6230,13 +6274,17 @@ pub const SuiRpcClient = struct {
             if (object_preset.inferKindFromTypeSignature(parameter.signature) != null) continue;
             if (containsMoveTypeParameterText(trimMoveReferenceSignature(parameter.signature))) continue;
 
-            const discovered_candidates = try self.discoverSharedObjectCandidatesFromMoveParameters(
+            if (cached_seed_object_ids == null) {
+                cached_seed_object_ids = try collectObjectDiscoverySeedObjectIdsFromMoveParameters(allocator, parameters);
+            }
+
+            const discovered_candidates = try self.discoverSharedObjectCandidatesFromSeedObjectIds(
                 allocator,
                 object_content_cache,
                 object_content_discovery_cache,
                 dynamic_field_cache,
                 object_summary_cache,
-                parameters,
+                cached_seed_object_ids.?,
                 parameter.signature,
                 parameter.shared_object_candidates == null or parameter.shared_object_candidates.?.len == 0,
             );
@@ -6304,6 +6352,11 @@ pub const SuiRpcClient = struct {
                     try buildAutoSelectedScalarArgJson(allocator, token),
                 );
             }
+
+            if (cached_seed_object_ids) |seed_object_ids| {
+                freeMoveDiscoveredObjectIds(allocator, seed_object_ids);
+                cached_seed_object_ids = null;
+            }
         }
     }
 
@@ -6323,10 +6376,18 @@ pub const SuiRpcClient = struct {
         owned_event_cache: *std.ArrayList(OwnedModuleEventDiscoveryCacheEntry),
     ) !void {
         const owner = owner_address orelse return;
+        var cached_seed_object_ids: ?[][]u8 = null;
+        defer if (cached_seed_object_ids) |seed_object_ids| {
+            freeMoveDiscoveredObjectIds(allocator, seed_object_ids);
+        };
 
         for (parameters) |*parameter| {
             if (parameter.omitted_from_explicit_args) continue;
             if (parameter.explicit_arg_json != null) continue;
+
+            if (cached_seed_object_ids == null) {
+                cached_seed_object_ids = try collectObjectDiscoverySeedObjectIdsFromMoveParameters(allocator, parameters);
+            }
 
             const scalar_struct_type = blk: {
                 if (coinTypeFromMoveSignature(parameter.signature) != null) break :blk null;
@@ -6334,13 +6395,13 @@ pub const SuiRpcClient = struct {
                 break :blk concreteObjectStructTypeFromSignature(parameter.signature);
             };
             if (scalar_struct_type) |struct_type| {
-                const discovered_candidates = try self.discoverOwnedObjectCandidatesFromMoveParameters(
+                const discovered_candidates = try self.discoverOwnedObjectCandidatesFromSeedObjectIds(
                     allocator,
                     object_content_cache,
                     object_content_discovery_cache,
                     dynamic_field_cache,
                     object_summary_cache,
-                    parameters,
+                    cached_seed_object_ids.?,
                     owner,
                     struct_type,
                     parameter.owned_object_candidates == null or parameter.owned_object_candidates.?.len == 0,
@@ -6348,7 +6409,7 @@ pub const SuiRpcClient = struct {
                 const need_event_fallback = discovered_candidates.len == 0 and
                     (parameter.owned_object_candidates == null or parameter.owned_object_candidates.?.len == 0);
                 const event_candidates = blk: {
-                    if (!need_event_fallback) break :blk &.{}; 
+                    if (!need_event_fallback) break :blk &.{};
                     if (event_package_id != null and event_module_name != null) {
                         const current = try self.discoverOwnedObjectCandidatesFromModuleEventsCachedBorrowed(
                             allocator,
@@ -6395,15 +6456,15 @@ pub const SuiRpcClient = struct {
                     if (parameter.owned_object_candidates) |old_candidates| {
                         for (old_candidates) |old_candidate| {
                             try merged_candidates.append(allocator, .{
-                        .object_id = try allocator.dupe(u8, old_candidate.object_id),
-                        .version = old_candidate.version,
-                        .digest = try allocator.dupe(u8, old_candidate.digest),
-                        .balance = old_candidate.balance,
-                        .discovery_rank = old_candidate.discovery_rank,
-                        .type_name = if (old_candidate.type_name) |value| try allocator.dupe(u8, value) else null,
-                        .owner_value = if (old_candidate.owner_value) |value| try allocator.dupe(u8, value) else null,
-                        .object_input_select_token = try allocator.dupe(u8, old_candidate.object_input_select_token),
-                        .selection_score = old_candidate.selection_score,
+                                .object_id = try allocator.dupe(u8, old_candidate.object_id),
+                                .version = old_candidate.version,
+                                .digest = try allocator.dupe(u8, old_candidate.digest),
+                                .balance = old_candidate.balance,
+                                .discovery_rank = old_candidate.discovery_rank,
+                                .type_name = if (old_candidate.type_name) |value| try allocator.dupe(u8, value) else null,
+                                .owner_value = if (old_candidate.owner_value) |value| try allocator.dupe(u8, value) else null,
+                                .object_input_select_token = try allocator.dupe(u8, old_candidate.object_input_select_token),
+                                .selection_score = old_candidate.selection_score,
                             });
                         }
                     }
@@ -6470,6 +6531,10 @@ pub const SuiRpcClient = struct {
                             ),
                         );
                     }
+                    if (cached_seed_object_ids) |seed_object_ids| {
+                        freeMoveDiscoveredObjectIds(allocator, seed_object_ids);
+                        cached_seed_object_ids = null;
+                    }
                 } else {
                     allocator.free(discovered_candidates);
                 }
@@ -6483,13 +6548,13 @@ pub const SuiRpcClient = struct {
                 break :blk concreteVectorObjectStructTypeFromSignature(parameter.signature);
             };
             if (vector_struct_type) |struct_type| {
-                const discovered_candidates = try self.discoverOwnedObjectCandidatesFromMoveParameters(
+                const discovered_candidates = try self.discoverOwnedObjectCandidatesFromSeedObjectIds(
                     allocator,
                     object_content_cache,
                     object_content_discovery_cache,
                     dynamic_field_cache,
                     object_summary_cache,
-                    parameters,
+                    cached_seed_object_ids.?,
                     owner,
                     struct_type,
                     parameter.vector_item_owned_object_candidates == null or parameter.vector_item_owned_object_candidates.?.len == 0,
@@ -6548,15 +6613,15 @@ pub const SuiRpcClient = struct {
                 if (parameter.vector_item_owned_object_candidates) |old_candidates| {
                     for (old_candidates) |old_candidate| {
                         try merged_candidates.append(allocator, .{
-                        .object_id = try allocator.dupe(u8, old_candidate.object_id),
-                        .version = old_candidate.version,
-                        .digest = try allocator.dupe(u8, old_candidate.digest),
-                        .balance = old_candidate.balance,
-                        .discovery_rank = old_candidate.discovery_rank,
-                        .type_name = if (old_candidate.type_name) |value| try allocator.dupe(u8, value) else null,
-                        .owner_value = if (old_candidate.owner_value) |value| try allocator.dupe(u8, value) else null,
-                        .object_input_select_token = try allocator.dupe(u8, old_candidate.object_input_select_token),
-                        .selection_score = old_candidate.selection_score,
+                            .object_id = try allocator.dupe(u8, old_candidate.object_id),
+                            .version = old_candidate.version,
+                            .digest = try allocator.dupe(u8, old_candidate.digest),
+                            .balance = old_candidate.balance,
+                            .discovery_rank = old_candidate.discovery_rank,
+                            .type_name = if (old_candidate.type_name) |value| try allocator.dupe(u8, value) else null,
+                            .owner_value = if (old_candidate.owner_value) |value| try allocator.dupe(u8, value) else null,
+                            .object_input_select_token = try allocator.dupe(u8, old_candidate.object_input_select_token),
+                            .selection_score = old_candidate.selection_score,
                         });
                     }
                 }
@@ -6622,6 +6687,10 @@ pub const SuiRpcClient = struct {
                             parameter.vector_item_owned_object_candidates.?,
                         ),
                     );
+                }
+                if (cached_seed_object_ids) |seed_object_ids| {
+                    freeMoveDiscoveredObjectIds(allocator, seed_object_ids);
+                    cached_seed_object_ids = null;
                 }
             }
         }
@@ -21971,7 +22040,7 @@ test "getMoveDynamicFieldDiscoveredObjectIdsCachedBorrowed reuses cached discove
     try testing.expectEqualStrings("0xposition1", borrowed_second[1]);
 }
 
-    test "getMoveTransactionObjectChangeDiscoveredObjectIdsCachedBorrowed reuses cached discoveries" {
+test "getMoveTransactionObjectChangeDiscoveredObjectIdsCachedBorrowed reuses cached discoveries" {
     const testing = std.testing;
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
