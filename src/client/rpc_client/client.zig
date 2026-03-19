@@ -4225,30 +4225,46 @@ pub const SuiRpcClient = struct {
         event_module_name: []const u8,
         signature: []const u8,
     ) ![]move_result.SharedMoveObjectCandidate {
-        var page = try self.getEventsPageWithRequest(allocator, .{
-            .filter = .{
-                .move_module = .{
-                    .package = event_package_id,
-                    .module = event_module_name,
-                },
-            },
-            .limit = 20,
-            .descending_order = true,
-        });
-        defer page.deinit(allocator);
-
         var discovered_ids = std.ArrayList([]u8).empty;
         defer {
             for (discovered_ids.items) |value| allocator.free(value);
             discovered_ids.deinit(allocator);
         }
 
-        for (page.entries) |entry| {
-            const parsed_json = entry.parsed_json orelse continue;
-            const parsed = std.json.parseFromSlice(std.json.Value, allocator, parsed_json, .{}) catch continue;
-            defer parsed.deinit();
-            try appendDiscoveredObjectIdsFromJsonValue(allocator, &discovered_ids, parsed.value, 16);
-            if (discovered_ids.items.len >= 16) break;
+        var cursor_tx_digest: ?[]u8 = null;
+        defer if (cursor_tx_digest) |value| allocator.free(value);
+        var cursor_event_seq: ?u64 = null;
+
+        var page_count: usize = 0;
+        while (page_count < 4 and discovered_ids.items.len < 16) : (page_count += 1) {
+            var page = try self.getEventsPageWithRequest(allocator, .{
+                .filter = .{
+                    .move_module = .{
+                        .package = event_package_id,
+                        .module = event_module_name,
+                    },
+                },
+                .cursor_tx_digest = cursor_tx_digest,
+                .cursor_event_seq = cursor_event_seq,
+                .limit = 20,
+                .descending_order = true,
+            });
+            defer page.deinit(allocator);
+
+            for (page.entries) |entry| {
+                const parsed_json = entry.parsed_json orelse continue;
+                const parsed = std.json.parseFromSlice(std.json.Value, allocator, parsed_json, .{}) catch continue;
+                defer parsed.deinit();
+                try appendDiscoveredObjectIdsFromJsonValue(allocator, &discovered_ids, parsed.value, 16);
+                if (discovered_ids.items.len >= 16) break;
+            }
+
+            if (!page.has_next_page or discovered_ids.items.len >= 16) break;
+            const next_cursor = page.next_cursor_tx_digest orelse break;
+            const next_event_seq = page.next_cursor_event_seq orelse break;
+            if (cursor_tx_digest) |value| allocator.free(value);
+            cursor_tx_digest = try allocator.dupe(u8, next_cursor);
+            cursor_event_seq = next_event_seq;
         }
 
         var candidates = std.ArrayList(move_result.SharedMoveObjectCandidate).empty;

@@ -41,6 +41,8 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
   of only the first `suix_getOwnedObjects` page.
 - [x] Concrete generic owned object discovery after type specialization.
 - [x] Shared object candidate discovery from module events.
+- [x] Aggregate multiple recent event pages when discovering shared object
+  candidates from module events.
 - [x] `Pool -> Position` candidate linking across parameters.
 - [x] `Position -> Pool` candidate linking from selected objects.
 - [x] Candidate-set joint selection where owned candidates can resolve shared

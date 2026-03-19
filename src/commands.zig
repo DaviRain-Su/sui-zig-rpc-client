@@ -5948,6 +5948,101 @@ test "runCommand move function with --summarize uses queried package for shared 
     try testing.expect(preferred_resolution.get("parameters").?.array.items[0].object.get("is_executable").?.bool);
 }
 
+test "runCommand move function with --summarize discovers shared object candidates across event pages" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var event_request_count: usize = 0;
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const request_count = @as(*usize, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"visibility\":\"Public\",\"isEntry\":false,\"typeParameters\":[],\"parameters\":[{\"MutableReference\":{\"Struct\":{\"address\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb\",\"module\":\"pool\",\"name\":\"Pool\",\"typeParams\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"sui\",\"name\":\"SUI\",\"typeParams\":[]}},{\"Struct\":{\"address\":\"0x2\",\"module\":\"sui\",\"name\":\"SUI\",\"typeParams\":[]}}]}}}],\"return\":[]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "suix_queryEvents")) {
+                request_count.* += 1;
+                if (request_count.* == 1) {
+                    std.debug.assert(std.mem.eql(
+                        u8,
+                        req.params_json,
+                        "[{\"MoveModule\":{\"package\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"module\":\"pool\"}},null,20,true]",
+                    ));
+                    return alloc.dupe(
+                        u8,
+                        "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xevent1\",\"eventSeq\":\"1\"},\"packageId\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"transactionModule\":\"pool\",\"parsedJson\":{\"partner_id\":\"0xpartner\"}}],\"nextCursor\":{\"txDigest\":\"0xcursor-next\",\"eventSeq\":\"2\"},\"hasNextPage\":true}}",
+                    );
+                }
+
+                std.debug.assert(std.mem.eql(
+                    u8,
+                    req.params_json,
+                    "[{\"MoveModule\":{\"package\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"module\":\"pool\"}},{\"txDigest\":\"0xcursor-next\",\"eventSeq\":\"2\"},20,true]",
+                ));
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xevent2\",\"eventSeq\":\"3\"},\"packageId\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool1\"}}],\"hasNextPage\":false}}",
+                );
+            }
+
+            std.debug.assert(std.mem.eql(u8, req.method, "sui_getObject"));
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"showType\":true") != null);
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"showOwner\":true") != null);
+            if (std.mem.indexOf(u8, req.params_json, "\"0xpartner\"") != null) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":{\"objectId\":\"0xpartner\",\"version\":\"12\",\"digest\":\"partner-digest-1\",\"type\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3::partner::Partner\",\"owner\":{\"Shared\":{\"initial_shared_version\":\"3\"}}}}}",
+                );
+            }
+
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0xpool1\"") != null);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":{\"objectId\":\"0xpool1\",\"version\":\"11\",\"digest\":\"pool-digest-1\",\"type\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb::pool::Pool<0x2::sui::SUI, 0x2::sui::SUI>\",\"owner\":{\"Shared\":{\"initial_shared_version\":\"7\"}}}}}",
+            );
+        }
+    }.call;
+
+    var args = cli.ParsedArgs{
+        .command = .move_function,
+        .has_command = true,
+        .move_package = client.package_preset.cetus_clmm_mainnet,
+        .move_module = "pool",
+        .move_function = "swap",
+        .tx_send_summarize = true,
+    };
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = &event_request_count,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    const parameter = parsed.value.object.get("parameters").?.array.items[0].object;
+    const shared_candidates = parameter.get("shared_object_candidates").?.array.items;
+    try testing.expectEqual(@as(usize, 2), event_request_count);
+    try testing.expectEqual(@as(usize, 1), shared_candidates.len);
+    try testing.expectEqualStrings("0xpool1", shared_candidates[0].object.get("object_id").?.string);
+    try testing.expectEqualStrings(
+        "\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xpool1\\\",\\\"inputKind\\\":\\\"shared\\\",\\\"initialSharedVersion\\\":7,\\\"mutable\\\":true}\"",
+        parameter.get("auto_selected_arg_json").?.string,
+    );
+}
+
 test "runCommand move function with --emit-template falls back to base send request output" {
     const testing = std.testing;
 
