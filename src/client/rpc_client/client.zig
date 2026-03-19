@@ -17090,6 +17090,105 @@ pub const SuiRpcClient = struct {
         return try page.entries[index].clone(allocator);
     }
 
+    const CoinPageSelectionCacheEntry = struct {
+        owner: []u8,
+        coin_type: ?[]u8 = null,
+        cursor: ?[]u8 = null,
+        limit: ?u64 = null,
+        page: coin_result.OwnedCoinPage,
+
+        fn deinit(self: *CoinPageSelectionCacheEntry, allocator: std.mem.Allocator) void {
+            allocator.free(self.owner);
+            if (self.coin_type) |value| allocator.free(value);
+            if (self.cursor) |value| allocator.free(value);
+            self.page.deinit(allocator);
+        }
+    };
+
+    fn deinitCoinPageSelectionCache(
+        allocator: std.mem.Allocator,
+        cache: *std.ArrayList(CoinPageSelectionCacheEntry),
+    ) void {
+        for (cache.items) |*entry| entry.deinit(allocator);
+        cache.deinit(allocator);
+    }
+
+    fn optionalStringsEqual(left: ?[]const u8, right: ?[]const u8) bool {
+        if (left == null and right == null) return true;
+        if (left == null or right == null) return false;
+        return std.mem.eql(u8, left.?, right.?);
+    }
+
+    fn coinPageRequestMatches(
+        entry: CoinPageSelectionCacheEntry,
+        owner: []const u8,
+        request: CoinPageRequest,
+    ) bool {
+        if (!std.mem.eql(u8, entry.owner, owner)) return false;
+        if (!optionalStringsEqual(entry.coin_type, request.coin_type)) return false;
+        if (!optionalStringsEqual(entry.cursor, request.cursor)) return false;
+        return entry.limit == request.limit;
+    }
+
+    fn getAllCoinsWithRequestCachedBorrowed(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        cache: *std.ArrayList(CoinPageSelectionCacheEntry),
+        owner: []const u8,
+        request: CoinPageRequest,
+    ) !*const coin_result.OwnedCoinPage {
+        for (cache.items) |*entry| {
+            if (!coinPageRequestMatches(entry.*, owner, request)) continue;
+            return &entry.page;
+        }
+
+        const page = try self.getAllCoinsWithRequest(allocator, owner, request);
+        errdefer page.deinit(allocator);
+
+        try cache.append(allocator, .{
+            .owner = try allocator.dupe(u8, owner),
+            .coin_type = if (request.coin_type) |value| try allocator.dupe(u8, value) else null,
+            .cursor = if (request.cursor) |value| try allocator.dupe(u8, value) else null,
+            .limit = request.limit,
+            .page = page,
+        });
+
+        return &cache.items[cache.items.len - 1].page;
+    }
+
+    fn selectCoinWithMinBalanceExcludingCached(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        cache: *std.ArrayList(CoinPageSelectionCacheEntry),
+        owner: []const u8,
+        request: CoinPageRequest,
+        min_balance: u64,
+        excluded_object_ids: []const []u8,
+    ) !?coin_result.OwnedCoinEntry {
+        const page = try self.getAllCoinsWithRequestCachedBorrowed(
+            allocator,
+            cache,
+            owner,
+            request,
+        );
+
+        var best_index: ?usize = null;
+        var best_balance: u64 = std.math.maxInt(u64);
+        for (page.entries, 0..) |entry, index| {
+            const object_id = entry.coin_object_id orelse continue;
+            if (objectIdIsExcluded(excluded_object_ids, object_id)) continue;
+            const balance = entry.balanceU64() orelse continue;
+            if (balance < min_balance) continue;
+            if (best_index == null or balance < best_balance) {
+                best_index = index;
+                best_balance = balance;
+            }
+        }
+
+        const index = best_index orelse return null;
+        return try page.entries[index].clone(allocator);
+    }
+
     pub fn selectLargestCoin(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
@@ -17108,6 +17207,37 @@ pub const SuiRpcClient = struct {
     ) !?coin_result.OwnedCoinEntry {
         var page = try self.getAllCoinsWithRequest(allocator, owner, request);
         defer page.deinit(allocator);
+
+        var best_index: ?usize = null;
+        var best_balance: u64 = 0;
+        for (page.entries, 0..) |entry, index| {
+            const object_id = entry.coin_object_id orelse continue;
+            if (objectIdIsExcluded(excluded_object_ids, object_id)) continue;
+            const balance = entry.balanceU64() orelse continue;
+            if (best_index == null or balance > best_balance) {
+                best_index = index;
+                best_balance = balance;
+            }
+        }
+
+        const index = best_index orelse return null;
+        return try page.entries[index].clone(allocator);
+    }
+
+    fn selectLargestCoinExcludingCached(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        cache: *std.ArrayList(CoinPageSelectionCacheEntry),
+        owner: []const u8,
+        request: CoinPageRequest,
+        excluded_object_ids: []const []u8,
+    ) !?coin_result.OwnedCoinEntry {
+        const page = try self.getAllCoinsWithRequestCachedBorrowed(
+            allocator,
+            cache,
+            owner,
+            request,
+        );
 
         var best_index: ?usize = null;
         var best_balance: u64 = 0;
@@ -17359,6 +17489,26 @@ pub const SuiRpcClient = struct {
         return try ownedSelectedArgumentValueFromObjectId(allocator, if (selection) |entry| entry.coin_object_id else null);
     }
 
+    fn selectCoinArgumentValueWithMinBalanceCached(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        cache: *std.ArrayList(CoinPageSelectionCacheEntry),
+        owner: []const u8,
+        request: CoinPageRequest,
+        min_balance: u64,
+    ) !?OwnedSelectedArgumentValue {
+        var selection = try self.selectCoinWithMinBalanceExcludingCached(
+            allocator,
+            cache,
+            owner,
+            request,
+            min_balance,
+            &.{},
+        );
+        defer if (selection) |*entry| entry.deinit(allocator);
+        return try ownedSelectedArgumentValueFromObjectId(allocator, if (selection) |entry| entry.coin_object_id else null);
+    }
+
     pub fn selectGasCoinArgumentValue(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
@@ -17367,6 +17517,30 @@ pub const SuiRpcClient = struct {
     ) !?OwnedSelectedArgumentValue {
         var selection = try self.selectGasCoin(allocator, owner, min_balance);
         defer if (selection) |*entry| entry.deinit(allocator);
+        return try ownedSelectedArgumentValueFromObjectId(allocator, if (selection) |entry| entry.coin_object_id else null);
+    }
+
+    fn selectGasCoinArgumentValueCached(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        cache: *std.ArrayList(CoinPageSelectionCacheEntry),
+        owner: []const u8,
+        min_balance: u64,
+    ) !?OwnedSelectedArgumentValue {
+        var selection = try self.selectLargestCoinExcludingCached(
+            allocator,
+            cache,
+            owner,
+            .{ .coin_type = default_sui_coin_type },
+            &.{},
+        );
+        defer if (selection) |*entry| entry.deinit(allocator);
+
+        if (selection) |entry| {
+            const balance = entry.balanceU64() orelse return null;
+            if (balance < min_balance) return null;
+        }
+
         return try ownedSelectedArgumentValueFromObjectId(allocator, if (selection) |entry| entry.coin_object_id else null);
     }
 
@@ -17511,6 +17685,51 @@ pub const SuiRpcClient = struct {
                 spec.module,
             ),
         };
+    }
+
+    fn selectArgumentValueWithCoinPageCache(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        coin_page_cache: *std.ArrayList(CoinPageSelectionCacheEntry),
+        request: SelectedArgumentRequest,
+    ) !?OwnedSelectedArgumentValue {
+        return switch (request) {
+            .gas_coin => |spec| try self.selectGasCoinArgumentValueCached(
+                allocator,
+                coin_page_cache,
+                spec.owner,
+                spec.min_balance,
+            ),
+            .coin_with_min_balance => |spec| try self.selectCoinArgumentValueWithMinBalanceCached(
+                allocator,
+                coin_page_cache,
+                spec.owner,
+                spec.request,
+                spec.min_balance,
+            ),
+            else => try self.selectArgumentValue(allocator, request),
+        };
+    }
+
+    fn selectArgumentValuesWithCoinPageCache(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        coin_page_cache: *std.ArrayList(CoinPageSelectionCacheEntry),
+        requests: []const SelectedArgumentRequest,
+    ) !OwnedSelectedArgumentValues {
+        var values = OwnedSelectedArgumentValues{};
+        errdefer values.deinit(allocator);
+
+        for (requests) |request| {
+            const selected = try self.selectArgumentValueWithCoinPageCache(
+                allocator,
+                coin_page_cache,
+                request,
+            ) orelse return error.SelectionNotFound;
+            try values.appendOwned(allocator, selected);
+        }
+
+        return values;
     }
 
     fn selectedRequestOptionalString(
@@ -18810,15 +19029,13 @@ pub const SuiRpcClient = struct {
         allocator: std.mem.Allocator,
         requests: []const SelectedArgumentRequest,
     ) !OwnedSelectedArgumentValues {
-        var values = OwnedSelectedArgumentValues{};
-        errdefer values.deinit(allocator);
-
-        for (requests) |request| {
-            const selected = try self.selectArgumentValue(allocator, request) orelse return error.SelectionNotFound;
-            try values.appendOwned(allocator, selected);
-        }
-
-        return values;
+        var coin_page_cache = std.ArrayList(CoinPageSelectionCacheEntry).empty;
+        defer deinitCoinPageSelectionCache(allocator, &coin_page_cache);
+        return try self.selectArgumentValuesWithCoinPageCache(
+            allocator,
+            &coin_page_cache,
+            requests,
+        );
     }
 
     pub fn appendMoveCallFromSelectedArguments(
@@ -18888,7 +19105,13 @@ pub const SuiRpcClient = struct {
         coin_request: SelectedArgumentRequest,
         amounts: []const tx_request_builder.ArgumentValue,
     ) !void {
-        var coin = try self.selectArgumentValue(allocator, coin_request) orelse return error.SelectionNotFound;
+        var coin_page_cache = std.ArrayList(CoinPageSelectionCacheEntry).empty;
+        defer deinitCoinPageSelectionCache(allocator, &coin_page_cache);
+        var coin = try self.selectArgumentValueWithCoinPageCache(
+            allocator,
+            &coin_page_cache,
+            coin_request,
+        ) orelse return error.SelectionNotFound;
         defer coin.deinit(allocator);
         try builder.appendSplitCoinsFromValues(coin.value, amounts);
     }
@@ -18900,7 +19123,13 @@ pub const SuiRpcClient = struct {
         coin_request: SelectedArgumentRequest,
         amounts: []const tx_request_builder.ArgumentValue,
     ) !tx_request_builder.ArgumentValue {
-        var coin = try self.selectArgumentValue(allocator, coin_request) orelse return error.SelectionNotFound;
+        var coin_page_cache = std.ArrayList(CoinPageSelectionCacheEntry).empty;
+        defer deinitCoinPageSelectionCache(allocator, &coin_page_cache);
+        var coin = try self.selectArgumentValueWithCoinPageCache(
+            allocator,
+            &coin_page_cache,
+            coin_request,
+        ) orelse return error.SelectionNotFound;
         defer coin.deinit(allocator);
         return try builder.appendSplitCoinsAndGetValueFromValues(coin.value, amounts);
     }
@@ -18936,9 +19165,19 @@ pub const SuiRpcClient = struct {
         destination_request: SelectedArgumentRequest,
         source_requests: []const SelectedArgumentRequest,
     ) !void {
-        var destination = try self.selectArgumentValue(allocator, destination_request) orelse return error.SelectionNotFound;
+        var coin_page_cache = std.ArrayList(CoinPageSelectionCacheEntry).empty;
+        defer deinitCoinPageSelectionCache(allocator, &coin_page_cache);
+        var destination = try self.selectArgumentValueWithCoinPageCache(
+            allocator,
+            &coin_page_cache,
+            destination_request,
+        ) orelse return error.SelectionNotFound;
         defer destination.deinit(allocator);
-        var sources = try self.selectArgumentValues(allocator, source_requests);
+        var sources = try self.selectArgumentValuesWithCoinPageCache(
+            allocator,
+            &coin_page_cache,
+            source_requests,
+        );
         defer sources.deinit(allocator);
         try builder.appendMergeCoinsFromValues(destination.value, sources.slice());
     }
@@ -18950,9 +19189,19 @@ pub const SuiRpcClient = struct {
         destination_request: SelectedArgumentRequest,
         source_requests: []const SelectedArgumentRequest,
     ) !tx_request_builder.ArgumentValue {
-        var destination = try self.selectArgumentValue(allocator, destination_request) orelse return error.SelectionNotFound;
+        var coin_page_cache = std.ArrayList(CoinPageSelectionCacheEntry).empty;
+        defer deinitCoinPageSelectionCache(allocator, &coin_page_cache);
+        var destination = try self.selectArgumentValueWithCoinPageCache(
+            allocator,
+            &coin_page_cache,
+            destination_request,
+        ) orelse return error.SelectionNotFound;
         defer destination.deinit(allocator);
-        var sources = try self.selectArgumentValues(allocator, source_requests);
+        var sources = try self.selectArgumentValuesWithCoinPageCache(
+            allocator,
+            &coin_page_cache,
+            source_requests,
+        );
         defer sources.deinit(allocator);
         return try builder.appendMergeCoinsAndGetValueFromValues(destination.value, sources.slice());
     }
@@ -22558,24 +22807,10 @@ test "appendMergeCoinsFromSelectedArguments resolves selected coins directly int
             const count = @as(*usize, @ptrCast(@alignCast(context)));
             count.* += 1;
             try testing.expectEqualStrings("suix_getCoins", req.method);
-            if (count.* == 1) {
-                try testing.expectEqualStrings("[\"0xowner\",\"0x2::sui::SUI\",null,null]", req.params_json);
-                return alloc.dupe(
-                    u8,
-                    "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xdestination-coin\",\"balance\":\"50\"}],\"hasNextPage\":false}}",
-                );
-            }
-            if (count.* == 2) {
-                try testing.expectEqualStrings("[\"0xowner\",\"0x2::sui::SUI\",null,null]", req.params_json);
-                return alloc.dupe(
-                    u8,
-                    "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xsource-coin-1\",\"balance\":\"7\"}],\"hasNextPage\":false}}",
-                );
-            }
             try testing.expectEqualStrings("[\"0xowner\",\"0x2::sui::SUI\",null,null]", req.params_json);
             return alloc.dupe(
                 u8,
-                "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xsource-coin-2\",\"balance\":\"8\"}],\"hasNextPage\":false}}",
+                "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xdestination-coin\",\"balance\":\"50\"},{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xsource-coin-1\",\"balance\":\"7\"},{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xsource-coin-2\",\"balance\":\"8\"}],\"hasNextPage\":false}}",
             );
         }
     }.call;
@@ -22605,7 +22840,7 @@ test "appendMergeCoinsFromSelectedArguments resolves selected coins directly int
     const commands_json = owned.takeCommandsJson().?;
     defer allocator.free(commands_json);
 
-    try testing.expectEqual(@as(usize, 3), request_count);
+    try testing.expectEqual(@as(usize, 1), request_count);
     try testing.expect(std.mem.indexOf(u8, commands_json, "\"MergeCoins\"") != null);
     try testing.expect(std.mem.indexOf(u8, commands_json, "0xdestination-coin") != null);
     try testing.expect(std.mem.indexOf(u8, commands_json, "0xsource-coin-1") != null);

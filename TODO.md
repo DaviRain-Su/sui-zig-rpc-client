@@ -171,6 +171,9 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
 - [x] Reuse repeated initial owner-context owned-object discovery reads across
   a single `move function` template build instead of requerying the same
   `(owner, struct type)` for multiple identical parameters.
+- [x] Reuse repeated coin-page reads across a single selected-argument
+  resolution flow instead of requerying the same `(owner, coin type)` during
+  merge/split and repeated coin selector resolution.
 - [x] Make the default execution path prefer preferred request artifacts
   whenever a safe resolution exists.
 

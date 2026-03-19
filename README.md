@@ -933,6 +933,7 @@ zig build run -- events \
 这条“不复用业务 coin”的约束现在也会继续延伸到 mixed scalar/vector 场景。像 `Coin<SUI>, vector<Coin<SUI>>` 这类签名里，后面的 coin vector 自动选择会先剔除前一个标量参数已经占用的 coin，再生成 `preferred_args_json` 和后续 request artifact。
 同样地，后面如果有显式给出的 coin 参数，前面的 auto-selected coin 参数现在也会先把这些显式 object id 预留掉，不再生成“前面自动选中了后面已经显式指定的 coin”这种坏模板。
 这条约束也已经接进了 preferred `MergeCoins / SplitCoins` 规划，不只是 summary 里的 `auto_selected_arg_json`。也就是说，后面的显式 coin 参数现在同样会从前面的自动 split source 候选里被排除。
+在直接执行层，selected-argument token 解析现在也会复用同一批 `suix_getCoins` 结果。也就是说，同一个 `(owner, coin type)` 在一次 `MoveCall` / `MergeCoins` / `SplitCoins` / `MakeMoveVec` 选参过程中，不会因为多个 coin selector 再反复打同一页 coin 查询。
 
 普通 owned object 现在也有同类的跨参数去重。像 `Position, Position` 或 `Position, vector<Position>` 这类签名里，后面的 auto-selected 参数会优先避开前面已经占用的同一 owned object，尽量不再生成“同一个 object input 被多个业务参数重复使用”的坏模板。
 
