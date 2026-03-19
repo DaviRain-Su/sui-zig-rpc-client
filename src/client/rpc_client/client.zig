@@ -14280,14 +14280,18 @@ pub const SuiRpcClient = struct {
         source: tx_builder.CommandSource,
         config: tx_request_builder.CommandRequestConfig,
     ) ![]u8 {
-        return try self.buildCommandSourceExecutePayloadWithRealBuilderInternal(
+        var plan = (try self.ownOptionsFromCommandSourceResolvingSelectedArgumentTokens(
             allocator,
             source,
             config,
-            .{ .direct_signatures = config.signatures },
-            null,
-            true,
-        );
+        )).authorizationPlan(.{
+            .direct_signatures = .{
+                .sender = config.sender,
+                .signatures = config.signatures,
+            },
+        });
+        defer plan.deinit(allocator);
+        return try self.buildOwnedPlanArtifact(allocator, &plan, .execute_payload);
     }
 
     pub fn buildCommandSourceExecutePayloadResolvingSelectedArgumentTokensFromDefaultKeystore(
@@ -14297,14 +14301,15 @@ pub const SuiRpcClient = struct {
         config: tx_request_builder.CommandRequestConfig,
         preparation: keystore.SignerPreparation,
     ) ![]u8 {
-        return try self.buildCommandSourceExecutePayloadWithRealBuilderInternal(
+        var plan = (try self.ownOptionsFromCommandSourceResolvingSelectedArgumentTokens(
             allocator,
             source,
             config,
-            .{ .default_keystore = preparation },
-            null,
-            true,
-        );
+        )).authorizationPlan(.{
+            .default_keystore = .{ .preparation = preparation },
+        });
+        defer plan.deinit(allocator);
+        return try self.buildOwnedPlanArtifact(allocator, &plan, .execute_payload);
     }
 
     pub fn buildCommandSourceExecutePayloadWithAutoGasPaymentWithSignatures(
@@ -14314,14 +14319,19 @@ pub const SuiRpcClient = struct {
         config: tx_request_builder.CommandRequestConfig,
         min_balance_override: ?u64,
     ) ![]u8 {
-        return try self.buildCommandSourceExecutePayloadWithRealBuilderInternal(
+        var plan = (try self.ownOptionsFromCommandSourceWithAutoGasPayment(
             allocator,
             source,
             config,
-            .{ .direct_signatures = config.signatures },
             min_balance_override orelse config.gas_budget orelse 1,
-            true,
-        );
+        )).authorizationPlan(.{
+            .direct_signatures = .{
+                .sender = config.sender,
+                .signatures = config.signatures,
+            },
+        });
+        defer plan.deinit(allocator);
+        return try self.buildOwnedPlanArtifact(allocator, &plan, .execute_payload);
     }
 
     pub fn buildCommandSourceExecutePayloadWithAutoGasPaymentFromDefaultKeystore(
@@ -14332,14 +14342,16 @@ pub const SuiRpcClient = struct {
         min_balance_override: ?u64,
         preparation: keystore.SignerPreparation,
     ) ![]u8 {
-        return try self.buildCommandSourceExecutePayloadWithRealBuilderInternal(
+        var plan = (try self.ownOptionsFromCommandSourceWithAutoGasPayment(
             allocator,
             source,
             config,
-            .{ .default_keystore = preparation },
             min_balance_override orelse config.gas_budget orelse 1,
-            true,
-        );
+        )).authorizationPlan(.{
+            .default_keystore = .{ .preparation = preparation },
+        });
+        defer plan.deinit(allocator);
+        return try self.buildOwnedPlanArtifact(allocator, &plan, .execute_payload);
     }
 
     pub fn runExecutePayloadAction(
@@ -26196,18 +26208,12 @@ test "executeCommandSourceResolvingSelectedArgumentTokensAndConfirmAndSummarizeW
                     "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xsel111\",\"type\":\"0x2::example::Thing\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
                 );
             }
-            if (std.mem.eql(u8, req.method, "unsafe_moveCall")) {
-                const params = try std.json.parseFromSlice(std.json.Value, alloc, req.params_json, .{});
-                defer params.deinit();
-                try testing.expectEqualStrings("0xowner", params.value.array.items[0].string);
-                try testing.expectEqualStrings("0xgas", params.value.array.items[6].string);
-                try testing.expectEqualStrings("0xsel111", params.value.array.items[5].array.items[0].string);
-                return alloc.dupe(u8, "{\"result\":{\"txBytes\":\"AQIDBA==\"}}");
-            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall") or std.mem.eql(u8, req.method, "unsafe_batchTransaction")) return error.TestUnexpectedResult;
             if (std.mem.eql(u8, req.method, "sui_executeTransactionBlock")) {
                 const payload = try std.json.parseFromSlice(std.json.Value, alloc, req.params_json, .{});
                 defer payload.deinit();
-                try testing.expectEqualStrings("AQIDBA==", payload.value.array.items[0].string);
+                try testing.expect(payload.value.array.items[0] == .string);
+                try testing.expect(payload.value.array.items[0].string.len != 0);
                 try testing.expectEqualStrings("sig-a", payload.value.array.items[1].array.items[0].string);
                 return alloc.dupe(u8, "{\"result\":{\"digest\":\"selected-signature-digest\"}}");
             }
@@ -26251,7 +26257,7 @@ test "executeCommandSourceResolvingSelectedArgumentTokensAndConfirmAndSummarizeW
     try testing.expectEqual(tx_result.ExecutionStatus.success, insights.status);
     try testing.expectEqualStrings("0xowner", insights.balance_changes[0].owner.?);
     try testing.expectEqual(@as(?i128, -10), insights.balance_changes[0].amount);
-    try testing.expectEqual(@as(usize, 4), state.request_count);
+    try testing.expectEqual(@as(usize, 3), state.request_count);
 }
 
 test "executeCommandSourceResolvingSelectedArgumentTokensAndObserveFromDefaultKeystore tracks observations" {
@@ -26310,18 +26316,12 @@ test "executeCommandSourceResolvingSelectedArgumentTokensAndObserveFromDefaultKe
                     "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xsel-default\",\"type\":\"0x2::example::Thing\",\"owner\":{\"AddressOwner\":\"0xplaceholder\"}}}],\"hasNextPage\":false}}",
                 );
             }
-            if (std.mem.eql(u8, req.method, "unsafe_moveCall")) {
-                const params = try std.json.parseFromSlice(std.json.Value, alloc, req.params_json, .{});
-                defer params.deinit();
-                try testing.expectEqualStrings(st.expected_sender, params.value.array.items[0].string);
-                try testing.expectEqualStrings("0xgas-default", params.value.array.items[6].string);
-                try testing.expectEqualStrings("0xsel-default", params.value.array.items[5].array.items[0].string);
-                return alloc.dupe(u8, "{\"result\":{\"txBytes\":\"AQIDBA==\"}}");
-            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall") or std.mem.eql(u8, req.method, "unsafe_batchTransaction")) return error.TestUnexpectedResult;
             if (std.mem.eql(u8, req.method, "sui_executeTransactionBlock")) {
                 const payload = try std.json.parseFromSlice(std.json.Value, alloc, req.params_json, .{});
                 defer payload.deinit();
-                try testing.expectEqualStrings("AQIDBA==", payload.value.array.items[0].string);
+                try testing.expect(payload.value.array.items[0] == .string);
+                try testing.expect(payload.value.array.items[0].string.len != 0);
                 try testing.expectEqual(@as(usize, 1), payload.value.array.items[1].array.items.len);
                 return alloc.dupe(u8, "{\"result\":{\"digest\":\"selected-default-digest\"}}");
             }
@@ -26369,7 +26369,7 @@ test "executeCommandSourceResolvingSelectedArgumentTokensAndObserveFromDefaultKe
     try testing.expectEqualStrings("selected-default-digest", observed.digest);
     try testing.expectEqual(tx_result.ExecutionStatus.success, observed.insights.status);
     try testing.expectEqualStrings(expected_sender, observed.insights.balance_changes[0].owner.?);
-    try testing.expectEqual(@as(usize, 4), state.request_count);
+    try testing.expectEqual(@as(usize, 3), state.request_count);
 }
 
 test "executeCommandSourceWithAutoGasPaymentAndConfirmAndSummarizeWithSignatures selects gas and returns insights" {
@@ -26393,17 +26393,12 @@ test "executeCommandSourceWithAutoGasPaymentAndConfirmAndSummarizeWithSignatures
                     "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xauto-coin\",\"version\":\"7\",\"digest\":\"digest-auto-coin\",\"balance\":\"90\"}],\"hasNextPage\":false}}",
                 );
             }
-            if (std.mem.eql(u8, req.method, "unsafe_batchTransaction")) {
-                const params = try std.json.parseFromSlice(std.json.Value, alloc, req.params_json, .{});
-                defer params.deinit();
-                try testing.expectEqualStrings("0xowner", params.value.array.items[0].string);
-                try testing.expectEqualStrings("0xauto-coin", params.value.array.items[2].string);
-                return alloc.dupe(u8, "{\"result\":{\"txBytes\":\"AQIDBA==\"}}");
-            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall") or std.mem.eql(u8, req.method, "unsafe_batchTransaction")) return error.TestUnexpectedResult;
             if (std.mem.eql(u8, req.method, "sui_executeTransactionBlock")) {
                 const payload = try std.json.parseFromSlice(std.json.Value, alloc, req.params_json, .{});
                 defer payload.deinit();
-                try testing.expectEqualStrings("AQIDBA==", payload.value.array.items[0].string);
+                try testing.expect(payload.value.array.items[0] == .string);
+                try testing.expect(payload.value.array.items[0].string.len != 0);
                 try testing.expectEqualStrings("sig-a", payload.value.array.items[1].array.items[0].string);
                 return alloc.dupe(u8, "{\"result\":{\"digest\":\"auto-signature-digest\"}}");
             }
@@ -26441,7 +26436,7 @@ test "executeCommandSourceWithAutoGasPaymentAndConfirmAndSummarizeWithSignatures
     try testing.expectEqual(tx_result.ExecutionStatus.success, insights.status);
     try testing.expectEqualStrings("0xowner", insights.balance_changes[0].owner.?);
     try testing.expectEqual(@as(?i128, -6), insights.balance_changes[0].amount);
-    try testing.expectEqual(@as(usize, 4), state.request_count);
+    try testing.expectEqual(@as(usize, 3), state.request_count);
 }
 
 test "executeCommandSourceWithAutoGasPaymentAndObserveFromDefaultKeystore tracks observations" {
@@ -26500,17 +26495,12 @@ test "executeCommandSourceWithAutoGasPaymentAndObserveFromDefaultKeystore tracks
                     "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xauto-default-coin\",\"version\":\"8\",\"digest\":\"digest-auto-default-coin\",\"balance\":\"95\"}],\"hasNextPage\":false}}",
                 );
             }
-            if (std.mem.eql(u8, req.method, "unsafe_batchTransaction")) {
-                const params = try std.json.parseFromSlice(std.json.Value, alloc, req.params_json, .{});
-                defer params.deinit();
-                try testing.expectEqualStrings(st.expected_sender, params.value.array.items[0].string);
-                try testing.expectEqualStrings("0xauto-default-coin", params.value.array.items[2].string);
-                return alloc.dupe(u8, "{\"result\":{\"txBytes\":\"AQIDBA==\"}}");
-            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall") or std.mem.eql(u8, req.method, "unsafe_batchTransaction")) return error.TestUnexpectedResult;
             if (std.mem.eql(u8, req.method, "sui_executeTransactionBlock")) {
                 const payload = try std.json.parseFromSlice(std.json.Value, alloc, req.params_json, .{});
                 defer payload.deinit();
-                try testing.expectEqualStrings("AQIDBA==", payload.value.array.items[0].string);
+                try testing.expect(payload.value.array.items[0] == .string);
+                try testing.expect(payload.value.array.items[0].string.len != 0);
                 try testing.expectEqual(@as(usize, 1), payload.value.array.items[1].array.items.len);
                 return alloc.dupe(u8, "{\"result\":{\"digest\":\"auto-default-digest\"}}");
             }
@@ -26552,7 +26542,7 @@ test "executeCommandSourceWithAutoGasPaymentAndObserveFromDefaultKeystore tracks
     try testing.expectEqualStrings("auto-default-digest", observed.digest);
     try testing.expectEqual(tx_result.ExecutionStatus.success, observed.insights.status);
     try testing.expectEqualStrings(expected_sender, observed.insights.balance_changes[0].owner.?);
-    try testing.expectEqual(@as(usize, 4), state.request_count);
+    try testing.expectEqual(@as(usize, 3), state.request_count);
 }
 
 test "runCommandSourceResolvingSelectedArgumentTokensOrChallengePromptWithAccountProvider returns structured prompts" {
