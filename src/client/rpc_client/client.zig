@@ -4306,6 +4306,88 @@ pub const SuiRpcClient = struct {
         return try candidates.toOwnedSlice(allocator);
     }
 
+    const SharedModuleEventDiscoveryCacheEntry = struct {
+        event_package_id: []u8,
+        event_module_name: []u8,
+        signature: []u8,
+        candidates: []move_result.SharedMoveObjectCandidate,
+
+        fn deinit(self: *SharedModuleEventDiscoveryCacheEntry, allocator: std.mem.Allocator) void {
+            allocator.free(self.event_package_id);
+            allocator.free(self.event_module_name);
+            allocator.free(self.signature);
+            for (self.candidates) |*candidate| candidate.deinit(allocator);
+            allocator.free(self.candidates);
+        }
+    };
+
+    fn deinitSharedModuleEventDiscoveryCache(
+        allocator: std.mem.Allocator,
+        cache: *std.ArrayList(SharedModuleEventDiscoveryCacheEntry),
+    ) void {
+        for (cache.items) |*entry| entry.deinit(allocator);
+        cache.deinit(allocator);
+    }
+
+    fn cloneSharedMoveObjectCandidates(
+        allocator: std.mem.Allocator,
+        candidates: []const move_result.SharedMoveObjectCandidate,
+    ) ![]move_result.SharedMoveObjectCandidate {
+        const cloned = try allocator.alloc(move_result.SharedMoveObjectCandidate, candidates.len);
+        errdefer allocator.free(cloned);
+
+        for (candidates, 0..) |candidate, index| {
+            cloned[index] = .{
+                .object_id = try allocator.dupe(u8, candidate.object_id),
+                .selection_score = candidate.selection_score,
+                .type_name = if (candidate.type_name) |value| try allocator.dupe(u8, value) else null,
+                .initial_shared_version = candidate.initial_shared_version,
+                .shared_object_input_select_token = try allocator.dupe(u8, candidate.shared_object_input_select_token),
+                .mutable_shared_object_input_select_token = try allocator.dupe(u8, candidate.mutable_shared_object_input_select_token),
+            };
+        }
+
+        return cloned;
+    }
+
+    fn discoverSharedObjectCandidatesFromModuleEventsCached(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        cache: *std.ArrayList(SharedModuleEventDiscoveryCacheEntry),
+        event_package_id: []const u8,
+        event_module_name: []const u8,
+        signature: []const u8,
+    ) ![]move_result.SharedMoveObjectCandidate {
+        for (cache.items) |entry| {
+            if (!std.mem.eql(u8, entry.event_package_id, event_package_id)) continue;
+            if (!std.mem.eql(u8, entry.event_module_name, event_module_name)) continue;
+            if (!std.mem.eql(u8, entry.signature, signature)) continue;
+            return try cloneSharedMoveObjectCandidates(allocator, entry.candidates);
+        }
+
+        const discovered = try self.discoverSharedObjectCandidatesFromModuleEvents(
+            allocator,
+            event_package_id,
+            event_module_name,
+            signature,
+        );
+        errdefer {
+            for (discovered) |*candidate| candidate.deinit(allocator);
+            allocator.free(discovered);
+        }
+
+        var entry = SharedModuleEventDiscoveryCacheEntry{
+            .event_package_id = try allocator.dupe(u8, event_package_id),
+            .event_module_name = try allocator.dupe(u8, event_module_name),
+            .signature = try allocator.dupe(u8, signature),
+            .candidates = discovered,
+        };
+        errdefer entry.deinit(allocator);
+
+        try cache.append(allocator, entry);
+        return try cloneSharedMoveObjectCandidates(allocator, discovered);
+    }
+
     fn collectObjectDiscoverySeedObjectIdsFromMoveParameters(
         allocator: std.mem.Allocator,
         parameters: []const move_result.OwnedMoveParameterSummary,
@@ -8088,6 +8170,9 @@ pub const SuiRpcClient = struct {
         owner_address: ?[]const u8,
         signer_selector: ?[]const u8,
     ) !void {
+        var shared_event_cache = std.ArrayList(SharedModuleEventDiscoveryCacheEntry).empty;
+        defer deinitSharedModuleEventDiscoveryCache(allocator, &shared_event_cache);
+
         var owned_event_cache = std.ArrayList(OwnedModuleEventDiscoveryCacheEntry).empty;
         defer deinitOwnedModuleEventDiscoveryCache(allocator, &owned_event_cache);
 
@@ -8191,8 +8276,9 @@ pub const SuiRpcClient = struct {
                                 event_module_name,
                             );
                             if (!containsMoveTypeParameterText(trimMoveReferenceSignature(parameter.signature))) {
-                                parameter.shared_object_candidates = try self.discoverSharedObjectCandidatesFromModuleEvents(
+                                parameter.shared_object_candidates = try self.discoverSharedObjectCandidatesFromModuleEventsCached(
                                     allocator,
+                                    &shared_event_cache,
                                     event_package_id,
                                     event_module_name,
                                     parameter.signature,
@@ -8205,8 +8291,9 @@ pub const SuiRpcClient = struct {
                                 package_and_module.module,
                             );
                             if (!containsMoveTypeParameterText(trimMoveReferenceSignature(parameter.signature))) {
-                                parameter.shared_object_candidates = try self.discoverSharedObjectCandidatesFromModuleEvents(
+                                parameter.shared_object_candidates = try self.discoverSharedObjectCandidatesFromModuleEventsCached(
                                     allocator,
+                                    &shared_event_cache,
                                     package_and_module.package,
                                     package_and_module.module,
                                     parameter.signature,
