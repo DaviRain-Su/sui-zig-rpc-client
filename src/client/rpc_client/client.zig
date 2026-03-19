@@ -4704,6 +4704,24 @@ pub const SuiRpcClient = struct {
         cache.deinit(allocator);
     }
 
+    const MoveSeedObjectDiscoveryCacheEntry = struct {
+        state_fingerprint: u64,
+        discovered_object_ids: [][]u8,
+
+        fn deinit(self: *MoveSeedObjectDiscoveryCacheEntry, allocator: std.mem.Allocator) void {
+            for (self.discovered_object_ids) |value| allocator.free(value);
+            allocator.free(self.discovered_object_ids);
+        }
+    };
+
+    fn deinitMoveSeedObjectDiscoveryCache(
+        allocator: std.mem.Allocator,
+        cache: *std.ArrayList(MoveSeedObjectDiscoveryCacheEntry),
+    ) void {
+        for (cache.items) |*entry| entry.deinit(allocator);
+        cache.deinit(allocator);
+    }
+
     fn cloneMoveDiscoveredObjectIds(
         allocator: std.mem.Allocator,
         object_ids: []const []const u8,
@@ -4724,6 +4742,19 @@ pub const SuiRpcClient = struct {
     ) void {
         for (object_ids) |object_id| allocator.free(object_id);
         allocator.free(object_ids);
+    }
+
+    fn moveSeedObjectDiscoveryFingerprint(
+        seed_object_ids: []const []const u8,
+        allow_dynamic_field_fallback: bool,
+    ) u64 {
+        var hasher = std.hash.Wyhash.init(0);
+        hasher.update(&.{@intFromBool(allow_dynamic_field_fallback)});
+        for (seed_object_ids) |object_id| {
+            hasher.update(object_id);
+            hasher.update(&.{0});
+        }
+        return hasher.final();
     }
 
     fn collectDiscoveredObjectIdsFromObjectResponseContent(
@@ -5061,12 +5092,43 @@ pub const SuiRpcClient = struct {
     fn discoverObjectIdsFromSeedObjectIds(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
+        seed_discovery_cache: *std.ArrayList(MoveSeedObjectDiscoveryCacheEntry),
         object_content_cache: *std.ArrayList(MoveObjectContentResponseCacheEntry),
         object_content_discovery_cache: *std.ArrayList(MoveObjectContentDiscoveryCacheEntry),
         dynamic_field_cache: *std.ArrayList(MoveDynamicFieldDiscoveryCacheEntry),
         seed_object_ids: []const []const u8,
         allow_dynamic_field_fallback: bool,
     ) ![][]u8 {
+        const discovered_ids = try self.getMoveSeedObjectDiscoveredObjectIdsCachedBorrowed(
+            allocator,
+            seed_discovery_cache,
+            object_content_cache,
+            object_content_discovery_cache,
+            dynamic_field_cache,
+            seed_object_ids,
+            allow_dynamic_field_fallback,
+        );
+        return try cloneMoveDiscoveredObjectIds(allocator, discovered_ids);
+    }
+
+    fn getMoveSeedObjectDiscoveredObjectIdsCachedBorrowed(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        cache: *std.ArrayList(MoveSeedObjectDiscoveryCacheEntry),
+        object_content_cache: *std.ArrayList(MoveObjectContentResponseCacheEntry),
+        object_content_discovery_cache: *std.ArrayList(MoveObjectContentDiscoveryCacheEntry),
+        dynamic_field_cache: *std.ArrayList(MoveDynamicFieldDiscoveryCacheEntry),
+        seed_object_ids: []const []const u8,
+        allow_dynamic_field_fallback: bool,
+    ) ![]const []const u8 {
+        const fingerprint = moveSeedObjectDiscoveryFingerprint(
+            seed_object_ids,
+            allow_dynamic_field_fallback,
+        );
+        for (cache.items) |entry| {
+            if (entry.state_fingerprint == fingerprint) return entry.discovered_object_ids;
+        }
+
         var discovered_ids = std.ArrayList([]u8).empty;
         defer {
             for (discovered_ids.items) |value| allocator.free(value);
@@ -5102,12 +5164,20 @@ pub const SuiRpcClient = struct {
             }
         }
 
-        return try discovered_ids.toOwnedSlice(allocator);
+        var entry = MoveSeedObjectDiscoveryCacheEntry{
+            .state_fingerprint = fingerprint,
+            .discovered_object_ids = try discovered_ids.toOwnedSlice(allocator),
+        };
+        errdefer entry.deinit(allocator);
+
+        try cache.append(allocator, entry);
+        return cache.items[cache.items.len - 1].discovered_object_ids;
     }
 
     fn discoverSharedObjectCandidatesFromSeedObjectIds(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
+        seed_discovery_cache: *std.ArrayList(MoveSeedObjectDiscoveryCacheEntry),
         object_content_cache: *std.ArrayList(MoveObjectContentResponseCacheEntry),
         object_content_discovery_cache: *std.ArrayList(MoveObjectContentDiscoveryCacheEntry),
         dynamic_field_cache: *std.ArrayList(MoveDynamicFieldDiscoveryCacheEntry),
@@ -5118,6 +5188,7 @@ pub const SuiRpcClient = struct {
     ) ![]move_result.SharedMoveObjectCandidate {
         const discovered_ids = try self.discoverObjectIdsFromSeedObjectIds(
             allocator,
+            seed_discovery_cache,
             object_content_cache,
             object_content_discovery_cache,
             dynamic_field_cache,
@@ -5156,6 +5227,8 @@ pub const SuiRpcClient = struct {
     ) ![]move_result.SharedMoveObjectCandidate {
         var arg_json_cache = std.ArrayList(MoveArgumentSelectedObjectIdsCacheEntry).empty;
         defer deinitMoveArgumentSelectedObjectIdsCache(allocator, &arg_json_cache);
+        var seed_discovery_cache = std.ArrayList(MoveSeedObjectDiscoveryCacheEntry).empty;
+        defer deinitMoveSeedObjectDiscoveryCache(allocator, &seed_discovery_cache);
 
         const seed_object_ids = try collectObjectDiscoverySeedObjectIdsFromMoveParameters(
             allocator,
@@ -5166,6 +5239,7 @@ pub const SuiRpcClient = struct {
 
         return try self.discoverSharedObjectCandidatesFromSeedObjectIds(
             allocator,
+            &seed_discovery_cache,
             object_content_cache,
             object_content_discovery_cache,
             dynamic_field_cache,
@@ -5238,6 +5312,8 @@ pub const SuiRpcClient = struct {
     ) ![]move_result.OwnedMoveObjectCandidate {
         var arg_json_cache = std.ArrayList(MoveArgumentSelectedObjectIdsCacheEntry).empty;
         defer deinitMoveArgumentSelectedObjectIdsCache(allocator, &arg_json_cache);
+        var seed_discovery_cache = std.ArrayList(MoveSeedObjectDiscoveryCacheEntry).empty;
+        defer deinitMoveSeedObjectDiscoveryCache(allocator, &seed_discovery_cache);
 
         const seed_object_ids = try collectObjectDiscoverySeedObjectIdsFromMoveParameters(
             allocator,
@@ -5248,6 +5324,7 @@ pub const SuiRpcClient = struct {
 
         return try self.discoverOwnedObjectCandidatesFromSeedObjectIds(
             allocator,
+            &seed_discovery_cache,
             object_content_cache,
             object_content_discovery_cache,
             dynamic_field_cache,
@@ -5262,6 +5339,7 @@ pub const SuiRpcClient = struct {
     fn discoverOwnedObjectCandidatesFromSeedObjectIds(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
+        seed_discovery_cache: *std.ArrayList(MoveSeedObjectDiscoveryCacheEntry),
         object_content_cache: *std.ArrayList(MoveObjectContentResponseCacheEntry),
         object_content_discovery_cache: *std.ArrayList(MoveObjectContentDiscoveryCacheEntry),
         dynamic_field_cache: *std.ArrayList(MoveDynamicFieldDiscoveryCacheEntry),
@@ -5273,6 +5351,7 @@ pub const SuiRpcClient = struct {
     ) ![]move_result.OwnedMoveObjectCandidate {
         const discovered_ids = try self.discoverObjectIdsFromSeedObjectIds(
             allocator,
+            seed_discovery_cache,
             object_content_cache,
             object_content_discovery_cache,
             dynamic_field_cache,
@@ -6427,6 +6506,7 @@ pub const SuiRpcClient = struct {
     fn populateSharedObjectCandidateFallbacksFromMoveParameters(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
+        seed_discovery_cache: *std.ArrayList(MoveSeedObjectDiscoveryCacheEntry),
         object_content_cache: *std.ArrayList(MoveObjectContentResponseCacheEntry),
         object_content_discovery_cache: *std.ArrayList(MoveObjectContentDiscoveryCacheEntry),
         dynamic_field_cache: *std.ArrayList(MoveDynamicFieldDiscoveryCacheEntry),
@@ -6456,6 +6536,7 @@ pub const SuiRpcClient = struct {
 
             const discovered_candidates = try self.discoverSharedObjectCandidatesFromSeedObjectIds(
                 allocator,
+                seed_discovery_cache,
                 object_content_cache,
                 object_content_discovery_cache,
                 dynamic_field_cache,
@@ -6539,6 +6620,7 @@ pub const SuiRpcClient = struct {
     fn populateOwnedObjectCandidateFallbacksFromMoveParameters(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
+        seed_discovery_cache: *std.ArrayList(MoveSeedObjectDiscoveryCacheEntry),
         object_content_cache: *std.ArrayList(MoveObjectContentResponseCacheEntry),
         object_content_discovery_cache: *std.ArrayList(MoveObjectContentDiscoveryCacheEntry),
         dynamic_field_cache: *std.ArrayList(MoveDynamicFieldDiscoveryCacheEntry),
@@ -6578,6 +6660,7 @@ pub const SuiRpcClient = struct {
             if (scalar_struct_type) |struct_type| {
                 const discovered_candidates = try self.discoverOwnedObjectCandidatesFromSeedObjectIds(
                     allocator,
+                    seed_discovery_cache,
                     object_content_cache,
                     object_content_discovery_cache,
                     dynamic_field_cache,
@@ -6731,6 +6814,7 @@ pub const SuiRpcClient = struct {
             if (vector_struct_type) |struct_type| {
                 const discovered_candidates = try self.discoverOwnedObjectCandidatesFromSeedObjectIds(
                     allocator,
+                    seed_discovery_cache,
                     object_content_cache,
                     object_content_discovery_cache,
                     dynamic_field_cache,
@@ -8016,6 +8100,8 @@ pub const SuiRpcClient = struct {
     ) !void {
         var arg_json_cache = std.ArrayList(MoveArgumentSelectedObjectIdsCacheEntry).empty;
         defer deinitMoveArgumentSelectedObjectIdsCache(allocator, &arg_json_cache);
+        var seed_discovery_cache = std.ArrayList(MoveSeedObjectDiscoveryCacheEntry).empty;
+        defer deinitMoveSeedObjectDiscoveryCache(allocator, &seed_discovery_cache);
         var selected_object_ids_cache = MoveSelectedObjectIdsBySourceCache{};
         defer selected_object_ids_cache.deinit(allocator);
 
@@ -8026,6 +8112,7 @@ pub const SuiRpcClient = struct {
             resetMoveParameterCandidateSelectionScores(parameters);
             try self.populateSharedObjectCandidateFallbacksFromMoveParameters(
                 allocator,
+                &seed_discovery_cache,
                 object_content_cache,
                 object_content_discovery_cache,
                 dynamic_field_cache,
@@ -8035,6 +8122,7 @@ pub const SuiRpcClient = struct {
             );
             try self.populateOwnedObjectCandidateFallbacksFromMoveParameters(
                 allocator,
+                &seed_discovery_cache,
                 object_content_cache,
                 object_content_discovery_cache,
                 dynamic_field_cache,
@@ -22046,6 +22134,84 @@ test "getMoveArgumentSelectedObjectIdsCachedBorrowed reuses cached parsed object
     try testing.expectEqual(@as(usize, 1), cache.items.len);
     try testing.expectEqual(@as(usize, 1), borrowed_second.len);
     try testing.expectEqualStrings("0xpool1", borrowed_second[0]);
+}
+
+test "getMoveSeedObjectDiscoveredObjectIdsCachedBorrowed reuses cached aggregated discoveries" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const State = struct { request_count: usize = 0 };
+    var state = State{};
+
+    const callback = struct {
+        fn call(ctx: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const st: *State = @ptrCast(@alignCast(ctx));
+            if (!std.mem.eql(u8, req.method, "sui_getObject")) return error.OutOfMemory;
+            st.request_count += 1;
+            try testing.expectEqualStrings(
+                "[\"0xseed1\",{\"showContent\":true}]",
+                req.params_json,
+            );
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":{\"content\":{\"dataType\":\"moveObject\",\"fields\":{\"pool\":\"0xpool1\",\"position\":\"0xposition1\"}}}}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &state,
+        .callback = callback,
+    };
+
+    var response_cache = std.ArrayList(SuiRpcClient.MoveObjectContentResponseCacheEntry).empty;
+    defer SuiRpcClient.deinitMoveObjectContentResponseCache(allocator, &response_cache);
+    var content_discovery_cache = std.ArrayList(SuiRpcClient.MoveObjectContentDiscoveryCacheEntry).empty;
+    defer SuiRpcClient.deinitMoveObjectContentDiscoveryCache(allocator, &content_discovery_cache);
+    var dynamic_field_cache = std.ArrayList(SuiRpcClient.MoveDynamicFieldDiscoveryCacheEntry).empty;
+    defer SuiRpcClient.deinitMoveDynamicFieldDiscoveryCache(allocator, &dynamic_field_cache);
+    var seed_discovery_cache = std.ArrayList(SuiRpcClient.MoveSeedObjectDiscoveryCacheEntry).empty;
+    defer SuiRpcClient.deinitMoveSeedObjectDiscoveryCache(allocator, &seed_discovery_cache);
+
+    const seed_object_ids = [_][]const u8{"0xseed1"};
+
+    const first = try client_instance.getMoveSeedObjectDiscoveredObjectIdsCachedBorrowed(
+        allocator,
+        &seed_discovery_cache,
+        &response_cache,
+        &content_discovery_cache,
+        &dynamic_field_cache,
+        seed_object_ids[0..],
+        false,
+    );
+    try testing.expectEqual(@as(usize, 1), state.request_count);
+    try testing.expectEqual(@as(usize, 2), first.len);
+    try testing.expectEqualStrings("0xpool1", first[0]);
+    try testing.expectEqualStrings("0xposition1", first[1]);
+
+    SuiRpcClient.deinitMoveObjectContentResponseCache(allocator, &response_cache);
+    response_cache = std.ArrayList(SuiRpcClient.MoveObjectContentResponseCacheEntry).empty;
+    SuiRpcClient.deinitMoveObjectContentDiscoveryCache(allocator, &content_discovery_cache);
+    content_discovery_cache = std.ArrayList(SuiRpcClient.MoveObjectContentDiscoveryCacheEntry).empty;
+
+    const second = try client_instance.getMoveSeedObjectDiscoveredObjectIdsCachedBorrowed(
+        allocator,
+        &seed_discovery_cache,
+        &response_cache,
+        &content_discovery_cache,
+        &dynamic_field_cache,
+        seed_object_ids[0..],
+        false,
+    );
+    try testing.expectEqual(@as(usize, 1), state.request_count);
+    try testing.expectEqual(first.ptr, second.ptr);
+    try testing.expectEqual(@as(usize, 2), second.len);
+    try testing.expectEqualStrings("0xpool1", second[0]);
+    try testing.expectEqualStrings("0xposition1", second[1]);
 }
 
 test "getSelectedObjectIdsFromMoveParametersBySourceCachedBorrowed reuses and invalidates by selected-id state" {

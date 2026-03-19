@@ -149,7 +149,7 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
 - [ ] Leave only genuinely unknowable parameters for manual input.
 - [ ] Reduce `UnresolvedMoveFunctionExecutionTemplate` failures in common
   protocol flows.
-- [ ] Keep owner-context candidate resolution bounded in live RPC paths by
+- [x] Keep owner-context candidate resolution bounded in live RPC paths by
   caching more repeated discovery work than module-event scans alone.
 - [x] Reuse repeated seed-object `showContent` reads across a single
   `move function` template build instead of rereading the same object during
