@@ -771,10 +771,40 @@ fn allowReferenceGasPriceFallbackForLocalProviderPath(
     };
 }
 
+fn supportsImplicitGasPaymentFallbackForLocalProviderPath(
+    provider: client.tx_request_builder.AccountProvider,
+) bool {
+    return switch (provider) {
+        .default_keystore,
+        .direct_signatures,
+        .remote_signer,
+        .zklogin,
+        .passkey,
+        .multisig,
+        => true,
+        else => false,
+    };
+}
+
 fn allowReferenceGasPriceFallbackForLocalSignerPath(
     args: *const cli.ParsedArgs,
 ) bool {
     return hasRealBuilderSignerSource(args);
+}
+
+fn implicitLocalGasPaymentFallbackMinBalance(
+    args: *const cli.ParsedArgs,
+    provider: ?client.tx_request_builder.AccountProvider,
+) ?u64 {
+    const has_supported_local_signer_source = if (provider) |value|
+        supportsImplicitGasPaymentFallbackForLocalProviderPath(value)
+    else
+        hasRealBuilderSignerSource(args);
+    if (!has_supported_local_signer_source) return null;
+    if (args.tx_build_gas_budget == null) return null;
+    if (args.tx_build_auto_gas_budget or args.tx_build_auto_gas_payment) return null;
+    if (args.tx_build_gas_payment != null) return null;
+    return args.tx_build_gas_budget;
 }
 
 fn resolvedUnsafeMoveCallArgumentsJson(
@@ -999,13 +1029,7 @@ fn buildLocalCommandSourceExecutePayload(
     args: *const cli.ParsedArgs,
     provider: ?client.tx_request_builder.AccountProvider,
 ) !?[]u8 {
-    const allow_implicit_gas_payment_fallback = provider == null and
-        args.signatures.items.len != 0 and
-        args.tx_build_sender != null and
-        args.tx_build_gas_budget != null and
-        !args.tx_build_auto_gas_budget and
-        !args.tx_build_auto_gas_payment and
-        args.tx_build_gas_payment == null;
+    const implicit_auto_gas_payment_min_balance = implicitLocalGasPaymentFallbackMinBalance(args, provider);
 
     const allow_reference_gas_price_fallback = if (provider) |value|
         allowReferenceGasPriceFallbackForLocalProviderPath(value)
@@ -1020,7 +1044,7 @@ fn buildLocalCommandSourceExecutePayload(
         true,
         allow_reference_gas_price_fallback,
         false,
-        if (allow_implicit_gas_payment_fallback) args.tx_build_gas_budget else null,
+        implicit_auto_gas_payment_min_balance,
     ) orelse return null;
     defer local.deinit(allocator);
 
@@ -1307,6 +1331,7 @@ fn runLocalCommandSourceAction(
     allow_reference_gas_price_fallback: bool,
     action: client.rpc_client.ProgrammaticClientAction,
 ) !?client.rpc_client.ProgrammaticClientActionOrChallengePromptResult {
+    const implicit_auto_gas_payment_min_balance = implicitLocalGasPaymentFallbackMinBalance(args, provider);
     var local = ownLocalCommandSourceBuildContext(
         allocator,
         rpc,
@@ -1315,7 +1340,7 @@ fn runLocalCommandSourceAction(
         true,
         allow_reference_gas_price_fallback,
         true,
-        null,
+        implicit_auto_gas_payment_min_balance,
     ) catch |err| switch (err) {
         error.InvalidCli => return null,
         else => return err,
@@ -12707,28 +12732,60 @@ test "runCommand tx_payload move-call resolves ownerless selected tokens from de
     var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
     defer rpc.deinit();
 
-    var request_count: usize = 0;
+    const Counts = struct {
+        owned: usize = 0,
+        normalized: usize = 0,
+        coin: usize = 0,
+        object: usize = 0,
+        unsafe: usize = 0,
+    };
+    var counts = Counts{};
     const MockContext = struct {
-        request_count: *usize,
+        counts: *Counts,
         expected_sender: []const u8,
     };
     const callback = struct {
         fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
             const ctx = @as(*MockContext, @ptrCast(@alignCast(context)));
-            ctx.request_count.* += 1;
             if (std.mem.eql(u8, req.method, "suix_getOwnedObjects")) {
+                ctx.counts.owned += 1;
                 std.debug.assert(std.mem.indexOf(u8, req.params_json, ctx.expected_sender) != null);
                 return alloc.dupe(
                     u8,
                     "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xbad1d0\",\"type\":\"0x2::example::Thing\",\"owner\":{\"AddressOwner\":\"0xbad1d0\"}}}],\"hasNextPage\":false}}",
                 );
             }
-            std.debug.assert(std.mem.eql(u8, req.method, "unsafe_moveCall"));
-            return alloc.dupe(u8, "{\"result\":{\"txBytes\":\"AQIDBA==\"}}");
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                ctx.counts.normalized += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"parameters\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"counter\",\"name\":\"Counter\"}},\"U64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\"}}}]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "suix_getCoins")) {
+                ctx.counts.coin += 1;
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, ctx.expected_sender) != null);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0x901\",\"version\":\"14\",\"digest\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"balance\":\"5000\"}],\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getObject")) {
+                ctx.counts.object += 1;
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, "0xbad1d0") != null);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":{\"objectId\":\"0xbad1d0\",\"version\":\"9\",\"digest\":\"0x2222222222222222222222222222222222222222222222222222222222222222\",\"owner\":{\"AddressOwner\":\"0xbad1d0\"}}}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall")) {
+                ctx.counts.unsafe += 1;
+            }
+            return error.OutOfMemory;
         }
     }.call;
     var mock_ctx = MockContext{
-        .request_count = &request_count,
+        .counts = &counts,
         .expected_sender = expected_sender,
     };
     rpc.request_sender = .{
@@ -12743,9 +12800,13 @@ test "runCommand tx_payload move-call resolves ownerless selected tokens from de
 
     const payload = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
     defer payload.deinit();
-    try testing.expectEqual(@as(usize, 3), request_count);
+    try testing.expectEqual(@as(usize, 1), counts.owned);
+    try testing.expectEqual(@as(usize, 1), counts.normalized);
+    try testing.expectEqual(@as(usize, 1), counts.coin);
+    try testing.expectEqual(@as(usize, 1), counts.object);
+    try testing.expectEqual(@as(usize, 0), counts.unsafe);
     try testing.expect(payload.value == .array);
-    try testing.expectEqualStrings("AQIDBA==", payload.value.array.items[0].string);
+    try testing.expect(payload.value.array.items[0].string.len > 0);
     const signature = payload.value.array.items[1].array.items[0].string;
     const decoded_len = try std.base64.standard.Decoder.calcSizeForSlice(signature);
     try testing.expectEqual(@as(usize, 97), decoded_len);
@@ -16131,6 +16192,144 @@ test "runCommand tx_send move-call with from-keystore uses local programmable bu
     try testing.expectEqual(@as(usize, 1), state.object);
     try testing.expectEqual(@as(usize, 0), state.unsafe_calls);
     try testing.expectEqual(@as(usize, 1), state.execute_calls);
+    try testing.expectEqualStrings("{\"result\":{\"executed\":true}}\n", output.items);
+}
+
+test "runCommand tx_send move-call resolves ownerless selected tokens from default keystore sender without unsafe fallback" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const seed = [_]u8{0x36} ** 32;
+    var encoded_key_bytes: [33]u8 = undefined;
+    encoded_key_bytes[0] = 0;
+    encoded_key_bytes[1..].* = seed;
+    const encoded_len = std.base64.standard.Encoder.calcSize(encoded_key_bytes.len);
+    const encoded_key = try allocator.alloc(u8, encoded_len);
+    defer allocator.free(encoded_key);
+    _ = std.base64.standard.Encoder.encode(encoded_key, &encoded_key_bytes);
+
+    const keystore_contents = try std.fmt.allocPrint(allocator, "[\"{s}\"]", .{encoded_key});
+    defer allocator.free(keystore_contents);
+    const expected_sender = try client.keystore.resolveAddressFromKeystoreContents(
+        allocator,
+        keystore_contents,
+        encoded_key,
+    ) orelse return error.TestUnexpectedResult;
+    defer allocator.free(expected_sender);
+
+    const cwd = std.fs.cwd();
+    const keystore_path = "tmp_selected_ownerless_send_keystore.json";
+    try cwd.writeFile(.{
+        .sub_path = keystore_path,
+        .data = keystore_contents,
+    });
+    defer cwd.deleteFile(keystore_path) catch {};
+
+    const old_override = client.keystore.test_keystore_path_override;
+    client.keystore.test_keystore_path_override = keystore_path;
+    defer client.keystore.test_keystore_path_override = old_override;
+
+    var args = cli.ParsedArgs{
+        .command = .tx_send,
+        .has_command = true,
+        .tx_build_package = "0x2",
+        .tx_build_module = "counter",
+        .tx_build_function = "increment",
+        .tx_build_type_args = "[]",
+        .tx_build_args = "[\"select:{\\\"kind\\\":\\\"owned_object_struct_type\\\",\\\"structType\\\":\\\"0x2::example::Thing\\\"}\",7]",
+        .tx_build_gas_budget = 800,
+        .tx_build_gas_price = 8,
+        .from_keystore = true,
+    };
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    const Counts = struct {
+        owned: usize = 0,
+        normalized: usize = 0,
+        coin: usize = 0,
+        object: usize = 0,
+        unsafe: usize = 0,
+        execute: usize = 0,
+    };
+    var counts = Counts{};
+    const MockContext = struct {
+        counts: *Counts,
+        expected_sender: []const u8,
+    };
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const ctx = @as(*MockContext, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "suix_getOwnedObjects")) {
+                ctx.counts.owned += 1;
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, ctx.expected_sender) != null);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xbad1d0\",\"type\":\"0x2::example::Thing\",\"owner\":{\"AddressOwner\":\"0xbad1d0\"}}}],\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                ctx.counts.normalized += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"parameters\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"counter\",\"name\":\"Counter\"}},\"U64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\"}}}]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "suix_getCoins")) {
+                ctx.counts.coin += 1;
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, ctx.expected_sender) != null);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0x901\",\"version\":\"14\",\"digest\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"balance\":\"5000\"}],\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getObject")) {
+                ctx.counts.object += 1;
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, "0xbad1d0") != null);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":{\"objectId\":\"0xbad1d0\",\"version\":\"9\",\"digest\":\"0x2222222222222222222222222222222222222222222222222222222222222222\",\"owner\":{\"AddressOwner\":\"0xbad1d0\"}}}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall") or std.mem.eql(u8, req.method, "unsafe_batchTransaction")) {
+                ctx.counts.unsafe += 1;
+            }
+            if (std.mem.eql(u8, req.method, "sui_executeTransactionBlock")) {
+                ctx.counts.execute += 1;
+                const params = std.json.parseFromSlice(std.json.Value, alloc, req.params_json, .{}) catch return error.OutOfMemory;
+                defer params.deinit();
+                std.debug.assert(params.value.array.items[0].string.len > 0);
+                const signature = params.value.array.items[1].array.items[0].string;
+                const decoded_len = std.base64.standard.Decoder.calcSizeForSlice(signature) catch return error.OutOfMemory;
+                std.debug.assert(decoded_len == 97);
+                return alloc.dupe(u8, "{\"result\":{\"executed\":true}}");
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+    var mock_ctx = MockContext{
+        .counts = &counts,
+        .expected_sender = expected_sender,
+    };
+    rpc.request_sender = .{
+        .context = &mock_ctx,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+    try testing.expectEqual(@as(usize, 1), counts.owned);
+    try testing.expectEqual(@as(usize, 1), counts.normalized);
+    try testing.expectEqual(@as(usize, 1), counts.coin);
+    try testing.expectEqual(@as(usize, 1), counts.object);
+    try testing.expectEqual(@as(usize, 0), counts.unsafe);
+    try testing.expectEqual(@as(usize, 1), counts.execute);
     try testing.expectEqualStrings("{\"result\":{\"executed\":true}}\n", output.items);
 }
 

@@ -232,6 +232,9 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
 - [x] Keep direct-signature execute-payload paths on the local programmable
   builder when `--sender` / `--gas-budget` are explicit but `--gas-payment` is
   omitted, including selected-argument command sources.
+- [x] Keep keystore-backed execute-payload paths on the local programmable
+  builder when `--gas-budget` is explicit but `--gas-payment` is omitted,
+  including ownerless selected-argument command sources.
 - [ ] Continue shrinking `unsafe_moveCall` usage.
 - [ ] Continue shrinking `unsafe_batchTransaction` usage.
 - [ ] Keep construction, simulation, and execution aligned to the same local

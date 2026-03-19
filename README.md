@@ -781,7 +781,7 @@ pub fn main() !void {
 - `tx build move-call`: 输出 MoveCall 指令 JSON；加 `--emit-tx-block` 可输出可直接提交的 `ProgrammableTransaction` JSON。
 - `tx build move-call|programmable --summarize`: 输出 build artifact 的结构化 summary
 
-对于 direct-signature 的 `tx payload` / `tx send` programmable 路径，如果已经给了显式 `--sender` 和 `--gas-budget`，但没有显式 `--gas-payment`，CLI 现在会优先在本地 builder 路径里自动挑一枚 gas coin，而不是直接退回 `unsafe_moveCall` / `unsafe_batchTransaction`；这条路径同样覆盖带 selected-argument token 的命令源，不必先手工把对象参数展开成 raw object ref。
+对于 keystore-backed signer source 或 direct-signature 的 `tx payload` / `tx send` programmable 路径，如果已经给了显式 `--gas-budget`，但没有显式 `--gas-payment`，CLI 现在会优先在本地 builder 路径里自动挑一枚 gas coin，而不是直接退回 `unsafe_moveCall` / `unsafe_batchTransaction`；这条路径同样覆盖带 selected-argument token 的命令源，不必先手工把对象参数展开成 raw object ref。
 - `tx build programmable`: 提供 `--commands` JSON 数组直接构建任意 PTB `ProgrammableTransaction`。
 - `tx build --signer`: 可复用 keystore 选择器（alias/address/key）；未提供 `--sender` 时优先使用首个可解析出地址的 signer。
 - `account list`: 列出 keystore 条目。
