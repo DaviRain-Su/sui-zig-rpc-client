@@ -889,7 +889,7 @@ zig build run -- events \
 - `parameters[*].vector_item_owned_object_candidates`: 如果你同时给了 `--sender`、`--signer` 或 `--from-keystore`，CLI 会尝试直接查出一组单元素对象候选，并回填成精确 `object_input(imm_or_owned, version, digest)` token；对 `Coin<T>` 候选还会带 `balance`
 - `parameters[*].owned_object_select_token`: 如果参数类型是 concrete object struct，CLI 会额外给一个 `owned_object_struct_type` 选择 token 候选
 - `parameters[*].owned_object_query_argv`: 对应的查询模板；对 `Coin<T>` 会优先落成 `account coins --coin-type`
-- `parameters[*].owned_object_candidates`: 如果有 owner 上下文，CLI 会直接查出一组 concrete owned object 候选，并给出可直接放进 `--args` 的精确 `object_input(imm_or_owned, version, digest)` token；对 `Coin<T>` 候选会补 `balance`，而 scalar `Coin<T>` 在多候选时会默认优先最大余额。普通 owned object discovery 现在也会聚合全部 `suix_getOwnedObjects` 分页结果，而不只看第一页
+- `parameters[*].owned_object_candidates`: 如果有 owner 上下文，CLI 会直接查出一组 concrete owned object 候选，并给出可直接放进 `--args` 的精确 `object_input(imm_or_owned, version, digest)` token；对 `Coin<T>` 候选会补 `balance`，而 scalar `Coin<T>` 在多候选时会默认优先最大余额。普通 owned object discovery 现在也会聚合全部 `suix_getOwnedObjects` 分页结果，而不只看第一页；此外，已发现对象内容里反推出的同类型 owned object 也会继续并入候选集，而不是只依赖 owner-page 查询
 - `call_template.type_args_json`: 直接可改的 `--type-args` JSON 模板
 - `call_template.args_json`: 直接可改的 `--args` JSON 模板
 - `call_template.preferred_args_json`: 在保留原始模板的同时，优先把 CLI 已经能自动选出的参数回填进去

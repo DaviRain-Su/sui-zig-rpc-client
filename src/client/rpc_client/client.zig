@@ -4283,7 +4283,7 @@ pub const SuiRpcClient = struct {
         return try candidates.toOwnedSlice(allocator);
     }
 
-    fn collectSharedDiscoverySeedObjectIdsFromMoveParameters(
+    fn collectObjectDiscoverySeedObjectIdsFromMoveParameters(
         allocator: std.mem.Allocator,
         parameters: []const move_result.OwnedMoveParameterSummary,
     ) ![][]u8 {
@@ -4329,7 +4329,7 @@ pub const SuiRpcClient = struct {
         parameters: []const move_result.OwnedMoveParameterSummary,
         signature: []const u8,
     ) ![]move_result.SharedMoveObjectCandidate {
-        const seed_object_ids = try collectSharedDiscoverySeedObjectIdsFromMoveParameters(allocator, parameters);
+        const seed_object_ids = try collectObjectDiscoverySeedObjectIdsFromMoveParameters(allocator, parameters);
         defer {
             for (seed_object_ids) |value| allocator.free(value);
             allocator.free(seed_object_ids);
@@ -4364,6 +4364,101 @@ pub const SuiRpcClient = struct {
             &candidates,
             discovered_ids.items,
             signature,
+        );
+
+        return try candidates.toOwnedSlice(allocator);
+    }
+
+    fn appendOwnedObjectCandidatesFromObjectIds(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        candidates: *std.ArrayList(move_result.OwnedMoveObjectCandidate),
+        object_ids: []const []const u8,
+        owner: []const u8,
+        struct_type: []const u8,
+    ) !void {
+        for (object_ids) |object_id| {
+            var summary = self.getObjectAndSummarizeWithOptions(
+                allocator,
+                object_id,
+                objectDataOptionsForSummaries(.{}),
+            ) catch continue;
+            defer summary.deinit(allocator);
+
+            if (summary.status != .found) continue;
+            if ((summary.owner_kind orelse .unknown) != .address_owner) continue;
+            const owner_value = summary.owner_value orelse continue;
+            if (!std.mem.eql(u8, owner_value, owner)) continue;
+            const type_name = summary.type_name orelse continue;
+            if (!std.mem.eql(u8, type_name, struct_type)) continue;
+            const version = summary.version orelse continue;
+            const digest = summary.digest orelse continue;
+            const token = summary.imm_or_owned_object_input_select_token orelse continue;
+
+            var already_present = false;
+            for (candidates.items) |candidate| {
+                if (std.mem.eql(u8, candidate.object_id, object_id)) {
+                    already_present = true;
+                    break;
+                }
+            }
+            if (already_present) continue;
+
+            try candidates.append(allocator, .{
+                .object_id = try allocator.dupe(u8, object_id),
+                .version = version,
+                .digest = try allocator.dupe(u8, digest),
+                .balance = null,
+                .type_name = try allocator.dupe(u8, type_name),
+                .owner_value = try allocator.dupe(u8, owner_value),
+                .object_input_select_token = try allocator.dupe(u8, token),
+            });
+        }
+    }
+
+    fn discoverOwnedObjectCandidatesFromMoveParameters(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        parameters: []const move_result.OwnedMoveParameterSummary,
+        owner: []const u8,
+        struct_type: []const u8,
+    ) ![]move_result.OwnedMoveObjectCandidate {
+        const seed_object_ids = try collectObjectDiscoverySeedObjectIdsFromMoveParameters(allocator, parameters);
+        defer {
+            for (seed_object_ids) |value| allocator.free(value);
+            allocator.free(seed_object_ids);
+        }
+
+        var discovered_ids = std.ArrayList([]u8).empty;
+        defer {
+            for (discovered_ids.items) |value| allocator.free(value);
+            discovered_ids.deinit(allocator);
+        }
+
+        for (seed_object_ids) |object_id| {
+            if (discovered_ids.items.len >= 16) break;
+            const response = self.getObjectWithOptions(object_id, .{ .show_content = true }) catch continue;
+            defer allocator.free(response);
+            try appendDiscoveredObjectIdsFromObjectResponseContent(
+                allocator,
+                &discovered_ids,
+                response,
+                16,
+            );
+        }
+
+        var candidates = std.ArrayList(move_result.OwnedMoveObjectCandidate).empty;
+        errdefer {
+            for (candidates.items) |*value| value.deinit(allocator);
+            candidates.deinit(allocator);
+        }
+
+        try self.appendOwnedObjectCandidatesFromObjectIds(
+            allocator,
+            &candidates,
+            discovered_ids.items,
+            owner,
+            struct_type,
         );
 
         return try candidates.toOwnedSlice(allocator);
@@ -5128,6 +5223,179 @@ pub const SuiRpcClient = struct {
         }
     }
 
+    fn populateOwnedObjectCandidateFallbacksFromMoveParameters(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        parameters: []move_result.OwnedMoveParameterSummary,
+        owner_address: ?[]const u8,
+    ) !void {
+        const owner = owner_address orelse return;
+
+        for (parameters) |*parameter| {
+            if (parameter.omitted_from_explicit_args) continue;
+            if (parameter.explicit_arg_json != null) continue;
+
+            const scalar_struct_type = blk: {
+                if (coinTypeFromMoveSignature(parameter.signature) != null) break :blk null;
+                if (parameter.owned_object_select_token == null) break :blk null;
+                break :blk concreteObjectStructTypeFromSignature(parameter.signature);
+            };
+            if (scalar_struct_type) |struct_type| {
+                const discovered_candidates = try self.discoverOwnedObjectCandidatesFromMoveParameters(
+                    allocator,
+                    parameters,
+                    owner,
+                    struct_type,
+                );
+                if (discovered_candidates.len != 0) {
+                    var merged_candidates = std.ArrayList(move_result.OwnedMoveObjectCandidate).empty;
+                    errdefer {
+                        for (merged_candidates.items) |*candidate| candidate.deinit(allocator);
+                        merged_candidates.deinit(allocator);
+                    }
+
+                    if (parameter.owned_object_candidates) |old_candidates| {
+                        for (old_candidates) |old_candidate| {
+                            try merged_candidates.append(allocator, .{
+                                .object_id = try allocator.dupe(u8, old_candidate.object_id),
+                                .version = old_candidate.version,
+                                .digest = try allocator.dupe(u8, old_candidate.digest),
+                                .balance = old_candidate.balance,
+                                .type_name = if (old_candidate.type_name) |value| try allocator.dupe(u8, value) else null,
+                                .owner_value = if (old_candidate.owner_value) |value| try allocator.dupe(u8, value) else null,
+                                .object_input_select_token = try allocator.dupe(u8, old_candidate.object_input_select_token),
+                                .selection_score = old_candidate.selection_score,
+                            });
+                        }
+                    }
+
+                    for (discovered_candidates) |candidate| {
+                        var already_present = false;
+                        for (merged_candidates.items) |existing| {
+                            if (std.mem.eql(u8, existing.object_id, candidate.object_id)) {
+                                already_present = true;
+                                break;
+                            }
+                        }
+                        if (already_present) continue;
+                        try merged_candidates.append(allocator, .{
+                            .object_id = try allocator.dupe(u8, candidate.object_id),
+                            .version = candidate.version,
+                            .digest = try allocator.dupe(u8, candidate.digest),
+                            .balance = candidate.balance,
+                            .type_name = if (candidate.type_name) |value| try allocator.dupe(u8, value) else null,
+                            .owner_value = if (candidate.owner_value) |value| try allocator.dupe(u8, value) else null,
+                            .object_input_select_token = try allocator.dupe(u8, candidate.object_input_select_token),
+                            .selection_score = candidate.selection_score,
+                        });
+                    }
+
+                    if (parameter.owned_object_candidates) |old_candidates| {
+                        for (old_candidates) |*candidate| candidate.deinit(allocator);
+                        allocator.free(old_candidates);
+                    }
+                    for (discovered_candidates) |*candidate| candidate.deinit(allocator);
+                    allocator.free(discovered_candidates);
+
+                    parameter.owned_object_candidates = try merged_candidates.toOwnedSlice(allocator);
+                    if (parameter.auto_selected_arg_json == null and parameter.owned_object_candidates.?.len == 1) {
+                        replaceMoveParameterAutoSelectedArgJson(
+                            allocator,
+                            parameter,
+                            try buildAutoSelectedScalarArgJson(
+                                allocator,
+                                parameter.owned_object_candidates.?[0].object_input_select_token,
+                            ),
+                        );
+                    }
+                } else {
+                    allocator.free(discovered_candidates);
+                }
+                continue;
+            }
+
+            const vector_struct_type = blk: {
+                const element_signature = vectorElementTypeSignature(parameter.signature) orelse break :blk null;
+                if (coinTypeFromCoinStructType(element_signature) != null) break :blk null;
+                if (parameter.vector_item_owned_object_select_token == null) break :blk null;
+                break :blk concreteVectorObjectStructTypeFromSignature(parameter.signature);
+            };
+            if (vector_struct_type) |struct_type| {
+                const discovered_candidates = try self.discoverOwnedObjectCandidatesFromMoveParameters(
+                    allocator,
+                    parameters,
+                    owner,
+                    struct_type,
+                );
+                if (discovered_candidates.len == 0) {
+                    allocator.free(discovered_candidates);
+                    continue;
+                }
+
+                var merged_candidates = std.ArrayList(move_result.OwnedMoveObjectCandidate).empty;
+                errdefer {
+                    for (merged_candidates.items) |*candidate| candidate.deinit(allocator);
+                    merged_candidates.deinit(allocator);
+                }
+
+                if (parameter.vector_item_owned_object_candidates) |old_candidates| {
+                    for (old_candidates) |old_candidate| {
+                        try merged_candidates.append(allocator, .{
+                            .object_id = try allocator.dupe(u8, old_candidate.object_id),
+                            .version = old_candidate.version,
+                            .digest = try allocator.dupe(u8, old_candidate.digest),
+                            .balance = old_candidate.balance,
+                            .type_name = if (old_candidate.type_name) |value| try allocator.dupe(u8, value) else null,
+                            .owner_value = if (old_candidate.owner_value) |value| try allocator.dupe(u8, value) else null,
+                            .object_input_select_token = try allocator.dupe(u8, old_candidate.object_input_select_token),
+                            .selection_score = old_candidate.selection_score,
+                        });
+                    }
+                }
+
+                for (discovered_candidates) |candidate| {
+                    var already_present = false;
+                    for (merged_candidates.items) |existing| {
+                        if (std.mem.eql(u8, existing.object_id, candidate.object_id)) {
+                            already_present = true;
+                            break;
+                        }
+                    }
+                    if (already_present) continue;
+                    try merged_candidates.append(allocator, .{
+                        .object_id = try allocator.dupe(u8, candidate.object_id),
+                        .version = candidate.version,
+                        .digest = try allocator.dupe(u8, candidate.digest),
+                        .balance = candidate.balance,
+                        .type_name = if (candidate.type_name) |value| try allocator.dupe(u8, value) else null,
+                        .owner_value = if (candidate.owner_value) |value| try allocator.dupe(u8, value) else null,
+                        .object_input_select_token = try allocator.dupe(u8, candidate.object_input_select_token),
+                        .selection_score = candidate.selection_score,
+                    });
+                }
+
+                if (parameter.vector_item_owned_object_candidates) |old_candidates| {
+                    for (old_candidates) |*candidate| candidate.deinit(allocator);
+                    allocator.free(old_candidates);
+                }
+                for (discovered_candidates) |*candidate| candidate.deinit(allocator);
+                allocator.free(discovered_candidates);
+
+                parameter.vector_item_owned_object_candidates = try merged_candidates.toOwnedSlice(allocator);
+                if (parameter.auto_selected_arg_json == null) {
+                    replaceMoveParameterAutoSelectedArgJson(
+                        allocator,
+                        parameter,
+                        try buildAutoSelectedVectorArgJson(
+                            allocator,
+                            parameter.vector_item_owned_object_candidates.?,
+                        ),
+                    );
+                }
+            }
+        }
+    }
+
     fn ownedCandidateShouldSortBefore(
         left: move_result.OwnedMoveObjectCandidate,
         right: move_result.OwnedMoveObjectCandidate,
@@ -5842,6 +6110,7 @@ pub const SuiRpcClient = struct {
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
         parameters: []move_result.OwnedMoveParameterSummary,
+        owner_address: ?[]const u8,
     ) !void {
         var round: usize = 0;
         while (round < move_candidate_resolution_max_rounds) : (round += 1) {
@@ -5849,6 +6118,11 @@ pub const SuiRpcClient = struct {
 
             resetMoveParameterCandidateSelectionScores(parameters);
             try self.populateSharedObjectCandidateFallbacksFromMoveParameters(allocator, parameters);
+            try self.populateOwnedObjectCandidateFallbacksFromMoveParameters(
+                allocator,
+                parameters,
+                owner_address,
+            );
             try self.applyReferencedSharedObjectCandidateSelectionHints(allocator, parameters);
             try self.applySharedCandidateSelectionHintsFromOwnedCandidates(allocator, parameters);
             try self.applyReferencedOwnedObjectCandidateSelectionHints(allocator, parameters);
@@ -7659,7 +7933,7 @@ pub const SuiRpcClient = struct {
                 summary.parameters,
             );
         }
-        try self.resolveMoveParameterCandidatesToFixedPoint(allocator, summary.parameters);
+        try self.resolveMoveParameterCandidatesToFixedPoint(allocator, summary.parameters, owner_address);
         try applyCrossParameterBusinessCoinSelectionHints(allocator, summary.parameters);
         try applyCrossParameterOwnedObjectSelectionHints(allocator, summary.parameters);
 

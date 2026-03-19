@@ -3476,6 +3476,15 @@ test "runCommand move function with --summarize fills owner context into owned o
                 );
             }
 
+            if (std.mem.eql(u8, req.method, "sui_getObject")) {
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0xposition1\"") != null);
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"showContent\":true") != null);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":{\"objectId\":\"0xposition1\",\"version\":\"7\",\"digest\":\"position-digest-1\",\"content\":{\"dataType\":\"moveObject\",\"fields\":{\"liquidity\":\"9\"}}}}}",
+                );
+            }
+
             std.debug.assert(std.mem.eql(u8, req.method, "suix_getOwnedObjects"));
             std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0xowner\"") != null);
             std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"StructType\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb::position::Position\"") != null);
@@ -3647,6 +3656,15 @@ test "runCommand move function with --summarize discovers specialized generic ow
                 return alloc.dupe(
                     u8,
                     "{\"result\":{\"visibility\":\"Public\",\"isEntry\":false,\"typeParameters\":[[]],\"parameters\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"balance\",\"name\":\"Balance\",\"typeParams\":[{\"TypeParameter\":0}]}}],\"return\":[]}}",
+                );
+            }
+
+            if (std.mem.eql(u8, req.method, "sui_getObject")) {
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0xbalance1\"") != null);
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"showContent\":true") != null);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":{\"objectId\":\"0xbalance1\",\"version\":\"13\",\"digest\":\"balance-digest-1\",\"content\":{\"dataType\":\"moveObject\",\"fields\":{\"value\":\"9\"}}}}}",
                 );
             }
 
@@ -4791,6 +4809,95 @@ test "runCommand move function with --summarize discovers related shared candida
     try testing.expectEqualStrings("0xregistry1", registry_candidates[0].object.get("object_id").?.string);
     try testing.expectEqualStrings(
         "\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xregistry1\\\",\\\"inputKind\\\":\\\"shared\\\",\\\"initialSharedVersion\\\":9,\\\"mutable\\\":false}\"",
+        parameters[1].object.get("auto_selected_arg_json").?.string,
+    );
+}
+
+test "runCommand move function with --summarize discovers owned candidates from discovered object content" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"visibility\":\"Public\",\"isEntry\":true,\"typeParameters\":[],\"parameters\":[{\"Struct\":{\"address\":\"0x2a\",\"module\":\"position\",\"name\":\"Position\",\"typeParams\":[]}},{\"Struct\":{\"address\":\"0x2a\",\"module\":\"receipt\",\"name\":\"Receipt\",\"typeParams\":[]}},{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "suix_getOwnedObjects")) {
+                if (std.mem.indexOf(u8, req.params_json, "\"StructType\":\"0x2a::position::Position\"") != null) {
+                    return alloc.dupe(
+                        u8,
+                        "{\"result\":{\"data\":[],\"hasNextPage\":false}}",
+                    );
+                }
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"StructType\":\"0x2a::receipt::Receipt\"") != null);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xreceipt1\",\"version\":\"7\",\"digest\":\"receipt-digest-1\",\"type\":\"0x2a::receipt::Receipt\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
+                );
+            }
+            std.debug.assert(std.mem.eql(u8, req.method, "sui_getObject"));
+            if (std.mem.indexOf(u8, req.params_json, "\"0xreceipt1\"") != null) {
+                if (std.mem.indexOf(u8, req.params_json, "\"showContent\":true") != null) {
+                    return alloc.dupe(
+                        u8,
+                        "{\"result\":{\"data\":{\"objectId\":\"0xreceipt1\",\"version\":\"7\",\"digest\":\"receipt-digest-1\",\"content\":{\"dataType\":\"moveObject\",\"fields\":{\"position_id\":\"0xposition1\"}}}}}",
+                    );
+                }
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":{\"objectId\":\"0xreceipt1\",\"version\":\"7\",\"digest\":\"receipt-digest-1\",\"type\":\"0x2a::receipt::Receipt\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}}",
+                );
+            }
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0xposition1\"") != null);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":{\"objectId\":\"0xposition1\",\"version\":\"11\",\"digest\":\"position-digest-1\",\"type\":\"0x2a::position::Position\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}}",
+            );
+        }
+    }.call;
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "move",
+        "function",
+        "0x2a",
+        "router",
+        "redeem",
+        "--sender",
+        "0xowner",
+        "--summarize",
+    });
+    defer args.deinit(allocator);
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    const parameters = parsed.value.object.get("parameters").?.array.items;
+    const position_candidates = parameters[0].object.get("owned_object_candidates").?.array.items;
+    try testing.expectEqual(@as(usize, 1), position_candidates.len);
+    try testing.expectEqualStrings("0xposition1", position_candidates[0].object.get("object_id").?.string);
+    try testing.expectEqualStrings(
+        "\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xposition1\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":11,\\\"digest\\\":\\\"position-digest-1\\\"}\"",
+        parameters[0].object.get("auto_selected_arg_json").?.string,
+    );
+    try testing.expectEqualStrings(
+        "\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xreceipt1\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":7,\\\"digest\\\":\\\"receipt-digest-1\\\"}\"",
         parameters[1].object.get("auto_selected_arg_json").?.string,
     );
 }
