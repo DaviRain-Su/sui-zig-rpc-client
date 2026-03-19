@@ -240,6 +240,10 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
 - [x] Keep reusable command-source execute helpers on the local programmable
   builder for direct-signature and default-keystore flows after selected-token
   resolution or auto gas payment.
+- [x] Keep reusable command-source execute helpers on the local programmable
+  builder for account-provider direct-signatures, keystore-contents, and
+  default-keystore flows, while leaving remote authorizer providers on the
+  existing `tx_bytes` contract.
 - [ ] Continue shrinking `unsafe_moveCall` usage.
 - [ ] Continue shrinking `unsafe_batchTransaction` usage.
 - [ ] Keep construction, simulation, and execution aligned to the same local

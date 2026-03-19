@@ -14274,6 +14274,44 @@ pub const SuiRpcClient = struct {
         );
     }
 
+    fn accountProviderCanUseLocalOwnedPlanExecutePayload(
+        provider: tx_request_builder.AccountProvider,
+    ) bool {
+        return switch (provider) {
+            .direct_signatures, .keystore_contents, .default_keystore => true,
+            else => false,
+        };
+    }
+
+    fn takeOwnedProgrammaticRequestOptions(
+        options: *tx_request_builder.OwnedProgrammaticRequestOptions,
+    ) tx_request_builder.OwnedProgrammaticRequestOptions {
+        const moved = options.*;
+        options.* = .{ .options = .{ .source = .{} } };
+        return moved;
+    }
+
+    fn buildExecutePayloadFromOwnedOptionsWithAccountProvider(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        options: *tx_request_builder.OwnedProgrammaticRequestOptions,
+        provider: tx_request_builder.AccountProvider,
+    ) ![]u8 {
+        if (accountProviderCanUseLocalOwnedPlanExecutePayload(provider)) {
+            var plan = takeOwnedProgrammaticRequestOptions(options).authorizationPlan(provider);
+            defer plan.deinit(allocator);
+            return try self.buildOwnedPlanArtifact(allocator, &plan, .execute_payload);
+        }
+
+        var moved = takeOwnedProgrammaticRequestOptions(options);
+        defer moved.deinit(allocator);
+        return try self.buildRealBuilderExecutePayloadFromOwnedOptionsWithAccountProvider(
+            allocator,
+            moved,
+            provider,
+        );
+    }
+
     pub fn buildCommandSourceExecutePayloadResolvingSelectedArgumentTokensWithSignatures(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
@@ -14490,11 +14528,7 @@ pub const SuiRpcClient = struct {
         );
         defer owned.deinit(allocator);
 
-        const payload = try self.buildRealBuilderExecutePayloadFromOwnedOptionsWithAccountProvider(
-            allocator,
-            owned,
-            provider,
-        );
+        const payload = try self.buildExecutePayloadFromOwnedOptionsWithAccountProvider(allocator, &owned, provider);
         defer allocator.free(payload);
         return try self.runExecutePayloadAction(allocator, payload, action);
     }
@@ -14516,11 +14550,7 @@ pub const SuiRpcClient = struct {
         );
         defer owned.deinit(allocator);
 
-        const payload = try self.buildRealBuilderExecutePayloadFromOwnedOptionsWithAccountProvider(
-            allocator,
-            owned,
-            provider,
-        );
+        const payload = try self.buildExecutePayloadFromOwnedOptionsWithAccountProvider(allocator, &owned, provider);
         defer allocator.free(payload);
         return try self.runExecutePayloadAction(allocator, payload, action);
     }
@@ -14544,11 +14574,7 @@ pub const SuiRpcClient = struct {
             return .{ .challenge_required = prompt };
         }
 
-        const payload = try self.buildRealBuilderExecutePayloadFromOwnedOptionsWithAccountProvider(
-            allocator,
-            owned,
-            provider,
-        );
+        const payload = try self.buildExecutePayloadFromOwnedOptionsWithAccountProvider(allocator, &owned, provider);
         defer allocator.free(payload);
         return .{ .completed = try self.runExecutePayloadAction(allocator, payload, action) };
     }
@@ -14570,11 +14596,7 @@ pub const SuiRpcClient = struct {
         defer owned.deinit(allocator);
 
         const updated_provider = try self.applySessionChallengeResponse(provider, response);
-        const payload = try self.buildRealBuilderExecutePayloadFromOwnedOptionsWithAccountProvider(
-            allocator,
-            owned,
-            updated_provider,
-        );
+        const payload = try self.buildExecutePayloadFromOwnedOptionsWithAccountProvider(allocator, &owned, updated_provider);
         defer allocator.free(payload);
         return try self.runExecutePayloadAction(allocator, payload, action);
     }
@@ -14600,11 +14622,7 @@ pub const SuiRpcClient = struct {
             return .{ .challenge_required = prompt };
         }
 
-        const payload = try self.buildRealBuilderExecutePayloadFromOwnedOptionsWithAccountProvider(
-            allocator,
-            owned,
-            provider,
-        );
+        const payload = try self.buildExecutePayloadFromOwnedOptionsWithAccountProvider(allocator, &owned, provider);
         defer allocator.free(payload);
         return .{ .completed = try self.runExecutePayloadAction(allocator, payload, action) };
     }
@@ -14628,11 +14646,7 @@ pub const SuiRpcClient = struct {
         defer owned.deinit(allocator);
 
         const updated_provider = try self.applySessionChallengeResponse(provider, response);
-        const payload = try self.buildRealBuilderExecutePayloadFromOwnedOptionsWithAccountProvider(
-            allocator,
-            owned,
-            updated_provider,
-        );
+        const payload = try self.buildExecutePayloadFromOwnedOptionsWithAccountProvider(allocator, &owned, updated_provider);
         defer allocator.free(payload);
         return try self.runExecutePayloadAction(allocator, payload, action);
     }
@@ -26542,6 +26556,190 @@ test "executeCommandSourceWithAutoGasPaymentAndObserveFromDefaultKeystore tracks
     try testing.expectEqualStrings("auto-default-digest", observed.digest);
     try testing.expectEqual(tx_result.ExecutionStatus.success, observed.insights.status);
     try testing.expectEqualStrings(expected_sender, observed.insights.balance_changes[0].owner.?);
+    try testing.expectEqual(@as(usize, 3), state.request_count);
+}
+
+test "runCommandSourceResolvingSelectedArgumentTokensWithAccountProvider keeps direct signature providers local" {
+    const testing = std.testing;
+    const State = struct { request_count: usize = 0 };
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var state = State{};
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const st = @as(*State, @ptrCast(@alignCast(context)));
+            st.request_count += 1;
+
+            if (std.mem.eql(u8, req.method, "suix_getOwnedObjects")) {
+                try testing.expect(std.mem.indexOf(u8, req.params_json, "0xowner") != null);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xprovider-local\",\"type\":\"0x2::example::Thing\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall") or std.mem.eql(u8, req.method, "unsafe_batchTransaction")) return error.TestUnexpectedResult;
+            if (std.mem.eql(u8, req.method, "sui_executeTransactionBlock")) {
+                const payload = try std.json.parseFromSlice(std.json.Value, alloc, req.params_json, .{});
+                defer payload.deinit();
+                try testing.expect(payload.value.array.items[0] == .string);
+                try testing.expect(payload.value.array.items[0].string.len != 0);
+                try testing.expectEqualStrings("sig-provider-direct", payload.value.array.items[1].array.items[0].string);
+                return alloc.dupe(u8, "{\"result\":{\"digest\":\"provider-direct-digest\"}}");
+            }
+            try testing.expectEqualStrings("sui_getTransactionBlock", req.method);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"digest\":\"provider-direct-digest\",\"effects\":{\"status\":{\"status\":\"success\"},\"gasUsed\":{\"computationCost\":\"9\",\"storageCost\":\"2\",\"storageRebate\":\"1\"}},\"balanceChanges\":[{\"owner\":{\"AddressOwner\":\"0xowner\"},\"coinType\":\"0x2::sui::SUI\",\"amount\":\"-10\"}]}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &state,
+        .callback = callback,
+    };
+
+    var result = try client_instance.runCommandSourceResolvingSelectedArgumentTokensWithAccountProvider(
+        allocator,
+        .{
+            .move_call = .{
+                .package_id = "0x2",
+                .module = "example",
+                .function_name = "act",
+                .type_args = "[]",
+                .arguments = "[\"select:{\\\"kind\\\":\\\"owned_object_struct_type\\\",\\\"owner\\\":\\\"0xowner\\\",\\\"structType\\\":\\\"0x2::example::Thing\\\"}\"]",
+            },
+        },
+        .{
+            .sender = "0xowner",
+            .gas_budget = 100,
+            .gas_payment_json = "[{\"objectId\":\"0xgas-provider\",\"version\":\"1\",\"digest\":\"digest-gas-provider\"}]",
+        },
+        .{
+            .direct_signatures = .{
+                .sender = "0xowner",
+                .signatures = &.{"sig-provider-direct"},
+            },
+        },
+        .{ .execute_confirm_summarize = .{ .timeout_ms = 100, .poll_ms = 0 } },
+    );
+    defer result.deinit(allocator);
+
+    switch (result) {
+        .summarized => |insights| {
+            try testing.expectEqual(tx_result.ExecutionStatus.success, insights.status);
+            try testing.expectEqualStrings("0xowner", insights.balance_changes[0].owner.?);
+        },
+        else => try testing.expect(false),
+    }
+    try testing.expectEqual(@as(usize, 3), state.request_count);
+}
+
+test "runCommandSourceWithAutoGasPaymentWithAccountProvider keeps keystore contents providers local" {
+    const testing = std.testing;
+    const State = struct {
+        request_count: usize = 0,
+        expected_sender: []const u8,
+    };
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const seed = [_]u8{0x41} ** 32;
+    var encoded_key_bytes: [33]u8 = undefined;
+    encoded_key_bytes[0] = 0;
+    encoded_key_bytes[1..].* = seed;
+    const encoded_len = std.base64.standard.Encoder.calcSize(encoded_key_bytes.len);
+    const encoded_key = try allocator.alloc(u8, encoded_len);
+    defer allocator.free(encoded_key);
+    _ = std.base64.standard.Encoder.encode(encoded_key, &encoded_key_bytes);
+
+    const keystore_contents = try std.fmt.allocPrint(allocator, "[\"{s}\"]", .{encoded_key});
+    defer allocator.free(keystore_contents);
+    const expected_sender = try keystore.resolveAddressFromKeystoreContents(
+        allocator,
+        keystore_contents,
+        encoded_key,
+    ) orelse return error.TestUnexpectedResult;
+    defer allocator.free(expected_sender);
+
+    var state = State{ .expected_sender = expected_sender };
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const st = @as(*State, @ptrCast(@alignCast(context)));
+            st.request_count += 1;
+
+            if (std.mem.eql(u8, req.method, "suix_getCoins")) {
+                try testing.expect(std.mem.indexOf(u8, req.params_json, st.expected_sender) != null);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xprovider-auto-coin\",\"version\":\"8\",\"digest\":\"digest-provider-auto-coin\",\"balance\":\"95\"}],\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall") or std.mem.eql(u8, req.method, "unsafe_batchTransaction")) return error.TestUnexpectedResult;
+            if (std.mem.eql(u8, req.method, "sui_executeTransactionBlock")) {
+                const payload = try std.json.parseFromSlice(std.json.Value, alloc, req.params_json, .{});
+                defer payload.deinit();
+                try testing.expect(payload.value.array.items[0] == .string);
+                try testing.expect(payload.value.array.items[0].string.len != 0);
+                try testing.expectEqual(@as(usize, 1), payload.value.array.items[1].array.items.len);
+                try testing.expect(payload.value.array.items[1].array.items[0] == .string);
+                try testing.expect(payload.value.array.items[1].array.items[0].string.len != 0);
+                return alloc.dupe(u8, "{\"result\":{\"digest\":\"provider-keystore-digest\"}}");
+            }
+            try testing.expectEqualStrings("sui_getTransactionBlock", req.method);
+            return alloc.dupe(
+                u8,
+                try std.fmt.allocPrint(
+                    alloc,
+                    "{{\"result\":{{\"digest\":\"provider-keystore-digest\",\"effects\":{{\"status\":{{\"status\":\"success\"}},\"gasUsed\":{{\"computationCost\":\"6\",\"storageCost\":\"2\",\"storageRebate\":\"1\"}}}},\"balanceChanges\":[{{\"owner\":{{\"AddressOwner\":\"{s}\"}},\"coinType\":\"0x2::sui::SUI\",\"amount\":\"-7\"}}]}}}}",
+                    .{st.expected_sender},
+                ),
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &state,
+        .callback = callback,
+    };
+
+    var result = try client_instance.runCommandSourceWithAutoGasPaymentWithAccountProvider(
+        allocator,
+        .{
+            .commands_json = "[{\"kind\":\"TransferObjects\",\"objects\":[\"0xcoin\"],\"address\":\"0xreceiver\"}]",
+        },
+        .{
+            .sender = expected_sender,
+            .gas_budget = 100,
+        },
+        .{
+            .keystore_contents = .{
+                .contents = keystore_contents,
+                .preparation = .{ .from_keystore = true },
+            },
+        },
+        50,
+        .{ .execute_confirm_observe = .{ .timeout_ms = 100, .poll_ms = 0 } },
+    );
+    defer result.deinit(allocator);
+
+    switch (result) {
+        .observed => |observed| {
+            try testing.expectEqualStrings("provider-keystore-digest", observed.digest);
+            try testing.expectEqual(tx_result.ExecutionStatus.success, observed.insights.status);
+            try testing.expectEqualStrings(expected_sender, observed.insights.balance_changes[0].owner.?);
+        },
+        else => try testing.expect(false),
+    }
     try testing.expectEqual(@as(usize, 3), state.request_count);
 }
 
