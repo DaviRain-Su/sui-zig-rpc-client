@@ -4556,6 +4556,42 @@ pub const SuiRpcClient = struct {
         return try cloneMoveDiscoveredObjectIds(allocator, discovered_object_ids);
     }
 
+    fn getMoveObjectContentDiscoveredObjectIdsCachedBorrowed(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        response_cache: *std.ArrayList(MoveObjectContentResponseCacheEntry),
+        discovery_cache: *std.ArrayList(MoveObjectContentDiscoveryCacheEntry),
+        object_id: []const u8,
+    ) ![]const []const u8 {
+        for (discovery_cache.items) |entry| {
+            if (std.mem.eql(u8, entry.object_id, object_id)) {
+                return entry.discovered_object_ids;
+            }
+        }
+
+        const response = try self.getMoveObjectContentResponseCached(
+            allocator,
+            response_cache,
+            object_id,
+        );
+        defer allocator.free(response);
+
+        const discovered_object_ids = try collectDiscoveredObjectIdsFromObjectResponseContent(
+            allocator,
+            response,
+        );
+        errdefer freeMoveDiscoveredObjectIds(allocator, discovered_object_ids);
+
+        var entry = MoveObjectContentDiscoveryCacheEntry{
+            .object_id = try allocator.dupe(u8, object_id),
+            .discovered_object_ids = discovered_object_ids,
+        };
+        errdefer entry.deinit(allocator);
+
+        try discovery_cache.append(allocator, entry);
+        return discovery_cache.items[discovery_cache.items.len - 1].discovered_object_ids;
+    }
+
     fn getMoveDynamicFieldDiscoveredObjectIdsCached(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
@@ -4715,16 +4751,12 @@ pub const SuiRpcClient = struct {
 
         for (seed_object_ids) |object_id| {
             if (discovered_ids.items.len >= 16) break;
-            const seed_discovered_object_ids = self.getMoveObjectContentDiscoveredObjectIdsCached(
+            const seed_discovered_object_ids = self.getMoveObjectContentDiscoveredObjectIdsCachedBorrowed(
                 allocator,
                 object_content_cache,
                 object_content_discovery_cache,
                 object_id,
             ) catch continue;
-            defer {
-                for (seed_discovered_object_ids) |value| allocator.free(value);
-                allocator.free(seed_discovered_object_ids);
-            }
             for (seed_discovered_object_ids) |discovered_object_id| {
                 if (discovered_ids.items.len >= 16) break;
                 try appendUniqueMoveSelectedObjectId(allocator, &discovered_ids, discovered_object_id);
@@ -4841,16 +4873,12 @@ pub const SuiRpcClient = struct {
 
         for (seed_object_ids) |object_id| {
             if (discovered_ids.items.len >= 16) break;
-            const seed_discovered_object_ids = self.getMoveObjectContentDiscoveredObjectIdsCached(
+            const seed_discovered_object_ids = self.getMoveObjectContentDiscoveredObjectIdsCachedBorrowed(
                 allocator,
                 object_content_cache,
                 object_content_discovery_cache,
                 object_id,
             ) catch continue;
-            defer {
-                for (seed_discovered_object_ids) |value| allocator.free(value);
-                allocator.free(seed_discovered_object_ids);
-            }
             for (seed_discovered_object_ids) |discovered_object_id| {
                 if (discovered_ids.items.len >= 16) break;
                 try appendUniqueMoveSelectedObjectId(allocator, &discovered_ids, discovered_object_id);
@@ -5756,16 +5784,12 @@ pub const SuiRpcClient = struct {
 
             var matched_index: ?usize = null;
             for (selected_object_ids) |selected_object_id| {
-                const discovered_object_ids = self.getMoveObjectContentDiscoveredObjectIdsCached(
+                const discovered_object_ids = self.getMoveObjectContentDiscoveredObjectIdsCachedBorrowed(
                     allocator,
                     object_content_cache,
                     object_content_discovery_cache,
                     selected_object_id,
                 ) catch continue;
-                defer {
-                    for (discovered_object_ids) |value| allocator.free(value);
-                    allocator.free(discovered_object_ids);
-                }
 
                 const candidate_index = discoveredObjectIdsMatchingObjectIdIndex(
                     discovered_object_ids,
@@ -6328,16 +6352,12 @@ pub const SuiRpcClient = struct {
             @memset(candidate_scores, 0);
 
             for (selected_object_ids.explicit_object_ids) |selected_object_id| {
-                const discovered_object_ids = self.getMoveObjectContentDiscoveredObjectIdsCached(
+                const discovered_object_ids = self.getMoveObjectContentDiscoveredObjectIdsCachedBorrowed(
                     allocator,
                     object_content_cache,
                     object_content_discovery_cache,
                     selected_object_id,
                 ) catch continue;
-                defer {
-                    for (discovered_object_ids) |value| allocator.free(value);
-                    allocator.free(discovered_object_ids);
-                }
 
                 const candidate_index = discoveredObjectIdsMatchingObjectIdIndex(
                     discovered_object_ids,
@@ -6347,16 +6367,12 @@ pub const SuiRpcClient = struct {
             }
 
             for (selected_object_ids.auto_selected_object_ids) |selected_object_id| {
-                const discovered_object_ids = self.getMoveObjectContentDiscoveredObjectIdsCached(
+                const discovered_object_ids = self.getMoveObjectContentDiscoveredObjectIdsCachedBorrowed(
                     allocator,
                     object_content_cache,
                     object_content_discovery_cache,
                     selected_object_id,
                 ) catch continue;
-                defer {
-                    for (discovered_object_ids) |value| allocator.free(value);
-                    allocator.free(discovered_object_ids);
-                }
 
                 const candidate_index = discoveredObjectIdsMatchingObjectIdIndex(
                     discovered_object_ids,
@@ -6368,16 +6384,12 @@ pub const SuiRpcClient = struct {
             for (parameters) |other_parameter| {
                 if (other_parameter.owned_object_candidates) |owned_candidates| {
                     for (owned_candidates) |owned_candidate| {
-                        const discovered_object_ids = self.getMoveObjectContentDiscoveredObjectIdsCached(
+                        const discovered_object_ids = self.getMoveObjectContentDiscoveredObjectIdsCachedBorrowed(
                             allocator,
                             object_content_cache,
                             object_content_discovery_cache,
                             owned_candidate.object_id,
                         ) catch continue;
-                        defer {
-                            for (discovered_object_ids) |value| allocator.free(value);
-                            allocator.free(discovered_object_ids);
-                        }
 
                         const candidate_index = discoveredObjectIdsMatchingObjectIdIndex(
                             discovered_object_ids,
@@ -6389,16 +6401,12 @@ pub const SuiRpcClient = struct {
 
                 if (other_parameter.vector_item_owned_object_candidates) |owned_candidates| {
                     for (owned_candidates) |owned_candidate| {
-                        const discovered_object_ids = self.getMoveObjectContentDiscoveredObjectIdsCached(
+                        const discovered_object_ids = self.getMoveObjectContentDiscoveredObjectIdsCachedBorrowed(
                             allocator,
                             object_content_cache,
                             object_content_discovery_cache,
                             owned_candidate.object_id,
                         ) catch continue;
-                        defer {
-                            for (discovered_object_ids) |value| allocator.free(value);
-                            allocator.free(discovered_object_ids);
-                        }
 
                         const candidate_index = discoveredObjectIdsMatchingObjectIdIndex(
                             discovered_object_ids,
@@ -6450,16 +6458,12 @@ pub const SuiRpcClient = struct {
             defer allocator.free(candidate_scores);
             @memset(candidate_scores, 0);
             for (candidates, 0..) |candidate, index| {
-                const discovered_object_ids = self.getMoveObjectContentDiscoveredObjectIdsCached(
+                const discovered_object_ids = self.getMoveObjectContentDiscoveredObjectIdsCachedBorrowed(
                     allocator,
                     object_content_cache,
                     object_content_discovery_cache,
                     candidate.object_id,
                 ) catch continue;
-                defer {
-                    for (discovered_object_ids) |value| allocator.free(value);
-                    allocator.free(discovered_object_ids);
-                }
                 candidate_scores[index] += explicit_reference_weight * discoveredObjectIdsReferenceScore(
                     discovered_object_ids,
                     selected_object_ids.explicit_object_ids,
@@ -6515,16 +6519,12 @@ pub const SuiRpcClient = struct {
             @memset(candidate_scores, 0);
 
             for (candidates, 0..) |candidate, index| {
-                const discovered_object_ids = self.getMoveObjectContentDiscoveredObjectIdsCached(
+                const discovered_object_ids = self.getMoveObjectContentDiscoveredObjectIdsCachedBorrowed(
                     allocator,
                     object_content_cache,
                     object_content_discovery_cache,
                     candidate.object_id,
                 ) catch continue;
-                defer {
-                    for (discovered_object_ids) |value| allocator.free(value);
-                    allocator.free(discovered_object_ids);
-                }
                 candidate_scores[index] += explicit_reference_weight * discoveredObjectIdsReferenceScore(
                     discovered_object_ids,
                     selected_object_ids.explicit_object_ids,
@@ -6594,11 +6594,12 @@ pub const SuiRpcClient = struct {
         parameter_index: usize,
         candidate_index: usize,
         object_id: []const u8,
-        discovered_object_ids: [][]u8,
+        discovered_object_ids: []const []const u8,
         apply_component_bonus: bool,
 
         fn deinit(self: MoveCandidateGraphNode, allocator: std.mem.Allocator) void {
-            freeMoveDiscoveredObjectIds(allocator, self.discovered_object_ids);
+            _ = self;
+            _ = allocator;
         }
     };
 
@@ -6625,7 +6626,7 @@ pub const SuiRpcClient = struct {
     fn componentReferencesSelectedDiscoveredObjectIds(
         component_nodes: []const usize,
         nodes: []const MoveCandidateGraphNode,
-        selected_discovered_object_ids: []const [][]u8,
+        selected_discovered_object_ids: []const []const []const u8,
     ) usize {
         var count: usize = 0;
         for (selected_discovered_object_ids) |discovered_object_ids| {
@@ -6685,41 +6686,31 @@ pub const SuiRpcClient = struct {
         defer selected_object_ids.deinit(allocator);
 
         const explicit_selected_discovered_object_ids = try allocator.alloc(
-            [][]u8,
+            []const []const u8,
             selected_object_ids.explicit_object_ids.len,
         );
-        defer {
-            for (explicit_selected_discovered_object_ids) |discovered_object_ids| {
-                freeMoveDiscoveredObjectIds(allocator, discovered_object_ids);
-            }
-            allocator.free(explicit_selected_discovered_object_ids);
-        }
+        defer allocator.free(explicit_selected_discovered_object_ids);
         for (selected_object_ids.explicit_object_ids, 0..) |object_id, index| {
-            explicit_selected_discovered_object_ids[index] = self.getMoveObjectContentDiscoveredObjectIdsCached(
+            explicit_selected_discovered_object_ids[index] = self.getMoveObjectContentDiscoveredObjectIdsCachedBorrowed(
                 allocator,
                 object_content_cache,
                 object_content_discovery_cache,
                 object_id,
-            ) catch try allocator.alloc([]u8, 0);
+            ) catch &.{};
         }
 
         const auto_selected_discovered_object_ids = try allocator.alloc(
-            [][]u8,
+            []const []const u8,
             selected_object_ids.auto_selected_object_ids.len,
         );
-        defer {
-            for (auto_selected_discovered_object_ids) |discovered_object_ids| {
-                freeMoveDiscoveredObjectIds(allocator, discovered_object_ids);
-            }
-            allocator.free(auto_selected_discovered_object_ids);
-        }
+        defer allocator.free(auto_selected_discovered_object_ids);
         for (selected_object_ids.auto_selected_object_ids, 0..) |object_id, index| {
-            auto_selected_discovered_object_ids[index] = self.getMoveObjectContentDiscoveredObjectIdsCached(
+            auto_selected_discovered_object_ids[index] = self.getMoveObjectContentDiscoveredObjectIdsCachedBorrowed(
                 allocator,
                 object_content_cache,
                 object_content_discovery_cache,
                 object_id,
-            ) catch try allocator.alloc([]u8, 0);
+            ) catch &.{};
         }
 
         var nodes = std.ArrayList(MoveCandidateGraphNode).empty;
@@ -6733,13 +6724,12 @@ pub const SuiRpcClient = struct {
 
             if (parameter.shared_object_candidates) |candidates| {
                 for (candidates, 0..) |candidate, candidate_index| {
-                    const discovered_object_ids = self.getMoveObjectContentDiscoveredObjectIdsCached(
+                    const discovered_object_ids = self.getMoveObjectContentDiscoveredObjectIdsCachedBorrowed(
                         allocator,
                         object_content_cache,
                         object_content_discovery_cache,
                         candidate.object_id,
-                    ) catch try allocator.alloc([]u8, 0);
-                    errdefer freeMoveDiscoveredObjectIds(allocator, discovered_object_ids);
+                    ) catch &.{};
                     try nodes.append(allocator, .{
                         .kind = .shared,
                         .parameter_index = parameter_index,
@@ -6753,13 +6743,12 @@ pub const SuiRpcClient = struct {
 
             if (parameter.owned_object_candidates) |candidates| {
                 for (candidates, 0..) |candidate, candidate_index| {
-                    const discovered_object_ids = self.getMoveObjectContentDiscoveredObjectIdsCached(
+                    const discovered_object_ids = self.getMoveObjectContentDiscoveredObjectIdsCachedBorrowed(
                         allocator,
                         object_content_cache,
                         object_content_discovery_cache,
                         candidate.object_id,
-                    ) catch try allocator.alloc([]u8, 0);
-                    errdefer freeMoveDiscoveredObjectIds(allocator, discovered_object_ids);
+                    ) catch &.{};
                     try nodes.append(allocator, .{
                         .kind = .owned,
                         .parameter_index = parameter_index,
@@ -6773,13 +6762,12 @@ pub const SuiRpcClient = struct {
 
             if (parameter.vector_item_owned_object_candidates) |candidates| {
                 for (candidates, 0..) |candidate, candidate_index| {
-                    const discovered_object_ids = self.getMoveObjectContentDiscoveredObjectIdsCached(
+                    const discovered_object_ids = self.getMoveObjectContentDiscoveredObjectIdsCachedBorrowed(
                         allocator,
                         object_content_cache,
                         object_content_discovery_cache,
                         candidate.object_id,
-                    ) catch try allocator.alloc([]u8, 0);
-                    errdefer freeMoveDiscoveredObjectIds(allocator, discovered_object_ids);
+                    ) catch &.{};
                     try nodes.append(allocator, .{
                         .kind = .vector_owned,
                         .parameter_index = parameter_index,
@@ -20209,6 +20197,17 @@ test "getMoveObjectContentDiscoveredObjectIdsCached reuses cached discoveries af
     try testing.expectEqual(@as(usize, 2), second.len);
     try testing.expectEqualStrings("0xpool1", second[0]);
     try testing.expectEqualStrings("0xposition1", second[1]);
+
+    const borrowed = try client_instance.getMoveObjectContentDiscoveredObjectIdsCachedBorrowed(
+        allocator,
+        &response_cache,
+        &discovery_cache,
+        "0xregistry1",
+    );
+    try testing.expectEqual(@as(usize, 1), state.request_count);
+    try testing.expectEqual(@as(usize, 2), borrowed.len);
+    try testing.expectEqualStrings("0xpool1", borrowed[0]);
+    try testing.expectEqualStrings("0xposition1", borrowed[1]);
 }
 
 test "runObjectQueryAndSummarize supports typed object-get queries" {

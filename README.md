@@ -1037,6 +1037,7 @@ zig build run -- move function cetus_clmm_mainnet pool swap \
 同样地，seed object 的 `dynamic fields` 扫描现在也会在单次模板构建里缓存复用，不再因为 shared/owned fallback 交替推进而重复扫同一个对象。
 候选过滤阶段复用的 `object get --summarize` 读取现在也会在单次模板构建里缓存复用，所以相同 object id 不会因为多个参数或多轮联动重复做 summary 过滤。
 连通簇联合评分这层也不再反复扫原始 `showContent` JSON，而是直接复用前面已经缓存好的 content-derived object id 列表来判断候选之间的引用关系和锚定关系。
+而且这些 content-derived object id 在内部评分/发现 hot path 里现在会直接借用缓存结果，不再每次都 clone/free 一份临时列表。
 
 当某个 shared / owned candidate 已经进入跨参数联动评分时，summary 里的 candidate 现在还会带 `selection_score`，并按“分数降序、object id 升序”排序。对 shared candidate，这个分数会同时综合“已选 object 的直接引用”和“owned candidate 的引用提示”，前者权重更高；而且显式给出的 object 参数，会再比 auto-selected object 参数有更高权重。对 `vector<concrete object struct>`，`vector_item_owned_object_candidates` 也会按同样的引用分数排序，`auto_selected_arg_json` 会跟着输出这组排序后的对象向量。当前这套联动已经会多轮迭代到稳定，而且对仍然打平的参数，还会额外把 candidate graph 的连通簇大小和“是否被当前交易里已显式/已选对象锚定”一起作为 bonus 打进去，所以像 `Pool2 + Position2 + Receipt2*` 这种更完整、更自洽、而且已经被当前交易上下文指向的对象组合，也能自动压过只有 `Pool1 + Position1` 的更弱候选簇。这样即使当前还不能安全自动选中全部参数，你也能直接从输出里看出 CLI 认为哪组对象更接近最终可执行组合。
 
