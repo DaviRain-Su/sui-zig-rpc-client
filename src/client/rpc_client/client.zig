@@ -4303,6 +4303,11 @@ pub const SuiRpcClient = struct {
         }
 
         for (parameters) |parameter| {
+            if (parameter.shared_object_candidates) |candidates| {
+                for (candidates) |candidate| {
+                    try appendUniqueMoveSelectedObjectId(allocator, &collected, candidate.object_id);
+                }
+            }
             if (parameter.owned_object_candidates) |candidates| {
                 for (candidates) |candidate| {
                     try appendUniqueMoveSelectedObjectId(allocator, &collected, candidate.object_id);

@@ -129,6 +129,8 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
   events.
 - [x] Aggregate shared candidates discovered from events and owned-object
   content instead of treating the two sources as mutually exclusive.
+- [x] Use already-discovered shared candidates as additional seeds when
+  discovering other shared object parameters.
 - [ ] Improve fallback behavior for protocols that do not expose recent useful
   events.
 - [ ] Improve candidate stability for shared objects such as pools.
