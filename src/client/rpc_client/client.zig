@@ -4777,10 +4777,12 @@ pub const SuiRpcClient = struct {
                 try appendSelectedObjectIdsFromArgumentJsonValue(allocator, &explicit_object_ids, parsed.value);
             }
 
-            if (parameter.auto_selected_arg_json) |arg_json| {
-                const parsed = std.json.parseFromSlice(std.json.Value, allocator, arg_json, .{}) catch continue;
-                defer parsed.deinit();
-                try appendSelectedObjectIdsFromArgumentJsonValue(allocator, &auto_selected_object_ids, parsed.value);
+            if (!parameter.auto_selected_via_tiebreak) {
+                if (parameter.auto_selected_arg_json) |arg_json| {
+                    const parsed = std.json.parseFromSlice(std.json.Value, allocator, arg_json, .{}) catch continue;
+                    defer parsed.deinit();
+                    try appendSelectedObjectIdsFromArgumentJsonValue(allocator, &auto_selected_object_ids, parsed.value);
+                }
             }
         }
 
@@ -4918,7 +4920,6 @@ pub const SuiRpcClient = struct {
         for (parameters) |*parameter| {
             if (parameter.omitted_from_explicit_args) continue;
             if (parameter.explicit_arg_json != null) continue;
-            if (parameter.auto_selected_arg_json != null and !parameter.auto_selected_via_tiebreak) continue;
 
             const candidates = parameter.shared_object_candidates orelse continue;
             if (candidates.len <= 1) continue;
@@ -5119,7 +5120,6 @@ pub const SuiRpcClient = struct {
         for (parameters) |*parameter| {
             if (parameter.omitted_from_explicit_args) continue;
             if (parameter.explicit_arg_json != null) continue;
-            if (parameter.auto_selected_arg_json != null and !parameter.auto_selected_via_tiebreak) continue;
 
             const candidates = parameter.shared_object_candidates orelse continue;
             if (candidates.len <= 1) continue;
@@ -5217,7 +5217,6 @@ pub const SuiRpcClient = struct {
         for (parameters) |*parameter| {
             if (parameter.omitted_from_explicit_args) continue;
             if (parameter.explicit_arg_json != null) continue;
-            if (parameter.auto_selected_arg_json != null and !parameter.auto_selected_via_tiebreak) continue;
             if (coinTypeFromMoveSignature(parameter.signature) != null) continue;
 
             const candidates = parameter.owned_object_candidates orelse continue;
@@ -5311,6 +5310,248 @@ pub const SuiRpcClient = struct {
         }
     }
 
+    fn resetMoveParameterCandidateSelectionScores(
+        parameters: []move_result.OwnedMoveParameterSummary,
+    ) void {
+        for (parameters) |*parameter| {
+            if (parameter.shared_object_candidates) |candidates| {
+                for (candidates) |*candidate| candidate.selection_score = 0;
+            }
+            if (parameter.owned_object_candidates) |candidates| {
+                for (candidates) |*candidate| candidate.selection_score = 0;
+            }
+            if (parameter.vector_item_owned_object_candidates) |candidates| {
+                for (candidates) |*candidate| candidate.selection_score = 0;
+            }
+        }
+    }
+
+    fn moveParameterNeedsJointComponentScoring(
+        parameter: move_result.OwnedMoveParameterSummary,
+    ) bool {
+        if (coinTypeFromMoveSignature(parameter.signature) != null) return false;
+        if (vectorElementTypeSignature(parameter.signature)) |element_signature| {
+            if (coinTypeFromCoinStructType(element_signature) != null) return false;
+        }
+        if (parameter.shared_object_candidates) |candidates| {
+            if (candidates.len > 1 and candidates[0].selection_score == candidates[1].selection_score) return true;
+        }
+        if (parameter.owned_object_candidates) |candidates| {
+            if (candidates.len > 1 and candidates[0].selection_score == candidates[1].selection_score) return true;
+        }
+        if (parameter.vector_item_owned_object_candidates) |candidates| {
+            if (candidates.len > 1 and candidates[0].selection_score == candidates[1].selection_score) return true;
+        }
+        return false;
+    }
+
+    const MoveCandidateGraphNodeKind = enum {
+        shared,
+        owned,
+        vector_owned,
+    };
+
+    const MoveCandidateGraphNode = struct {
+        kind: MoveCandidateGraphNodeKind,
+        parameter_index: usize,
+        candidate_index: usize,
+        object_id: []const u8,
+        response_json: ?[]u8,
+        apply_component_bonus: bool,
+
+        fn deinit(self: MoveCandidateGraphNode, allocator: std.mem.Allocator) void {
+            if (self.response_json) |value| allocator.free(value);
+        }
+    };
+
+    fn moveCandidateGraphNodeSelectionScorePointer(
+        parameters: []move_result.OwnedMoveParameterSummary,
+        node: MoveCandidateGraphNode,
+    ) *usize {
+        return switch (node.kind) {
+            .shared => &parameters[node.parameter_index].shared_object_candidates.?[node.candidate_index].selection_score,
+            .owned => &parameters[node.parameter_index].owned_object_candidates.?[node.candidate_index].selection_score,
+            .vector_owned => &parameters[node.parameter_index].vector_item_owned_object_candidates.?[node.candidate_index].selection_score,
+        };
+    }
+
+    fn objectResponseContentReferencesObjectId(
+        allocator: std.mem.Allocator,
+        response_json: []const u8,
+        object_id: []const u8,
+    ) bool {
+        return objectResponseContentReferenceScore(allocator, response_json, &.{object_id}) != 0;
+    }
+
+    fn moveCandidateGraphNodesAreConnected(
+        allocator: std.mem.Allocator,
+        left: MoveCandidateGraphNode,
+        right: MoveCandidateGraphNode,
+    ) bool {
+        if (left.parameter_index == right.parameter_index) return false;
+        if (left.response_json) |response| {
+            if (objectResponseContentReferencesObjectId(allocator, response, right.object_id)) return true;
+        }
+        if (right.response_json) |response| {
+            if (objectResponseContentReferencesObjectId(allocator, response, left.object_id)) return true;
+        }
+        return false;
+    }
+
+    fn applyJointCandidateComponentSelectionHints(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        parameters: []move_result.OwnedMoveParameterSummary,
+    ) !void {
+        var has_ambiguous_candidates = false;
+        for (parameters) |parameter| {
+            if (moveParameterNeedsJointComponentScoring(parameter)) {
+                has_ambiguous_candidates = true;
+                break;
+            }
+        }
+        if (!has_ambiguous_candidates) return;
+
+        var nodes = std.ArrayList(MoveCandidateGraphNode).empty;
+        defer {
+            for (nodes.items) |node| node.deinit(allocator);
+            nodes.deinit(allocator);
+        }
+
+        for (parameters, 0..) |parameter, parameter_index| {
+            const apply_component_bonus = moveParameterNeedsJointComponentScoring(parameter);
+
+            if (parameter.shared_object_candidates) |candidates| {
+                for (candidates, 0..) |candidate, candidate_index| {
+                    try nodes.append(allocator, .{
+                        .kind = .shared,
+                        .parameter_index = parameter_index,
+                        .candidate_index = candidate_index,
+                        .object_id = candidate.object_id,
+                        .response_json = self.getObjectWithOptions(candidate.object_id, .{ .show_content = true }) catch null,
+                        .apply_component_bonus = apply_component_bonus,
+                    });
+                }
+            }
+
+            if (parameter.owned_object_candidates) |candidates| {
+                for (candidates, 0..) |candidate, candidate_index| {
+                    try nodes.append(allocator, .{
+                        .kind = .owned,
+                        .parameter_index = parameter_index,
+                        .candidate_index = candidate_index,
+                        .object_id = candidate.object_id,
+                        .response_json = self.getObjectWithOptions(candidate.object_id, .{ .show_content = true }) catch null,
+                        .apply_component_bonus = apply_component_bonus,
+                    });
+                }
+            }
+
+            if (parameter.vector_item_owned_object_candidates) |candidates| {
+                for (candidates, 0..) |candidate, candidate_index| {
+                    try nodes.append(allocator, .{
+                        .kind = .vector_owned,
+                        .parameter_index = parameter_index,
+                        .candidate_index = candidate_index,
+                        .object_id = candidate.object_id,
+                        .response_json = self.getObjectWithOptions(candidate.object_id, .{ .show_content = true }) catch null,
+                        .apply_component_bonus = apply_component_bonus,
+                    });
+                }
+            }
+        }
+
+        if (nodes.items.len <= 1) return;
+
+        var visited = try allocator.alloc(bool, nodes.items.len);
+        defer allocator.free(visited);
+        @memset(visited, false);
+
+        var component_sizes = try allocator.alloc(usize, nodes.items.len);
+        defer allocator.free(component_sizes);
+        @memset(component_sizes, 1);
+
+        var stack = std.ArrayList(usize).empty;
+        defer stack.deinit(allocator);
+        var component_nodes = std.ArrayList(usize).empty;
+        defer component_nodes.deinit(allocator);
+
+        for (nodes.items, 0..) |_, start_index| {
+            if (visited[start_index]) continue;
+
+            stack.clearRetainingCapacity();
+            component_nodes.clearRetainingCapacity();
+            try stack.append(allocator, start_index);
+            visited[start_index] = true;
+
+            while (stack.pop()) |current_index| {
+                try component_nodes.append(allocator, current_index);
+
+                for (nodes.items, 0..) |candidate, other_index| {
+                    if (visited[other_index]) continue;
+                    if (!moveCandidateGraphNodesAreConnected(
+                        allocator,
+                        nodes.items[current_index],
+                        candidate,
+                    )) continue;
+                    visited[other_index] = true;
+                    try stack.append(allocator, other_index);
+                }
+            }
+
+            for (component_nodes.items) |node_index| {
+                component_sizes[node_index] = component_nodes.items.len;
+            }
+        }
+
+        for (nodes.items, 0..) |node, node_index| {
+            if (!node.apply_component_bonus) continue;
+            if (component_sizes[node_index] <= 1) continue;
+            moveCandidateGraphNodeSelectionScorePointer(parameters, node).* += component_sizes[node_index] - 1;
+        }
+
+        for (parameters) |*parameter| {
+            if (parameter.shared_object_candidates) |candidates| {
+                sortSharedObjectCandidatesByScore(candidates);
+                if (parameter.explicit_arg_json == null) {
+                    if (selectSortedSharedCandidateToken(parameter.*, candidates)) |selection| {
+                        replaceMoveParameterAutoSelectedArgJson(
+                            allocator,
+                            parameter,
+                            try buildAutoSelectedScalarArgJson(allocator, selection.token),
+                        );
+                        parameter.auto_selected_via_tiebreak = selection.decision.used_tiebreak;
+                    }
+                }
+            }
+
+            if (parameter.owned_object_candidates) |candidates| {
+                sortOwnedObjectCandidatesByScore(candidates);
+                if (parameter.explicit_arg_json == null) {
+                    if (selectSortedOwnedCandidateToken(candidates)) |selection| {
+                        replaceMoveParameterAutoSelectedArgJson(
+                            allocator,
+                            parameter,
+                            try buildAutoSelectedScalarArgJson(allocator, selection.token),
+                        );
+                        parameter.auto_selected_via_tiebreak = selection.decision.used_tiebreak;
+                    }
+                }
+            }
+
+            if (parameter.vector_item_owned_object_candidates) |candidates| {
+                sortOwnedObjectCandidatesByScore(candidates);
+                if (parameter.explicit_arg_json == null) {
+                    replaceMoveParameterAutoSelectedArgJson(
+                        allocator,
+                        parameter,
+                        try buildAutoSelectedVectorArgJson(allocator, candidates),
+                    );
+                }
+            }
+        }
+    }
+
     const move_candidate_resolution_max_rounds: usize = 4;
 
     fn updateMoveSelectionStateHasher(
@@ -5383,6 +5624,7 @@ pub const SuiRpcClient = struct {
         while (round < move_candidate_resolution_max_rounds) : (round += 1) {
             const before = moveParameterSelectionStateFingerprint(parameters);
 
+            resetMoveParameterCandidateSelectionScores(parameters);
             try self.populateSharedObjectCandidateFallbacksFromMoveParameters(allocator, parameters);
             try self.applyReferencedSharedObjectCandidateSelectionHints(allocator, parameters);
             try self.applySharedCandidateSelectionHintsFromOwnedCandidates(allocator, parameters);
@@ -5390,6 +5632,7 @@ pub const SuiRpcClient = struct {
             try self.applyReferencedSharedObjectCandidateSelectionHints(allocator, parameters);
             try self.applyReferencedOwnedObjectCandidateSelectionHints(allocator, parameters);
             try self.applyReferencedVectorOwnedObjectCandidateSelectionHints(allocator, parameters);
+            try self.applyJointCandidateComponentSelectionHints(allocator, parameters);
 
             const after = moveParameterSelectionStateFingerprint(parameters);
             if (before == after) break;

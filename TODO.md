@@ -59,6 +59,8 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
   candidates, with explicit `auto_selected_tiebreak` visibility.
 - [x] Iterative multi-pass candidate propagation until shared/owned selections
   reach a stable fixed point.
+- [x] Connected-component scoring bonuses for tied candidate sets so larger,
+  more internally consistent object clusters rank higher.
 
 ### Coin automation
 
