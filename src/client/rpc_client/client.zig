@@ -4719,6 +4719,17 @@ pub const SuiRpcClient = struct {
         }
     }
 
+    fn tryAppendSelectedObjectIdsFromArgumentJsonValue(
+        allocator: std.mem.Allocator,
+        collected: *std.ArrayList([]u8),
+        value: std.json.Value,
+    ) !void {
+        appendSelectedObjectIdsFromArgumentJsonValue(allocator, collected, value) catch |err| switch (err) {
+            error.InvalidCli => {},
+            else => return err,
+        };
+    }
+
     fn collectSelectedObjectIdsFromMoveParameters(
         allocator: std.mem.Allocator,
         parameters: []const move_result.OwnedMoveParameterSummary,
@@ -6104,31 +6115,62 @@ pub const SuiRpcClient = struct {
         return try output.toOwnedSlice(allocator);
     }
 
+    const SelectedCoinCandidate = struct {
+        object_id: []const u8,
+        token: []const u8,
+    };
+
+    fn coinCandidateObjectIdIsExcluded(
+        excluded_object_ids: []const []const u8,
+        object_id: []const u8,
+    ) bool {
+        for (excluded_object_ids) |excluded_object_id| {
+            if (std.mem.eql(u8, excluded_object_id, object_id)) return true;
+        }
+        return false;
+    }
+
+    fn selectSmallestSufficientCoinCandidateExcluding(
+        candidates: []const move_result.OwnedMoveObjectCandidate,
+        min_balance: u64,
+        excluded_object_ids: []const []const u8,
+    ) ?SelectedCoinCandidate {
+        var selected: ?SelectedCoinCandidate = null;
+        var selected_balance: u64 = 0;
+        for (candidates) |candidate| {
+            if (coinCandidateObjectIdIsExcluded(excluded_object_ids, candidate.object_id)) continue;
+            const balance = candidate.balance orelse continue;
+            if (balance < min_balance) continue;
+            if (selected == null or balance < selected_balance) {
+                selected = .{
+                    .object_id = candidate.object_id,
+                    .token = candidate.object_input_select_token,
+                };
+                selected_balance = balance;
+            }
+        }
+        return selected;
+    }
+
     fn selectSmallestSufficientCoinCandidateToken(
         candidates: []const move_result.OwnedMoveObjectCandidate,
         min_balance: u64,
     ) ?[]const u8 {
-        var selected_token: ?[]const u8 = null;
-        var selected_balance: u64 = 0;
-        for (candidates) |candidate| {
-            const balance = candidate.balance orelse continue;
-            if (balance < min_balance) continue;
-            if (selected_token == null or balance < selected_balance) {
-                selected_token = candidate.object_input_select_token;
-                selected_balance = balance;
-            }
-        }
-        return selected_token;
+        return if (selectSmallestSufficientCoinCandidateExcluding(candidates, min_balance, &.{})) |selected|
+            selected.token
+        else
+            null;
     }
 
-    fn appendCoveringCoinCandidateTokens(
+    fn appendCoveringCoinCandidatesExcluding(
         allocator: std.mem.Allocator,
-        selected_tokens: *std.ArrayList([]const u8),
+        selected_candidates: *std.ArrayList(SelectedCoinCandidate),
         candidates: []const move_result.OwnedMoveObjectCandidate,
         min_balance: u64,
+        excluded_object_ids: []const []const u8,
     ) !bool {
-        if (selectSmallestSufficientCoinCandidateToken(candidates, min_balance)) |token| {
-            try selected_tokens.append(allocator, token);
+        if (selectSmallestSufficientCoinCandidateExcluding(candidates, min_balance, excluded_object_ids)) |selected| {
+            try selected_candidates.append(allocator, selected);
             return true;
         }
 
@@ -6142,6 +6184,7 @@ pub const SuiRpcClient = struct {
             var next_balance: u64 = 0;
             for (candidates, 0..) |candidate, index| {
                 if (used[index]) continue;
+                if (coinCandidateObjectIdIsExcluded(excluded_object_ids, candidate.object_id)) continue;
                 const balance = candidate.balance orelse continue;
                 if (next_index == null or balance > next_balance) {
                     next_index = index;
@@ -6150,10 +6193,35 @@ pub const SuiRpcClient = struct {
             }
             const index = next_index orelse return false;
             used[index] = true;
-            try selected_tokens.append(allocator, candidates[index].object_input_select_token);
+            try selected_candidates.append(allocator, .{
+                .object_id = candidates[index].object_id,
+                .token = candidates[index].object_input_select_token,
+            });
             total_balance +|= next_balance;
         }
 
+        return true;
+    }
+
+    fn appendCoveringCoinCandidateTokens(
+        allocator: std.mem.Allocator,
+        selected_tokens: *std.ArrayList([]const u8),
+        candidates: []const move_result.OwnedMoveObjectCandidate,
+        min_balance: u64,
+    ) !bool {
+        var selected_candidates = std.ArrayList(SelectedCoinCandidate).empty;
+        defer selected_candidates.deinit(allocator);
+        const found = try appendCoveringCoinCandidatesExcluding(
+            allocator,
+            &selected_candidates,
+            candidates,
+            min_balance,
+            &.{},
+        );
+        if (!found) return false;
+        for (selected_candidates.items) |selected| {
+            try selected_tokens.append(allocator, selected.token);
+        }
         return true;
     }
 
@@ -6272,6 +6340,11 @@ pub const SuiRpcClient = struct {
         var paired_coin_indices = try allocator.alloc(bool, parameters.len);
         defer allocator.free(paired_coin_indices);
         @memset(paired_coin_indices, false);
+        var reserved_coin_object_ids = std.ArrayList([]u8).empty;
+        defer {
+            for (reserved_coin_object_ids.items) |value| allocator.free(value);
+            reserved_coin_object_ids.deinit(allocator);
+        }
 
         for (parameters, 0..) |parameter, index| {
             if (parameter.omitted_from_explicit_args) continue;
@@ -6295,20 +6368,42 @@ pub const SuiRpcClient = struct {
 
             if (coinTypeFromMoveSignature(target.signature) != null) {
                 if (target.owned_object_candidates) |candidates| {
-                    const selected_value = if (selectSmallestSufficientCoinCandidateToken(candidates, min_balance)) |token|
-                        try buildAutoSelectedScalarArgJson(allocator, token)
-                    else
-                        null;
+                    const selected_value = if (selectSmallestSufficientCoinCandidateExcluding(
+                        candidates,
+                        min_balance,
+                        reserved_coin_object_ids.items,
+                    )) |selected| blk: {
+                        try reserved_coin_object_ids.append(allocator, try allocator.dupe(u8, selected.object_id));
+                        break :blk try buildAutoSelectedScalarArgJson(allocator, selected.token);
+                    } else null;
                     replaceMoveParameterAutoSelectedArgJson(allocator, target, selected_value);
                 }
             } else if (vectorElementTypeSignature(target.signature)) |element_signature| {
                 if (coinTypeFromCoinStructType(element_signature) != null) {
                     if (target.vector_item_owned_object_candidates) |candidates| {
-                        const selected_value = try buildCoveringCoinVectorArgJson(
+                        var selected_candidates = std.ArrayList(SelectedCoinCandidate).empty;
+                        defer selected_candidates.deinit(allocator);
+                        const found = try appendCoveringCoinCandidatesExcluding(
                             allocator,
+                            &selected_candidates,
                             candidates,
                             min_balance,
+                            reserved_coin_object_ids.items,
                         );
+                        const selected_value = if (found) blk: {
+                            for (selected_candidates.items) |selected| {
+                                try reserved_coin_object_ids.append(allocator, try allocator.dupe(u8, selected.object_id));
+                            }
+                            var selected_tokens = std.ArrayList([]const u8).empty;
+                            defer selected_tokens.deinit(allocator);
+                            for (selected_candidates.items) |selected| {
+                                try selected_tokens.append(allocator, selected.token);
+                            }
+                            break :blk try buildAutoSelectedVectorArgJsonFromTokens(
+                                allocator,
+                                selected_tokens.items,
+                            );
+                        } else null;
                         replaceMoveParameterAutoSelectedArgJson(allocator, target, selected_value);
                     }
                 }
@@ -6456,6 +6551,11 @@ pub const SuiRpcClient = struct {
         var paired_coin_indices = try allocator.alloc(bool, summary.parameters.len);
         defer allocator.free(paired_coin_indices);
         @memset(paired_coin_indices, false);
+        var reserved_coin_object_ids = std.ArrayList([]u8).empty;
+        defer {
+            for (reserved_coin_object_ids.items) |value| allocator.free(value);
+            reserved_coin_object_ids.deinit(allocator);
+        }
         var needs_split = false;
         for (summary.parameters, 0..) |parameter, index| {
             if (parameter.omitted_from_explicit_args) continue;
@@ -6506,25 +6606,36 @@ pub const SuiRpcClient = struct {
                     owned_source_jsons.deinit(allocator);
                 }
 
-                const source_json = if (moveParameterAutoSelectedSplitSourceArgJson(parameter)) |value|
-                    value
-                else blk: {
+                const source_json = blk: {
+                    if (parameter.explicit_arg_json) |value| {
+                        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, value, .{});
+                        defer parsed.deinit();
+                        try tryAppendSelectedObjectIdsFromArgumentJsonValue(
+                            allocator,
+                            &reserved_coin_object_ids,
+                            parsed.value,
+                        );
+                        break :blk value;
+                    }
+
                     if (parameter.explicit_arg_json == null) {
                         if (parameter.owned_object_candidates) |candidates| {
-                            var selected_tokens = std.ArrayList([]const u8).empty;
-                            defer selected_tokens.deinit(allocator);
-                            const found = try appendCoveringCoinCandidateTokens(
+                            var selected_candidates = std.ArrayList(SelectedCoinCandidate).empty;
+                            defer selected_candidates.deinit(allocator);
+                            const found = try appendCoveringCoinCandidatesExcluding(
                                 allocator,
-                                &selected_tokens,
+                                &selected_candidates,
                                 candidates,
                                 min_balance,
+                                reserved_coin_object_ids.items,
                             );
-                            if (found and selected_tokens.items.len != 0) {
-                                for (selected_tokens.items) |token| {
+                            if (found and selected_candidates.items.len != 0) {
+                                for (selected_candidates.items) |selected| {
                                     try owned_source_jsons.append(
                                         allocator,
-                                        try buildAutoSelectedScalarArgJson(allocator, token),
+                                        try buildAutoSelectedScalarArgJson(allocator, selected.token),
                                     );
+                                    try reserved_coin_object_ids.append(allocator, try allocator.dupe(u8, selected.object_id));
                                 }
                                 const destination_json = owned_source_jsons.items[0];
                                 if (owned_source_jsons.items.len > 1) {
@@ -6544,20 +6655,22 @@ pub const SuiRpcClient = struct {
                         if (vectorElementTypeSignature(parameter.signature)) |element_signature| {
                             if (coinTypeFromCoinStructType(element_signature) != null) {
                                 if (parameter.vector_item_owned_object_candidates) |candidates| {
-                                    var selected_tokens = std.ArrayList([]const u8).empty;
-                                    defer selected_tokens.deinit(allocator);
-                                    const found = try appendCoveringCoinCandidateTokens(
+                                    var selected_candidates = std.ArrayList(SelectedCoinCandidate).empty;
+                                    defer selected_candidates.deinit(allocator);
+                                    const found = try appendCoveringCoinCandidatesExcluding(
                                         allocator,
-                                        &selected_tokens,
+                                        &selected_candidates,
                                         candidates,
                                         min_balance,
+                                        reserved_coin_object_ids.items,
                                     );
-                                    if (found and selected_tokens.items.len != 0) {
-                                        for (selected_tokens.items) |token| {
+                                    if (found and selected_candidates.items.len != 0) {
+                                        for (selected_candidates.items) |selected| {
                                             try owned_source_jsons.append(
                                                 allocator,
-                                                try buildAutoSelectedScalarArgJson(allocator, token),
+                                                try buildAutoSelectedScalarArgJson(allocator, selected.token),
                                             );
+                                            try reserved_coin_object_ids.append(allocator, try allocator.dupe(u8, selected.object_id));
                                         }
                                         const destination_json = owned_source_jsons.items[0];
                                         if (owned_source_jsons.items.len > 1) {
@@ -6577,8 +6690,16 @@ pub const SuiRpcClient = struct {
                             }
                         }
                     }
-
-                    if (moveParameterSplitSourceArgJson(parameter)) |value| break :blk value;
+                    if (moveParameterAutoSelectedSplitSourceArgJson(parameter)) |value| {
+                        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, value, .{});
+                        defer parsed.deinit();
+                        try tryAppendSelectedObjectIdsFromArgumentJsonValue(
+                            allocator,
+                            &reserved_coin_object_ids,
+                            parsed.value,
+                        );
+                        break :blk value;
+                    }
                     return null;
                 };
 
@@ -7144,7 +7265,6 @@ pub const SuiRpcClient = struct {
             allocator,
             preferred_resolution,
         );
-        errdefer allocator.free(preferred_resolution_json);
         defer allocator.free(preferred_resolution_json);
         const move_call_command_json = try buildMoveFunctionCommandTemplateJson(
             allocator,
@@ -7204,12 +7324,11 @@ pub const SuiRpcClient = struct {
             )
         else
             null;
-        errdefer if (preferred_move_call_command_json) |value| allocator.free(value);
+        defer if (preferred_move_call_command_json) |value| allocator.free(value);
         var preferred_commands_json = if (preferred_move_call_command_json) |value|
             try buildMoveFunctionCommandsTemplateJson(allocator, value)
         else
             null;
-        if (preferred_move_call_command_json) |value| allocator.free(value);
         errdefer if (preferred_commands_json) |value| allocator.free(value);
 
         const split_preferred_commands_json = try buildMoveFunctionSplitCoinPreferredCommandsJson(

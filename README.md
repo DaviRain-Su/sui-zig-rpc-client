@@ -922,6 +922,8 @@ zig build run -- events \
 
 这套规则也已经能处理多币、多金额的声明顺序配对。例如 `vector<Coin<A>>, vector<Coin<B>>, u64, u64` 这类签名里，CLI 会按参数声明顺序把两个 trailing amount 依次配对到前面的两个 coin 参数，并分别生成自己的 `MergeCoins` / `SplitCoins` / `MakeMoveVec` 片段，再把两边结果一起接到同一个 `MoveCall` 里。
 
+对同币种的多标量 coin 参数，这套 preferred 规划现在也会避免重复复用同一枚 owned coin。也就是说，像 `Coin<SUI>, Coin<SUI>, u64, u64` 这类签名在自动选币时，会优先给两个参数分配不同的 source coin；只有真的没有足够的独立候选时，CLI 才会停在未解析，而不会生成表面可执行、实际会因为一枚 coin 被业务参数重复占用而冲突的模板。
+
 这层模板现在同时覆盖两条路径：
 - typed `--package/--module/--function` argv
 - 更通用的 `--commands` request artifact

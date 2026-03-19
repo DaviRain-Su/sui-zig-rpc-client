@@ -75,6 +75,8 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
   parameters for preferred split planning.
 - [x] `MergeCoins + SplitCoins + MakeMoveVec` planning for `vector<Coin<T>>,
   amount` preferred templates.
+- [x] Avoid reusing the same owned business coin across multiple `Coin<T>`
+  parameters when auto-selecting and planning preferred split templates.
 
 ## Highest Priority Remaining Work
 
