@@ -77,6 +77,8 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
   amount` preferred templates.
 - [x] Avoid reusing the same owned business coin across multiple `Coin<T>`
   parameters when auto-selecting and planning preferred split templates.
+- [x] Avoid reusing already-selected scalar business coins inside later
+  `vector<Coin<T>>` auto-selected parameters.
 
 ## Highest Priority Remaining Work
 

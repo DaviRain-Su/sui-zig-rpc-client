@@ -6097,6 +6097,42 @@ pub const SuiRpcClient = struct {
         return null;
     }
 
+    fn computeMoveCoinAmountHints(
+        allocator: std.mem.Allocator,
+        parameters: []const move_result.OwnedMoveParameterSummary,
+    ) ![]?u64 {
+        var amount_hints = try allocator.alloc(?u64, parameters.len);
+        errdefer allocator.free(amount_hints);
+        for (amount_hints) |*slot| slot.* = null;
+
+        var paired_coin_indices = try allocator.alloc(bool, parameters.len);
+        defer allocator.free(paired_coin_indices);
+        @memset(paired_coin_indices, false);
+
+        for (parameters, 0..) |parameter, index| {
+            if (parameter.omitted_from_explicit_args) continue;
+            const min_balance = parseExplicitCoinBalanceArgJson(allocator, parameter) orelse continue;
+
+            const target_index = blk: {
+                for (parameters[0..index], 0..) |candidate, candidate_index| {
+                    if (paired_coin_indices[candidate_index]) continue;
+                    if (candidate.omitted_from_explicit_args) continue;
+                    if (candidate.explicit_arg_json != null) continue;
+                    if (coinTypeFromMoveSignature(candidate.signature) != null) break :blk candidate_index;
+                    if (vectorElementTypeSignature(candidate.signature)) |element_signature| {
+                        if (coinTypeFromCoinStructType(element_signature) != null) break :blk candidate_index;
+                    }
+                }
+                break :blk null;
+            } orelse continue;
+
+            paired_coin_indices[target_index] = true;
+            amount_hints[target_index] = min_balance;
+        }
+
+        return amount_hints;
+    }
+
     fn buildAutoSelectedVectorArgJsonFromTokens(
         allocator: std.mem.Allocator,
         tokens: []const []const u8,
@@ -6201,6 +6237,157 @@ pub const SuiRpcClient = struct {
         }
 
         return true;
+    }
+
+    fn appendAllCoinCandidatesExcluding(
+        allocator: std.mem.Allocator,
+        selected_candidates: *std.ArrayList(SelectedCoinCandidate),
+        candidates: []const move_result.OwnedMoveObjectCandidate,
+        excluded_object_ids: []const []const u8,
+    ) !bool {
+        for (candidates) |candidate| {
+            if (coinCandidateObjectIdIsExcluded(excluded_object_ids, candidate.object_id)) continue;
+            try selected_candidates.append(allocator, .{
+                .object_id = candidate.object_id,
+                .token = candidate.object_input_select_token,
+            });
+        }
+        return selected_candidates.items.len != 0;
+    }
+
+    fn selectLargestBalanceCoinCandidateExcluding(
+        candidates: []const move_result.OwnedMoveObjectCandidate,
+        excluded_object_ids: []const []const u8,
+    ) ?SelectedCoinCandidate {
+        var selected: ?SelectedCoinCandidate = null;
+        var selected_balance: u64 = 0;
+        for (candidates) |candidate| {
+            if (coinCandidateObjectIdIsExcluded(excluded_object_ids, candidate.object_id)) continue;
+            const balance = candidate.balance orelse continue;
+            if (selected == null or balance > selected_balance) {
+                selected = .{
+                    .object_id = candidate.object_id,
+                    .token = candidate.object_input_select_token,
+                };
+                selected_balance = balance;
+            }
+        }
+        return selected;
+    }
+
+    fn appendReservedMoveObjectIdsFromArgumentJsonText(
+        allocator: std.mem.Allocator,
+        reserved_object_ids: *std.ArrayList([]u8),
+        arg_json: []const u8,
+    ) !void {
+        const parsed = std.json.parseFromSlice(std.json.Value, allocator, arg_json, .{}) catch return;
+        defer parsed.deinit();
+        try tryAppendSelectedObjectIdsFromArgumentJsonValue(
+            allocator,
+            reserved_object_ids,
+            parsed.value,
+        );
+    }
+
+    fn applyCrossParameterBusinessCoinSelectionHints(
+        allocator: std.mem.Allocator,
+        parameters: []move_result.OwnedMoveParameterSummary,
+    ) !void {
+        const amount_hints = try computeMoveCoinAmountHints(allocator, parameters);
+        defer allocator.free(amount_hints);
+
+        var reserved_coin_object_ids = std.ArrayList([]u8).empty;
+        defer {
+            for (reserved_coin_object_ids.items) |value| allocator.free(value);
+            reserved_coin_object_ids.deinit(allocator);
+        }
+
+        for (parameters, 0..) |*parameter, index| {
+            if (parameter.omitted_from_explicit_args) continue;
+
+            if (parameter.explicit_arg_json) |value| {
+                try appendReservedMoveObjectIdsFromArgumentJsonText(
+                    allocator,
+                    &reserved_coin_object_ids,
+                    value,
+                );
+                continue;
+            }
+
+            if (coinTypeFromMoveSignature(parameter.signature) != null) {
+                if (parameter.owned_object_candidates) |candidates| {
+                    const selected = if (amount_hints[index]) |min_balance|
+                        selectSmallestSufficientCoinCandidateExcluding(
+                            candidates,
+                            min_balance,
+                            reserved_coin_object_ids.items,
+                        )
+                    else
+                        selectLargestBalanceCoinCandidateExcluding(
+                            candidates,
+                            reserved_coin_object_ids.items,
+                        );
+                    const selected_value = if (selected) |value| blk: {
+                        try reserved_coin_object_ids.append(
+                            allocator,
+                            try allocator.dupe(u8, value.object_id),
+                        );
+                        break :blk try buildAutoSelectedScalarArgJson(allocator, value.token);
+                    } else null;
+                    replaceMoveParameterAutoSelectedArgJson(allocator, parameter, selected_value);
+                    continue;
+                }
+            }
+
+            if (vectorElementTypeSignature(parameter.signature)) |element_signature| {
+                if (coinTypeFromCoinStructType(element_signature) != null) {
+                    if (parameter.vector_item_owned_object_candidates) |candidates| {
+                        var selected_candidates = std.ArrayList(SelectedCoinCandidate).empty;
+                        defer selected_candidates.deinit(allocator);
+                        const found = if (amount_hints[index]) |min_balance|
+                            try appendCoveringCoinCandidatesExcluding(
+                                allocator,
+                                &selected_candidates,
+                                candidates,
+                                min_balance,
+                                reserved_coin_object_ids.items,
+                            )
+                        else
+                            try appendAllCoinCandidatesExcluding(
+                                allocator,
+                                &selected_candidates,
+                                candidates,
+                                reserved_coin_object_ids.items,
+                            );
+                        const selected_value = if (found) blk: {
+                            var selected_tokens = std.ArrayList([]const u8).empty;
+                            defer selected_tokens.deinit(allocator);
+                            for (selected_candidates.items) |selected| {
+                                try reserved_coin_object_ids.append(
+                                    allocator,
+                                    try allocator.dupe(u8, selected.object_id),
+                                );
+                                try selected_tokens.append(allocator, selected.token);
+                            }
+                            break :blk try buildAutoSelectedVectorArgJsonFromTokens(
+                                allocator,
+                                selected_tokens.items,
+                            );
+                        } else null;
+                        replaceMoveParameterAutoSelectedArgJson(allocator, parameter, selected_value);
+                        continue;
+                    }
+                }
+            }
+
+            if (parameter.auto_selected_arg_json) |value| {
+                try appendReservedMoveObjectIdsFromArgumentJsonText(
+                    allocator,
+                    &reserved_coin_object_ids,
+                    value,
+                );
+            }
+        }
     }
 
     fn appendCoveringCoinCandidateTokens(
@@ -7248,6 +7435,7 @@ pub const SuiRpcClient = struct {
             );
         }
         try self.resolveMoveParameterCandidatesToFixedPoint(allocator, summary.parameters);
+        try applyCrossParameterBusinessCoinSelectionHints(allocator, summary.parameters);
 
         const type_args_json = try resolvedMoveFunctionTypeArgsTemplateJson(
             allocator,

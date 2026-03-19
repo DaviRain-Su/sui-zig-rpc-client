@@ -924,6 +924,8 @@ zig build run -- events \
 
 对同币种的多标量 coin 参数，这套 preferred 规划现在也会避免重复复用同一枚 owned coin。也就是说，像 `Coin<SUI>, Coin<SUI>, u64, u64` 这类签名在自动选币时，会优先给两个参数分配不同的 source coin；只有真的没有足够的独立候选时，CLI 才会停在未解析，而不会生成表面可执行、实际会因为一枚 coin 被业务参数重复占用而冲突的模板。
 
+这条“不复用业务 coin”的约束现在也会继续延伸到 mixed scalar/vector 场景。像 `Coin<SUI>, vector<Coin<SUI>>` 这类签名里，后面的 coin vector 自动选择会先剔除前一个标量参数已经占用的 coin，再生成 `preferred_args_json` 和后续 request artifact。
+
 这层模板现在同时覆盖两条路径：
 - typed `--package/--module/--function` argv
 - 更通用的 `--commands` request artifact
