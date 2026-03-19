@@ -248,6 +248,9 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
   builder for account-provider direct-signatures, keystore-contents, and
   default-keystore flows, while leaving remote authorizer providers on the
   existing `tx_bytes` contract.
+- [x] Keep challenge-approved remote/future-wallet account-provider
+  command-source execute payloads on the local owned-plan / local builder
+  path instead of dropping back to real-builder `tx_bytes`.
 - [ ] Continue shrinking `unsafe_moveCall` usage.
 - [ ] Continue shrinking `unsafe_batchTransaction` usage.
 - [ ] Keep construction, simulation, and execution aligned to the same local

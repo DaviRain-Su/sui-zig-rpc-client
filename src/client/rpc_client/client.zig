@@ -14475,7 +14475,14 @@ pub const SuiRpcClient = struct {
         provider: tx_request_builder.AccountProvider,
     ) bool {
         return switch (provider) {
-            .direct_signatures, .keystore_contents, .default_keystore => true,
+            .direct_signatures,
+            .keystore_contents,
+            .default_keystore,
+            .remote_signer,
+            .zklogin,
+            .passkey,
+            .multisig,
+            => true,
             else => false,
         };
     }

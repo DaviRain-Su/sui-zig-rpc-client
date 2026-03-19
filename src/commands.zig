@@ -14086,7 +14086,7 @@ test "runCommandWithProgrammaticProvider tx_send move-call prints provider chall
     try testing.expect(std.mem.indexOf(u8, output.items, "\"challenge\"") != null);
 }
 
-test "runCommandWithProgrammaticProvider tx_send move-call applies unsafe provider challenge response" {
+test "runCommandWithProgrammaticProvider tx_send move-call applies local builder provider challenge response" {
     const testing = std.testing;
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -14171,7 +14171,7 @@ test "runCommandWithProgrammaticProvider tx_send move-call applies unsafe provid
     );
 
     try testing.expect(authorizer_called);
-    try testing.expectEqual(@as(usize, 1), state.unsafe);
+    try testing.expectEqual(@as(usize, 0), state.unsafe);
     try testing.expectEqual(@as(usize, 1), state.execute);
 
     const response = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
@@ -14255,7 +14255,7 @@ test "runCommandWithProgrammaticProvider tx_send commands prints provider challe
     try testing.expect(std.mem.indexOf(u8, output.items, "\"challenge\"") != null);
 }
 
-test "runCommandWithProgrammaticProvider tx_send commands applies unsafe batch provider challenge response" {
+test "runCommandWithProgrammaticProvider tx_send commands applies local builder batch provider challenge response" {
     const testing = std.testing;
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -14316,8 +14316,6 @@ test "runCommandWithProgrammaticProvider tx_send commands applies unsafe batch p
                             const seen = @as(*bool, @ptrCast(@alignCast(context)));
                             seen.* = true;
                             try testing.expectEqualStrings("unsafe-batch-provider-approved", req.account_session.session_id.?);
-                            try testing.expect(req.tx_bytes_base64 != null);
-                            try testing.expectEqualStrings("AQIDBA==", req.tx_bytes_base64.?);
                             return .{
                                 .sender = "0xprovider",
                                 .signatures = &.{"sig-unsafe-batch-provider-approved"},
@@ -14339,7 +14337,7 @@ test "runCommandWithProgrammaticProvider tx_send commands applies unsafe batch p
     );
 
     try testing.expect(authorizer_called);
-    try testing.expectEqual(@as(usize, 1), state.unsafe);
+    try testing.expectEqual(@as(usize, 0), state.unsafe);
     try testing.expectEqual(@as(usize, 1), state.execute);
 
     const response = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
@@ -14877,7 +14875,7 @@ test "runCommandWithProgrammaticProvider tx_payload move-call prints provider ch
     try testing.expect(std.mem.indexOf(u8, output.items, "\"challenge\"") != null);
 }
 
-test "runCommandWithProgrammaticProvider tx_payload move-call with selected args applies unsafe provider challenge response" {
+test "runCommandWithProgrammaticProvider tx_payload move-call with selected args applies local builder provider challenge response" {
     const testing = std.testing;
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -14943,8 +14941,6 @@ test "runCommandWithProgrammaticProvider tx_payload move-call with selected args
                         fn call(context: *anyopaque, _: std.mem.Allocator, req: client.tx_request_builder.RemoteAuthorizationRequest) !client.tx_request_builder.RemoteAuthorizationResult {
                             const seen = @as(*bool, @ptrCast(@alignCast(context)));
                             seen.* = true;
-                            try testing.expect(req.tx_bytes_base64 != null);
-                            try testing.expectEqualStrings("AQIDBA==", req.tx_bytes_base64.?);
                             try testing.expectEqualStrings("payload-provider-approved", req.account_session.session_id.?);
                             return .{
                                 .sender = "0xprovider",
@@ -14968,11 +14964,11 @@ test "runCommandWithProgrammaticProvider tx_payload move-call with selected args
 
     try testing.expect(authorizer_called);
     try testing.expectEqual(@as(usize, 1), state.owned);
-    try testing.expectEqual(@as(usize, 1), state.unsafe);
+    try testing.expectEqual(@as(usize, 0), state.unsafe);
 
     const payload = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
     defer payload.deinit();
-    try testing.expectEqualStrings("AQIDBA==", payload.value.array.items[0].string);
+    try testing.expect(payload.value.array.items[0].string.len > 0);
     try testing.expectEqualStrings("sig-payload-provider-approved", payload.value.array.items[1].array.items[0].string);
 }
 
