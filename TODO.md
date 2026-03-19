@@ -147,6 +147,9 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
 - [x] Reuse repeated seed-object `showContent` reads across a single
   `move function` template build instead of rereading the same object during
   fallback discovery, scoring, and fixed-point rounds.
+- [x] Reuse repeated object-id extraction from seed-object `showContent`
+  payloads across a single `move function` template build instead of reparsing
+  the same content JSON during shared/owned fallback and candidate scoring.
 - [x] Reuse repeated seed-object dynamic-field scans across a single
   `move function` template build instead of rescanning the same object during
   shared/owned fallback discovery rounds.

@@ -1033,6 +1033,7 @@ zig build run -- move function cetus_clmm_mainnet pool swap \
 
 如果你在 `move function --summarize` 时同时给了 `--sender`、`--signer` 或 `--from-keystore`，CLI 现在还会进一步把 owner 上下文带进 discovery 流程。对 concrete owned object 和 `vector<concrete owned object>` 参数，summary 会直接尝试 `suix_getOwnedObjects`，把找到的候选对象填进 `owned_object_candidates` / `vector_item_owned_object_candidates`。这里的 concrete owned object 也包括已经特化完成的 generic struct，例如 `0x2::balance::Balance<0x2::sui::SUI>` 或 receipt 一类类型；只要签名里不再残留 `T0/T1` 这类未解析 type parameter，就会进入同一套 owned discovery。如果 owner-page 查询本身没找到结果，CLI 现在会继续把当前交易里已选/已发现 seed object 的 `content` 和 `dynamic fields` 里暴露出来的 object id 一起聚合进 owned fallback source，再按 owner 和 struct type 过滤成匹配候选，而不是把这两类来源当成互斥备选。除此之外，只要当前查询函数本身有明确的 `package/module`，CLI 还会把 recent module events 里的 object id 作为下一层 owned fallback；如果当前函数模块没有 useful candidate，再继续 fallback 到参数类型自己的 `package/module` 去扫 recent events。为了避免 fixed-point 联动时反复扫同一模块，这些 owned event fallback 结果现在会在单次 `move function` 模板生成里缓存复用；同一个 `(owner, struct type)` 的初始 owner-page 查询结果也会在同一轮模板生成里复用，不会因为多个相同 owned 参数重复请求 `suix_getOwnedObjects`。 这一步不会替你自动做最终选择，但已经把“提示层”推进成了“候选集层”。
 同一轮模板生成里，重复命中的 seed object `showContent` 读取现在也会缓存复用，所以 shared/owned fallback、候选打分和 fixed-point 联动不会再反复读取同一个对象内容。
+而且同一个 seed object 从 `showContent` 内容里抽出来的 object id 列表本身也会缓存复用，不再在 shared/owned fallback 和候选评分里重复解析同一份内容 JSON。
 同样地，seed object 的 `dynamic fields` 扫描现在也会在单次模板构建里缓存复用，不再因为 shared/owned fallback 交替推进而重复扫同一个对象。
 候选过滤阶段复用的 `object get --summarize` 读取现在也会在单次模板构建里缓存复用，所以相同 object id 不会因为多个参数或多轮联动重复做 summary 过滤。
 

@@ -4437,6 +4437,25 @@ pub const SuiRpcClient = struct {
         return try allocator.dupe(u8, response);
     }
 
+    const MoveObjectContentDiscoveryCacheEntry = struct {
+        object_id: []u8,
+        discovered_object_ids: [][]u8,
+
+        fn deinit(self: *MoveObjectContentDiscoveryCacheEntry, allocator: std.mem.Allocator) void {
+            allocator.free(self.object_id);
+            for (self.discovered_object_ids) |value| allocator.free(value);
+            allocator.free(self.discovered_object_ids);
+        }
+    };
+
+    fn deinitMoveObjectContentDiscoveryCache(
+        allocator: std.mem.Allocator,
+        cache: *std.ArrayList(MoveObjectContentDiscoveryCacheEntry),
+    ) void {
+        for (cache.items) |*entry| entry.deinit(allocator);
+        cache.deinit(allocator);
+    }
+
     const MoveDynamicFieldDiscoveryCacheEntry = struct {
         parent_object_id: []u8,
         discovered_object_ids: [][]u8,
@@ -4468,6 +4487,65 @@ pub const SuiRpcClient = struct {
         }
 
         return cloned;
+    }
+
+    fn collectDiscoveredObjectIdsFromObjectResponseContent(
+        allocator: std.mem.Allocator,
+        response_json: []const u8,
+    ) ![][]u8 {
+        var discovered_ids = std.ArrayList([]u8).empty;
+        defer {
+            for (discovered_ids.items) |value| allocator.free(value);
+            discovered_ids.deinit(allocator);
+        }
+
+        try appendDiscoveredObjectIdsFromObjectResponseContent(
+            allocator,
+            &discovered_ids,
+            response_json,
+            std.math.maxInt(usize),
+        );
+
+        return try discovered_ids.toOwnedSlice(allocator);
+    }
+
+    fn getMoveObjectContentDiscoveredObjectIdsCached(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        response_cache: *std.ArrayList(MoveObjectContentResponseCacheEntry),
+        discovery_cache: *std.ArrayList(MoveObjectContentDiscoveryCacheEntry),
+        object_id: []const u8,
+    ) ![][]u8 {
+        for (discovery_cache.items) |entry| {
+            if (std.mem.eql(u8, entry.object_id, object_id)) {
+                return try cloneMoveDiscoveredObjectIds(allocator, entry.discovered_object_ids);
+            }
+        }
+
+        const response = try self.getMoveObjectContentResponseCached(
+            allocator,
+            response_cache,
+            object_id,
+        );
+        defer allocator.free(response);
+
+        const discovered_object_ids = try collectDiscoveredObjectIdsFromObjectResponseContent(
+            allocator,
+            response,
+        );
+        errdefer {
+            for (discovered_object_ids) |value| allocator.free(value);
+            allocator.free(discovered_object_ids);
+        }
+
+        var entry = MoveObjectContentDiscoveryCacheEntry{
+            .object_id = try allocator.dupe(u8, object_id),
+            .discovered_object_ids = discovered_object_ids,
+        };
+        errdefer entry.deinit(allocator);
+
+        try discovery_cache.append(allocator, entry);
+        return try cloneMoveDiscoveredObjectIds(allocator, discovered_object_ids);
     }
 
     fn getMoveDynamicFieldDiscoveredObjectIdsCached(
@@ -4608,6 +4686,7 @@ pub const SuiRpcClient = struct {
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
         object_content_cache: *std.ArrayList(MoveObjectContentResponseCacheEntry),
+        object_content_discovery_cache: *std.ArrayList(MoveObjectContentDiscoveryCacheEntry),
         dynamic_field_cache: *std.ArrayList(MoveDynamicFieldDiscoveryCacheEntry),
         object_summary_cache: *std.ArrayList(MoveObjectSummaryCacheEntry),
         parameters: []const move_result.OwnedMoveParameterSummary,
@@ -4628,18 +4707,20 @@ pub const SuiRpcClient = struct {
 
         for (seed_object_ids) |object_id| {
             if (discovered_ids.items.len >= 16) break;
-            const response = self.getMoveObjectContentResponseCached(
+            const seed_discovered_object_ids = self.getMoveObjectContentDiscoveredObjectIdsCached(
                 allocator,
                 object_content_cache,
+                object_content_discovery_cache,
                 object_id,
             ) catch continue;
-            defer allocator.free(response);
-            try appendDiscoveredObjectIdsFromObjectResponseContent(
-                allocator,
-                &discovered_ids,
-                response,
-                16,
-            );
+            defer {
+                for (seed_discovered_object_ids) |value| allocator.free(value);
+                allocator.free(seed_discovered_object_ids);
+            }
+            for (seed_discovered_object_ids) |discovered_object_id| {
+                if (discovered_ids.items.len >= 16) break;
+                try appendUniqueMoveSelectedObjectId(allocator, &discovered_ids, discovered_object_id);
+            }
         }
 
         if (allow_dynamic_field_fallback and discovered_ids.items.len < 16) {
@@ -4730,6 +4811,7 @@ pub const SuiRpcClient = struct {
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
         object_content_cache: *std.ArrayList(MoveObjectContentResponseCacheEntry),
+        object_content_discovery_cache: *std.ArrayList(MoveObjectContentDiscoveryCacheEntry),
         dynamic_field_cache: *std.ArrayList(MoveDynamicFieldDiscoveryCacheEntry),
         object_summary_cache: *std.ArrayList(MoveObjectSummaryCacheEntry),
         parameters: []const move_result.OwnedMoveParameterSummary,
@@ -4751,18 +4833,20 @@ pub const SuiRpcClient = struct {
 
         for (seed_object_ids) |object_id| {
             if (discovered_ids.items.len >= 16) break;
-            const response = self.getMoveObjectContentResponseCached(
+            const seed_discovered_object_ids = self.getMoveObjectContentDiscoveredObjectIdsCached(
                 allocator,
                 object_content_cache,
+                object_content_discovery_cache,
                 object_id,
             ) catch continue;
-            defer allocator.free(response);
-            try appendDiscoveredObjectIdsFromObjectResponseContent(
-                allocator,
-                &discovered_ids,
-                response,
-                16,
-            );
+            defer {
+                for (seed_discovered_object_ids) |value| allocator.free(value);
+                allocator.free(seed_discovered_object_ids);
+            }
+            for (seed_discovered_object_ids) |discovered_object_id| {
+                if (discovered_ids.items.len >= 16) break;
+                try appendUniqueMoveSelectedObjectId(allocator, &discovered_ids, discovered_object_id);
+            }
         }
 
         if (allow_dynamic_field_fallback and discovered_ids.items.len < 16) {
@@ -5586,10 +5670,50 @@ pub const SuiRpcClient = struct {
         return matched_index;
     }
 
+    fn discoveredObjectIdsReferenceScore(
+        discovered_object_ids: []const []const u8,
+        object_ids: []const []const u8,
+    ) usize {
+        if (object_ids.len == 0) return 0;
+
+        var score: usize = 0;
+        for (object_ids) |object_id| {
+            for (discovered_object_ids) |discovered_object_id| {
+                if (!std.mem.eql(u8, discovered_object_id, object_id)) continue;
+                score += 1;
+                break;
+            }
+        }
+        return score;
+    }
+
+    fn discoveredObjectIdsMatchingObjectIdIndex(
+        discovered_object_ids: []const []const u8,
+        object_ids: []const []const u8,
+    ) ?usize {
+        if (object_ids.len == 0) return null;
+
+        var matched_index: ?usize = null;
+        for (object_ids, 0..) |object_id, index| {
+            var found = false;
+            for (discovered_object_ids) |discovered_object_id| {
+                if (std.mem.eql(u8, discovered_object_id, object_id)) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) continue;
+            if (matched_index != null) return null;
+            matched_index = index;
+        }
+        return matched_index;
+    }
+
     fn applyReferencedSharedObjectCandidateSelectionHints(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
         object_content_cache: *std.ArrayList(MoveObjectContentResponseCacheEntry),
+        object_content_discovery_cache: *std.ArrayList(MoveObjectContentDiscoveryCacheEntry),
         parameters: []move_result.OwnedMoveParameterSummary,
     ) !void {
         const selected_object_ids = try collectSelectedObjectIdsFromMoveParameters(allocator, parameters);
@@ -5614,16 +5738,19 @@ pub const SuiRpcClient = struct {
 
             var matched_index: ?usize = null;
             for (selected_object_ids) |selected_object_id| {
-                const response = self.getMoveObjectContentResponseCached(
+                const discovered_object_ids = self.getMoveObjectContentDiscoveredObjectIdsCached(
                     allocator,
                     object_content_cache,
+                    object_content_discovery_cache,
                     selected_object_id,
                 ) catch continue;
-                defer allocator.free(response);
+                defer {
+                    for (discovered_object_ids) |value| allocator.free(value);
+                    allocator.free(discovered_object_ids);
+                }
 
-                const candidate_index = objectResponseContentMatchingObjectIdIndex(
-                    allocator,
-                    response,
+                const candidate_index = discoveredObjectIdsMatchingObjectIdIndex(
+                    discovered_object_ids,
                     candidate_object_ids,
                 ) orelse continue;
 
@@ -5704,6 +5831,7 @@ pub const SuiRpcClient = struct {
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
         object_content_cache: *std.ArrayList(MoveObjectContentResponseCacheEntry),
+        object_content_discovery_cache: *std.ArrayList(MoveObjectContentDiscoveryCacheEntry),
         dynamic_field_cache: *std.ArrayList(MoveDynamicFieldDiscoveryCacheEntry),
         object_summary_cache: *std.ArrayList(MoveObjectSummaryCacheEntry),
         parameters: []move_result.OwnedMoveParameterSummary,
@@ -5718,6 +5846,7 @@ pub const SuiRpcClient = struct {
             const discovered_candidates = try self.discoverSharedObjectCandidatesFromMoveParameters(
                 allocator,
                 object_content_cache,
+                object_content_discovery_cache,
                 dynamic_field_cache,
                 object_summary_cache,
                 parameters,
@@ -5793,6 +5922,7 @@ pub const SuiRpcClient = struct {
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
         object_content_cache: *std.ArrayList(MoveObjectContentResponseCacheEntry),
+        object_content_discovery_cache: *std.ArrayList(MoveObjectContentDiscoveryCacheEntry),
         dynamic_field_cache: *std.ArrayList(MoveDynamicFieldDiscoveryCacheEntry),
         object_summary_cache: *std.ArrayList(MoveObjectSummaryCacheEntry),
         parameters: []move_result.OwnedMoveParameterSummary,
@@ -5816,6 +5946,7 @@ pub const SuiRpcClient = struct {
                 const discovered_candidates = try self.discoverOwnedObjectCandidatesFromMoveParameters(
                     allocator,
                     object_content_cache,
+                    object_content_discovery_cache,
                     dynamic_field_cache,
                     object_summary_cache,
                     parameters,
@@ -5962,6 +6093,7 @@ pub const SuiRpcClient = struct {
                 const discovered_candidates = try self.discoverOwnedObjectCandidatesFromMoveParameters(
                     allocator,
                     object_content_cache,
+                    object_content_discovery_cache,
                     dynamic_field_cache,
                     object_summary_cache,
                     parameters,
@@ -6143,6 +6275,7 @@ pub const SuiRpcClient = struct {
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
         object_content_cache: *std.ArrayList(MoveObjectContentResponseCacheEntry),
+        object_content_discovery_cache: *std.ArrayList(MoveObjectContentDiscoveryCacheEntry),
         parameters: []move_result.OwnedMoveParameterSummary,
     ) !void {
         const selected_object_ids = try collectSelectedObjectIdsFromMoveParametersBySource(allocator, parameters);
@@ -6177,32 +6310,38 @@ pub const SuiRpcClient = struct {
             @memset(candidate_scores, 0);
 
             for (selected_object_ids.explicit_object_ids) |selected_object_id| {
-                const response = self.getMoveObjectContentResponseCached(
+                const discovered_object_ids = self.getMoveObjectContentDiscoveredObjectIdsCached(
                     allocator,
                     object_content_cache,
+                    object_content_discovery_cache,
                     selected_object_id,
                 ) catch continue;
-                defer allocator.free(response);
+                defer {
+                    for (discovered_object_ids) |value| allocator.free(value);
+                    allocator.free(discovered_object_ids);
+                }
 
-                const candidate_index = objectResponseContentMatchingObjectIdIndex(
-                    allocator,
-                    response,
+                const candidate_index = discoveredObjectIdsMatchingObjectIdIndex(
+                    discovered_object_ids,
                     candidate_object_ids,
                 ) orelse continue;
                 candidate_scores[candidate_index] += explicit_reference_weight;
             }
 
             for (selected_object_ids.auto_selected_object_ids) |selected_object_id| {
-                const response = self.getMoveObjectContentResponseCached(
+                const discovered_object_ids = self.getMoveObjectContentDiscoveredObjectIdsCached(
                     allocator,
                     object_content_cache,
+                    object_content_discovery_cache,
                     selected_object_id,
                 ) catch continue;
-                defer allocator.free(response);
+                defer {
+                    for (discovered_object_ids) |value| allocator.free(value);
+                    allocator.free(discovered_object_ids);
+                }
 
-                const candidate_index = objectResponseContentMatchingObjectIdIndex(
-                    allocator,
-                    response,
+                const candidate_index = discoveredObjectIdsMatchingObjectIdIndex(
+                    discovered_object_ids,
                     candidate_object_ids,
                 ) orelse continue;
                 candidate_scores[candidate_index] += auto_selected_reference_weight;
@@ -6211,16 +6350,19 @@ pub const SuiRpcClient = struct {
             for (parameters) |other_parameter| {
                 if (other_parameter.owned_object_candidates) |owned_candidates| {
                     for (owned_candidates) |owned_candidate| {
-                        const response = self.getMoveObjectContentResponseCached(
+                        const discovered_object_ids = self.getMoveObjectContentDiscoveredObjectIdsCached(
                             allocator,
                             object_content_cache,
+                            object_content_discovery_cache,
                             owned_candidate.object_id,
                         ) catch continue;
-                        defer allocator.free(response);
+                        defer {
+                            for (discovered_object_ids) |value| allocator.free(value);
+                            allocator.free(discovered_object_ids);
+                        }
 
-                        const candidate_index = objectResponseContentMatchingObjectIdIndex(
-                            allocator,
-                            response,
+                        const candidate_index = discoveredObjectIdsMatchingObjectIdIndex(
+                            discovered_object_ids,
                             candidate_object_ids,
                         ) orelse continue;
                         candidate_scores[candidate_index] += 1;
@@ -6229,16 +6371,19 @@ pub const SuiRpcClient = struct {
 
                 if (other_parameter.vector_item_owned_object_candidates) |owned_candidates| {
                     for (owned_candidates) |owned_candidate| {
-                        const response = self.getMoveObjectContentResponseCached(
+                        const discovered_object_ids = self.getMoveObjectContentDiscoveredObjectIdsCached(
                             allocator,
                             object_content_cache,
+                            object_content_discovery_cache,
                             owned_candidate.object_id,
                         ) catch continue;
-                        defer allocator.free(response);
+                        defer {
+                            for (discovered_object_ids) |value| allocator.free(value);
+                            allocator.free(discovered_object_ids);
+                        }
 
-                        const candidate_index = objectResponseContentMatchingObjectIdIndex(
-                            allocator,
-                            response,
+                        const candidate_index = discoveredObjectIdsMatchingObjectIdIndex(
+                            discovered_object_ids,
                             candidate_object_ids,
                         ) orelse continue;
                         candidate_scores[candidate_index] += 1;
@@ -6266,6 +6411,7 @@ pub const SuiRpcClient = struct {
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
         object_content_cache: *std.ArrayList(MoveObjectContentResponseCacheEntry),
+        object_content_discovery_cache: *std.ArrayList(MoveObjectContentDiscoveryCacheEntry),
         parameters: []move_result.OwnedMoveParameterSummary,
     ) !void {
         const selected_object_ids = try collectSelectedObjectIdsFromMoveParametersBySource(allocator, parameters);
@@ -6286,20 +6432,22 @@ pub const SuiRpcClient = struct {
             defer allocator.free(candidate_scores);
             @memset(candidate_scores, 0);
             for (candidates, 0..) |candidate, index| {
-                const response = self.getMoveObjectContentResponseCached(
+                const discovered_object_ids = self.getMoveObjectContentDiscoveredObjectIdsCached(
                     allocator,
                     object_content_cache,
+                    object_content_discovery_cache,
                     candidate.object_id,
                 ) catch continue;
-                defer allocator.free(response);
-                candidate_scores[index] += explicit_reference_weight * objectResponseContentReferenceScore(
-                    allocator,
-                    response,
+                defer {
+                    for (discovered_object_ids) |value| allocator.free(value);
+                    allocator.free(discovered_object_ids);
+                }
+                candidate_scores[index] += explicit_reference_weight * discoveredObjectIdsReferenceScore(
+                    discovered_object_ids,
                     selected_object_ids.explicit_object_ids,
                 );
-                candidate_scores[index] += objectResponseContentReferenceScore(
-                    allocator,
-                    response,
+                candidate_scores[index] += discoveredObjectIdsReferenceScore(
+                    discovered_object_ids,
                     selected_object_ids.auto_selected_object_ids,
                 );
             }
@@ -6324,6 +6472,7 @@ pub const SuiRpcClient = struct {
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
         object_content_cache: *std.ArrayList(MoveObjectContentResponseCacheEntry),
+        object_content_discovery_cache: *std.ArrayList(MoveObjectContentDiscoveryCacheEntry),
         parameters: []move_result.OwnedMoveParameterSummary,
     ) !void {
         const selected_object_ids = try collectSelectedObjectIdsFromMoveParametersBySource(allocator, parameters);
@@ -6348,20 +6497,22 @@ pub const SuiRpcClient = struct {
             @memset(candidate_scores, 0);
 
             for (candidates, 0..) |candidate, index| {
-                const response = self.getMoveObjectContentResponseCached(
+                const discovered_object_ids = self.getMoveObjectContentDiscoveredObjectIdsCached(
                     allocator,
                     object_content_cache,
+                    object_content_discovery_cache,
                     candidate.object_id,
                 ) catch continue;
-                defer allocator.free(response);
-                candidate_scores[index] += explicit_reference_weight * objectResponseContentReferenceScore(
-                    allocator,
-                    response,
+                defer {
+                    for (discovered_object_ids) |value| allocator.free(value);
+                    allocator.free(discovered_object_ids);
+                }
+                candidate_scores[index] += explicit_reference_weight * discoveredObjectIdsReferenceScore(
+                    discovered_object_ids,
                     selected_object_ids.explicit_object_ids,
                 );
-                candidate_scores[index] += objectResponseContentReferenceScore(
-                    allocator,
-                    response,
+                candidate_scores[index] += discoveredObjectIdsReferenceScore(
+                    discovered_object_ids,
                     selected_object_ids.auto_selected_object_ids,
                 );
             }
@@ -6856,6 +7007,7 @@ pub const SuiRpcClient = struct {
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
         object_content_cache: *std.ArrayList(MoveObjectContentResponseCacheEntry),
+        object_content_discovery_cache: *std.ArrayList(MoveObjectContentDiscoveryCacheEntry),
         dynamic_field_cache: *std.ArrayList(MoveDynamicFieldDiscoveryCacheEntry),
         object_summary_cache: *std.ArrayList(MoveObjectSummaryCacheEntry),
         parameters: []move_result.OwnedMoveParameterSummary,
@@ -6872,6 +7024,7 @@ pub const SuiRpcClient = struct {
             try self.populateSharedObjectCandidateFallbacksFromMoveParameters(
                 allocator,
                 object_content_cache,
+                object_content_discovery_cache,
                 dynamic_field_cache,
                 object_summary_cache,
                 parameters,
@@ -6879,6 +7032,7 @@ pub const SuiRpcClient = struct {
             try self.populateOwnedObjectCandidateFallbacksFromMoveParameters(
                 allocator,
                 object_content_cache,
+                object_content_discovery_cache,
                 dynamic_field_cache,
                 object_summary_cache,
                 parameters,
@@ -6890,31 +7044,37 @@ pub const SuiRpcClient = struct {
             try self.applyReferencedSharedObjectCandidateSelectionHints(
                 allocator,
                 object_content_cache,
+                object_content_discovery_cache,
                 parameters,
             );
             try self.applySharedCandidateSelectionHintsFromOwnedCandidates(
                 allocator,
                 object_content_cache,
+                object_content_discovery_cache,
                 parameters,
             );
             try self.applyReferencedOwnedObjectCandidateSelectionHints(
                 allocator,
                 object_content_cache,
+                object_content_discovery_cache,
                 parameters,
             );
             try self.applyReferencedSharedObjectCandidateSelectionHints(
                 allocator,
                 object_content_cache,
+                object_content_discovery_cache,
                 parameters,
             );
             try self.applyReferencedOwnedObjectCandidateSelectionHints(
                 allocator,
                 object_content_cache,
+                object_content_discovery_cache,
                 parameters,
             );
             try self.applyReferencedVectorOwnedObjectCandidateSelectionHints(
                 allocator,
                 object_content_cache,
+                object_content_discovery_cache,
                 parameters,
             );
             try self.applyJointCandidateComponentSelectionHints(
@@ -8582,6 +8742,9 @@ pub const SuiRpcClient = struct {
         var object_content_cache = std.ArrayList(MoveObjectContentResponseCacheEntry).empty;
         defer deinitMoveObjectContentResponseCache(allocator, &object_content_cache);
 
+        var object_content_discovery_cache = std.ArrayList(MoveObjectContentDiscoveryCacheEntry).empty;
+        defer deinitMoveObjectContentDiscoveryCache(allocator, &object_content_discovery_cache);
+
         var dynamic_field_cache = std.ArrayList(MoveDynamicFieldDiscoveryCacheEntry).empty;
         defer deinitMoveDynamicFieldDiscoveryCache(allocator, &dynamic_field_cache);
 
@@ -8798,6 +8961,7 @@ pub const SuiRpcClient = struct {
         try self.resolveMoveParameterCandidatesToFixedPoint(
             allocator,
             &object_content_cache,
+            &object_content_discovery_cache,
             &dynamic_field_cache,
             &object_summary_cache,
             summary.parameters,
