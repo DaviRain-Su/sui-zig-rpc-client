@@ -5379,18 +5379,38 @@ pub const SuiRpcClient = struct {
                     struct_type,
                     parameter.owned_object_candidates == null or parameter.owned_object_candidates.?.len == 0,
                 );
-                const event_candidates = if (discovered_candidates.len == 0 and
-                    (parameter.owned_object_candidates == null or parameter.owned_object_candidates.?.len == 0) and
-                    event_package_id != null and event_module_name != null)
-                    try self.discoverOwnedObjectCandidatesFromModuleEvents(
-                        allocator,
-                        owner,
-                        struct_type,
-                        event_package_id.?,
-                        event_module_name.?,
-                    )
-                else
-                    try allocator.alloc(move_result.OwnedMoveObjectCandidate, 0);
+                const need_event_fallback = discovered_candidates.len == 0 and
+                    (parameter.owned_object_candidates == null or parameter.owned_object_candidates.?.len == 0);
+                const event_candidates = blk: {
+                    if (!need_event_fallback) break :blk try allocator.alloc(move_result.OwnedMoveObjectCandidate, 0);
+                    if (event_package_id != null and event_module_name != null) {
+                        const current = try self.discoverOwnedObjectCandidatesFromModuleEvents(
+                            allocator,
+                            owner,
+                            struct_type,
+                            event_package_id.?,
+                            event_module_name.?,
+                        );
+                        if (current.len != 0) break :blk current;
+                        allocator.free(current);
+                    }
+                    if (moveStructPackageAndModule(parameter.signature)) |package_and_module| {
+                        if (event_package_id != null and event_module_name != null and
+                            std.mem.eql(u8, event_package_id.?, package_and_module.package) and
+                            std.mem.eql(u8, event_module_name.?, package_and_module.module))
+                        {
+                            break :blk try allocator.alloc(move_result.OwnedMoveObjectCandidate, 0);
+                        }
+                        break :blk try self.discoverOwnedObjectCandidatesFromModuleEvents(
+                            allocator,
+                            owner,
+                            struct_type,
+                            package_and_module.package,
+                            package_and_module.module,
+                        );
+                    }
+                    break :blk try allocator.alloc(move_result.OwnedMoveObjectCandidate, 0);
+                };
                 defer {
                     for (event_candidates) |*candidate| candidate.deinit(allocator);
                     allocator.free(event_candidates);
@@ -5498,18 +5518,38 @@ pub const SuiRpcClient = struct {
                     struct_type,
                     parameter.vector_item_owned_object_candidates == null or parameter.vector_item_owned_object_candidates.?.len == 0,
                 );
-                const event_candidates = if (discovered_candidates.len == 0 and
-                    (parameter.vector_item_owned_object_candidates == null or parameter.vector_item_owned_object_candidates.?.len == 0) and
-                    event_package_id != null and event_module_name != null)
-                    try self.discoverOwnedObjectCandidatesFromModuleEvents(
-                        allocator,
-                        owner,
-                        struct_type,
-                        event_package_id.?,
-                        event_module_name.?,
-                    )
-                else
-                    try allocator.alloc(move_result.OwnedMoveObjectCandidate, 0);
+                const need_event_fallback = discovered_candidates.len == 0 and
+                    (parameter.vector_item_owned_object_candidates == null or parameter.vector_item_owned_object_candidates.?.len == 0);
+                const event_candidates = blk: {
+                    if (!need_event_fallback) break :blk try allocator.alloc(move_result.OwnedMoveObjectCandidate, 0);
+                    if (event_package_id != null and event_module_name != null) {
+                        const current = try self.discoverOwnedObjectCandidatesFromModuleEvents(
+                            allocator,
+                            owner,
+                            struct_type,
+                            event_package_id.?,
+                            event_module_name.?,
+                        );
+                        if (current.len != 0) break :blk current;
+                        allocator.free(current);
+                    }
+                    if (moveStructPackageAndModule(parameter.signature)) |package_and_module| {
+                        if (event_package_id != null and event_module_name != null and
+                            std.mem.eql(u8, event_package_id.?, package_and_module.package) and
+                            std.mem.eql(u8, event_module_name.?, package_and_module.module))
+                        {
+                            break :blk try allocator.alloc(move_result.OwnedMoveObjectCandidate, 0);
+                        }
+                        break :blk try self.discoverOwnedObjectCandidatesFromModuleEvents(
+                            allocator,
+                            owner,
+                            struct_type,
+                            package_and_module.package,
+                            package_and_module.module,
+                        );
+                    }
+                    break :blk try allocator.alloc(move_result.OwnedMoveObjectCandidate, 0);
+                };
                 defer {
                     for (event_candidates) |*candidate| candidate.deinit(allocator);
                     allocator.free(event_candidates);
