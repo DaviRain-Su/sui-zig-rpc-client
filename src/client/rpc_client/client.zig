@@ -4978,6 +4978,9 @@ pub const SuiRpcClient = struct {
 
         for (parameters) |parameter| {
             if (collected.items.len >= move_object_discovery_seed_global_limit) break;
+            const keep_candidate_seeds = parameter.explicit_arg_json == null and
+                (parameter.auto_selected_arg_json == null or parameter.auto_selected_via_tiebreak);
+            if (!keep_candidate_seeds) continue;
             if (parameter.shared_object_candidates) |candidates| {
                 var appended: usize = 0;
                 for (candidates) |candidate| {
@@ -21623,6 +21626,88 @@ test "collectObjectDiscoverySeedObjectIdsFromMoveParameters prioritizes selected
     try testing.expectEqualStrings("0xowned3", seeds[9]);
     try testing.expectEqualStrings("0xvector0", seeds[10]);
     try testing.expectEqualStrings("0xvector3", seeds[13]);
+}
+
+test "collectObjectDiscoverySeedObjectIdsFromMoveParameters skips candidate seeds for stable selections" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const shared_candidates = try allocator.alloc(move_result.SharedMoveObjectCandidate, 2);
+    errdefer allocator.free(shared_candidates);
+    shared_candidates[0] = .{
+        .object_id = try allocator.dupe(u8, "0xshared-a"),
+        .discovery_rank = 0,
+        .initial_shared_version = 1,
+        .shared_object_input_select_token = try allocator.dupe(u8, "select:shared-a"),
+        .mutable_shared_object_input_select_token = try allocator.dupe(u8, "select:shared-mut-a"),
+    };
+    shared_candidates[1] = .{
+        .object_id = try allocator.dupe(u8, "0xshared-b"),
+        .discovery_rank = 1,
+        .initial_shared_version = 2,
+        .shared_object_input_select_token = try allocator.dupe(u8, "select:shared-b"),
+        .mutable_shared_object_input_select_token = try allocator.dupe(u8, "select:shared-mut-b"),
+    };
+    errdefer {
+        for (shared_candidates) |*candidate| candidate.deinit(allocator);
+    }
+
+    const tiebreak_candidates = try allocator.alloc(move_result.SharedMoveObjectCandidate, 2);
+    errdefer allocator.free(tiebreak_candidates);
+    tiebreak_candidates[0] = .{
+        .object_id = try allocator.dupe(u8, "0xtiebreak-a"),
+        .discovery_rank = 0,
+        .initial_shared_version = 3,
+        .shared_object_input_select_token = try allocator.dupe(u8, "select:tiebreak-a"),
+        .mutable_shared_object_input_select_token = try allocator.dupe(u8, "select:tiebreak-mut-a"),
+    };
+    tiebreak_candidates[1] = .{
+        .object_id = try allocator.dupe(u8, "0xtiebreak-b"),
+        .discovery_rank = 1,
+        .initial_shared_version = 4,
+        .shared_object_input_select_token = try allocator.dupe(u8, "select:tiebreak-b"),
+        .mutable_shared_object_input_select_token = try allocator.dupe(u8, "select:tiebreak-mut-b"),
+    };
+    errdefer {
+        for (tiebreak_candidates) |*candidate| candidate.deinit(allocator);
+    }
+
+    const parameters = try allocator.alloc(move_result.OwnedMoveParameterSummary, 2);
+    defer {
+        for (parameters) |*parameter| parameter.deinit(allocator);
+        allocator.free(parameters);
+    }
+
+    parameters[0] = .{
+        .signature = try allocator.dupe(u8, "&mut 0x2a::pool::Pool"),
+        .auto_selected_arg_json = try allocator.dupe(
+            u8,
+            "\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xselected\\\",\\\"inputKind\\\":\\\"shared\\\",\\\"initialSharedVersion\\\":1,\\\"mutable\\\":true}\"",
+        ),
+        .shared_object_candidates = shared_candidates,
+    };
+    parameters[1] = .{
+        .signature = try allocator.dupe(u8, "&mut 0x2a::pool::Pool"),
+        .auto_selected_arg_json = try allocator.dupe(
+            u8,
+            "\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xtiebreak-a\\\",\\\"inputKind\\\":\\\"shared\\\",\\\"initialSharedVersion\\\":3,\\\"mutable\\\":true}\"",
+        ),
+        .auto_selected_via_tiebreak = true,
+        .shared_object_candidates = tiebreak_candidates,
+    };
+
+    const seeds = try SuiRpcClient.collectObjectDiscoverySeedObjectIdsFromMoveParameters(
+        allocator,
+        parameters,
+    );
+    defer SuiRpcClient.freeMoveDiscoveredObjectIds(allocator, seeds);
+
+    try testing.expectEqual(@as(usize, 3), seeds.len);
+    try testing.expectEqualStrings("0xselected", seeds[0]);
+    try testing.expectEqualStrings("0xtiebreak-a", seeds[1]);
+    try testing.expectEqualStrings("0xtiebreak-b", seeds[2]);
 }
 
 test "getMoveDynamicFieldDiscoveredObjectIdsCachedBorrowed reuses cached discoveries" {
