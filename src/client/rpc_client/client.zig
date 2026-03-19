@@ -4957,6 +4957,9 @@ pub const SuiRpcClient = struct {
         allocator: std.mem.Allocator,
         parameters: []const move_result.OwnedMoveParameterSummary,
     ) ![][]u8 {
+        const move_object_discovery_seed_global_limit: usize = 32;
+        const move_object_discovery_seed_per_parameter_limit: usize = 4;
+
         var collected = std.ArrayList([]u8).empty;
         errdefer {
             for (collected.items) |value| allocator.free(value);
@@ -4969,23 +4972,42 @@ pub const SuiRpcClient = struct {
             allocator.free(selected_object_ids);
         }
         for (selected_object_ids) |object_id| {
+            if (collected.items.len >= move_object_discovery_seed_global_limit) break;
             try appendUniqueMoveSelectedObjectId(allocator, &collected, object_id);
         }
 
         for (parameters) |parameter| {
+            if (collected.items.len >= move_object_discovery_seed_global_limit) break;
             if (parameter.shared_object_candidates) |candidates| {
+                var appended: usize = 0;
                 for (candidates) |candidate| {
+                    if (collected.items.len >= move_object_discovery_seed_global_limit) break;
+                    if (appended >= move_object_discovery_seed_per_parameter_limit) break;
+                    const before_len = collected.items.len;
                     try appendUniqueMoveSelectedObjectId(allocator, &collected, candidate.object_id);
+                    if (collected.items.len > before_len) appended += 1;
                 }
             }
+            if (collected.items.len >= move_object_discovery_seed_global_limit) break;
             if (parameter.owned_object_candidates) |candidates| {
+                var appended: usize = 0;
                 for (candidates) |candidate| {
+                    if (collected.items.len >= move_object_discovery_seed_global_limit) break;
+                    if (appended >= move_object_discovery_seed_per_parameter_limit) break;
+                    const before_len = collected.items.len;
                     try appendUniqueMoveSelectedObjectId(allocator, &collected, candidate.object_id);
+                    if (collected.items.len > before_len) appended += 1;
                 }
             }
+            if (collected.items.len >= move_object_discovery_seed_global_limit) break;
             if (parameter.vector_item_owned_object_candidates) |candidates| {
+                var appended: usize = 0;
                 for (candidates) |candidate| {
+                    if (collected.items.len >= move_object_discovery_seed_global_limit) break;
+                    if (appended >= move_object_discovery_seed_per_parameter_limit) break;
+                    const before_len = collected.items.len;
                     try appendUniqueMoveSelectedObjectId(allocator, &collected, candidate.object_id);
+                    if (collected.items.len > before_len) appended += 1;
                 }
             }
         }
@@ -21500,6 +21522,107 @@ test "getMoveObjectContentDiscoveredObjectIdsCached reuses cached discoveries af
     try testing.expectEqual(@as(usize, 2), borrowed.len);
     try testing.expectEqualStrings("0xpool1", borrowed[0]);
     try testing.expectEqualStrings("0xposition1", borrowed[1]);
+}
+
+test "collectObjectDiscoverySeedObjectIdsFromMoveParameters prioritizes selected ids and caps candidate seeds" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const shared_candidates = try allocator.alloc(move_result.SharedMoveObjectCandidate, 6);
+    errdefer allocator.free(shared_candidates);
+    for (shared_candidates, 0..) |*candidate, index| {
+        candidate.* = .{
+            .object_id = try std.fmt.allocPrint(allocator, "0xshared{d}", .{index}),
+            .discovery_rank = index,
+            .initial_shared_version = @as(u64, index + 1),
+            .shared_object_input_select_token = try std.fmt.allocPrint(allocator, "select:shared:{d}", .{index}),
+            .mutable_shared_object_input_select_token = try std.fmt.allocPrint(allocator, "select:shared-mut:{d}", .{index}),
+        };
+    }
+    errdefer {
+        for (shared_candidates) |*candidate| candidate.deinit(allocator);
+    }
+
+    const owned_candidates = try allocator.alloc(move_result.OwnedMoveObjectCandidate, 6);
+    errdefer allocator.free(owned_candidates);
+    for (owned_candidates, 0..) |*candidate, index| {
+        candidate.* = .{
+            .object_id = try std.fmt.allocPrint(allocator, "0xowned{d}", .{index}),
+            .version = index + 1,
+            .digest = try std.fmt.allocPrint(allocator, "owned-digest-{d}", .{index}),
+            .discovery_rank = index,
+            .object_input_select_token = try std.fmt.allocPrint(allocator, "select:owned:{d}", .{index}),
+        };
+    }
+    errdefer {
+        for (owned_candidates) |*candidate| candidate.deinit(allocator);
+    }
+
+    const vector_candidates = try allocator.alloc(move_result.OwnedMoveObjectCandidate, 6);
+    errdefer allocator.free(vector_candidates);
+    for (vector_candidates, 0..) |*candidate, index| {
+        candidate.* = .{
+            .object_id = try std.fmt.allocPrint(allocator, "0xvector{d}", .{index}),
+            .version = index + 1,
+            .digest = try std.fmt.allocPrint(allocator, "vector-digest-{d}", .{index}),
+            .discovery_rank = index,
+            .object_input_select_token = try std.fmt.allocPrint(allocator, "select:vector:{d}", .{index}),
+        };
+    }
+    errdefer {
+        for (vector_candidates) |*candidate| candidate.deinit(allocator);
+    }
+
+    const parameters = try allocator.alloc(move_result.OwnedMoveParameterSummary, 5);
+    defer {
+        for (parameters) |*parameter| parameter.deinit(allocator);
+        allocator.free(parameters);
+    }
+
+    parameters[0] = .{
+        .signature = try allocator.dupe(u8, "&0x2::clock::Clock"),
+        .explicit_arg_json = try allocator.dupe(
+            u8,
+            "\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xexplicit\\\",\\\"inputKind\\\":\\\"shared\\\",\\\"initialSharedVersion\\\":1,\\\"mutable\\\":false}\"",
+        ),
+    };
+    parameters[1] = .{
+        .signature = try allocator.dupe(u8, "&0x2::clock::Clock"),
+        .auto_selected_arg_json = try allocator.dupe(
+            u8,
+            "\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xauto\\\",\\\"inputKind\\\":\\\"shared\\\",\\\"initialSharedVersion\\\":2,\\\"mutable\\\":false}\"",
+        ),
+    };
+    parameters[2] = .{
+        .signature = try allocator.dupe(u8, "&mut 0x2a::pool::Pool"),
+        .shared_object_candidates = shared_candidates,
+    };
+    parameters[3] = .{
+        .signature = try allocator.dupe(u8, "0x2a::position::Position"),
+        .owned_object_candidates = owned_candidates,
+    };
+    parameters[4] = .{
+        .signature = try allocator.dupe(u8, "vector<0x2a::position::Position>"),
+        .vector_item_owned_object_candidates = vector_candidates,
+    };
+
+    const seeds = try SuiRpcClient.collectObjectDiscoverySeedObjectIdsFromMoveParameters(
+        allocator,
+        parameters,
+    );
+    defer SuiRpcClient.freeMoveDiscoveredObjectIds(allocator, seeds);
+
+    try testing.expectEqual(@as(usize, 14), seeds.len);
+    try testing.expectEqualStrings("0xexplicit", seeds[0]);
+    try testing.expectEqualStrings("0xauto", seeds[1]);
+    try testing.expectEqualStrings("0xshared0", seeds[2]);
+    try testing.expectEqualStrings("0xshared3", seeds[5]);
+    try testing.expectEqualStrings("0xowned0", seeds[6]);
+    try testing.expectEqualStrings("0xowned3", seeds[9]);
+    try testing.expectEqualStrings("0xvector0", seeds[10]);
+    try testing.expectEqualStrings("0xvector3", seeds[13]);
 }
 
 test "getMoveDynamicFieldDiscoveredObjectIdsCachedBorrowed reuses cached discoveries" {

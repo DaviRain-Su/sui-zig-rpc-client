@@ -161,6 +161,8 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
 - [x] Reuse recent module-event object-id discovery across shared/owned
   fallback paths instead of rescanning the same `package/module` event source
   twice in one template build.
+- [x] Bound seed-object discovery work by prioritizing selected objects and
+  only following a capped number of top-ranked candidates per parameter.
 - [x] Reuse borrowed cached dynamic-field discoveries inside shared/owned
   fallback hot paths instead of recloning temporary object-id lists.
 - [x] Reuse repeated candidate object summary reads across a single
