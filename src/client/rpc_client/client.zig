@@ -4464,6 +4464,7 @@ pub const SuiRpcClient = struct {
         parameters: []const move_result.OwnedMoveParameterSummary,
         owner: []const u8,
         struct_type: []const u8,
+        allow_dynamic_field_fallback: bool,
     ) ![]move_result.OwnedMoveObjectCandidate {
         const seed_object_ids = try collectObjectDiscoverySeedObjectIdsFromMoveParameters(allocator, parameters);
         defer {
@@ -4487,6 +4488,24 @@ pub const SuiRpcClient = struct {
                 response,
                 16,
             );
+        }
+
+        if (allow_dynamic_field_fallback and discovered_ids.items.len == 0) {
+            for (seed_object_ids) |object_id| {
+                if (discovered_ids.items.len >= 16) break;
+                var page = self.getAllDynamicFieldsWithRequest(
+                    allocator,
+                    object_id,
+                    .{ .limit = 20 },
+                ) catch continue;
+                defer page.deinit(allocator);
+                try appendDiscoveredObjectIdsFromDynamicFields(
+                    allocator,
+                    &discovered_ids,
+                    page,
+                    16,
+                );
+            }
         }
 
         var candidates = std.ArrayList(move_result.OwnedMoveObjectCandidate).empty;
@@ -5289,6 +5308,7 @@ pub const SuiRpcClient = struct {
                     parameters,
                     owner,
                     struct_type,
+                    parameter.owned_object_candidates == null or parameter.owned_object_candidates.?.len == 0,
                 );
                 if (discovered_candidates.len != 0) {
                     var merged_candidates = std.ArrayList(move_result.OwnedMoveObjectCandidate).empty;
@@ -5369,6 +5389,7 @@ pub const SuiRpcClient = struct {
                     parameters,
                     owner,
                     struct_type,
+                    parameter.vector_item_owned_object_candidates == null or parameter.vector_item_owned_object_candidates.?.len == 0,
                 );
                 if (discovered_candidates.len == 0) {
                     allocator.free(discovered_candidates);

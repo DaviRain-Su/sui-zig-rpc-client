@@ -42,6 +42,8 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
 - [x] Concrete generic owned object discovery after type specialization.
 - [x] Additional owned object candidate discovery from already discovered
   object content, not only owner-page queries.
+- [x] Additional owned object candidate discovery from dynamic fields of
+  already selected or discovered seed objects.
 - [x] Shared object candidate discovery from module events.
 - [x] Aggregate multiple recent event pages when discovering shared object
   candidates from module events.
