@@ -258,7 +258,7 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
   and `MakeMoveVec` coverage.
 - [x] Add a `receipt_flow_lab` package for receipt/capability multi-step
   flows.
-- [ ] Add a `dynamic_registry` package for content/dynamic-field-based
+- [x] Add a `dynamic_registry` package for content/dynamic-field-based
   discovery coverage.
 - [ ] Add an `admin_upgrade_lab` package for capability/publish/upgrade
   coverage.

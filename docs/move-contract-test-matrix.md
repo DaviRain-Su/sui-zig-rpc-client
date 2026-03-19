@@ -126,6 +126,10 @@
 
 用途：锁定 dynamic fields / object table / indirect object discovery。
 
+当前状态：
+- 已落地：[`fixtures/move/dynamic_registry`](/Users/davirian/dev/zig/sui-zig-rpc-client/fixtures/move/dynamic_registry)
+- 已验证：`sui move test --path fixtures/move/dynamic_registry`
+
 建议覆盖：
 - object content 不直接暴露目标 id
 - 必须通过 dynamic fields 找对象

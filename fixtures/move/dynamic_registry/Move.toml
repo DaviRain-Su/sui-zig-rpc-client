@@ -1,0 +1,6 @@
+[package]
+name = "dynamic_registry"
+edition = "2024"
+
+[addresses]
+dynamic_registry = "0x0"
