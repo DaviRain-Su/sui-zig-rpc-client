@@ -4418,7 +4418,7 @@ test "runCommand move function with --summarize prefers owned candidate with hig
     );
 }
 
-test "runCommand move function with --summarize tie-breaks shared candidates by deterministic order" {
+test "runCommand move function with --summarize tie-breaks shared candidates by discovery order" {
     const testing = std.testing;
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -4436,7 +4436,7 @@ test "runCommand move function with --summarize tie-breaks shared candidates by 
             if (std.mem.eql(u8, req.method, "suix_queryEvents")) {
                 return alloc.dupe(
                     u8,
-                    "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xevent1\",\"eventSeq\":\"1\"},\"packageId\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool1\"}},{\"id\":{\"txDigest\":\"0xevent2\",\"eventSeq\":\"2\"},\"packageId\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool2\"}}],\"hasNextPage\":false}}",
+                    "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xevent2\",\"eventSeq\":\"2\"},\"packageId\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool2\"}},{\"id\":{\"txDigest\":\"0xevent1\",\"eventSeq\":\"1\"},\"packageId\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool1\"}}],\"hasNextPage\":false}}",
                 );
             }
             if (std.mem.eql(u8, req.method, "suix_getOwnedObjects")) {
@@ -4509,13 +4509,13 @@ test "runCommand move function with --summarize tie-breaks shared candidates by 
     defer parsed.deinit();
     const parameters = parsed.value.object.get("parameters").?.array.items;
     try testing.expectEqualStrings(
-        "\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xpool1\\\",\\\"inputKind\\\":\\\"shared\\\",\\\"initialSharedVersion\\\":7,\\\"mutable\\\":true}\"",
+        "\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xpool2\\\",\\\"inputKind\\\":\\\"shared\\\",\\\"initialSharedVersion\\\":8,\\\"mutable\\\":true}\"",
         parameters[0].object.get("auto_selected_arg_json").?.string,
     );
     const shared_candidates = parameters[0].object.get("shared_object_candidates").?.array.items;
     try testing.expectEqual(@as(i64, 7), shared_candidates[0].object.get("selection_score").?.integer);
     try testing.expectEqual(@as(i64, 7), shared_candidates[1].object.get("selection_score").?.integer);
-    try testing.expectEqualStrings("0xpool1", shared_candidates[0].object.get("object_id").?.string);
+    try testing.expectEqualStrings("0xpool2", shared_candidates[0].object.get("object_id").?.string);
     const preferred_resolution = parsed.value.object.get("call_template").?.object.get("preferred_resolution").?.object;
     try testing.expectEqualStrings(
         "auto_selected_tiebreak",
@@ -4541,7 +4541,7 @@ test "runCommand move function with --summarize tie-breaks zero-score shared eve
             if (std.mem.eql(u8, req.method, "suix_queryEvents")) {
                 return alloc.dupe(
                     u8,
-                    "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xevent1\",\"eventSeq\":\"1\"},\"packageId\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool1\"}},{\"id\":{\"txDigest\":\"0xevent2\",\"eventSeq\":\"2\"},\"packageId\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool2\"}}],\"hasNextPage\":false}}",
+                    "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xevent2\",\"eventSeq\":\"2\"},\"packageId\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool2\"}},{\"id\":{\"txDigest\":\"0xevent1\",\"eventSeq\":\"1\"},\"packageId\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool1\"}}],\"hasNextPage\":false}}",
                 );
             }
             if (std.mem.eql(u8, req.method, "sui_getObject")) {
@@ -4590,9 +4590,9 @@ test "runCommand move function with --summarize tie-breaks zero-score shared eve
     const shared_candidates = parameter.get("shared_object_candidates").?.array.items;
     try testing.expectEqual(@as(i64, 0), shared_candidates[0].object.get("selection_score").?.integer);
     try testing.expectEqual(@as(i64, 0), shared_candidates[1].object.get("selection_score").?.integer);
-    try testing.expectEqualStrings("0xpool1", shared_candidates[0].object.get("object_id").?.string);
+    try testing.expectEqualStrings("0xpool2", shared_candidates[0].object.get("object_id").?.string);
     try testing.expectEqualStrings(
-        "\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xpool1\\\",\\\"inputKind\\\":\\\"shared\\\",\\\"initialSharedVersion\\\":7,\\\"mutable\\\":true}\"",
+        "\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xpool2\\\",\\\"inputKind\\\":\\\"shared\\\",\\\"initialSharedVersion\\\":8,\\\"mutable\\\":true}\"",
         parameter.get("auto_selected_arg_json").?.string,
     );
     const preferred_resolution = parsed.value.object.get("call_template").?.object.get("preferred_resolution").?.object;
@@ -4602,7 +4602,7 @@ test "runCommand move function with --summarize tie-breaks zero-score shared eve
     );
 }
 
-test "runCommand move function with --summarize tie-breaks owned candidates by deterministic order" {
+test "runCommand move function with --summarize tie-breaks owned candidates by discovery order" {
     const testing = std.testing;
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -4626,7 +4626,7 @@ test "runCommand move function with --summarize tie-breaks owned candidates by d
             if (std.mem.eql(u8, req.method, "suix_getOwnedObjects")) {
                 return alloc.dupe(
                     u8,
-                    "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xposition-a\",\"version\":\"7\",\"digest\":\"position-digest-a\",\"type\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb::position::Position\",\"owner\":{\"AddressOwner\":\"0xowner\"}}},{\"data\":{\"objectId\":\"0xposition-b\",\"version\":\"8\",\"digest\":\"position-digest-b\",\"type\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb::position::Position\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
+                    "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xposition-b\",\"version\":\"8\",\"digest\":\"position-digest-b\",\"type\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb::position::Position\",\"owner\":{\"AddressOwner\":\"0xowner\"}}},{\"data\":{\"objectId\":\"0xposition-a\",\"version\":\"7\",\"digest\":\"position-digest-a\",\"type\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb::position::Position\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
                 );
             }
             if (std.mem.eql(u8, req.method, "sui_getObject")) {
@@ -4690,13 +4690,13 @@ test "runCommand move function with --summarize tie-breaks owned candidates by d
     defer parsed.deinit();
     const parameters = parsed.value.object.get("parameters").?.array.items;
     try testing.expectEqualStrings(
-        "\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xposition-a\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":7,\\\"digest\\\":\\\"position-digest-a\\\"}\"",
+        "\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xposition-b\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":8,\\\"digest\\\":\\\"position-digest-b\\\"}\"",
         parameters[1].object.get("auto_selected_arg_json").?.string,
     );
     const owned_candidates = parameters[1].object.get("owned_object_candidates").?.array.items;
     try testing.expectEqual(@as(i64, 14), owned_candidates[0].object.get("selection_score").?.integer);
     try testing.expectEqual(@as(i64, 14), owned_candidates[1].object.get("selection_score").?.integer);
-    try testing.expectEqualStrings("0xposition-a", owned_candidates[0].object.get("object_id").?.string);
+    try testing.expectEqualStrings("0xposition-b", owned_candidates[0].object.get("object_id").?.string);
     const preferred_resolution = parsed.value.object.get("call_template").?.object.get("preferred_resolution").?.object;
     try testing.expectEqualStrings(
         "auto_selected_tiebreak",
@@ -4704,7 +4704,7 @@ test "runCommand move function with --summarize tie-breaks owned candidates by d
     );
 }
 
-test "runCommand move function with --summarize tie-breaks zero-score owned candidates by deterministic order" {
+test "runCommand move function with --summarize tie-breaks zero-score owned candidates by discovery order" {
     const testing = std.testing;
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -4739,7 +4739,7 @@ test "runCommand move function with --summarize tie-breaks zero-score owned cand
             std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"StructType\":\"0x2a::position::Position\"") != null);
             return alloc.dupe(
                 u8,
-                "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xposition-a\",\"version\":\"7\",\"digest\":\"position-digest-a\",\"type\":\"0x2a::position::Position\",\"owner\":{\"AddressOwner\":\"0xowner\"}}},{\"data\":{\"objectId\":\"0xposition-b\",\"version\":\"8\",\"digest\":\"position-digest-b\",\"type\":\"0x2a::position::Position\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
+                "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xposition-b\",\"version\":\"8\",\"digest\":\"position-digest-b\",\"type\":\"0x2a::position::Position\",\"owner\":{\"AddressOwner\":\"0xowner\"}}},{\"data\":{\"objectId\":\"0xposition-a\",\"version\":\"7\",\"digest\":\"position-digest-a\",\"type\":\"0x2a::position::Position\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
             );
         }
     }.call;
@@ -4772,9 +4772,9 @@ test "runCommand move function with --summarize tie-breaks zero-score owned cand
     const owned_candidates = parameter.get("owned_object_candidates").?.array.items;
     try testing.expectEqual(@as(i64, 0), owned_candidates[0].object.get("selection_score").?.integer);
     try testing.expectEqual(@as(i64, 0), owned_candidates[1].object.get("selection_score").?.integer);
-    try testing.expectEqualStrings("0xposition-a", owned_candidates[0].object.get("object_id").?.string);
+    try testing.expectEqualStrings("0xposition-b", owned_candidates[0].object.get("object_id").?.string);
     try testing.expectEqualStrings(
-        "\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xposition-a\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":7,\\\"digest\\\":\\\"position-digest-a\\\"}\"",
+        "\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xposition-b\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":8,\\\"digest\\\":\\\"position-digest-b\\\"}\"",
         parameter.get("auto_selected_arg_json").?.string,
     );
     const preferred_resolution = parsed.value.object.get("call_template").?.object.get("preferred_resolution").?.object;

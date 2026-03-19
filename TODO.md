@@ -199,7 +199,7 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
   dynamic fields instead of treating the two sources as mutually exclusive.
 - [ ] Improve fallback behavior for protocols that do not expose recent useful
   events.
-- [ ] Improve candidate stability for shared objects such as pools.
+- [x] Improve candidate stability for shared objects such as pools.
 
 ### 5. Complete ABI lowering coverage
 

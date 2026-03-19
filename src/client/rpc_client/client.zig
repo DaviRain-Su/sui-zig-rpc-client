@@ -4248,7 +4248,7 @@ pub const SuiRpcClient = struct {
     ) !void {
         const struct_type = trimMoveReferenceSignature(signature);
 
-        for (object_ids) |object_id| {
+        for (object_ids, 0..) |object_id, discovery_rank| {
             const summary = self.getMoveObjectSummaryCachedBorrowed(
                 allocator,
                 object_summary_cache,
@@ -4276,6 +4276,7 @@ pub const SuiRpcClient = struct {
             try candidates.append(allocator, .{
                 .object_id = try allocator.dupe(u8, object_id),
                 .selection_score = 0,
+                .discovery_rank = discovery_rank,
                 .type_name = try allocator.dupe(u8, type_name),
                 .initial_shared_version = initial_shared_version,
                 .shared_object_input_select_token = try allocator.dupe(u8, shared_token),
@@ -4409,6 +4410,7 @@ pub const SuiRpcClient = struct {
             cloned[index] = .{
                 .object_id = try allocator.dupe(u8, candidate.object_id),
                 .selection_score = candidate.selection_score,
+                .discovery_rank = candidate.discovery_rank,
                 .type_name = if (candidate.type_name) |value| try allocator.dupe(u8, value) else null,
                 .initial_shared_version = candidate.initial_shared_version,
                 .shared_object_input_select_token = try allocator.dupe(u8, candidate.shared_object_input_select_token),
@@ -5009,7 +5011,7 @@ pub const SuiRpcClient = struct {
         owner: []const u8,
         struct_type: []const u8,
     ) !void {
-        for (object_ids) |object_id| {
+        for (object_ids, 0..) |object_id, discovery_rank| {
             const summary = self.getMoveObjectSummaryCachedBorrowed(
                 allocator,
                 object_summary_cache,
@@ -5039,6 +5041,7 @@ pub const SuiRpcClient = struct {
                 .object_id = try allocator.dupe(u8, object_id),
                 .version = version,
                 .digest = try allocator.dupe(u8, digest),
+                .discovery_rank = discovery_rank,
                 .balance = null,
                 .type_name = try allocator.dupe(u8, type_name),
                 .owner_value = try allocator.dupe(u8, owner_value),
@@ -5249,6 +5252,7 @@ pub const SuiRpcClient = struct {
                 .version = candidate.version,
                 .digest = try allocator.dupe(u8, candidate.digest),
                 .selection_score = candidate.selection_score,
+                .discovery_rank = candidate.discovery_rank,
                 .balance = candidate.balance,
                 .type_name = if (candidate.type_name) |value| try allocator.dupe(u8, value) else null,
                 .owner_value = if (candidate.owner_value) |value| try allocator.dupe(u8, value) else null,
@@ -5425,7 +5429,7 @@ pub const SuiRpcClient = struct {
                 coin_candidates.deinit(allocator);
             }
 
-            for (coin_page.entries) |entry| {
+            for (coin_page.entries, 0..) |entry, discovery_rank| {
                 const object_id = entry.coin_object_id orelse continue;
                 const version = entry.version orelse continue;
                 const digest = entry.digest orelse continue;
@@ -5433,6 +5437,7 @@ pub const SuiRpcClient = struct {
                     .object_id = try allocator.dupe(u8, object_id),
                     .version = version,
                     .digest = try allocator.dupe(u8, digest),
+                    .discovery_rank = discovery_rank,
                     .balance = entry.balanceU64(),
                     .type_name = try allocator.dupe(u8, struct_type),
                     .owner_value = try allocator.dupe(u8, owner),
@@ -5466,7 +5471,7 @@ pub const SuiRpcClient = struct {
             candidates.deinit(allocator);
         }
 
-        for (page.entries) |entry| {
+        for (page.entries, 0..) |entry, discovery_rank| {
             if (entry.status != .found) continue;
             const object_id = entry.object_id orelse continue;
             const version = entry.version orelse continue;
@@ -5475,6 +5480,7 @@ pub const SuiRpcClient = struct {
                 .object_id = try allocator.dupe(u8, object_id),
                 .version = version,
                 .digest = try allocator.dupe(u8, digest),
+                .discovery_rank = discovery_rank,
                 .balance = null,
                 .type_name = if (entry.type_name) |value| try allocator.dupe(u8, value) else null,
                 .owner_value = if (entry.owner_value) |value| try allocator.dupe(u8, value) else null,
@@ -6101,6 +6107,9 @@ pub const SuiRpcClient = struct {
         if (left.selection_score != right.selection_score) {
             return left.selection_score > right.selection_score;
         }
+        if (left.discovery_rank != right.discovery_rank) {
+            return left.discovery_rank < right.discovery_rank;
+        }
         return std.mem.order(u8, left.object_id, right.object_id) == .lt;
     }
 
@@ -6179,6 +6188,7 @@ pub const SuiRpcClient = struct {
                     try merged_candidates.append(allocator, .{
                         .object_id = try allocator.dupe(u8, old_candidate.object_id),
                         .selection_score = old_candidate.selection_score,
+                        .discovery_rank = old_candidate.discovery_rank,
                         .type_name = if (old_candidate.type_name) |value| try allocator.dupe(u8, value) else null,
                         .initial_shared_version = old_candidate.initial_shared_version,
                         .shared_object_input_select_token = try allocator.dupe(u8, old_candidate.shared_object_input_select_token),
@@ -6199,6 +6209,7 @@ pub const SuiRpcClient = struct {
                 try merged_candidates.append(allocator, .{
                     .object_id = try allocator.dupe(u8, candidate.object_id),
                     .selection_score = candidate.selection_score,
+                    .discovery_rank = candidate.discovery_rank,
                     .type_name = if (candidate.type_name) |value| try allocator.dupe(u8, value) else null,
                     .initial_shared_version = candidate.initial_shared_version,
                     .shared_object_input_select_token = try allocator.dupe(u8, candidate.shared_object_input_select_token),
@@ -6313,14 +6324,15 @@ pub const SuiRpcClient = struct {
                     if (parameter.owned_object_candidates) |old_candidates| {
                         for (old_candidates) |old_candidate| {
                             try merged_candidates.append(allocator, .{
-                                .object_id = try allocator.dupe(u8, old_candidate.object_id),
-                                .version = old_candidate.version,
-                                .digest = try allocator.dupe(u8, old_candidate.digest),
-                                .balance = old_candidate.balance,
-                                .type_name = if (old_candidate.type_name) |value| try allocator.dupe(u8, value) else null,
-                                .owner_value = if (old_candidate.owner_value) |value| try allocator.dupe(u8, value) else null,
-                                .object_input_select_token = try allocator.dupe(u8, old_candidate.object_input_select_token),
-                                .selection_score = old_candidate.selection_score,
+                        .object_id = try allocator.dupe(u8, old_candidate.object_id),
+                        .version = old_candidate.version,
+                        .digest = try allocator.dupe(u8, old_candidate.digest),
+                        .balance = old_candidate.balance,
+                        .discovery_rank = old_candidate.discovery_rank,
+                        .type_name = if (old_candidate.type_name) |value| try allocator.dupe(u8, value) else null,
+                        .owner_value = if (old_candidate.owner_value) |value| try allocator.dupe(u8, value) else null,
+                        .object_input_select_token = try allocator.dupe(u8, old_candidate.object_input_select_token),
+                        .selection_score = old_candidate.selection_score,
                             });
                         }
                     }
@@ -6339,6 +6351,7 @@ pub const SuiRpcClient = struct {
                             .version = candidate.version,
                             .digest = try allocator.dupe(u8, candidate.digest),
                             .balance = candidate.balance,
+                            .discovery_rank = candidate.discovery_rank,
                             .type_name = if (candidate.type_name) |value| try allocator.dupe(u8, value) else null,
                             .owner_value = if (candidate.owner_value) |value| try allocator.dupe(u8, value) else null,
                             .object_input_select_token = try allocator.dupe(u8, candidate.object_input_select_token),
@@ -6360,6 +6373,7 @@ pub const SuiRpcClient = struct {
                             .version = candidate.version,
                             .digest = try allocator.dupe(u8, candidate.digest),
                             .balance = candidate.balance,
+                            .discovery_rank = candidate.discovery_rank,
                             .type_name = if (candidate.type_name) |value| try allocator.dupe(u8, value) else null,
                             .owner_value = if (candidate.owner_value) |value| try allocator.dupe(u8, value) else null,
                             .object_input_select_token = try allocator.dupe(u8, candidate.object_input_select_token),
@@ -6461,14 +6475,15 @@ pub const SuiRpcClient = struct {
                 if (parameter.vector_item_owned_object_candidates) |old_candidates| {
                     for (old_candidates) |old_candidate| {
                         try merged_candidates.append(allocator, .{
-                            .object_id = try allocator.dupe(u8, old_candidate.object_id),
-                            .version = old_candidate.version,
-                            .digest = try allocator.dupe(u8, old_candidate.digest),
-                            .balance = old_candidate.balance,
-                            .type_name = if (old_candidate.type_name) |value| try allocator.dupe(u8, value) else null,
-                            .owner_value = if (old_candidate.owner_value) |value| try allocator.dupe(u8, value) else null,
-                            .object_input_select_token = try allocator.dupe(u8, old_candidate.object_input_select_token),
-                            .selection_score = old_candidate.selection_score,
+                        .object_id = try allocator.dupe(u8, old_candidate.object_id),
+                        .version = old_candidate.version,
+                        .digest = try allocator.dupe(u8, old_candidate.digest),
+                        .balance = old_candidate.balance,
+                        .discovery_rank = old_candidate.discovery_rank,
+                        .type_name = if (old_candidate.type_name) |value| try allocator.dupe(u8, value) else null,
+                        .owner_value = if (old_candidate.owner_value) |value| try allocator.dupe(u8, value) else null,
+                        .object_input_select_token = try allocator.dupe(u8, old_candidate.object_input_select_token),
+                        .selection_score = old_candidate.selection_score,
                         });
                     }
                 }
@@ -6487,6 +6502,7 @@ pub const SuiRpcClient = struct {
                         .version = candidate.version,
                         .digest = try allocator.dupe(u8, candidate.digest),
                         .balance = candidate.balance,
+                        .discovery_rank = candidate.discovery_rank,
                         .type_name = if (candidate.type_name) |value| try allocator.dupe(u8, value) else null,
                         .owner_value = if (candidate.owner_value) |value| try allocator.dupe(u8, value) else null,
                         .object_input_select_token = try allocator.dupe(u8, candidate.object_input_select_token),
@@ -6508,6 +6524,7 @@ pub const SuiRpcClient = struct {
                         .version = candidate.version,
                         .digest = try allocator.dupe(u8, candidate.digest),
                         .balance = candidate.balance,
+                        .discovery_rank = candidate.discovery_rank,
                         .type_name = if (candidate.type_name) |value| try allocator.dupe(u8, value) else null,
                         .owner_value = if (candidate.owner_value) |value| try allocator.dupe(u8, value) else null,
                         .object_input_select_token = try allocator.dupe(u8, candidate.object_input_select_token),
@@ -6543,6 +6560,9 @@ pub const SuiRpcClient = struct {
     ) bool {
         if (left.selection_score != right.selection_score) {
             return left.selection_score > right.selection_score;
+        }
+        if (left.discovery_rank != right.discovery_rank) {
+            return left.discovery_rank < right.discovery_rank;
         }
         return std.mem.order(u8, left.object_id, right.object_id) == .lt;
     }
@@ -6857,6 +6877,7 @@ pub const SuiRpcClient = struct {
         parameter_index: usize,
         candidate_index: usize,
         object_id: []const u8,
+        discovery_rank: usize,
         discovered_object_ids: []const []const u8,
         apply_component_bonus: bool,
 
@@ -6873,10 +6894,12 @@ pub const SuiRpcClient = struct {
         explicit_anchor_count: usize,
         auto_anchor_count: usize,
         internal_reference_count: usize,
+        discovery_key: []u8,
         deterministic_key: []u8,
 
         fn deinit(self: *MoveCandidateComponentRecord, allocator: std.mem.Allocator) void {
             allocator.free(self.node_indices);
+            allocator.free(self.discovery_key);
             allocator.free(self.deterministic_key);
         }
     };
@@ -6951,6 +6974,78 @@ pub const SuiRpcClient = struct {
         return try output.toOwnedSlice(allocator);
     }
 
+    fn buildMoveCandidateComponentDiscoveryKey(
+        allocator: std.mem.Allocator,
+        component_nodes: []const usize,
+        nodes: []const MoveCandidateGraphNode,
+    ) ![]u8 {
+        const sorted_indices = try allocator.dupe(usize, component_nodes);
+        defer allocator.free(sorted_indices);
+
+        var index: usize = 1;
+        while (index < sorted_indices.len) : (index += 1) {
+            var scan = index;
+            while (scan > 0) : (scan -= 1) {
+                const current = nodes[sorted_indices[scan]];
+                const previous = nodes[sorted_indices[scan - 1]];
+                if (current.parameter_index != previous.parameter_index) {
+                    if (current.parameter_index < previous.parameter_index) {
+                        std.mem.swap(usize, &sorted_indices[scan], &sorted_indices[scan - 1]);
+                        continue;
+                    }
+                    break;
+                }
+                const current_kind = @intFromEnum(current.kind);
+                const previous_kind = @intFromEnum(previous.kind);
+                if (current_kind != previous_kind) {
+                    if (current_kind < previous_kind) {
+                        std.mem.swap(usize, &sorted_indices[scan], &sorted_indices[scan - 1]);
+                        continue;
+                    }
+                    break;
+                }
+                if (current.discovery_rank != previous.discovery_rank) {
+                    if (current.discovery_rank < previous.discovery_rank) {
+                        std.mem.swap(usize, &sorted_indices[scan], &sorted_indices[scan - 1]);
+                        continue;
+                    }
+                    break;
+                }
+                if (std.mem.order(u8, current.object_id, previous.object_id) == .lt) {
+                    std.mem.swap(usize, &sorted_indices[scan], &sorted_indices[scan - 1]);
+                    continue;
+                }
+                break;
+            }
+        }
+
+        var output = std.ArrayList(u8){};
+        defer output.deinit(allocator);
+        for (sorted_indices) |node_index| {
+            const node = nodes[node_index];
+            var usize_buf: [@sizeOf(usize)]u8 = undefined;
+
+            std.mem.writeInt(
+                usize,
+                &usize_buf,
+                node.parameter_index,
+                .big,
+            );
+            try output.appendSlice(allocator, &usize_buf);
+            try output.append(allocator, @intCast(@intFromEnum(node.kind)));
+            std.mem.writeInt(
+                usize,
+                &usize_buf,
+                node.discovery_rank,
+                .big,
+            );
+            try output.appendSlice(allocator, &usize_buf);
+            try output.appendSlice(allocator, node.object_id);
+            try output.append(allocator, 0);
+        }
+        return try output.toOwnedSlice(allocator);
+    }
+
     fn moveCandidateComponentShouldSortBefore(
         left: MoveCandidateComponentRecord,
         right: MoveCandidateComponentRecord,
@@ -6969,6 +7064,9 @@ pub const SuiRpcClient = struct {
         }
         if (left.size != right.size) {
             return left.size > right.size;
+        }
+        if (!std.mem.eql(u8, left.discovery_key, right.discovery_key)) {
+            return std.mem.order(u8, left.discovery_key, right.discovery_key) == .lt;
         }
         return std.mem.order(u8, left.deterministic_key, right.deterministic_key) == .lt;
     }
@@ -7029,6 +7127,13 @@ pub const SuiRpcClient = struct {
                     }
                     break;
                 }
+                if (current.discovery_rank != previous.discovery_rank) {
+                    if (current.discovery_rank < previous.discovery_rank) {
+                        std.mem.swap(move_result.SharedMoveObjectCandidate, &candidates[scan], &candidates[scan - 1]);
+                        continue;
+                    }
+                    break;
+                }
                 if (std.mem.order(u8, current.object_id, previous.object_id) == .lt) {
                     std.mem.swap(move_result.SharedMoveObjectCandidate, &candidates[scan], &candidates[scan - 1]);
                     continue;
@@ -7074,6 +7179,13 @@ pub const SuiRpcClient = struct {
                 );
                 if (current_rank != previous_rank) {
                     if (current_rank < previous_rank) {
+                        std.mem.swap(move_result.OwnedMoveObjectCandidate, &candidates[scan], &candidates[scan - 1]);
+                        continue;
+                    }
+                    break;
+                }
+                if (current.discovery_rank != previous.discovery_rank) {
+                    if (current.discovery_rank < previous.discovery_rank) {
                         std.mem.swap(move_result.OwnedMoveObjectCandidate, &candidates[scan], &candidates[scan - 1]);
                         continue;
                     }
@@ -7202,6 +7314,7 @@ pub const SuiRpcClient = struct {
                         .parameter_index = parameter_index,
                         .candidate_index = candidate_index,
                         .object_id = candidate.object_id,
+                        .discovery_rank = candidate.discovery_rank,
                         .discovered_object_ids = discovered_object_ids,
                         .apply_component_bonus = apply_component_bonus,
                     });
@@ -7221,6 +7334,7 @@ pub const SuiRpcClient = struct {
                         .parameter_index = parameter_index,
                         .candidate_index = candidate_index,
                         .object_id = candidate.object_id,
+                        .discovery_rank = candidate.discovery_rank,
                         .discovered_object_ids = discovered_object_ids,
                         .apply_component_bonus = apply_component_bonus,
                     });
@@ -7240,6 +7354,7 @@ pub const SuiRpcClient = struct {
                         .parameter_index = parameter_index,
                         .candidate_index = candidate_index,
                         .object_id = candidate.object_id,
+                        .discovery_rank = candidate.discovery_rank,
                         .discovered_object_ids = discovered_object_ids,
                         .apply_component_bonus = apply_component_bonus,
                     });
@@ -7345,6 +7460,12 @@ pub const SuiRpcClient = struct {
                 component_nodes.items,
                 nodes.items,
             );
+            const component_discovery_key = try buildMoveCandidateComponentDiscoveryKey(
+                allocator,
+                component_nodes.items,
+                nodes.items,
+            );
+            errdefer allocator.free(component_discovery_key);
             const component_key = try buildMoveCandidateComponentDeterministicKey(
                 allocator,
                 component_nodes.items,
@@ -7360,6 +7481,7 @@ pub const SuiRpcClient = struct {
                 .explicit_anchor_count = explicit_anchor_count,
                 .auto_anchor_count = auto_anchor_count,
                 .internal_reference_count = internal_reference_count,
+                .discovery_key = component_discovery_key,
                 .deterministic_key = component_key,
             });
 

@@ -5,6 +5,7 @@ pub const OwnedMoveObjectCandidate = struct {
     version: u64,
     digest: []u8,
     selection_score: usize = 0,
+    discovery_rank: usize = std.math.maxInt(usize),
     balance: ?u64 = null,
     type_name: ?[]u8 = null,
     owner_value: ?[]u8 = null,
@@ -22,6 +23,7 @@ pub const OwnedMoveObjectCandidate = struct {
 pub const SharedMoveObjectCandidate = struct {
     object_id: []u8,
     selection_score: usize = 0,
+    discovery_rank: usize = std.math.maxInt(usize),
     type_name: ?[]u8 = null,
     initial_shared_version: u64,
     shared_object_input_select_token: []u8,
