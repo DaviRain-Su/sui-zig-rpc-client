@@ -246,6 +246,27 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
 - [ ] Keep reducing manual copying from summaries into execution commands.
 - [ ] Preserve reusable artifact flows while simplifying the default CLI path.
 
+### 9. Local Move contract coverage matrix
+
+- [ ] Add a `counter_baseline` package for pure-value and sender/signer
+  invocation coverage.
+- [ ] Add a `shared_state_lab` package for shared object and versioned shared
+  object coverage.
+- [ ] Add a `generic_vault` package for generic object and generic pure struct
+  coverage.
+- [ ] Add a `vector_router` package for `vector<object>`, `vector<Coin<T>>`,
+  and `MakeMoveVec` coverage.
+- [ ] Add a `receipt_flow_lab` package for receipt/capability multi-step
+  flows.
+- [ ] Add a `dynamic_registry` package for content/dynamic-field-based
+  discovery coverage.
+- [ ] Add an `admin_upgrade_lab` package for capability/publish/upgrade
+  coverage.
+- [ ] Add a `pool_like_protocol_lab` package for transaction-level
+  `Pool + Position + Coin + gas` coverage.
+- [ ] Wire the local package matrix into deterministic regression docs/tests,
+  not only live protocol smoke checks.
+
 ## Cetus Readiness Gaps
 
 These are not protocol-specific feature branches. They are concrete examples of
