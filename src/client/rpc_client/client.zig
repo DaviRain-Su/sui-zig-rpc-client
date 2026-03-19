@@ -4435,6 +4435,86 @@ pub const SuiRpcClient = struct {
         return try allocator.dupe(u8, response);
     }
 
+    const MoveDynamicFieldDiscoveryCacheEntry = struct {
+        parent_object_id: []u8,
+        discovered_object_ids: [][]u8,
+
+        fn deinit(self: *MoveDynamicFieldDiscoveryCacheEntry, allocator: std.mem.Allocator) void {
+            allocator.free(self.parent_object_id);
+            for (self.discovered_object_ids) |value| allocator.free(value);
+            allocator.free(self.discovered_object_ids);
+        }
+    };
+
+    fn deinitMoveDynamicFieldDiscoveryCache(
+        allocator: std.mem.Allocator,
+        cache: *std.ArrayList(MoveDynamicFieldDiscoveryCacheEntry),
+    ) void {
+        for (cache.items) |*entry| entry.deinit(allocator);
+        cache.deinit(allocator);
+    }
+
+    fn cloneMoveDiscoveredObjectIds(
+        allocator: std.mem.Allocator,
+        object_ids: []const []const u8,
+    ) ![][]u8 {
+        const cloned = try allocator.alloc([]u8, object_ids.len);
+        errdefer allocator.free(cloned);
+
+        for (object_ids, 0..) |object_id, index| {
+            cloned[index] = try allocator.dupe(u8, object_id);
+        }
+
+        return cloned;
+    }
+
+    fn getMoveDynamicFieldDiscoveredObjectIdsCached(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        cache: *std.ArrayList(MoveDynamicFieldDiscoveryCacheEntry),
+        parent_object_id: []const u8,
+    ) ![][]u8 {
+        for (cache.items) |entry| {
+            if (std.mem.eql(u8, entry.parent_object_id, parent_object_id)) {
+                return try cloneMoveDiscoveredObjectIds(allocator, entry.discovered_object_ids);
+            }
+        }
+
+        var page = try self.getAllDynamicFieldsWithRequest(
+            allocator,
+            parent_object_id,
+            .{ .limit = 20 },
+        );
+        defer page.deinit(allocator);
+
+        var discovered_ids = std.ArrayList([]u8).empty;
+        defer {
+            for (discovered_ids.items) |value| allocator.free(value);
+            discovered_ids.deinit(allocator);
+        }
+        try appendDiscoveredObjectIdsFromDynamicFields(
+            allocator,
+            &discovered_ids,
+            page,
+            16,
+        );
+
+        const owned_ids = try discovered_ids.toOwnedSlice(allocator);
+        errdefer {
+            for (owned_ids) |value| allocator.free(value);
+            allocator.free(owned_ids);
+        }
+
+        var entry = MoveDynamicFieldDiscoveryCacheEntry{
+            .parent_object_id = try allocator.dupe(u8, parent_object_id),
+            .discovered_object_ids = owned_ids,
+        };
+        errdefer entry.deinit(allocator);
+
+        try cache.append(allocator, entry);
+        return try cloneMoveDiscoveredObjectIds(allocator, owned_ids);
+    }
+
     fn collectObjectDiscoverySeedObjectIdsFromMoveParameters(
         allocator: std.mem.Allocator,
         parameters: []const move_result.OwnedMoveParameterSummary,
@@ -4479,6 +4559,7 @@ pub const SuiRpcClient = struct {
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
         object_content_cache: *std.ArrayList(MoveObjectContentResponseCacheEntry),
+        dynamic_field_cache: *std.ArrayList(MoveDynamicFieldDiscoveryCacheEntry),
         parameters: []const move_result.OwnedMoveParameterSummary,
         signature: []const u8,
         allow_dynamic_field_fallback: bool,
@@ -4514,18 +4595,19 @@ pub const SuiRpcClient = struct {
         if (allow_dynamic_field_fallback and discovered_ids.items.len < 16) {
             for (seed_object_ids) |object_id| {
                 if (discovered_ids.items.len >= 16) break;
-                var page = self.getAllDynamicFieldsWithRequest(
+                const dynamic_field_object_ids = self.getMoveDynamicFieldDiscoveredObjectIdsCached(
                     allocator,
+                    dynamic_field_cache,
                     object_id,
-                    .{ .limit = 20 },
                 ) catch continue;
-                defer page.deinit(allocator);
-                try appendDiscoveredObjectIdsFromDynamicFields(
-                    allocator,
-                    &discovered_ids,
-                    page,
-                    16,
-                );
+                defer {
+                    for (dynamic_field_object_ids) |value| allocator.free(value);
+                    allocator.free(dynamic_field_object_ids);
+                }
+                for (dynamic_field_object_ids) |dynamic_field_object_id| {
+                    if (discovered_ids.items.len >= 16) break;
+                    try appendUniqueMoveSelectedObjectId(allocator, &discovered_ids, dynamic_field_object_id);
+                }
             }
         }
 
@@ -4596,6 +4678,7 @@ pub const SuiRpcClient = struct {
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
         object_content_cache: *std.ArrayList(MoveObjectContentResponseCacheEntry),
+        dynamic_field_cache: *std.ArrayList(MoveDynamicFieldDiscoveryCacheEntry),
         parameters: []const move_result.OwnedMoveParameterSummary,
         owner: []const u8,
         struct_type: []const u8,
@@ -4632,18 +4715,19 @@ pub const SuiRpcClient = struct {
         if (allow_dynamic_field_fallback and discovered_ids.items.len < 16) {
             for (seed_object_ids) |object_id| {
                 if (discovered_ids.items.len >= 16) break;
-                var page = self.getAllDynamicFieldsWithRequest(
+                const dynamic_field_object_ids = self.getMoveDynamicFieldDiscoveredObjectIdsCached(
                     allocator,
+                    dynamic_field_cache,
                     object_id,
-                    .{ .limit = 20 },
                 ) catch continue;
-                defer page.deinit(allocator);
-                try appendDiscoveredObjectIdsFromDynamicFields(
-                    allocator,
-                    &discovered_ids,
-                    page,
-                    16,
-                );
+                defer {
+                    for (dynamic_field_object_ids) |value| allocator.free(value);
+                    allocator.free(dynamic_field_object_ids);
+                }
+                for (dynamic_field_object_ids) |dynamic_field_object_id| {
+                    if (discovered_ids.items.len >= 16) break;
+                    try appendUniqueMoveSelectedObjectId(allocator, &discovered_ids, dynamic_field_object_id);
+                }
             }
         }
 
@@ -5507,6 +5591,7 @@ pub const SuiRpcClient = struct {
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
         object_content_cache: *std.ArrayList(MoveObjectContentResponseCacheEntry),
+        dynamic_field_cache: *std.ArrayList(MoveDynamicFieldDiscoveryCacheEntry),
         parameters: []move_result.OwnedMoveParameterSummary,
     ) !void {
         for (parameters) |*parameter| {
@@ -5519,6 +5604,7 @@ pub const SuiRpcClient = struct {
             const discovered_candidates = try self.discoverSharedObjectCandidatesFromMoveParameters(
                 allocator,
                 object_content_cache,
+                dynamic_field_cache,
                 parameters,
                 parameter.signature,
                 parameter.shared_object_candidates == null or parameter.shared_object_candidates.?.len == 0,
@@ -5592,6 +5678,7 @@ pub const SuiRpcClient = struct {
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
         object_content_cache: *std.ArrayList(MoveObjectContentResponseCacheEntry),
+        dynamic_field_cache: *std.ArrayList(MoveDynamicFieldDiscoveryCacheEntry),
         parameters: []move_result.OwnedMoveParameterSummary,
         owner_address: ?[]const u8,
         event_package_id: ?[]const u8,
@@ -5613,6 +5700,7 @@ pub const SuiRpcClient = struct {
                 const discovered_candidates = try self.discoverOwnedObjectCandidatesFromMoveParameters(
                     allocator,
                     object_content_cache,
+                    dynamic_field_cache,
                     parameters,
                     owner,
                     struct_type,
@@ -5755,6 +5843,7 @@ pub const SuiRpcClient = struct {
                 const discovered_candidates = try self.discoverOwnedObjectCandidatesFromMoveParameters(
                     allocator,
                     object_content_cache,
+                    dynamic_field_cache,
                     parameters,
                     owner,
                     struct_type,
@@ -6645,6 +6734,7 @@ pub const SuiRpcClient = struct {
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
         object_content_cache: *std.ArrayList(MoveObjectContentResponseCacheEntry),
+        dynamic_field_cache: *std.ArrayList(MoveDynamicFieldDiscoveryCacheEntry),
         parameters: []move_result.OwnedMoveParameterSummary,
         owner_address: ?[]const u8,
         event_package_id: ?[]const u8,
@@ -6659,11 +6749,13 @@ pub const SuiRpcClient = struct {
             try self.populateSharedObjectCandidateFallbacksFromMoveParameters(
                 allocator,
                 object_content_cache,
+                dynamic_field_cache,
                 parameters,
             );
             try self.populateOwnedObjectCandidateFallbacksFromMoveParameters(
                 allocator,
                 object_content_cache,
+                dynamic_field_cache,
                 parameters,
                 owner_address,
                 event_package_id,
@@ -8319,6 +8411,9 @@ pub const SuiRpcClient = struct {
         var object_content_cache = std.ArrayList(MoveObjectContentResponseCacheEntry).empty;
         defer deinitMoveObjectContentResponseCache(allocator, &object_content_cache);
 
+        var dynamic_field_cache = std.ArrayList(MoveDynamicFieldDiscoveryCacheEntry).empty;
+        defer deinitMoveDynamicFieldDiscoveryCache(allocator, &dynamic_field_cache);
+
         var owned_event_cache = std.ArrayList(OwnedModuleEventDiscoveryCacheEntry).empty;
         defer deinitOwnedModuleEventDiscoveryCache(allocator, &owned_event_cache);
 
@@ -8522,6 +8617,7 @@ pub const SuiRpcClient = struct {
         try self.resolveMoveParameterCandidatesToFixedPoint(
             allocator,
             &object_content_cache,
+            &dynamic_field_cache,
             summary.parameters,
             owner_address,
             summary.package_id,

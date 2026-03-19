@@ -5098,8 +5098,14 @@ test "runCommand move function with --summarize discovers shared candidates from
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
+    const State = struct {
+        registry_dynamic_field_requests: usize = 0,
+    };
+    var state = State{};
+
     const callback = struct {
-        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const callback_state = @as(*State, @ptrCast(@alignCast(context)));
             if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
                 return alloc.dupe(
                     u8,
@@ -5114,6 +5120,7 @@ test "runCommand move function with --summarize discovers shared candidates from
             }
             if (std.mem.eql(u8, req.method, "suix_getDynamicFields")) {
                 if (std.mem.indexOf(u8, req.params_json, "\"0xregistry1\"") != null) {
+                    callback_state.registry_dynamic_field_requests += 1;
                     return alloc.dupe(
                         u8,
                         "{\"result\":{\"data\":[{\"name\":{\"type\":\"address\",\"value\":\"0xpool-owner\"},\"type\":\"DynamicField\",\"objectType\":\"0x2a::pool::Pool\",\"objectId\":\"0xpool1\",\"version\":\"4\",\"digest\":\"pool-digest-1\"}],\"hasNextPage\":false}}",
@@ -5162,7 +5169,7 @@ test "runCommand move function with --summarize discovers shared candidates from
     var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
     defer rpc.deinit();
     rpc.request_sender = .{
-        .context = undefined,
+        .context = &state,
         .callback = callback,
     };
 
@@ -5185,6 +5192,7 @@ test "runCommand move function with --summarize discovers shared candidates from
         "\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xregistry1\\\",\\\"inputKind\\\":\\\"shared\\\",\\\"initialSharedVersion\\\":9,\\\"mutable\\\":false}\"",
         parameters[1].object.get("explicit_arg_json").?.string,
     );
+    try testing.expectEqual(@as(usize, 1), state.registry_dynamic_field_requests);
 }
 
 test "runCommand move function with --summarize discovers owned candidates from discovered object content" {
