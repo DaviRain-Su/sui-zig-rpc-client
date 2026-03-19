@@ -5111,10 +5111,10 @@ pub const SuiRpcClient = struct {
         candidates: []const move_result.OwnedMoveObjectCandidate,
     ) ?struct { token: []const u8, decision: SortedCandidateSelectionDecision } {
         if (candidates.len == 0) return null;
-        if (candidates[0].selection_score == 0) return null;
+        if (candidates[0].selection_score == 0 and candidates.len == 1) return null;
 
-        const used_tiebreak = candidates.len > 1 and
-            candidates[1].selection_score == candidates[0].selection_score;
+        const used_tiebreak = candidates[0].selection_score == 0 or
+            (candidates.len > 1 and candidates[1].selection_score == candidates[0].selection_score);
         return .{
             .token = candidates[0].object_input_select_token,
             .decision = .{

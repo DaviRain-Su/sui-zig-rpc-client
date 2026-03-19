@@ -4446,6 +4446,86 @@ test "runCommand move function with --summarize tie-breaks owned candidates by d
     );
 }
 
+test "runCommand move function with --summarize tie-breaks zero-score owned candidates by deterministic order" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"visibility\":\"Public\",\"isEntry\":true,\"typeParameters\":[],\"parameters\":[{\"Struct\":{\"address\":\"0x2a\",\"module\":\"position\",\"name\":\"Position\",\"typeParams\":[]}},{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[]}}",
+                );
+            }
+
+            if (std.mem.eql(u8, req.method, "sui_getObject")) {
+                if (std.mem.indexOf(u8, req.params_json, "\"0xposition-a\"") != null) {
+                    return alloc.dupe(
+                        u8,
+                        "{\"result\":{\"data\":{\"objectId\":\"0xposition-a\",\"version\":\"7\",\"digest\":\"position-digest-a\",\"content\":{\"dataType\":\"moveObject\",\"fields\":{\"liquidity\":\"9\"}}}}}",
+                    );
+                }
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0xposition-b\"") != null);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":{\"objectId\":\"0xposition-b\",\"version\":\"8\",\"digest\":\"position-digest-b\",\"content\":{\"dataType\":\"moveObject\",\"fields\":{\"liquidity\":\"4\"}}}}}",
+                );
+            }
+
+            std.debug.assert(std.mem.eql(u8, req.method, "suix_getOwnedObjects"));
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0xowner\"") != null);
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"StructType\":\"0x2a::position::Position\"") != null);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xposition-a\",\"version\":\"7\",\"digest\":\"position-digest-a\",\"type\":\"0x2a::position::Position\",\"owner\":{\"AddressOwner\":\"0xowner\"}}},{\"data\":{\"objectId\":\"0xposition-b\",\"version\":\"8\",\"digest\":\"position-digest-b\",\"type\":\"0x2a::position::Position\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var args = cli.ParsedArgs{
+        .command = .move_function,
+        .has_command = true,
+        .move_package = "0x2a",
+        .move_module = "router",
+        .move_function = "deposit_position",
+        .tx_build_sender = "0xowner",
+        .tx_send_summarize = true,
+    };
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    const parameter = parsed.value.object.get("parameters").?.array.items[0].object;
+    const owned_candidates = parameter.get("owned_object_candidates").?.array.items;
+    try testing.expectEqual(@as(i64, 0), owned_candidates[0].object.get("selection_score").?.integer);
+    try testing.expectEqual(@as(i64, 0), owned_candidates[1].object.get("selection_score").?.integer);
+    try testing.expectEqualStrings("0xposition-a", owned_candidates[0].object.get("object_id").?.string);
+    try testing.expectEqualStrings(
+        "\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xposition-a\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":7,\\\"digest\\\":\\\"position-digest-a\\\"}\"",
+        parameter.get("auto_selected_arg_json").?.string,
+    );
+    const preferred_resolution = parsed.value.object.get("call_template").?.object.get("preferred_resolution").?.object;
+    try testing.expectEqualStrings(
+        "auto_selected_tiebreak",
+        preferred_resolution.get("parameters").?.array.items[0].object.get("resolution_kind").?.string,
+    );
+}
+
 test "runCommand move function with --summarize links shared object candidates to selected owned objects" {
     const testing = std.testing;
 

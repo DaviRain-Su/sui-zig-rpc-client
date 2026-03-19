@@ -57,6 +57,8 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
   above auto-selected references.
 - [x] Low-confidence deterministic tie-break selection for zero-score shared
   candidates discovered from ordered module events.
+- [x] Low-confidence deterministic tie-break selection for zero-score owned
+  candidates discovered from owner context.
 - [x] Vector-owned candidate scoring and stable ordering from selected object
   references.
 - [x] Candidate `selection_score` exposure and deterministic score-first
