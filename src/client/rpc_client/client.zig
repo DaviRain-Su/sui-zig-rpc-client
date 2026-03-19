@@ -3586,6 +3586,501 @@ pub const SuiRpcClient = struct {
         return try buildPureBytesInputJson(allocator, bytes.items);
     }
 
+    const NormalizedMoveModuleResponseCacheEntry = struct {
+        package_id: []u8,
+        module: []u8,
+        response_json: []u8,
+
+        pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+            allocator.free(self.package_id);
+            allocator.free(self.module);
+            allocator.free(self.response_json);
+        }
+    };
+
+    fn deinitNormalizedMoveModuleResponseCache(
+        allocator: std.mem.Allocator,
+        cache: *std.ArrayList(NormalizedMoveModuleResponseCacheEntry),
+    ) void {
+        for (cache.items) |*entry| entry.deinit(allocator);
+        cache.deinit(allocator);
+    }
+
+    fn normalizedStructDescriptor(
+        struct_object: std.json.ObjectMap,
+    ) !struct {
+        address: []const u8,
+        module: []const u8,
+        name: []const u8,
+        type_arguments: []const std.json.Value,
+    } {
+        const address_value = struct_object.get("address") orelse return error.InvalidCli;
+        const module_value = struct_object.get("module") orelse return error.InvalidCli;
+        const name_value = struct_object.get("name") orelse return error.InvalidCli;
+        if (address_value != .string or module_value != .string or name_value != .string) return error.InvalidCli;
+        return .{
+            .address = address_value.string,
+            .module = module_value.string,
+            .name = name_value.string,
+            .type_arguments = try normalizedStructTypeArguments(struct_object),
+        };
+    }
+
+    fn normalizedStructHasKeyAbility(
+        struct_object: std.json.ObjectMap,
+    ) bool {
+        const abilities_value = struct_object.get("abilities") orelse return false;
+        const ability_items: []const std.json.Value = switch (abilities_value) {
+            .array => abilities_value.array.items,
+            .object => blk: {
+                const nested = abilities_value.object.get("abilities") orelse return false;
+                if (nested != .array) return false;
+                break :blk nested.array.items;
+            },
+            else => return false,
+        };
+        for (ability_items) |item| {
+            if (item != .string) continue;
+            if (std.ascii.eqlIgnoreCase(item.string, "Key")) return true;
+        }
+        return false;
+    }
+
+    fn getNormalizedStructFieldsFromModuleResponse(
+        parsed_module: std.json.Value,
+        struct_name: []const u8,
+    ) !std.json.ObjectMap {
+        if (parsed_module != .object) return error.InvalidResponse;
+        const result = parsed_module.object.get("result") orelse return error.InvalidResponse;
+        if (result != .object) return error.InvalidResponse;
+        const structs_value = result.object.get("structs") orelse return error.InvalidResponse;
+        if (structs_value != .object) return error.InvalidResponse;
+        const struct_value = structs_value.object.get(struct_name) orelse return error.InvalidResponse;
+        if (struct_value != .object) return error.InvalidResponse;
+        return struct_value.object;
+    }
+
+    fn getNormalizedMoveModuleResponseCachedBorrowed(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        cache: *std.ArrayList(NormalizedMoveModuleResponseCacheEntry),
+        package_id: []const u8,
+        module: []const u8,
+    ) ![]const u8 {
+        for (cache.items) |entry| {
+            if (std.mem.eql(u8, entry.package_id, package_id) and
+                std.mem.eql(u8, entry.module, module))
+            {
+                return entry.response_json;
+            }
+        }
+
+        const response_json = try self.getNormalizedMoveModule(allocator, package_id, module);
+        errdefer allocator.free(response_json);
+        try cache.append(allocator, .{
+            .package_id = try allocator.dupe(u8, package_id),
+            .module = try allocator.dupe(u8, module),
+            .response_json = response_json,
+        });
+        return cache.items[cache.items.len - 1].response_json;
+    }
+
+    fn normalizedTypeSupportsPureValueEncodingWithModuleCache(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        module_cache: *std.ArrayList(NormalizedMoveModuleResponseCacheEntry),
+        value: std.json.Value,
+    ) anyerror!bool {
+        switch (value) {
+            .string => |name| {
+                const canonical = canonicalPrimitiveMoveTypeName(name) orelse return false;
+                return !std.mem.eql(u8, canonical, "signer");
+            },
+            .object => |object| {
+                if (object.get("Reference")) |inner| {
+                    return try self.normalizedTypeSupportsPureValueEncodingWithModuleCache(
+                        allocator,
+                        module_cache,
+                        inner,
+                    );
+                }
+                if (object.get("MutableReference")) |inner| {
+                    return try self.normalizedTypeSupportsPureValueEncodingWithModuleCache(
+                        allocator,
+                        module_cache,
+                        inner,
+                    );
+                }
+                if (object.get("TypeParameter") != null) return false;
+                if (object.get("Vector")) |inner| {
+                    return try self.normalizedTypeSupportsPureValueEncodingWithModuleCache(
+                        allocator,
+                        module_cache,
+                        inner,
+                    );
+                }
+                if (object.get("Struct")) |struct_value| {
+                    if (struct_value != .object) return false;
+                    const struct_object = struct_value.object;
+                    const type_params = try normalizedStructTypeArguments(struct_object);
+
+                    if (try normalizedStructMatches(struct_object, "0x1", "string", "String")) {
+                        return type_params.len == 0;
+                    }
+                    if (try normalizedStructMatches(struct_object, "0x1", "ascii", "String")) {
+                        return type_params.len == 0;
+                    }
+                    if (try normalizedStructMatches(struct_object, "0x2", "object", "ID")) {
+                        return type_params.len == 0;
+                    }
+                    if (try normalizedStructMatches(struct_object, "0x1", "option", "Option")) {
+                        return type_params.len == 1 and try self.normalizedTypeSupportsPureValueEncodingWithModuleCache(
+                            allocator,
+                            module_cache,
+                            type_params[0],
+                        );
+                    }
+                    if (try normalizedStructMatches(struct_object, "0x2", "object", "UID")) return false;
+
+                    const descriptor = try normalizedStructDescriptor(struct_object);
+                    const module_response = try self.getNormalizedMoveModuleResponseCachedBorrowed(
+                        allocator,
+                        module_cache,
+                        descriptor.address,
+                        descriptor.module,
+                    );
+                    const parsed_module = try std.json.parseFromSlice(
+                        std.json.Value,
+                        allocator,
+                        module_response,
+                        .{},
+                    );
+                    defer parsed_module.deinit();
+
+                    const struct_definition = try getNormalizedStructFieldsFromModuleResponse(
+                        parsed_module.value,
+                        descriptor.name,
+                    );
+                    if (normalizedStructHasKeyAbility(struct_definition)) return false;
+
+                    const fields_value = struct_definition.get("fields") orelse return error.InvalidResponse;
+                    if (fields_value != .array) return error.InvalidResponse;
+                    for (fields_value.array.items) |field| {
+                        if (field != .object) return error.InvalidResponse;
+                        const field_type = field.object.get("type") orelse return error.InvalidResponse;
+                        const resolved_field_json = try substituteNormalizedMoveTypeJson(
+                            allocator,
+                            field_type,
+                            descriptor.type_arguments,
+                        );
+                        defer allocator.free(resolved_field_json);
+                        const resolved_field = try std.json.parseFromSlice(
+                            std.json.Value,
+                            allocator,
+                            resolved_field_json,
+                            .{},
+                        );
+                        defer resolved_field.deinit();
+                        if (!try self.normalizedTypeSupportsPureValueEncodingWithModuleCache(
+                            allocator,
+                            module_cache,
+                            resolved_field.value,
+                        )) return false;
+                    }
+                    return true;
+                }
+                return false;
+            },
+            else => return false,
+        }
+    }
+
+    fn appendGenericNormalizedStructValueBytesWithModuleCache(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        module_cache: *std.ArrayList(NormalizedMoveModuleResponseCacheEntry),
+        out: *std.ArrayList(u8),
+        value: std.json.Value,
+        struct_object: std.json.ObjectMap,
+    ) anyerror!void {
+        const descriptor = try normalizedStructDescriptor(struct_object);
+        const module_response = try self.getNormalizedMoveModuleResponseCachedBorrowed(
+            allocator,
+            module_cache,
+            descriptor.address,
+            descriptor.module,
+        );
+        const parsed_module = try std.json.parseFromSlice(std.json.Value, allocator, module_response, .{});
+        defer parsed_module.deinit();
+
+        const struct_definition = try getNormalizedStructFieldsFromModuleResponse(parsed_module.value, descriptor.name);
+        if (normalizedStructHasKeyAbility(struct_definition)) return error.InvalidCli;
+        const fields_value = struct_definition.get("fields") orelse return error.InvalidResponse;
+        if (fields_value != .array) return error.InvalidResponse;
+        const fields = fields_value.array.items;
+
+        const FieldInputSource = union(enum) {
+            scalar: std.json.Value,
+            array: []const std.json.Value,
+            object: std.json.ObjectMap,
+        };
+
+        const source: FieldInputSource = switch (value) {
+            .array => |items| blk: {
+                if (items.items.len != fields.len) return error.InvalidCli;
+                break :blk .{ .array = items.items };
+            },
+            .object => |object_value| blk: {
+                if (object_value.count() != fields.len) return error.InvalidCli;
+                break :blk .{ .object = object_value };
+            },
+            .null => blk: {
+                if (fields.len != 0) return error.InvalidCli;
+                break :blk .{ .scalar = value };
+            },
+            else => blk: {
+                if (fields.len != 1) return error.InvalidCli;
+                break :blk .{ .scalar = value };
+            },
+        };
+
+        for (fields, 0..) |field, index| {
+            if (field != .object) return error.InvalidResponse;
+            const field_name = field.object.get("name") orelse return error.InvalidResponse;
+            if (field_name != .string) return error.InvalidResponse;
+            const field_type = field.object.get("type") orelse return error.InvalidResponse;
+            const resolved_field_json = try substituteNormalizedMoveTypeJson(
+                allocator,
+                field_type,
+                descriptor.type_arguments,
+            );
+            defer allocator.free(resolved_field_json);
+            const resolved_field = try std.json.parseFromSlice(
+                std.json.Value,
+                allocator,
+                resolved_field_json,
+                .{},
+            );
+            defer resolved_field.deinit();
+
+            const field_value = switch (source) {
+                .scalar => |scalar| scalar,
+                .array => |items| items[index],
+                .object => |object_value| object_value.get(field_name.string) orelse return error.InvalidCli,
+            };
+
+            try self.appendNormalizedPureValueBytesWithModuleCache(
+                allocator,
+                module_cache,
+                out,
+                field_value,
+                resolved_field.value,
+            );
+        }
+    }
+
+    fn appendNormalizedPureValueBytesWithModuleCache(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        module_cache: *std.ArrayList(NormalizedMoveModuleResponseCacheEntry),
+        out: *std.ArrayList(u8),
+        value: std.json.Value,
+        parameter_type: std.json.Value,
+    ) anyerror!void {
+        switch (parameter_type) {
+            .string => |name| {
+                const canonical = canonicalPrimitiveMoveTypeName(name) orelse return error.InvalidCli;
+                if (std.mem.eql(u8, canonical, "bool")) {
+                    if (value != .bool) return error.InvalidCli;
+                    try out.append(allocator, if (value.bool) 1 else 0);
+                    return;
+                }
+                if (std.mem.eql(u8, canonical, "u8")) {
+                    try out.append(allocator, try parseUnsignedJsonValueAs(u8, value));
+                    return;
+                }
+                if (std.mem.eql(u8, canonical, "u16")) {
+                    var bytes: [2]u8 = undefined;
+                    std.mem.writeInt(u16, &bytes, try parseUnsignedJsonValueAs(u16, value), .little);
+                    try out.appendSlice(allocator, &bytes);
+                    return;
+                }
+                if (std.mem.eql(u8, canonical, "u32")) {
+                    var bytes: [4]u8 = undefined;
+                    std.mem.writeInt(u32, &bytes, try parseUnsignedJsonValueAs(u32, value), .little);
+                    try out.appendSlice(allocator, &bytes);
+                    return;
+                }
+                if (std.mem.eql(u8, canonical, "u64")) {
+                    var bytes: [8]u8 = undefined;
+                    std.mem.writeInt(u64, &bytes, try parseUnsignedJsonValueAs(u64, value), .little);
+                    try out.appendSlice(allocator, &bytes);
+                    return;
+                }
+                if (std.mem.eql(u8, canonical, "u128")) {
+                    var bytes: [16]u8 = undefined;
+                    std.mem.writeInt(u128, &bytes, try parseUnsignedJsonValueAs(u128, value), .little);
+                    try out.appendSlice(allocator, &bytes);
+                    return;
+                }
+                if (std.mem.eql(u8, canonical, "u256")) {
+                    var bytes: [32]u8 = undefined;
+                    std.mem.writeInt(u256, &bytes, try parseUnsignedJsonValueAs(u256, value), .little);
+                    try out.appendSlice(allocator, &bytes);
+                    return;
+                }
+                if (std.mem.eql(u8, canonical, "address")) {
+                    if (value != .string) return error.InvalidCli;
+                    const address = try ptb_bytes_builder.parseHexAddress32(value.string);
+                    try out.appendSlice(allocator, &address);
+                    return;
+                }
+                return error.InvalidCli;
+            },
+            .object => |object| {
+                if (object.get("Reference")) |inner| {
+                    return try self.appendNormalizedPureValueBytesWithModuleCache(
+                        allocator,
+                        module_cache,
+                        out,
+                        value,
+                        inner,
+                    );
+                }
+                if (object.get("MutableReference")) |inner| {
+                    return try self.appendNormalizedPureValueBytesWithModuleCache(
+                        allocator,
+                        module_cache,
+                        out,
+                        value,
+                        inner,
+                    );
+                }
+                if (object.get("Vector")) |inner| {
+                    if ((try classifyNormalizedMoveType(allocator, inner)) == .u8) {
+                        const bytes = try ptb_bytes_builder.parseRawBytesJsonValue(allocator, value);
+                        defer allocator.free(bytes);
+                        return try appendLengthPrefixedBytes(out, allocator, bytes);
+                    }
+                    if (value != .array) return error.InvalidCli;
+                    try appendUleb128(out, allocator, value.array.items.len);
+                    for (value.array.items) |item| {
+                        try self.appendNormalizedPureValueBytesWithModuleCache(
+                            allocator,
+                            module_cache,
+                            out,
+                            item,
+                            inner,
+                        );
+                    }
+                    return;
+                }
+                const struct_kind = try classifyKnownPureStructType(parameter_type);
+                if (struct_kind) |known_kind| {
+                    const struct_value = object.get("Struct") orelse return error.InvalidCli;
+                    if (struct_value != .object) return error.InvalidCli;
+                    const type_params = try normalizedStructTypeArguments(struct_value.object);
+
+                    switch (known_kind) {
+                        .utf8_string => {
+                            if (value != .string) return error.InvalidCli;
+                            return try appendLengthPrefixedBytes(out, allocator, value.string);
+                        },
+                        .ascii_string => {
+                            if (value != .string) return error.InvalidCli;
+                            for (value.string) |char| {
+                                if (char > 0x7f) return error.InvalidCli;
+                            }
+                            return try appendLengthPrefixedBytes(out, allocator, value.string);
+                        },
+                        .object_id => {
+                            if (value != .string) return error.InvalidCli;
+                            const address = try ptb_bytes_builder.parseHexAddress32(value.string);
+                            try out.appendSlice(allocator, &address);
+                            return;
+                        },
+                        .option => {
+                            if (type_params.len != 1) return error.InvalidCli;
+                            if (value == .null) {
+                                return try appendUleb128(out, allocator, 0);
+                            }
+                            try appendUleb128(out, allocator, 1);
+                            return try self.appendNormalizedPureValueBytesWithModuleCache(
+                                allocator,
+                                module_cache,
+                                out,
+                                value,
+                                type_params[0],
+                            );
+                        },
+                        else => return error.InvalidCli,
+                    }
+                }
+
+                const struct_value = object.get("Struct") orelse return error.InvalidCli;
+                if (struct_value != .object) return error.InvalidCli;
+                if (!try self.normalizedTypeSupportsPureValueEncodingWithModuleCache(
+                    allocator,
+                    module_cache,
+                    parameter_type,
+                )) return error.InvalidCli;
+                return try self.appendGenericNormalizedStructValueBytesWithModuleCache(
+                    allocator,
+                    module_cache,
+                    out,
+                    value,
+                    struct_value.object,
+                );
+            },
+            else => return error.InvalidCli,
+        }
+    }
+
+    fn buildPureNormalizedValueInputJsonWithModuleCache(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        module_cache: *std.ArrayList(NormalizedMoveModuleResponseCacheEntry),
+        value: std.json.Value,
+        parameter_type: std.json.Value,
+    ) anyerror![]u8 {
+        var bytes = std.ArrayList(u8){};
+        defer bytes.deinit(allocator);
+        try self.appendNormalizedPureValueBytesWithModuleCache(
+            allocator,
+            module_cache,
+            &bytes,
+            value,
+            parameter_type,
+        );
+        return try buildPureBytesInputJson(allocator, bytes.items);
+    }
+
+    fn moveArgumentValueLooksLikeObjectReference(
+        value: std.json.Value,
+    ) bool {
+        return switch (value) {
+            .string => |raw| blk: {
+                const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+                if (trimmed.len == 0) break :blk false;
+                if (std.mem.eql(u8, trimmed, "GasCoin")) break :blk true;
+                if (std.mem.startsWith(u8, trimmed, "select:") or
+                    std.mem.startsWith(u8, trimmed, "sel:"))
+                {
+                    break :blk true;
+                }
+                if (std.mem.startsWith(u8, trimmed, "0x")) break :blk true;
+                if (object_preset.resolveKind(trimmed) != null) break :blk true;
+                break :blk false;
+            },
+            .object => |object| object.get("Object") != null or
+                object.get("Input") != null or
+                object.get("Result") != null or
+                object.get("NestedResult") != null or
+                object.get("Pure") != null,
+            else => false,
+        };
+    }
+
     fn buildNormalizedMoveFunctionParams(
         allocator: std.mem.Allocator,
         package_id: []const u8,
@@ -10491,12 +10986,14 @@ pub const SuiRpcClient = struct {
             allocator: std.mem.Allocator,
             inputs: std.ArrayListUnmanaged([]u8) = .{},
             commands: std.ArrayListUnmanaged([]u8) = .{},
+            normalized_module_cache: std.ArrayList(NormalizedMoveModuleResponseCacheEntry) = .empty,
 
             fn deinit(ctx: *@This()) void {
                 for (ctx.inputs.items) |item| ctx.allocator.free(item);
                 for (ctx.commands.items) |item| ctx.allocator.free(item);
                 ctx.inputs.deinit(ctx.allocator);
                 ctx.commands.deinit(ctx.allocator);
+                deinitNormalizedMoveModuleResponseCache(ctx.allocator, &ctx.normalized_module_cache);
             }
 
             fn appendInput(ctx: *@This(), input_json: []u8) !u16 {
@@ -10791,7 +11288,15 @@ pub const SuiRpcClient = struct {
                             if (nested_kind == .u8) return try ctx.lowerMoveCallArgumentForKind(value, .vector_u8);
                             return try ctx.lowerVectorMoveCallArgument(value, inner);
                         }
-                        if (try classifyKnownPureStructType(parameter_type)) |_| {
+                        const known_pure_struct_kind = try classifyKnownPureStructType(parameter_type);
+                        if ((known_pure_struct_kind != null or
+                            !moveArgumentValueLooksLikeObjectReference(value)) and
+                            try ctx.rpc.normalizedTypeSupportsPureValueEncodingWithModuleCache(
+                                ctx.allocator,
+                                &ctx.normalized_module_cache,
+                                parameter_type,
+                            ))
+                        {
                             switch (value) {
                                 .object => |argument_object| {
                                     if (argument_object.get("Object") != null) return error.InvalidCli;
@@ -10806,7 +11311,12 @@ pub const SuiRpcClient = struct {
                                 else => {},
                             }
 
-                            const input_json = try buildPureNormalizedValueInputJson(ctx.allocator, value, parameter_type);
+                            const input_json = try ctx.rpc.buildPureNormalizedValueInputJsonWithModuleCache(
+                                ctx.allocator,
+                                &ctx.normalized_module_cache,
+                                value,
+                                parameter_type,
+                            );
                             errdefer ctx.allocator.free(input_json);
                             const input_index = try ctx.appendInput(input_json);
                             return try ctx.buildInputRefJson(input_index);
@@ -12468,6 +12978,91 @@ pub const SuiRpcClient = struct {
         }
 
         try testing.expectEqual(@as(usize, 1), state.normalized_calls);
+        try testing.expectEqual(@as(usize, 0), state.object_calls);
+    }
+
+    test "local move-call lowering supports concrete pure structs resolved from normalized modules" {
+        const testing = std.testing;
+
+        var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+        defer _ = gpa.deinit();
+        const allocator = gpa.allocator();
+
+        const State = struct {
+            normalized_function_calls: usize = 0,
+            normalized_module_calls: usize = 0,
+            object_calls: usize = 0,
+        };
+
+        var rpc = SuiRpcClient.init(allocator, "https://rpc.invalid");
+        defer rpc.deinit();
+
+        var state = State{};
+        rpc.request_sender = .{
+            .context = &state,
+            .callback = struct {
+                fn send(
+                    ctx: *anyopaque,
+                    alloc: std.mem.Allocator,
+                    req: RpcRequest,
+                ) error{OutOfMemory}![]u8 {
+                    const local_state: *State = @ptrCast(@alignCast(ctx));
+                    if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                        local_state.normalized_function_calls += 1;
+                        return try alloc.dupe(
+                            u8,
+                            "{\"result\":{\"parameters\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"balance\",\"name\":\"Balance\",\"typeParams\":[{\"TypeParameter\":0}]}},{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[],\"typeParameters\":[{\"constraints\":[]}],\"visibility\":\"Public\",\"isEntry\":true}}",
+                        );
+                    }
+                    if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveModule")) {
+                        local_state.normalized_module_calls += 1;
+                        return try alloc.dupe(
+                            u8,
+                            "{\"result\":{\"structs\":{\"Balance\":{\"abilities\":{\"abilities\":[\"Store\"]},\"typeParameters\":[{\"constraints\":{\"abilities\":[]},\"isPhantom\":true}],\"fields\":[{\"name\":\"value\",\"type\":\"U64\"}]}}}}",
+                        );
+                    }
+                    if (std.mem.eql(u8, req.method, "sui_getObject")) {
+                        local_state.object_calls += 1;
+                    }
+                    return error.OutOfMemory;
+                }
+            }.send,
+        };
+
+        var parts = try rpc.ownLocalProgrammableTransactionPartsFromCommandSource(
+            allocator,
+            .{
+                .move_call = .{
+                    .package_id = "0x2",
+                    .module = "balance_helpers",
+                    .function_name = "submit_balance",
+                    .type_args = "[\"0x2::sui::SUI\"]",
+                    .arguments = "[7]",
+                },
+            },
+            "0xsender",
+            "[{\"objectId\":\"0xgas\",\"version\":\"5\",\"digest\":\"gas-digest\"}]",
+            7,
+            1200,
+            null,
+        );
+        defer parts.deinit(allocator);
+
+        const inputs = try std.json.parseFromSlice(std.json.Value, allocator, parts.inputs_json, .{});
+        defer inputs.deinit();
+        try testing.expectEqual(@as(usize, 1), inputs.value.array.items.len);
+        try testing.expect(inputs.value.array.items[0].object.get("Pure") != null);
+
+        const pure_value = inputs.value.array.items[0].object.get("Pure").?;
+        try testing.expect(pure_value == .string);
+        const decoded_len = try std.base64.standard.Decoder.calcSizeForSlice(pure_value.string);
+        const decoded = try allocator.alloc(u8, decoded_len);
+        defer allocator.free(decoded);
+        try std.base64.standard.Decoder.decode(decoded, pure_value.string);
+        try testing.expectEqualSlices(u8, &.{ 7, 0, 0, 0, 0, 0, 0, 0 }, decoded);
+
+        try testing.expectEqual(@as(usize, 1), state.normalized_function_calls);
+        try testing.expectEqual(@as(usize, 1), state.normalized_module_calls);
         try testing.expectEqual(@as(usize, 0), state.object_calls);
     }
 

@@ -223,7 +223,7 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
 
 ### 5. Complete ABI lowering coverage
 
-- [ ] Support more unknown pure struct lowering.
+- [x] Support more unknown pure struct lowering.
 - [ ] Support more nested generic/container combinations.
 - [ ] Broaden coverage for complex pure-value encoding paths.
 
