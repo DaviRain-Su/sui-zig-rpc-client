@@ -4917,7 +4917,8 @@ pub const SuiRpcClient = struct {
 
         for (parameters) |*parameter| {
             if (parameter.omitted_from_explicit_args) continue;
-            if (parameter.explicit_arg_json != null or parameter.auto_selected_arg_json != null) continue;
+            if (parameter.explicit_arg_json != null) continue;
+            if (parameter.auto_selected_arg_json != null and !parameter.auto_selected_via_tiebreak) continue;
 
             const candidates = parameter.shared_object_candidates orelse continue;
             if (candidates.len <= 1) continue;
@@ -5117,7 +5118,8 @@ pub const SuiRpcClient = struct {
 
         for (parameters) |*parameter| {
             if (parameter.omitted_from_explicit_args) continue;
-            if (parameter.explicit_arg_json != null or parameter.auto_selected_arg_json != null) continue;
+            if (parameter.explicit_arg_json != null) continue;
+            if (parameter.auto_selected_arg_json != null and !parameter.auto_selected_via_tiebreak) continue;
 
             const candidates = parameter.shared_object_candidates orelse continue;
             if (candidates.len <= 1) continue;
@@ -5214,7 +5216,8 @@ pub const SuiRpcClient = struct {
 
         for (parameters) |*parameter| {
             if (parameter.omitted_from_explicit_args) continue;
-            if (parameter.explicit_arg_json != null or parameter.auto_selected_arg_json != null) continue;
+            if (parameter.explicit_arg_json != null) continue;
+            if (parameter.auto_selected_arg_json != null and !parameter.auto_selected_via_tiebreak) continue;
             if (coinTypeFromMoveSignature(parameter.signature) != null) continue;
 
             const candidates = parameter.owned_object_candidates orelse continue;
@@ -5305,6 +5308,91 @@ pub const SuiRpcClient = struct {
                 parameter,
                 try buildAutoSelectedVectorArgJson(allocator, candidates),
             );
+        }
+    }
+
+    const move_candidate_resolution_max_rounds: usize = 4;
+
+    fn updateMoveSelectionStateHasher(
+        hasher: *std.hash.Wyhash,
+        value: ?[]const u8,
+    ) void {
+        if (value) |text| {
+            hasher.update(text);
+            hasher.update(&.{0});
+            return;
+        }
+        hasher.update(&.{1});
+    }
+
+    fn moveParameterSelectionStateFingerprint(
+        parameters: []const move_result.OwnedMoveParameterSummary,
+    ) u64 {
+        var hasher = std.hash.Wyhash.init(0);
+
+        for (parameters) |parameter| {
+            hasher.update(parameter.signature);
+            hasher.update(&.{0xff});
+            updateMoveSelectionStateHasher(&hasher, parameter.explicit_arg_json);
+            updateMoveSelectionStateHasher(&hasher, parameter.auto_selected_arg_json);
+            hasher.update(&.{@intFromBool(parameter.auto_selected_via_tiebreak)});
+
+            if (parameter.shared_object_candidates) |candidates| {
+                hasher.update("shared");
+                for (candidates) |candidate| {
+                    hasher.update(candidate.object_id);
+                    hasher.update(&.{0});
+                    var score_bytes: [@sizeOf(usize)]u8 = undefined;
+                    std.mem.writeInt(usize, &score_bytes, candidate.selection_score, .little);
+                    hasher.update(&score_bytes);
+                }
+            }
+
+            if (parameter.owned_object_candidates) |candidates| {
+                hasher.update("owned");
+                for (candidates) |candidate| {
+                    hasher.update(candidate.object_id);
+                    hasher.update(&.{0});
+                    var score_bytes: [@sizeOf(usize)]u8 = undefined;
+                    std.mem.writeInt(usize, &score_bytes, candidate.selection_score, .little);
+                    hasher.update(&score_bytes);
+                }
+            }
+
+            if (parameter.vector_item_owned_object_candidates) |candidates| {
+                hasher.update("vector-owned");
+                for (candidates) |candidate| {
+                    hasher.update(candidate.object_id);
+                    hasher.update(&.{0});
+                    var score_bytes: [@sizeOf(usize)]u8 = undefined;
+                    std.mem.writeInt(usize, &score_bytes, candidate.selection_score, .little);
+                    hasher.update(&score_bytes);
+                }
+            }
+        }
+
+        return hasher.final();
+    }
+
+    fn resolveMoveParameterCandidatesToFixedPoint(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        parameters: []move_result.OwnedMoveParameterSummary,
+    ) !void {
+        var round: usize = 0;
+        while (round < move_candidate_resolution_max_rounds) : (round += 1) {
+            const before = moveParameterSelectionStateFingerprint(parameters);
+
+            try self.populateSharedObjectCandidateFallbacksFromMoveParameters(allocator, parameters);
+            try self.applyReferencedSharedObjectCandidateSelectionHints(allocator, parameters);
+            try self.applySharedCandidateSelectionHintsFromOwnedCandidates(allocator, parameters);
+            try self.applyReferencedOwnedObjectCandidateSelectionHints(allocator, parameters);
+            try self.applyReferencedSharedObjectCandidateSelectionHints(allocator, parameters);
+            try self.applyReferencedOwnedObjectCandidateSelectionHints(allocator, parameters);
+            try self.applyReferencedVectorOwnedObjectCandidateSelectionHints(allocator, parameters);
+
+            const after = moveParameterSelectionStateFingerprint(parameters);
+            if (before == after) break;
         }
     }
 
@@ -6642,13 +6730,7 @@ pub const SuiRpcClient = struct {
                 summary.parameters,
             );
         }
-        try self.populateSharedObjectCandidateFallbacksFromMoveParameters(allocator, summary.parameters);
-        try self.applyReferencedSharedObjectCandidateSelectionHints(allocator, summary.parameters);
-        try self.applySharedCandidateSelectionHintsFromOwnedCandidates(allocator, summary.parameters);
-        try self.applyReferencedOwnedObjectCandidateSelectionHints(allocator, summary.parameters);
-        try self.applyReferencedSharedObjectCandidateSelectionHints(allocator, summary.parameters);
-        try self.applyReferencedOwnedObjectCandidateSelectionHints(allocator, summary.parameters);
-        try self.applyReferencedVectorOwnedObjectCandidateSelectionHints(allocator, summary.parameters);
+        try self.resolveMoveParameterCandidatesToFixedPoint(allocator, summary.parameters);
 
         const type_args_json = try resolvedMoveFunctionTypeArgsTemplateJson(
             allocator,

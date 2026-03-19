@@ -57,6 +57,8 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
   ordering in summaries.
 - [x] Deterministic tie-break auto-selection for scored shared/owned
   candidates, with explicit `auto_selected_tiebreak` visibility.
+- [x] Iterative multi-pass candidate propagation until shared/owned selections
+  reach a stable fixed point.
 
 ### Coin automation
 
