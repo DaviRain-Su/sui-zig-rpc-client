@@ -139,6 +139,8 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
   discovering other shared object parameters.
 - [x] Fallback shared discovery from dynamic fields of already selected or
   discovered seed objects.
+- [x] Aggregate shared candidates discovered from seed-object content and
+  dynamic fields instead of treating the two sources as mutually exclusive.
 - [ ] Improve fallback behavior for protocols that do not expose recent useful
   events.
 - [ ] Improve candidate stability for shared objects such as pools.

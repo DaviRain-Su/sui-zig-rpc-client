@@ -4754,6 +4754,12 @@ test "runCommand move function with --summarize discovers related shared candida
                     "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xevent1\",\"eventSeq\":\"1\"},\"packageId\":\"0x2a\",\"transactionModule\":\"router\",\"parsedJson\":{\"pool_id\":\"0xpool1\"}}],\"hasNextPage\":false}}",
                 );
             }
+            if (std.mem.eql(u8, req.method, "suix_getDynamicFields")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[],\"hasNextPage\":false}}",
+                );
+            }
             std.debug.assert(std.mem.eql(u8, req.method, "sui_getObject"));
             if (std.mem.indexOf(u8, req.params_json, "\"0xpool1\"") != null) {
                 if (std.mem.indexOf(u8, req.params_json, "\"showContent\":true") != null) {
@@ -4810,6 +4816,104 @@ test "runCommand move function with --summarize discovers related shared candida
     try testing.expectEqualStrings(
         "\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xregistry1\\\",\\\"inputKind\\\":\\\"shared\\\",\\\"initialSharedVersion\\\":9,\\\"mutable\\\":false}\"",
         parameters[1].object.get("auto_selected_arg_json").?.string,
+    );
+}
+
+test "runCommand move function with --summarize merges shared candidates from content and dynamic fields" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"visibility\":\"Public\",\"isEntry\":true,\"typeParameters\":[],\"parameters\":[{\"MutableReference\":{\"Struct\":{\"address\":\"0x2a\",\"module\":\"pool\",\"name\":\"Pool\",\"typeParams\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"sui\",\"name\":\"SUI\",\"typeParams\":[]}},{\"Struct\":{\"address\":\"0x2\",\"module\":\"sui\",\"name\":\"SUI\",\"typeParams\":[]}}]}}},{\"Reference\":{\"Struct\":{\"address\":\"0x2a\",\"module\":\"config\",\"name\":\"Registry\",\"typeParams\":[]}}},{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "suix_queryEvents")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[],\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "suix_getDynamicFields")) {
+                if (std.mem.indexOf(u8, req.params_json, "\"0xregistry1\"") != null) {
+                    return alloc.dupe(
+                        u8,
+                        "{\"result\":{\"data\":[{\"name\":{\"type\":\"address\",\"value\":\"0xpool-owner-2\"},\"type\":\"DynamicField\",\"objectType\":\"0x2a::pool::Pool\",\"objectId\":\"0xpool2\",\"version\":\"5\",\"digest\":\"pool-digest-2\"}],\"hasNextPage\":false}}",
+                    );
+                }
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[],\"hasNextPage\":false}}",
+                );
+            }
+            std.debug.assert(std.mem.eql(u8, req.method, "sui_getObject"));
+            if (std.mem.indexOf(u8, req.params_json, "\"0xregistry1\"") != null) {
+                if (std.mem.indexOf(u8, req.params_json, "\"showContent\":true") != null) {
+                    return alloc.dupe(
+                        u8,
+                        "{\"result\":{\"data\":{\"objectId\":\"0xregistry1\",\"version\":\"12\",\"digest\":\"registry-digest-1\",\"content\":{\"dataType\":\"moveObject\",\"fields\":{\"pool_id\":\"0xpool1\"}}}}}",
+                    );
+                }
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":{\"objectId\":\"0xregistry1\",\"version\":\"12\",\"digest\":\"registry-digest-1\",\"type\":\"0x2a::config::Registry\",\"owner\":{\"Shared\":{\"initial_shared_version\":\"9\"}}}}}",
+                );
+            }
+            if (std.mem.indexOf(u8, req.params_json, "\"0xpool1\"") != null) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":{\"objectId\":\"0xpool1\",\"version\":\"11\",\"digest\":\"pool-digest-1\",\"type\":\"0x2a::pool::Pool<0x2::sui::SUI, 0x2::sui::SUI>\",\"owner\":{\"Shared\":{\"initial_shared_version\":\"7\"}}}}}",
+                );
+            }
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0xpool2\"") != null);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":{\"objectId\":\"0xpool2\",\"version\":\"12\",\"digest\":\"pool-digest-2\",\"type\":\"0x2a::pool::Pool<0x2::sui::SUI, 0x2::sui::SUI>\",\"owner\":{\"Shared\":{\"initial_shared_version\":\"8\"}}}}}",
+            );
+        }
+    }.call;
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "move",
+        "function",
+        "0x2a",
+        "router",
+        "rebalance",
+        "--object-arg-at",
+        "1",
+        "0xregistry1",
+        "--summarize",
+    });
+    defer args.deinit(allocator);
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    const parameters = parsed.value.object.get("parameters").?.array.items;
+    const pool_candidates = parameters[0].object.get("shared_object_candidates").?.array.items;
+    try testing.expectEqual(@as(usize, 2), pool_candidates.len);
+    try testing.expectEqualStrings("0xpool1", pool_candidates[0].object.get("object_id").?.string);
+    try testing.expectEqualStrings("0xpool2", pool_candidates[1].object.get("object_id").?.string);
+    try testing.expectEqualStrings(
+        "\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xpool1\\\",\\\"inputKind\\\":\\\"shared\\\",\\\"initialSharedVersion\\\":7,\\\"mutable\\\":true}\"",
+        parameters[0].object.get("auto_selected_arg_json").?.string,
     );
 }
 
