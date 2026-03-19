@@ -799,7 +799,7 @@ fn implicitLocalGasPaymentFallbackMinBalance(
     const has_supported_local_signer_source = if (provider) |value|
         supportsImplicitGasPaymentFallbackForLocalProviderPath(value)
     else
-        hasRealBuilderSignerSource(args);
+        hasRealBuilderSignerSource(args) or args.tx_build_sender != null;
     if (!has_supported_local_signer_source) return null;
     if (args.tx_build_gas_budget == null) return null;
     if (args.tx_build_auto_gas_budget or args.tx_build_auto_gas_payment) return null;
@@ -1102,6 +1102,7 @@ fn buildLocalCommandSourceTxBytes(
     args: *const cli.ParsedArgs,
     provider: ?client.tx_request_builder.AccountProvider,
 ) !?[]u8 {
+    const implicit_auto_gas_payment_min_balance = implicitLocalGasPaymentFallbackMinBalance(args, provider);
     var local = try ownLocalCommandSourceBuildContext(
         allocator,
         rpc,
@@ -1110,7 +1111,7 @@ fn buildLocalCommandSourceTxBytes(
         false,
         true,
         false,
-        null,
+        implicit_auto_gas_payment_min_balance,
     ) orelse return null;
     defer local.deinit(allocator);
 
@@ -1270,6 +1271,7 @@ fn buildLocalCommandSourceTransactionBlock(
     args: *const cli.ParsedArgs,
     provider: ?client.tx_request_builder.AccountProvider,
 ) !?[]u8 {
+    const implicit_auto_gas_payment_min_balance = implicitLocalGasPaymentFallbackMinBalance(args, provider);
     var local = try ownLocalCommandSourceBuildContext(
         allocator,
         rpc,
@@ -1278,7 +1280,7 @@ fn buildLocalCommandSourceTransactionBlock(
         false,
         true,
         false,
-        null,
+        implicit_auto_gas_payment_min_balance,
     ) orelse return null;
     defer local.deinit(allocator);
 
@@ -1299,6 +1301,7 @@ fn buildLocalCommandSourceInspectPayload(
     args: *const cli.ParsedArgs,
     provider: ?client.tx_request_builder.AccountProvider,
 ) !?[]u8 {
+    const implicit_auto_gas_payment_min_balance = implicitLocalGasPaymentFallbackMinBalance(args, provider);
     var local = try ownLocalCommandSourceBuildContext(
         allocator,
         rpc,
@@ -1307,7 +1310,7 @@ fn buildLocalCommandSourceInspectPayload(
         false,
         true,
         false,
-        null,
+        implicit_auto_gas_payment_min_balance,
     ) orelse return null;
     defer local.deinit(allocator);
 
@@ -11548,11 +11551,17 @@ test "runCommand tx_simulate with commands sends inspect request" {
     var saw_request = false;
     var method_ok = false;
     var params_text: ?[]const u8 = null;
+    var coin_queries: usize = 0;
+    var normalized_queries: usize = 0;
+    var object_queries: usize = 0;
 
     const MockContext = struct {
         saw_request: *bool,
         method_ok: *bool,
         params_text: *?[]const u8,
+        coin_queries: *usize,
+        normalized_queries: *usize,
+        object_queries: *usize,
     };
     const callback = struct {
         fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
@@ -11560,6 +11569,28 @@ test "runCommand tx_simulate with commands sends inspect request" {
             _ = req.request_body;
 
             const ctx = @as(*MockContext, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "suix_getCoins")) {
+                ctx.coin_queries.* += 1;
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0xabc\"") != null);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0x901\",\"version\":\"14\",\"digest\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"balance\":\"5000\"}],\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                ctx.normalized_queries.* += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"parameters\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"counter\",\"name\":\"Counter\"}},{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\"}}}]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getObject")) {
+                ctx.object_queries.* += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":{\"objectId\":\"0xabc\",\"version\":\"9\",\"digest\":\"0x2222222222222222222222222222222222222222222222222222222222222222\",\"owner\":{\"AddressOwner\":\"0xabc\"}}}}",
+                );
+            }
             ctx.saw_request.* = true;
             ctx.method_ok.* = std.mem.eql(u8, req.method, "sui_devInspectTransactionBlock");
             ctx.params_text.* = try alloc.dupe(u8, req.params_json);
@@ -11571,6 +11602,9 @@ test "runCommand tx_simulate with commands sends inspect request" {
         .saw_request = &saw_request,
         .method_ok = &method_ok,
         .params_text = &params_text,
+        .coin_queries = &coin_queries,
+        .normalized_queries = &normalized_queries,
+        .object_queries = &object_queries,
     };
     rpc.request_sender = .{
         .context = &mock_ctx,
@@ -11581,6 +11615,9 @@ test "runCommand tx_simulate with commands sends inspect request" {
     defer output.deinit(allocator);
 
     try runCommand(allocator, &rpc, &args, output.writer(allocator));
+    try testing.expectEqual(@as(usize, 1), coin_queries);
+    try testing.expectEqual(@as(usize, 1), normalized_queries);
+    try testing.expectEqual(@as(usize, 1), object_queries);
     try testing.expect(saw_request);
     try testing.expect(method_ok);
     try testing.expectEqualStrings("{\"result\":{\"inspected\":true}}\n", output.items);
@@ -11624,15 +11661,45 @@ test "runCommand tx_simulate move-call sends inspect request" {
 
     var saw_request = false;
     var params_text: ?[]const u8 = null;
+    var coin_queries: usize = 0;
+    var normalized_queries: usize = 0;
+    var object_queries: usize = 0;
 
-    const MockContext = struct { saw_request: *bool, params_text: *?[]const u8 };
+    const MockContext = struct {
+        saw_request: *bool,
+        params_text: *?[]const u8,
+        coin_queries: *usize,
+        normalized_queries: *usize,
+        object_queries: *usize,
+    };
     const callback = struct {
         fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
             _ = req.id;
             _ = req.request_body;
-            _ = req.method;
 
             const ctx = @as(*MockContext, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "suix_getCoins")) {
+                ctx.coin_queries.* += 1;
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0xabc\"") != null);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0x901\",\"version\":\"14\",\"digest\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"balance\":\"5000\"}],\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                ctx.normalized_queries.* += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"parameters\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"counter\",\"name\":\"Counter\"}},{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\"}}}]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getObject")) {
+                ctx.object_queries.* += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":{\"objectId\":\"0xabc\",\"version\":\"9\",\"digest\":\"0x2222222222222222222222222222222222222222222222222222222222222222\",\"owner\":{\"AddressOwner\":\"0xabc\"}}}}",
+                );
+            }
             ctx.saw_request.* = true;
             ctx.params_text.* = try alloc.dupe(u8, req.params_json);
             return alloc.dupe(u8, "{\"result\":true}");
@@ -11642,6 +11709,9 @@ test "runCommand tx_simulate move-call sends inspect request" {
     var mock_ctx = MockContext{
         .saw_request = &saw_request,
         .params_text = &params_text,
+        .coin_queries = &coin_queries,
+        .normalized_queries = &normalized_queries,
+        .object_queries = &object_queries,
     };
     rpc.request_sender = .{
         .context = &mock_ctx,
@@ -11652,6 +11722,9 @@ test "runCommand tx_simulate move-call sends inspect request" {
     defer output.deinit(allocator);
 
     try runCommand(allocator, &rpc, &args, output.writer(allocator));
+    try testing.expectEqual(@as(usize, 1), coin_queries);
+    try testing.expectEqual(@as(usize, 1), normalized_queries);
+    try testing.expectEqual(@as(usize, 1), object_queries);
     try testing.expect(saw_request);
 
     const captured = params_text orelse return error.TestUnexpectedResult;
@@ -11689,18 +11762,45 @@ test "runCommand tx_simulate accepts single command object input" {
 
     var saw_request = false;
     var params_text: ?[]const u8 = null;
+    var coin_queries: usize = 0;
+    var normalized_queries: usize = 0;
+    var object_queries: usize = 0;
 
     const MockContext = struct {
         saw_request: *bool,
         params_text: *?[]const u8,
+        coin_queries: *usize,
+        normalized_queries: *usize,
+        object_queries: *usize,
     };
     const callback = struct {
         fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
             _ = req.id;
-            _ = req.method;
             _ = req.request_body;
 
             const ctx = @as(*MockContext, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "suix_getCoins")) {
+                ctx.coin_queries.* += 1;
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0xabc\"") != null);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0x901\",\"version\":\"14\",\"digest\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"balance\":\"5000\"}],\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                ctx.normalized_queries.* += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"parameters\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"counter\",\"name\":\"Counter\"}},{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\"}}}]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getObject")) {
+                ctx.object_queries.* += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":{\"objectId\":\"0xabc\",\"version\":\"9\",\"digest\":\"0x2222222222222222222222222222222222222222222222222222222222222222\",\"owner\":{\"AddressOwner\":\"0xabc\"}}}}",
+                );
+            }
             ctx.saw_request.* = true;
             ctx.params_text.* = try alloc.dupe(u8, req.params_json);
             return alloc.dupe(u8, "{\"result\":{\"ok\":true}}");
@@ -11710,6 +11810,9 @@ test "runCommand tx_simulate accepts single command object input" {
     var mock_ctx = MockContext{
         .saw_request = &saw_request,
         .params_text = &params_text,
+        .coin_queries = &coin_queries,
+        .normalized_queries = &normalized_queries,
+        .object_queries = &object_queries,
     };
     rpc.request_sender = .{
         .context = &mock_ctx,
@@ -11720,6 +11823,9 @@ test "runCommand tx_simulate accepts single command object input" {
     defer output.deinit(allocator);
 
     try runCommand(allocator, &rpc, &args, output.writer(allocator));
+    try testing.expectEqual(@as(usize, 1), coin_queries);
+    try testing.expectEqual(@as(usize, 1), normalized_queries);
+    try testing.expectEqual(@as(usize, 1), object_queries);
     try testing.expect(saw_request);
 
     const captured = params_text orelse return error.TestUnexpectedResult;
@@ -16784,6 +16890,95 @@ test "runCommand tx_dry_run move-call with explicit gas metadata uses local prog
     try testing.expectEqual(@as(usize, 0), counts.unsafe);
 }
 
+test "runCommand tx_dry_run move-call with omitted gas payment keeps local programmable builder path" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const Counts = struct {
+        coin: usize = 0,
+        normalized: usize = 0,
+        object: usize = 0,
+        dry_run: usize = 0,
+        unsafe: usize = 0,
+    };
+    var counts = Counts{};
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const state = @as(*Counts, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "suix_getCoins")) {
+                state.coin += 1;
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0x123\"") != null);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0x901\",\"version\":\"14\",\"digest\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"balance\":\"5000\"}],\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                state.normalized += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"parameters\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"counter\",\"name\":\"Counter\"}},\"U64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\"}}}]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getObject")) {
+                state.object += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":{\"objectId\":\"0xabc\",\"version\":\"9\",\"digest\":\"0x4444444444444444444444444444444444444444444444444444444444444444\",\"owner\":{\"AddressOwner\":\"0x123\"}}}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_dryRunTransactionBlock")) {
+                state.dry_run += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"effects\":{\"status\":{\"status\":\"success\"}},\"balanceChanges\":[]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall") or std.mem.eql(u8, req.method, "unsafe_batchTransaction")) {
+                state.unsafe += 1;
+                return alloc.dupe(u8, "{\"result\":{\"txBytes\":\"AQIDBA==\"}}");
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+
+    var args = cli.ParsedArgs{
+        .command = .tx_dry_run,
+        .has_command = true,
+        .tx_build_package = "0x2",
+        .tx_build_module = "counter",
+        .tx_build_function = "increment",
+        .tx_build_type_args = "[]",
+        .tx_build_args = "[\"0xabc\",7]",
+        .tx_build_sender = "0x123",
+        .tx_build_gas_budget = 1200,
+        .tx_build_gas_price = 8,
+        .tx_send_summarize = true,
+    };
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = &counts,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    try testing.expectEqual(@as(usize, 1), counts.coin);
+    try testing.expectEqual(@as(usize, 1), counts.normalized);
+    try testing.expectEqual(@as(usize, 1), counts.object);
+    try testing.expectEqual(@as(usize, 1), counts.dry_run);
+    try testing.expectEqual(@as(usize, 0), counts.unsafe);
+}
+
 test "runCommand tx_dry_run request artifact uses local programmable builder path" {
     const testing = std.testing;
 
@@ -17802,7 +17997,7 @@ test "runCommand tx_build move-call with emit-tx-block includes gas metadata" {
         .tx_build_package = "0x2",
         .tx_build_module = "counter",
         .tx_build_function = "increment",
-        .tx_build_type_args = "[\"T\"]",
+        .tx_build_type_args = "[]",
         .tx_build_args = "[\"0xabc\"]",
         .tx_build_sender = "0xabc",
         .tx_build_gas_budget = 1000,
@@ -17812,6 +18007,45 @@ test "runCommand tx_build move-call with emit-tx-block includes gas metadata" {
 
     var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
     defer rpc.deinit();
+
+    const Counts = struct { coin: usize = 0, normalized: usize = 0, object: usize = 0, unsafe: usize = 0 };
+    var counts = Counts{};
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const state = @as(*Counts, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "suix_getCoins")) {
+                state.coin += 1;
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0xabc\"") != null);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0x901\",\"version\":\"14\",\"digest\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"balance\":\"5000\"}],\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                state.normalized += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"parameters\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"counter\",\"name\":\"Counter\"}},{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\"}}}]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getObject")) {
+                state.object += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":{\"objectId\":\"0xabc\",\"version\":\"9\",\"digest\":\"0x2222222222222222222222222222222222222222222222222222222222222222\",\"owner\":{\"AddressOwner\":\"0xabc\"}}}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall")) {
+                state.unsafe += 1;
+                return alloc.dupe(u8, "{\"result\":{\"txBytes\":\"AQIDBA==\"}}");
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+    rpc.request_sender = .{
+        .context = &counts,
+        .callback = callback,
+    };
 
     var output = std.ArrayList(u8){};
     defer output.deinit(allocator);
@@ -17828,6 +18062,10 @@ test "runCommand tx_build move-call with emit-tx-block includes gas metadata" {
     try testing.expectEqual(@as(i64, 1000), parsed.value.object.get("gasBudget").?.integer);
     try testing.expect(parsed.value.object.get("gasPrice").? == .integer);
     try testing.expectEqual(@as(i64, 7), parsed.value.object.get("gasPrice").?.integer);
+    try testing.expectEqual(@as(usize, 1), counts.coin);
+    try testing.expectEqual(@as(usize, 1), counts.normalized);
+    try testing.expectEqual(@as(usize, 1), counts.object);
+    try testing.expectEqual(@as(usize, 0), counts.unsafe);
     const commands = parsed.value.object.get("commands").?;
     try testing.expect(commands == .array);
     try testing.expect(commands.array.items.len == 1);
@@ -18185,17 +18423,42 @@ test "runCommand tx_build programmable resolves selected argument tokens into tx
     var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
     defer rpc.deinit();
 
+    const Counts = struct { owned: usize = 0, coin: usize = 0, normalized: usize = 0, object: usize = 0 };
+    var counts = Counts{};
     const callback = struct {
-        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
-            std.debug.assert(std.mem.eql(u8, req.method, "suix_getOwnedObjects"));
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const state = @as(*Counts, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "suix_getOwnedObjects")) {
+                state.owned += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xfedcba\",\"type\":\"0x2::example::Thing\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                state.normalized += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"parameters\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"counter\",\"name\":\"Counter\"}},{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\"}}}]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getObject")) {
+                state.object += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":{\"objectId\":\"0xfedcba\",\"version\":\"9\",\"digest\":\"0x2222222222222222222222222222222222222222222222222222222222222222\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}}",
+                );
+            }
+            std.debug.assert(std.mem.eql(u8, req.method, "suix_getCoins"));
+            state.coin += 1;
             return alloc.dupe(
                 u8,
-                "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xfedcba\",\"type\":\"0x2::example::Thing\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
+                "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0x901\",\"version\":\"14\",\"digest\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"balance\":\"5000\"}],\"hasNextPage\":false}}",
             );
         }
     }.call;
     rpc.request_sender = .{
-        .context = undefined,
+        .context = &counts,
         .callback = callback,
     };
 
@@ -18203,6 +18466,10 @@ test "runCommand tx_build programmable resolves selected argument tokens into tx
     defer output.deinit(allocator);
 
     try runCommand(allocator, &rpc, &args, output.writer(allocator));
+    try testing.expectEqual(@as(usize, 1), counts.owned);
+    try testing.expectEqual(@as(usize, 1), counts.coin);
+    try testing.expectEqual(@as(usize, 1), counts.normalized);
+    try testing.expectEqual(@as(usize, 1), counts.object);
     try testing.expect(std.mem.indexOf(u8, output.items, "\"ProgrammableTransaction\"") != null);
     try testing.expect(std.mem.indexOf(u8, output.items, "0xfedcba") != null);
 }
@@ -18398,6 +18665,86 @@ test "runCommand tx_build move-call with emit-tx-block and explicit gas payment 
     try testing.expect(parsed.value.object.get("commands") != null);
 }
 
+test "runCommand tx_build move-call with emit-tx-block and omitted gas payment keeps local programmable builder path" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var args = cli.ParsedArgs{
+        .command = .tx_build,
+        .has_command = true,
+        .tx_build_kind = .move_call,
+        .tx_build_package = "0x2",
+        .tx_build_module = "counter",
+        .tx_build_function = "increment",
+        .tx_build_type_args = "[]",
+        .tx_build_args = "[\"0xabc\",7]",
+        .tx_build_sender = "0x123",
+        .tx_build_gas_budget = 1200,
+        .tx_build_gas_price = 8,
+        .tx_build_emit_tx_block = true,
+    };
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    const Counts = struct { coin: usize = 0, normalized: usize = 0, object: usize = 0, unsafe: usize = 0 };
+    var counts = Counts{};
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const state = @as(*Counts, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "suix_getCoins")) {
+                state.coin += 1;
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0x123\"") != null);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0x901\",\"version\":\"14\",\"digest\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"balance\":\"5000\"}],\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                state.normalized += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"parameters\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"counter\",\"name\":\"Counter\"}},\"U64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\"}}}]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getObject")) {
+                state.object += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":{\"objectId\":\"0xabc\",\"version\":\"9\",\"digest\":\"0x4444444444444444444444444444444444444444444444444444444444444444\",\"owner\":{\"AddressOwner\":\"0x123\"}}}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall")) {
+                state.unsafe += 1;
+                return alloc.dupe(u8, "{\"result\":{\"txBytes\":\"AQIDBA==\"}}");
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+    rpc.request_sender = .{
+        .context = &counts,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    try testing.expectEqual(@as(usize, 1), counts.coin);
+    try testing.expectEqual(@as(usize, 1), counts.normalized);
+    try testing.expectEqual(@as(usize, 1), counts.object);
+    try testing.expectEqual(@as(usize, 0), counts.unsafe);
+    try testing.expect(parsed.value.object.get("inputs") != null);
+    try testing.expect(parsed.value.object.get("gasData") != null);
+    try testing.expect(parsed.value.object.get("commands") != null);
+}
+
 test "runCommand tx_simulate move-call with explicit gas payment uses local programmable builder path" {
     const testing = std.testing;
 
@@ -18483,6 +18830,104 @@ test "runCommand tx_simulate move-call with explicit gas payment uses local prog
     try testing.expect(tx_block.value.object.get("gasData") != null);
 }
 
+test "runCommand tx_simulate move-call with omitted gas payment keeps local programmable builder path" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var args = cli.ParsedArgs{
+        .command = .tx_simulate,
+        .has_command = true,
+        .tx_build_package = "0x2",
+        .tx_build_module = "counter",
+        .tx_build_function = "increment",
+        .tx_build_type_args = "[]",
+        .tx_build_args = "[\"0xabc\",7]",
+        .tx_build_sender = "0x123",
+        .tx_build_gas_budget = 1200,
+        .tx_build_gas_price = 8,
+    };
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    const Counts = struct { coin: usize = 0, normalized: usize = 0, object: usize = 0, inspect: usize = 0, unsafe: usize = 0 };
+    var counts = Counts{};
+    var params_text: ?[]const u8 = null;
+
+    const MockContext = struct {
+        counts: *Counts,
+        params_text: *?[]const u8,
+    };
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const ctx = @as(*MockContext, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "suix_getCoins")) {
+                ctx.counts.coin += 1;
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0x123\"") != null);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0x901\",\"version\":\"14\",\"digest\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"balance\":\"5000\"}],\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                ctx.counts.normalized += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"parameters\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"counter\",\"name\":\"Counter\"}},\"U64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\"}}}]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getObject")) {
+                ctx.counts.object += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":{\"objectId\":\"0xabc\",\"version\":\"9\",\"digest\":\"0x4444444444444444444444444444444444444444444444444444444444444444\",\"owner\":{\"AddressOwner\":\"0x123\"}}}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_devInspectTransactionBlock")) {
+                ctx.counts.inspect += 1;
+                ctx.params_text.* = try alloc.dupe(u8, req.params_json);
+                return alloc.dupe(u8, "{\"result\":{\"inspected\":true}}");
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall") or std.mem.eql(u8, req.method, "unsafe_batchTransaction")) {
+                ctx.counts.unsafe += 1;
+                return alloc.dupe(u8, "{\"result\":{\"txBytes\":\"AQIDBA==\"}}");
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+    var mock_ctx = MockContext{
+        .counts = &counts,
+        .params_text = &params_text,
+    };
+    rpc.request_sender = .{
+        .context = &mock_ctx,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+    try testing.expectEqualStrings("{\"result\":{\"inspected\":true}}\n", output.items);
+    try testing.expectEqual(@as(usize, 1), counts.coin);
+    try testing.expectEqual(@as(usize, 1), counts.normalized);
+    try testing.expectEqual(@as(usize, 1), counts.object);
+    try testing.expectEqual(@as(usize, 1), counts.inspect);
+    try testing.expectEqual(@as(usize, 0), counts.unsafe);
+
+    const captured = params_text orelse return error.TestUnexpectedResult;
+    defer allocator.free(captured);
+    const params = try std.json.parseFromSlice(std.json.Value, allocator, captured, .{});
+    defer params.deinit();
+    const tx_block = try std.json.parseFromSlice(std.json.Value, allocator, params.value.array.items[0].string, .{});
+    defer tx_block.deinit();
+    try testing.expect(tx_block.value.object.get("inputs") != null);
+    try testing.expect(tx_block.value.object.get("gasData") != null);
+}
+
 test "runCommand tx_build programmable outputs transaction block" {
     const testing = std.testing;
 
@@ -18502,6 +18947,33 @@ test "runCommand tx_build programmable outputs transaction block" {
 
     var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
     defer rpc.deinit();
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            if (std.mem.eql(u8, req.method, "suix_getCoins")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0x901\",\"version\":\"14\",\"digest\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"balance\":\"5000\"}],\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"parameters\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"counter\",\"name\":\"Counter\"}},{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\"}}}]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getObject")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":{\"objectId\":\"0xabc\",\"version\":\"9\",\"digest\":\"0x2222222222222222222222222222222222222222222222222222222222222222\",\"owner\":{\"AddressOwner\":\"0xabc\"}}}}",
+                );
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+    rpc.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
 
     var output = std.ArrayList(u8){};
     defer output.deinit(allocator);
@@ -18577,6 +19049,33 @@ test "runCommand tx_build programmable with --summarize prints transaction block
 
     var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
     defer rpc.deinit();
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            if (std.mem.eql(u8, req.method, "suix_getCoins")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0x901\",\"version\":\"14\",\"digest\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"balance\":\"5000\"}],\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"parameters\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"counter\",\"name\":\"Counter\"}},{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\"}}}]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getObject")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":{\"objectId\":\"0xabc\",\"version\":\"9\",\"digest\":\"0x2222222222222222222222222222222222222222222222222222222222222222\",\"owner\":{\"AddressOwner\":\"0xabc\"}}}}",
+                );
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+    rpc.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
 
     var output = std.ArrayList(u8){};
     defer output.deinit(allocator);
@@ -18642,6 +19141,33 @@ test "runCommand tx_build programmable accepts single command object and repeata
 
     var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
     defer rpc.deinit();
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            if (std.mem.eql(u8, req.method, "suix_getCoins")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0x901\",\"version\":\"14\",\"digest\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"balance\":\"5000\"}],\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"parameters\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"counter\",\"name\":\"Counter\"}},{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\"}}}]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getObject")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":{\"objectId\":\"0xabc\",\"version\":\"9\",\"digest\":\"0x2222222222222222222222222222222222222222222222222222222222222222\",\"owner\":{\"AddressOwner\":\"0xabc\"}}}}",
+                );
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+    rpc.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
 
     var output = std.ArrayList(u8){};
     defer output.deinit(allocator);
@@ -18681,6 +19207,33 @@ test "runCommand tx_build programmable accepts single command object" {
 
     var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
     defer rpc.deinit();
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            if (std.mem.eql(u8, req.method, "suix_getCoins")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0x901\",\"version\":\"14\",\"digest\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"balance\":\"5000\"}],\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"parameters\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"counter\",\"name\":\"Counter\"}},{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\"}}}]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getObject")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":{\"objectId\":\"0xabc\",\"version\":\"9\",\"digest\":\"0x2222222222222222222222222222222222222222222222222222222222222222\",\"owner\":{\"AddressOwner\":\"0xabc\"}}}}",
+                );
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+    rpc.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
 
     var output = std.ArrayList(u8){};
     defer output.deinit(allocator);
