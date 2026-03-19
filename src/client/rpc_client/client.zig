@@ -4723,20 +4723,91 @@ pub const SuiRpcClient = struct {
         allocator: std.mem.Allocator,
         parameters: []const move_result.OwnedMoveParameterSummary,
     ) ![][]u8 {
+        const bucketed = try collectSelectedObjectIdsFromMoveParametersBySource(allocator, parameters);
+        defer bucketed.deinit(allocator);
+
         var collected = std.ArrayList([]u8).empty;
         errdefer {
             for (collected.items) |value| allocator.free(value);
             collected.deinit(allocator);
         }
 
-        for (parameters) |parameter| {
-            const arg_json = parameter.explicit_arg_json orelse parameter.auto_selected_arg_json orelse continue;
-            const parsed = std.json.parseFromSlice(std.json.Value, allocator, arg_json, .{}) catch continue;
-            defer parsed.deinit();
-            try appendSelectedObjectIdsFromArgumentJsonValue(allocator, &collected, parsed.value);
+        for (bucketed.explicit_object_ids) |object_id| {
+            try appendUniqueMoveSelectedObjectId(allocator, &collected, object_id);
+        }
+        for (bucketed.auto_selected_object_ids) |object_id| {
+            try appendUniqueMoveSelectedObjectId(allocator, &collected, object_id);
         }
 
         return try collected.toOwnedSlice(allocator);
+    }
+
+    const SelectedMoveObjectIdBuckets = struct {
+        explicit_object_ids: [][]u8,
+        auto_selected_object_ids: [][]u8,
+
+        fn deinit(self: SelectedMoveObjectIdBuckets, allocator: std.mem.Allocator) void {
+            for (self.explicit_object_ids) |value| allocator.free(value);
+            allocator.free(self.explicit_object_ids);
+            for (self.auto_selected_object_ids) |value| allocator.free(value);
+            allocator.free(self.auto_selected_object_ids);
+        }
+    };
+
+    fn collectSelectedObjectIdsFromMoveParametersBySource(
+        allocator: std.mem.Allocator,
+        parameters: []const move_result.OwnedMoveParameterSummary,
+    ) !SelectedMoveObjectIdBuckets {
+        var explicit_object_ids = std.ArrayList([]u8).empty;
+        errdefer {
+            for (explicit_object_ids.items) |value| allocator.free(value);
+            explicit_object_ids.deinit(allocator);
+        }
+
+        var auto_selected_object_ids = std.ArrayList([]u8).empty;
+        errdefer {
+            for (auto_selected_object_ids.items) |value| allocator.free(value);
+            auto_selected_object_ids.deinit(allocator);
+        }
+
+        for (parameters) |parameter| {
+            if (parameter.explicit_arg_json) |arg_json| {
+                const parsed = std.json.parseFromSlice(std.json.Value, allocator, arg_json, .{}) catch continue;
+                defer parsed.deinit();
+                try appendSelectedObjectIdsFromArgumentJsonValue(allocator, &explicit_object_ids, parsed.value);
+            }
+
+            if (parameter.auto_selected_arg_json) |arg_json| {
+                const parsed = std.json.parseFromSlice(std.json.Value, allocator, arg_json, .{}) catch continue;
+                defer parsed.deinit();
+                try appendSelectedObjectIdsFromArgumentJsonValue(allocator, &auto_selected_object_ids, parsed.value);
+            }
+        }
+
+        var filtered_auto_selected_object_ids = std.ArrayList([]u8).empty;
+        errdefer {
+            for (filtered_auto_selected_object_ids.items) |value| allocator.free(value);
+            filtered_auto_selected_object_ids.deinit(allocator);
+        }
+        for (auto_selected_object_ids.items) |object_id| {
+            var present_in_explicit = false;
+            for (explicit_object_ids.items) |explicit_object_id| {
+                if (std.mem.eql(u8, explicit_object_id, object_id)) {
+                    present_in_explicit = true;
+                    break;
+                }
+            }
+            if (present_in_explicit) continue;
+            try filtered_auto_selected_object_ids.append(allocator, try allocator.dupe(u8, object_id));
+        }
+
+        for (auto_selected_object_ids.items) |value| allocator.free(value);
+        auto_selected_object_ids.deinit(allocator);
+
+        return .{
+            .explicit_object_ids = try explicit_object_ids.toOwnedSlice(allocator),
+            .auto_selected_object_ids = try filtered_auto_selected_object_ids.toOwnedSlice(allocator),
+        };
     }
 
     fn jsonValueContainsExactString(
@@ -5029,11 +5100,8 @@ pub const SuiRpcClient = struct {
         allocator: std.mem.Allocator,
         parameters: []move_result.OwnedMoveParameterSummary,
     ) !void {
-        const selected_object_ids = try collectSelectedObjectIdsFromMoveParameters(allocator, parameters);
-        defer {
-            for (selected_object_ids) |value| allocator.free(value);
-            allocator.free(selected_object_ids);
-        }
+        const selected_object_ids = try collectSelectedObjectIdsFromMoveParametersBySource(allocator, parameters);
+        defer selected_object_ids.deinit(allocator);
 
         var total_owned_hint_count: usize = 0;
         for (parameters) |other_parameter| {
@@ -5044,7 +5112,8 @@ pub const SuiRpcClient = struct {
                 total_owned_hint_count += owned_candidates.len;
             }
         }
-        const selected_reference_weight = total_owned_hint_count + 1;
+        const auto_selected_reference_weight = total_owned_hint_count + 1;
+        const explicit_reference_weight = auto_selected_reference_weight + selected_object_ids.auto_selected_object_ids.len + 1;
 
         for (parameters) |*parameter| {
             if (parameter.omitted_from_explicit_args) continue;
@@ -5062,7 +5131,7 @@ pub const SuiRpcClient = struct {
             defer allocator.free(candidate_scores);
             @memset(candidate_scores, 0);
 
-            for (selected_object_ids) |selected_object_id| {
+            for (selected_object_ids.explicit_object_ids) |selected_object_id| {
                 const response = self.getObjectWithOptions(selected_object_id, .{ .show_content = true }) catch continue;
                 defer allocator.free(response);
 
@@ -5071,7 +5140,19 @@ pub const SuiRpcClient = struct {
                     response,
                     candidate_object_ids,
                 ) orelse continue;
-                candidate_scores[candidate_index] += selected_reference_weight;
+                candidate_scores[candidate_index] += explicit_reference_weight;
+            }
+
+            for (selected_object_ids.auto_selected_object_ids) |selected_object_id| {
+                const response = self.getObjectWithOptions(selected_object_id, .{ .show_content = true }) catch continue;
+                defer allocator.free(response);
+
+                const candidate_index = objectResponseContentMatchingObjectIdIndex(
+                    allocator,
+                    response,
+                    candidate_object_ids,
+                ) orelse continue;
+                candidate_scores[candidate_index] += auto_selected_reference_weight;
             }
 
             for (parameters) |other_parameter| {
@@ -5125,12 +5206,11 @@ pub const SuiRpcClient = struct {
         allocator: std.mem.Allocator,
         parameters: []move_result.OwnedMoveParameterSummary,
     ) !void {
-        const selected_object_ids = try collectSelectedObjectIdsFromMoveParameters(allocator, parameters);
-        defer {
-            for (selected_object_ids) |value| allocator.free(value);
-            allocator.free(selected_object_ids);
-        }
-        if (selected_object_ids.len == 0) return;
+        const selected_object_ids = try collectSelectedObjectIdsFromMoveParametersBySource(allocator, parameters);
+        defer selected_object_ids.deinit(allocator);
+        if (selected_object_ids.explicit_object_ids.len == 0 and selected_object_ids.auto_selected_object_ids.len == 0) return;
+
+        const explicit_reference_weight = selected_object_ids.auto_selected_object_ids.len + 1;
 
         for (parameters) |*parameter| {
             if (parameter.omitted_from_explicit_args) continue;
@@ -5146,10 +5226,15 @@ pub const SuiRpcClient = struct {
             for (candidates, 0..) |candidate, index| {
                 const response = self.getObjectWithOptions(candidate.object_id, .{ .show_content = true }) catch continue;
                 defer allocator.free(response);
-                candidate_scores[index] = objectResponseContentReferenceScore(
+                candidate_scores[index] += explicit_reference_weight * objectResponseContentReferenceScore(
                     allocator,
                     response,
-                    selected_object_ids,
+                    selected_object_ids.explicit_object_ids,
+                );
+                candidate_scores[index] += objectResponseContentReferenceScore(
+                    allocator,
+                    response,
+                    selected_object_ids.auto_selected_object_ids,
                 );
             }
 
@@ -5174,12 +5259,11 @@ pub const SuiRpcClient = struct {
         allocator: std.mem.Allocator,
         parameters: []move_result.OwnedMoveParameterSummary,
     ) !void {
-        const selected_object_ids = try collectSelectedObjectIdsFromMoveParameters(allocator, parameters);
-        defer {
-            for (selected_object_ids) |value| allocator.free(value);
-            allocator.free(selected_object_ids);
-        }
-        if (selected_object_ids.len == 0) return;
+        const selected_object_ids = try collectSelectedObjectIdsFromMoveParametersBySource(allocator, parameters);
+        defer selected_object_ids.deinit(allocator);
+        if (selected_object_ids.explicit_object_ids.len == 0 and selected_object_ids.auto_selected_object_ids.len == 0) return;
+
+        const explicit_reference_weight = selected_object_ids.auto_selected_object_ids.len + 1;
 
         for (parameters) |*parameter| {
             if (parameter.omitted_from_explicit_args) continue;
@@ -5199,10 +5283,15 @@ pub const SuiRpcClient = struct {
             for (candidates, 0..) |candidate, index| {
                 const response = self.getObjectWithOptions(candidate.object_id, .{ .show_content = true }) catch continue;
                 defer allocator.free(response);
-                candidate_scores[index] = objectResponseContentReferenceScore(
+                candidate_scores[index] += explicit_reference_weight * objectResponseContentReferenceScore(
                     allocator,
                     response,
-                    selected_object_ids,
+                    selected_object_ids.explicit_object_ids,
+                );
+                candidate_scores[index] += objectResponseContentReferenceScore(
+                    allocator,
+                    response,
+                    selected_object_ids.auto_selected_object_ids,
                 );
             }
 

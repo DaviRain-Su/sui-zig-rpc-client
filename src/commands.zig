@@ -3994,12 +3994,12 @@ test "runCommand move function with --summarize prefers owned candidate with hig
         parameters[1].object.get("auto_selected_arg_json").?.string,
     );
     const owned_candidates = parameters[1].object.get("owned_object_candidates").?.array.items;
-    try testing.expectEqual(@as(i64, 2), owned_candidates[0].object.get("selection_score").?.integer);
+    try testing.expectEqual(@as(i64, 3), owned_candidates[0].object.get("selection_score").?.integer);
     try testing.expectEqualStrings("0xposition-b", owned_candidates[0].object.get("object_id").?.string);
-    try testing.expectEqual(@as(i64, 1), owned_candidates[1].object.get("selection_score").?.integer);
-    try testing.expectEqualStrings("0xposition-a", owned_candidates[1].object.get("object_id").?.string);
+    try testing.expectEqual(@as(i64, 2), owned_candidates[1].object.get("selection_score").?.integer);
+    try testing.expectEqualStrings("0xposition-c", owned_candidates[1].object.get("object_id").?.string);
     try testing.expectEqual(@as(i64, 1), owned_candidates[2].object.get("selection_score").?.integer);
-    try testing.expectEqualStrings("0xposition-c", owned_candidates[2].object.get("object_id").?.string);
+    try testing.expectEqualStrings("0xposition-a", owned_candidates[2].object.get("object_id").?.string);
     try testing.expectEqualStrings(
         "[\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xpool1\\\",\\\"inputKind\\\":\\\"shared\\\",\\\"initialSharedVersion\\\":7,\\\"mutable\\\":true}\",\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xposition-b\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":8,\\\"digest\\\":\\\"position-digest-b\\\"}\",\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xvault1\\\",\\\"inputKind\\\":\\\"shared\\\",\\\"initialSharedVersion\\\":5,\\\"mutable\\\":false}\"]",
         parsed.value.object.get("call_template").?.object.get("preferred_args_json").?.string,
@@ -5671,15 +5671,130 @@ test "runCommand move function with --summarize scores shared candidates from se
     const shared_candidates = parameters[0].object.get("shared_object_candidates").?.array.items;
     try testing.expectEqual(@as(usize, 2), shared_candidates.len);
     try testing.expectEqualStrings("0xpool1", shared_candidates[0].object.get("object_id").?.string);
-    try testing.expectEqual(@as(i64, 2), shared_candidates[0].object.get("selection_score").?.integer);
+    try testing.expectEqual(@as(i64, 4), shared_candidates[0].object.get("selection_score").?.integer);
     try testing.expectEqualStrings("0xpool2", shared_candidates[1].object.get("object_id").?.string);
-    try testing.expectEqual(@as(i64, 1), shared_candidates[1].object.get("selection_score").?.integer);
+    try testing.expectEqual(@as(i64, 2), shared_candidates[1].object.get("selection_score").?.integer);
     const preferred_resolution = parsed.value.object.get("call_template").?.object.get("preferred_resolution").?.object;
     try testing.expectEqualStrings(
         "auto_selected",
         preferred_resolution.get("parameters").?.array.items[0].object.get("resolution_kind").?.string,
     );
     try testing.expect(preferred_resolution.get("parameters").?.array.items[0].object.get("is_executable").?.bool);
+}
+
+test "runCommand move function with --summarize weights explicit object references above auto-selected ones for shared candidates" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"visibility\":\"Public\",\"isEntry\":true,\"typeParameters\":[],\"parameters\":[{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"example\",\"name\":\"Pool\",\"typeParams\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"sui\",\"name\":\"SUI\",\"typeParams\":[]}},{\"Struct\":{\"address\":\"0x2\",\"module\":\"sui\",\"name\":\"SUI\",\"typeParams\":[]}}]}}},{\"Reference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"example\",\"name\":\"Receipt\",\"typeParams\":[]}}},{\"Reference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"example\",\"name\":\"Ticket\",\"typeParams\":[]}}},{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "suix_queryEvents")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xevent1\",\"eventSeq\":\"1\"},\"packageId\":\"0x2\",\"transactionModule\":\"example\",\"parsedJson\":{\"pool_id\":\"0xpoola\"}},{\"id\":{\"txDigest\":\"0xevent2\",\"eventSeq\":\"2\"},\"packageId\":\"0x2\",\"transactionModule\":\"example\",\"parsedJson\":{\"pool_id\":\"0xpoolb\"}}],\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "suix_getOwnedObjects")) {
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0xowner\"") != null);
+                if (std.mem.indexOf(u8, req.params_json, "\"0x2::example::Ticket\"") != null) {
+                    return alloc.dupe(
+                        u8,
+                        "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xticket-auto\",\"version\":\"9\",\"digest\":\"ticket-digest-auto\",\"type\":\"0x2::example::Ticket\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
+                    );
+                }
+                if (std.mem.indexOf(u8, req.params_json, "\"0x2::example::Receipt\"") != null) {
+                    return alloc.dupe(u8, "{\"result\":{\"data\":[],\"hasNextPage\":false}}");
+                }
+                return alloc.dupe(u8, "{\"result\":{\"data\":[],\"hasNextPage\":false}}");
+            }
+            if (std.mem.eql(u8, req.method, "sui_getObject")) {
+                if (std.mem.indexOf(u8, req.params_json, "\"0xpoola\"") != null) {
+                    return alloc.dupe(
+                        u8,
+                        "{\"result\":{\"data\":{\"objectId\":\"0xpoola\",\"version\":\"11\",\"digest\":\"pool-digest-a\",\"type\":\"0x2::example::Pool<0x2::sui::SUI, 0x2::sui::SUI>\",\"owner\":{\"Shared\":{\"initial_shared_version\":\"7\"}}}}}",
+                    );
+                }
+                if (std.mem.indexOf(u8, req.params_json, "\"0xpoolb\"") != null) {
+                    return alloc.dupe(
+                        u8,
+                        "{\"result\":{\"data\":{\"objectId\":\"0xpoolb\",\"version\":\"12\",\"digest\":\"pool-digest-b\",\"type\":\"0x2::example::Pool<0x2::sui::SUI, 0x2::sui::SUI>\",\"owner\":{\"Shared\":{\"initial_shared_version\":\"8\"}}}}}",
+                    );
+                }
+                if (std.mem.indexOf(u8, req.params_json, "\"0xreceipt-explicit\"") != null) {
+                    if (std.mem.indexOf(u8, req.params_json, "\"showContent\":true") != null) {
+                        return alloc.dupe(
+                            u8,
+                            "{\"result\":{\"data\":{\"objectId\":\"0xreceipt-explicit\",\"version\":\"7\",\"digest\":\"receipt-digest-explicit\",\"content\":{\"dataType\":\"moveObject\",\"fields\":{\"pool_id\":\"0xpoolb\"}}}}}",
+                        );
+                    }
+                    return alloc.dupe(
+                        u8,
+                        "{\"result\":{\"data\":{\"objectId\":\"0xreceipt-explicit\",\"version\":\"7\",\"digest\":\"receipt-digest-explicit\",\"type\":\"0x2::example::Receipt\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}}",
+                    );
+                }
+                if (std.mem.indexOf(u8, req.params_json, "\"0xticket-auto\"") != null) {
+                    std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"showContent\":true") != null);
+                    return alloc.dupe(
+                        u8,
+                        "{\"result\":{\"data\":{\"objectId\":\"0xticket-auto\",\"version\":\"9\",\"digest\":\"ticket-digest-auto\",\"content\":{\"dataType\":\"moveObject\",\"fields\":{\"pool_id\":\"0xpoola\"}}}}}",
+                    );
+                }
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "move",
+        "function",
+        "0x2",
+        "example",
+        "select_pool",
+        "--sender",
+        "0xowner",
+        "--object-arg-at",
+        "1",
+        "0xreceipt-explicit",
+        "--summarize",
+    });
+    defer args.deinit(allocator);
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    const parameters = parsed.value.object.get("parameters").?.array.items;
+    try testing.expectEqualStrings(
+        "\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xpoolb\\\",\\\"inputKind\\\":\\\"shared\\\",\\\"initialSharedVersion\\\":8,\\\"mutable\\\":true}\"",
+        parameters[0].object.get("auto_selected_arg_json").?.string,
+    );
+    const shared_candidates = parameters[0].object.get("shared_object_candidates").?.array.items;
+    try testing.expectEqualStrings("0xpoolb", shared_candidates[0].object.get("object_id").?.string);
+    try testing.expect(shared_candidates[0].object.get("selection_score").?.integer > shared_candidates[1].object.get("selection_score").?.integer);
+    try testing.expectEqualStrings("0xpoola", shared_candidates[1].object.get("object_id").?.string);
+    try testing.expectEqualStrings(
+        "\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xticket-auto\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":9,\\\"digest\\\":\\\"ticket-digest-auto\\\"}\"",
+        parameters[2].object.get("auto_selected_arg_json").?.string,
+    );
 }
 
 test "runCommand move function with --summarize ranks vector owned candidates from selected object references" {
@@ -5767,11 +5882,11 @@ test "runCommand move function with --summarize ranks vector owned candidates fr
     const vector_item_candidates = parameter.get("vector_item_owned_object_candidates").?.array.items;
     try testing.expectEqual(@as(usize, 3), vector_item_candidates.len);
     try testing.expectEqualStrings("0xreceipt-b", vector_item_candidates[0].object.get("object_id").?.string);
-    try testing.expectEqual(@as(i64, 2), vector_item_candidates[0].object.get("selection_score").?.integer);
+    try testing.expectEqual(@as(i64, 8), vector_item_candidates[0].object.get("selection_score").?.integer);
     try testing.expectEqualStrings("0xreceipt-a", vector_item_candidates[1].object.get("object_id").?.string);
-    try testing.expectEqual(@as(i64, 1), vector_item_candidates[1].object.get("selection_score").?.integer);
+    try testing.expectEqual(@as(i64, 4), vector_item_candidates[1].object.get("selection_score").?.integer);
     try testing.expectEqualStrings("0xreceipt-c", vector_item_candidates[2].object.get("object_id").?.string);
-    try testing.expectEqual(@as(i64, 1), vector_item_candidates[2].object.get("selection_score").?.integer);
+    try testing.expectEqual(@as(i64, 4), vector_item_candidates[2].object.get("selection_score").?.integer);
     try testing.expectEqualStrings(
         "[\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xreceipt-b\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":8,\\\"digest\\\":\\\"receipt-digest-b\\\"}\",\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xreceipt-a\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":7,\\\"digest\\\":\\\"receipt-digest-a\\\"}\",\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xreceipt-c\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":9,\\\"digest\\\":\\\"receipt-digest-c\\\"}\"]",
         parameter.get("auto_selected_arg_json").?.string,

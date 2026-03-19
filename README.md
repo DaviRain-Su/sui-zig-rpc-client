@@ -1014,7 +1014,7 @@ zig build run -- move function cetus_clmm_mainnet pool swap \
 
 如果你在 `move function --summarize` 时同时给了 `--sender`、`--signer` 或 `--from-keystore`，CLI 现在还会进一步把 owner 上下文带进 discovery 流程。对 concrete owned object 和 `vector<concrete owned object>` 参数，summary 会直接尝试 `suix_getOwnedObjects`，把找到的候选对象填进 `owned_object_candidates` / `vector_item_owned_object_candidates`。这里的 concrete owned object 也包括已经特化完成的 generic struct，例如 `0x2::balance::Balance<0x2::sui::SUI>` 或 receipt 一类类型；只要签名里不再残留 `T0/T1` 这类未解析 type parameter，就会进入同一套 owned discovery。 这一步不会替你自动做最终选择，但已经把“提示层”推进成了“候选集层”。
 
-当某个 shared / owned candidate 已经进入跨参数联动评分时，summary 里的 candidate 现在还会带 `selection_score`，并按“分数降序、object id 升序”排序。对 shared candidate，这个分数会同时综合“已选 object 的直接引用”和“owned candidate 的引用提示”，前者权重更高。对 `vector<concrete object struct>`，`vector_item_owned_object_candidates` 也会按同样的引用分数排序，`auto_selected_arg_json` 会跟着输出这组排序后的对象向量。这样即使当前还不能安全自动选中，你也能直接从输出里看出 CLI 认为哪组对象更接近最终可执行组合。
+当某个 shared / owned candidate 已经进入跨参数联动评分时，summary 里的 candidate 现在还会带 `selection_score`，并按“分数降序、object id 升序”排序。对 shared candidate，这个分数会同时综合“已选 object 的直接引用”和“owned candidate 的引用提示”，前者权重更高；而且显式给出的 object 参数，会再比 auto-selected object 参数有更高权重。对 `vector<concrete object struct>`，`vector_item_owned_object_candidates` 也会按同样的引用分数排序，`auto_selected_arg_json` 会跟着输出这组排序后的对象向量。这样即使当前还不能安全自动选中，你也能直接从输出里看出 CLI 认为哪组对象更接近最终可执行组合。
 
 当 ABI 显示参数是非 `vector<u8>` 的 `vector<T>` 时，CLI 现在会在本地 programmable builder 路径里自动插入 `MakeMoveVec`。这对 Cetus 一类需要 `vector<Coin<_>>` 的调用很重要，因为你可以直接传：
 
