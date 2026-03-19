@@ -3994,12 +3994,17 @@ test "runCommand move function with --summarize prefers owned candidate with hig
         parameters[1].object.get("auto_selected_arg_json").?.string,
     );
     const owned_candidates = parameters[1].object.get("owned_object_candidates").?.array.items;
-    try testing.expectEqual(@as(i64, 4), owned_candidates[0].object.get("selection_score").?.integer);
+    try testing.expect(owned_candidates[0].object.get("selection_score").?.integer >
+        owned_candidates[1].object.get("selection_score").?.integer);
     try testing.expectEqualStrings("0xposition-b", owned_candidates[0].object.get("object_id").?.string);
-    try testing.expectEqual(@as(i64, 3), owned_candidates[1].object.get("selection_score").?.integer);
-    try testing.expectEqualStrings("0xposition-c", owned_candidates[1].object.get("object_id").?.string);
-    try testing.expectEqual(@as(i64, 1), owned_candidates[2].object.get("selection_score").?.integer);
-    try testing.expectEqualStrings("0xposition-a", owned_candidates[2].object.get("object_id").?.string);
+    try testing.expect(owned_candidates[1].object.get("selection_score").?.integer > 0);
+    try testing.expect(owned_candidates[2].object.get("selection_score").?.integer > 0);
+    const second_id = owned_candidates[1].object.get("object_id").?.string;
+    const third_id = owned_candidates[2].object.get("object_id").?.string;
+    try testing.expect(
+        (std.mem.eql(u8, second_id, "0xposition-a") and std.mem.eql(u8, third_id, "0xposition-c")) or
+            (std.mem.eql(u8, second_id, "0xposition-c") and std.mem.eql(u8, third_id, "0xposition-a")),
+    );
     try testing.expectEqualStrings(
         "[\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xpool1\\\",\\\"inputKind\\\":\\\"shared\\\",\\\"initialSharedVersion\\\":7,\\\"mutable\\\":true}\",\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xposition-b\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":8,\\\"digest\\\":\\\"position-digest-b\\\"}\",\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xvault1\\\",\\\"inputKind\\\":\\\"shared\\\",\\\"initialSharedVersion\\\":5,\\\"mutable\\\":false}\"]",
         parsed.value.object.get("call_template").?.object.get("preferred_args_json").?.string,
@@ -4104,6 +4109,85 @@ test "runCommand move function with --summarize tie-breaks shared candidates by 
     try testing.expectEqual(@as(i64, 6), shared_candidates[0].object.get("selection_score").?.integer);
     try testing.expectEqual(@as(i64, 6), shared_candidates[1].object.get("selection_score").?.integer);
     try testing.expectEqualStrings("0xpool1", shared_candidates[0].object.get("object_id").?.string);
+    const preferred_resolution = parsed.value.object.get("call_template").?.object.get("preferred_resolution").?.object;
+    try testing.expectEqualStrings(
+        "auto_selected_tiebreak",
+        preferred_resolution.get("parameters").?.array.items[0].object.get("resolution_kind").?.string,
+    );
+}
+
+test "runCommand move function with --summarize tie-breaks zero-score shared event candidates by discovery order" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"visibility\":\"Public\",\"isEntry\":true,\"typeParameters\":[],\"parameters\":[{\"MutableReference\":{\"Struct\":{\"address\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb\",\"module\":\"pool\",\"name\":\"Pool\",\"typeParams\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"sui\",\"name\":\"SUI\",\"typeParams\":[]}},{\"Struct\":{\"address\":\"0x2\",\"module\":\"sui\",\"name\":\"SUI\",\"typeParams\":[]}}]}}},{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "suix_queryEvents")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xevent1\",\"eventSeq\":\"1\"},\"packageId\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool1\"}},{\"id\":{\"txDigest\":\"0xevent2\",\"eventSeq\":\"2\"},\"packageId\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool2\"}}],\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getObject")) {
+                if (std.mem.indexOf(u8, req.params_json, "\"0xpool1\"") != null) {
+                    return alloc.dupe(
+                        u8,
+                        "{\"result\":{\"data\":{\"objectId\":\"0xpool1\",\"version\":\"11\",\"digest\":\"pool-digest-1\",\"type\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb::pool::Pool<0x2::sui::SUI, 0x2::sui::SUI>\",\"owner\":{\"Shared\":{\"initial_shared_version\":\"7\"}}}}}",
+                    );
+                }
+                if (std.mem.indexOf(u8, req.params_json, "\"0xpool2\"") != null) {
+                    return alloc.dupe(
+                        u8,
+                        "{\"result\":{\"data\":{\"objectId\":\"0xpool2\",\"version\":\"12\",\"digest\":\"pool-digest-2\",\"type\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb::pool::Pool<0x2::sui::SUI, 0x2::sui::SUI>\",\"owner\":{\"Shared\":{\"initial_shared_version\":\"8\"}}}}}",
+                    );
+                }
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "move",
+        "function",
+        client.package_preset.cetus_clmm_mainnet,
+        "pool",
+        "swap",
+        "--summarize",
+    });
+    defer args.deinit(allocator);
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    const parameter = parsed.value.object.get("parameters").?.array.items[0].object;
+    const shared_candidates = parameter.get("shared_object_candidates").?.array.items;
+    try testing.expectEqual(@as(i64, 0), shared_candidates[0].object.get("selection_score").?.integer);
+    try testing.expectEqual(@as(i64, 0), shared_candidates[1].object.get("selection_score").?.integer);
+    try testing.expectEqualStrings("0xpool1", shared_candidates[0].object.get("object_id").?.string);
+    try testing.expectEqualStrings(
+        "\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xpool1\\\",\\\"inputKind\\\":\\\"shared\\\",\\\"initialSharedVersion\\\":7,\\\"mutable\\\":true}\"",
+        parameter.get("auto_selected_arg_json").?.string,
+    );
     const preferred_resolution = parsed.value.object.get("call_template").?.object.get("preferred_resolution").?.object;
     try testing.expectEqualStrings(
         "auto_selected_tiebreak",

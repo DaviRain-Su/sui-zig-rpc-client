@@ -906,6 +906,8 @@ zig build run -- events \
 
 当存在 preferred request artifact 时，CLI 现在也会把同一份结构化结果嵌进 request JSON 的 `preferredResolution` 字段。这样你即使只消费 `--emit-template preferred-dry-run-request` / `preferred-send-request`，也能直接看到当前自动选中的参数组合和剩余 unresolved 参数位。
 
+如果 shared object 候选来自模块事件发现、但当前没有更强的引用分数，CLI 现在也会按 discovery 顺序做一个低置信度 `auto_selected_tiebreak`。这不会伪装成普通 `auto_selected`，但能把一部分“只差多候选打平”的调用继续往可执行方向推进。
+
 如果你在 `move function --summarize` 时给的显式参数少于总参数个数，CLI 会优先把这些值按“非 object 参数位”做稀疏回填，而不是强行占掉前面的 object 参数位。这样像 `Coin<T>, u64, TxContext` 这类常见签名里，只传 `--arg 13` 就会优先落到 `u64` 金额参数上；同时前一个 `Coin<T>` 的 `coin_with_min_balance_select_token` 会把 `minBalance` 自动抬到 `13`。
 
 如果你已经知道某个参数应该落到哪个位置，不想依赖稀疏回填，可以直接用 `--arg-at <index> <value>`。这里的 `index` 就是 summary 里 `parameters[*]` 的索引；它会覆盖对应参数位的 `explicit_arg_json`，并继续参与 `preferred_*` 模板生成。`TxContext` 这类 runtime 参数仍然不能手工覆盖。

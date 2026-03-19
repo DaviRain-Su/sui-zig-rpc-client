@@ -5009,10 +5009,10 @@ pub const SuiRpcClient = struct {
         candidates: []const move_result.SharedMoveObjectCandidate,
     ) ?struct { token: []const u8, decision: SortedCandidateSelectionDecision } {
         if (candidates.len == 0) return null;
-        if (candidates[0].selection_score == 0) return null;
+        if (candidates[0].selection_score == 0 and parameter.shared_object_event_query_argv == null) return null;
 
-        const used_tiebreak = candidates.len > 1 and
-            candidates[1].selection_score == candidates[0].selection_score;
+        const used_tiebreak = candidates[0].selection_score == 0 or
+            (candidates.len > 1 and candidates[1].selection_score == candidates[0].selection_score);
         return .{
             .token = if (isMoveMutableReferenceSignature(parameter.signature))
                 candidates[0].mutable_shared_object_input_select_token

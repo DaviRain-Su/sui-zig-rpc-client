@@ -51,6 +51,8 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
   references over broader owned-candidate hints.
 - [x] Shared/owned candidate scoring that weights explicit object references
   above auto-selected references.
+- [x] Low-confidence deterministic tie-break selection for zero-score shared
+  candidates discovered from ordered module events.
 - [x] Vector-owned candidate scoring and stable ordering from selected object
   references.
 - [x] Candidate `selection_score` exposure and deterministic score-first
