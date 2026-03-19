@@ -4525,6 +4525,73 @@ pub const SuiRpcClient = struct {
         return try candidates.toOwnedSlice(allocator);
     }
 
+    fn discoverOwnedObjectCandidatesFromModuleEvents(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        owner: []const u8,
+        struct_type: []const u8,
+        event_package_id: []const u8,
+        event_module_name: []const u8,
+    ) ![]move_result.OwnedMoveObjectCandidate {
+        var discovered_ids = std.ArrayList([]u8).empty;
+        defer {
+            for (discovered_ids.items) |value| allocator.free(value);
+            discovered_ids.deinit(allocator);
+        }
+
+        var cursor_tx_digest: ?[]u8 = null;
+        defer if (cursor_tx_digest) |value| allocator.free(value);
+        var cursor_event_seq: ?u64 = null;
+
+        var page_count: usize = 0;
+        while (page_count < 4 and discovered_ids.items.len < 16) : (page_count += 1) {
+            var page = try self.getEventsPageWithRequest(allocator, .{
+                .filter = .{
+                    .move_module = .{
+                        .package = event_package_id,
+                        .module = event_module_name,
+                    },
+                },
+                .cursor_tx_digest = cursor_tx_digest,
+                .cursor_event_seq = cursor_event_seq,
+                .limit = 20,
+                .descending_order = true,
+            });
+            defer page.deinit(allocator);
+
+            for (page.entries) |entry| {
+                const parsed_json = entry.parsed_json orelse continue;
+                const parsed = std.json.parseFromSlice(std.json.Value, allocator, parsed_json, .{}) catch continue;
+                defer parsed.deinit();
+                try appendDiscoveredObjectIdsFromJsonValue(allocator, &discovered_ids, parsed.value, 16);
+                if (discovered_ids.items.len >= 16) break;
+            }
+
+            if (!page.has_next_page or discovered_ids.items.len >= 16) break;
+            const next_cursor = page.next_cursor_tx_digest orelse break;
+            const next_event_seq = page.next_cursor_event_seq orelse break;
+            if (cursor_tx_digest) |value| allocator.free(value);
+            cursor_tx_digest = try allocator.dupe(u8, next_cursor);
+            cursor_event_seq = next_event_seq;
+        }
+
+        var candidates = std.ArrayList(move_result.OwnedMoveObjectCandidate).empty;
+        errdefer {
+            for (candidates.items) |*value| value.deinit(allocator);
+            candidates.deinit(allocator);
+        }
+
+        try self.appendOwnedObjectCandidatesFromObjectIds(
+            allocator,
+            &candidates,
+            discovered_ids.items,
+            owner,
+            struct_type,
+        );
+
+        return try candidates.toOwnedSlice(allocator);
+    }
+
     fn discoverOwnedObjectCandidates(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
@@ -5290,6 +5357,8 @@ pub const SuiRpcClient = struct {
         allocator: std.mem.Allocator,
         parameters: []move_result.OwnedMoveParameterSummary,
         owner_address: ?[]const u8,
+        event_package_id: ?[]const u8,
+        event_module_name: ?[]const u8,
     ) !void {
         const owner = owner_address orelse return;
 
@@ -5310,7 +5379,24 @@ pub const SuiRpcClient = struct {
                     struct_type,
                     parameter.owned_object_candidates == null or parameter.owned_object_candidates.?.len == 0,
                 );
-                if (discovered_candidates.len != 0) {
+                const event_candidates = if (discovered_candidates.len == 0 and
+                    (parameter.owned_object_candidates == null or parameter.owned_object_candidates.?.len == 0) and
+                    event_package_id != null and event_module_name != null)
+                    try self.discoverOwnedObjectCandidatesFromModuleEvents(
+                        allocator,
+                        owner,
+                        struct_type,
+                        event_package_id.?,
+                        event_module_name.?,
+                    )
+                else
+                    try allocator.alloc(move_result.OwnedMoveObjectCandidate, 0);
+                defer {
+                    for (event_candidates) |*candidate| candidate.deinit(allocator);
+                    allocator.free(event_candidates);
+                }
+
+                if (discovered_candidates.len != 0 or event_candidates.len != 0) {
                     var merged_candidates = std.ArrayList(move_result.OwnedMoveObjectCandidate).empty;
                     errdefer {
                         for (merged_candidates.items) |*candidate| candidate.deinit(allocator);
@@ -5333,6 +5419,27 @@ pub const SuiRpcClient = struct {
                     }
 
                     for (discovered_candidates) |candidate| {
+                        var already_present = false;
+                        for (merged_candidates.items) |existing| {
+                            if (std.mem.eql(u8, existing.object_id, candidate.object_id)) {
+                                already_present = true;
+                                break;
+                            }
+                        }
+                        if (already_present) continue;
+                        try merged_candidates.append(allocator, .{
+                            .object_id = try allocator.dupe(u8, candidate.object_id),
+                            .version = candidate.version,
+                            .digest = try allocator.dupe(u8, candidate.digest),
+                            .balance = candidate.balance,
+                            .type_name = if (candidate.type_name) |value| try allocator.dupe(u8, value) else null,
+                            .owner_value = if (candidate.owner_value) |value| try allocator.dupe(u8, value) else null,
+                            .object_input_select_token = try allocator.dupe(u8, candidate.object_input_select_token),
+                            .selection_score = candidate.selection_score,
+                        });
+                    }
+
+                    for (event_candidates) |candidate| {
                         var already_present = false;
                         for (merged_candidates.items) |existing| {
                             if (std.mem.eql(u8, existing.object_id, candidate.object_id)) {
@@ -5391,7 +5498,24 @@ pub const SuiRpcClient = struct {
                     struct_type,
                     parameter.vector_item_owned_object_candidates == null or parameter.vector_item_owned_object_candidates.?.len == 0,
                 );
-                if (discovered_candidates.len == 0) {
+                const event_candidates = if (discovered_candidates.len == 0 and
+                    (parameter.vector_item_owned_object_candidates == null or parameter.vector_item_owned_object_candidates.?.len == 0) and
+                    event_package_id != null and event_module_name != null)
+                    try self.discoverOwnedObjectCandidatesFromModuleEvents(
+                        allocator,
+                        owner,
+                        struct_type,
+                        event_package_id.?,
+                        event_module_name.?,
+                    )
+                else
+                    try allocator.alloc(move_result.OwnedMoveObjectCandidate, 0);
+                defer {
+                    for (event_candidates) |*candidate| candidate.deinit(allocator);
+                    allocator.free(event_candidates);
+                }
+
+                if (discovered_candidates.len == 0 and event_candidates.len == 0) {
                     allocator.free(discovered_candidates);
                     continue;
                 }
@@ -5418,6 +5542,27 @@ pub const SuiRpcClient = struct {
                 }
 
                 for (discovered_candidates) |candidate| {
+                    var already_present = false;
+                    for (merged_candidates.items) |existing| {
+                        if (std.mem.eql(u8, existing.object_id, candidate.object_id)) {
+                            already_present = true;
+                            break;
+                        }
+                    }
+                    if (already_present) continue;
+                    try merged_candidates.append(allocator, .{
+                        .object_id = try allocator.dupe(u8, candidate.object_id),
+                        .version = candidate.version,
+                        .digest = try allocator.dupe(u8, candidate.digest),
+                        .balance = candidate.balance,
+                        .type_name = if (candidate.type_name) |value| try allocator.dupe(u8, value) else null,
+                        .owner_value = if (candidate.owner_value) |value| try allocator.dupe(u8, value) else null,
+                        .object_input_select_token = try allocator.dupe(u8, candidate.object_input_select_token),
+                        .selection_score = candidate.selection_score,
+                    });
+                }
+
+                for (event_candidates) |candidate| {
                     var already_present = false;
                     for (merged_candidates.items) |existing| {
                         if (std.mem.eql(u8, existing.object_id, candidate.object_id)) {
@@ -6175,6 +6320,8 @@ pub const SuiRpcClient = struct {
         allocator: std.mem.Allocator,
         parameters: []move_result.OwnedMoveParameterSummary,
         owner_address: ?[]const u8,
+        event_package_id: ?[]const u8,
+        event_module_name: ?[]const u8,
     ) !void {
         var round: usize = 0;
         while (round < move_candidate_resolution_max_rounds) : (round += 1) {
@@ -6186,6 +6333,8 @@ pub const SuiRpcClient = struct {
                 allocator,
                 parameters,
                 owner_address,
+                event_package_id,
+                event_module_name,
             );
             try self.applyReferencedSharedObjectCandidateSelectionHints(allocator, parameters);
             try self.applySharedCandidateSelectionHintsFromOwnedCandidates(allocator, parameters);
@@ -7997,7 +8146,13 @@ pub const SuiRpcClient = struct {
                 summary.parameters,
             );
         }
-        try self.resolveMoveParameterCandidatesToFixedPoint(allocator, summary.parameters, owner_address);
+        try self.resolveMoveParameterCandidatesToFixedPoint(
+            allocator,
+            summary.parameters,
+            owner_address,
+            summary.package_id,
+            summary.module_name,
+        );
         try applyCrossParameterBusinessCoinSelectionHints(allocator, summary.parameters);
         try applyCrossParameterOwnedObjectSelectionHints(allocator, summary.parameters);
 

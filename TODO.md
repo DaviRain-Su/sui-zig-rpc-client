@@ -46,6 +46,8 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
   already selected or discovered seed objects.
 - [x] Aggregate owned candidates discovered from seed-object content and
   dynamic fields instead of treating the two sources as mutually exclusive.
+- [x] Owned object candidate discovery from recent module events, filtered back
+  down by owner and concrete struct type.
 - [x] Shared object candidate discovery from module events.
 - [x] Aggregate multiple recent event pages when discovering shared object
   candidates from module events.
