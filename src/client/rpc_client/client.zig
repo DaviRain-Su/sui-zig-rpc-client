@@ -4490,7 +4490,7 @@ pub const SuiRpcClient = struct {
             );
         }
 
-        if (allow_dynamic_field_fallback and discovered_ids.items.len == 0) {
+        if (allow_dynamic_field_fallback and discovered_ids.items.len < 16) {
             for (seed_object_ids) |object_id| {
                 if (discovered_ids.items.len >= 16) break;
                 var page = self.getAllDynamicFieldsWithRequest(

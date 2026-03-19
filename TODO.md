@@ -44,6 +44,8 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
   object content, not only owner-page queries.
 - [x] Additional owned object candidate discovery from dynamic fields of
   already selected or discovered seed objects.
+- [x] Aggregate owned candidates discovered from seed-object content and
+  dynamic fields instead of treating the two sources as mutually exclusive.
 - [x] Shared object candidate discovery from module events.
 - [x] Aggregate multiple recent event pages when discovering shared object
   candidates from module events.
