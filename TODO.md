@@ -248,7 +248,7 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
 
 ### 9. Local Move contract coverage matrix
 
-- [ ] Add a `counter_baseline` package for pure-value and sender/signer
+- [x] Add a `counter_baseline` package for pure-value and sender/signer
   invocation coverage.
 - [x] Add a `shared_state_lab` package for shared object and versioned shared
   object coverage.

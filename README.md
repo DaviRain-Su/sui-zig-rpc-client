@@ -58,6 +58,14 @@ zig build test --summary all
 - `K2 ZKLogin / session-backed account flow`
 
 本地 Move 合约矩阵现在已经开始落地，第一项是：
+- [`fixtures/move/counter_baseline`](/Users/davirian/dev/zig/sui-zig-rpc-client/fixtures/move/counter_baseline)
+  - 覆盖 `u64/bool/address`、by-value pure struct、多返回值顺序、sender 上下文，以及 entry / non-entry 两条调用路径
+  - 可直接运行：
+
+```bash
+sui move test --path fixtures/move/counter_baseline
+```
+
 - [`fixtures/move/shared_state_lab`](/Users/davirian/dev/zig/sui-zig-rpc-client/fixtures/move/shared_state_lab)
   - 覆盖 shared object、owned admin cap、shared object 跨交易修改、version migration
   - 可直接运行：

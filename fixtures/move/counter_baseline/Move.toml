@@ -1,0 +1,6 @@
+[package]
+name = "counter_baseline"
+edition = "2024"
+
+[addresses]
+counter_baseline = "0x0"

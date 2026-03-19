@@ -41,6 +41,10 @@
 - sender/signer 填充
 - direct `move function --dry-run`
 
+当前状态：
+- 已落地：[`fixtures/move/counter_baseline`](/Users/davirian/dev/zig/sui-zig-rpc-client/fixtures/move/counter_baseline)
+- 已验证：`sui move test --path fixtures/move/counter_baseline`
+
 ### 2. `shared_state_lab`
 
 用途：锁定 shared object 输入和版本化 shared object 行为。
