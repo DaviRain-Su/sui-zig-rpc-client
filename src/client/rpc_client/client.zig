@@ -8053,6 +8053,33 @@ pub const SuiRpcClient = struct {
             for (reserved_coin_object_ids.items) |value| allocator.free(value);
             reserved_coin_object_ids.deinit(allocator);
         }
+        for (summary.parameters) |parameter| {
+            if (parameter.omitted_from_explicit_args) continue;
+            const explicit_value = parameter.explicit_arg_json orelse continue;
+
+            if (coinTypeFromMoveSignature(parameter.signature) != null) {
+                const parsed = try std.json.parseFromSlice(std.json.Value, allocator, explicit_value, .{});
+                defer parsed.deinit();
+                try tryAppendSelectedObjectIdsFromArgumentJsonValue(
+                    allocator,
+                    &reserved_coin_object_ids,
+                    parsed.value,
+                );
+                continue;
+            }
+
+            if (vectorElementTypeSignature(parameter.signature)) |element_signature| {
+                if (coinTypeFromCoinStructType(element_signature) != null) {
+                    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, explicit_value, .{});
+                    defer parsed.deinit();
+                    try tryAppendSelectedObjectIdsFromArgumentJsonValue(
+                        allocator,
+                        &reserved_coin_object_ids,
+                        parsed.value,
+                    );
+                }
+            }
+        }
         var needs_split = false;
         for (summary.parameters, 0..) |parameter, index| {
             if (parameter.omitted_from_explicit_args) continue;

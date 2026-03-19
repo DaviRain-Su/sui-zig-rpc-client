@@ -113,6 +113,8 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
   `vector<Coin<T>>` auto-selected parameters.
 - [x] Reserve later explicit coin object arguments before earlier business-coin
   auto-selection runs.
+- [x] Reserve later explicit coin object arguments before earlier preferred
+  split/merge planning chooses its source coins.
 
 ## Highest Priority Remaining Work
 
