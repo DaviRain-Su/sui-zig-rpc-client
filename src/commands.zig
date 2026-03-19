@@ -3106,14 +3106,22 @@ test "runCommand move function with --summarize prints normalized function summa
 
     const callback = struct {
         fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
-            std.debug.assert(std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction"));
-            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0x2\"") != null);
-            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"pool\"") != null);
-            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"swap\"") != null);
-            return alloc.dupe(
-                u8,
-                "{\"result\":{\"visibility\":\"Public\",\"isEntry\":true,\"typeParameters\":[],\"parameters\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"pool\",\"name\":\"Pool\",\"typeParams\":[]}},\"U64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[\"Bool\"]}}",
-            );
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0x2\"") != null);
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"pool\"") != null);
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"swap\"") != null);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"visibility\":\"Public\",\"isEntry\":true,\"typeParameters\":[],\"parameters\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"pool\",\"name\":\"Pool\",\"typeParams\":[]}},\"U64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[\"Bool\"]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveModule")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"structs\":{\"Pool\":{\"abilities\":{\"abilities\":[\"Key\",\"Store\"]},\"typeParameters\":[],\"fields\":[{\"name\":\"id\",\"type\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"object\",\"name\":\"UID\",\"typeParams\":[]}}}]}}}}",
+                );
+            }
+            return error.OutOfMemory;
         }
     }.call;
 
@@ -3197,11 +3205,19 @@ test "runCommand move function with --summarize applies sparse explicit pure arg
 
     const callback = struct {
         fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
-            std.debug.assert(std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction"));
-            return alloc.dupe(
-                u8,
-                "{\"result\":{\"visibility\":\"Public\",\"isEntry\":true,\"typeParameters\":[],\"parameters\":[{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"pool\",\"name\":\"Pool\",\"typeParams\":[]}}},\"u64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[]}}",
-            );
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"visibility\":\"Public\",\"isEntry\":true,\"typeParameters\":[],\"parameters\":[{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"pool\",\"name\":\"Pool\",\"typeParams\":[]}}},\"u64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveModule")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"structs\":{\"Pool\":{\"abilities\":{\"abilities\":[\"Key\",\"Store\"]},\"typeParameters\":[],\"fields\":[{\"name\":\"id\",\"type\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"object\",\"name\":\"UID\",\"typeParams\":[]}}}]}}}}",
+                );
+            }
+            return error.OutOfMemory;
         }
     }.call;
 
@@ -3292,6 +3308,71 @@ test "runCommand move function with --summarize reports pure wrapper lowering ki
     try testing.expectEqualStrings("[]", parsed.value.object.get("call_template").?.object.get("type_args_json").?.string);
 }
 
+test "runCommand move function with --summarize reports nested generic pure lowering kinds" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"visibility\":\"Public\",\"isEntry\":true,\"typeParameters\":[{\"constraints\":[]}],\"parameters\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"config\",\"name\":\"Complex\",\"typeParams\":[{\"TypeParameter\":0}]}},{\"Struct\":{\"address\":\"0x1\",\"module\":\"option\",\"name\":\"Option\",\"typeParams\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"config\",\"name\":\"Complex\",\"typeParams\":[{\"TypeParameter\":0}]}}]}},{\"Vector\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"balance\",\"name\":\"Balance\",\"typeParams\":[{\"TypeParameter\":0}]}}},{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveModule")) {
+                if (std.mem.indexOf(u8, req.params_json, "\"config\"") != null) {
+                    return alloc.dupe(
+                        u8,
+                        "{\"result\":{\"structs\":{\"Complex\":{\"abilities\":{\"abilities\":[\"Store\"]},\"typeParameters\":[{\"constraints\":{\"abilities\":[]},\"isPhantom\":true}],\"fields\":[{\"name\":\"owner\",\"type\":\"Address\"},{\"name\":\"spending\",\"type\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"balance\",\"name\":\"Balance\",\"typeParams\":[{\"TypeParameter\":0}]}}},{\"name\":\"limit\",\"type\":{\"Struct\":{\"address\":\"0x1\",\"module\":\"option\",\"name\":\"Option\",\"typeParams\":[\"U64\"]}}},{\"name\":\"weights\",\"type\":{\"Vector\":\"U16\"}}]}}}}",
+                    );
+                }
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"structs\":{\"Balance\":{\"abilities\":{\"abilities\":[\"Store\"]},\"typeParameters\":[{\"constraints\":{\"abilities\":[]},\"isPhantom\":true}],\"fields\":[{\"name\":\"value\",\"type\":\"U64\"}]}}}}",
+                );
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+
+    var args = cli.ParsedArgs{
+        .command = .move_function,
+        .has_command = true,
+        .move_package = "0x2",
+        .move_module = "config_helpers",
+        .move_function = "submit_complex",
+        .tx_build_type_args = "[\"0x2::sui::SUI\"]",
+        .tx_send_summarize = true,
+    };
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    const parameters = parsed.value.object.get("parameters").?.array.items;
+    try testing.expectEqualStrings("pure_struct", parameters[0].object.get("lowering_kind").?.string);
+    try testing.expectEqualStrings("\"<arg0-manual-json-or-token>\"", parameters[0].object.get("placeholder_json").?.string);
+    try testing.expectEqualStrings("option", parameters[1].object.get("lowering_kind").?.string);
+    try testing.expectEqualStrings("null", parameters[1].object.get("placeholder_json").?.string);
+    try testing.expectEqualStrings("vector", parameters[2].object.get("lowering_kind").?.string);
+    try testing.expectEqualStrings("[\"<arg2-item0>\"]", parameters[2].object.get("placeholder_json").?.string);
+    try testing.expectEqualStrings("runtime", parameters[3].object.get("lowering_kind").?.string);
+}
+
 test "runCommand move function with --summarize prefers known object preset tokens" {
     const testing = std.testing;
 
@@ -3301,14 +3382,22 @@ test "runCommand move function with --summarize prefers known object preset toke
 
     const callback = struct {
         fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
-            std.debug.assert(std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction"));
-            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\"") != null);
-            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"pool\"") != null);
-            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"add_liquidity_fix_coin\"") != null);
-            return alloc.dupe(
-                u8,
-                "{\"result\":{\"visibility\":\"Public\",\"isEntry\":false,\"typeParameters\":[[],[]],\"parameters\":[{\"Reference\":{\"Struct\":{\"address\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb\",\"module\":\"config\",\"name\":\"GlobalConfig\",\"typeParams\":[]}}},{\"Reference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"clock\",\"name\":\"Clock\",\"typeParams\":[]}}}],\"return\":[]}}",
-            );
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\"") != null);
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"pool\"") != null);
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"add_liquidity_fix_coin\"") != null);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"visibility\":\"Public\",\"isEntry\":false,\"typeParameters\":[[],[]],\"parameters\":[{\"Reference\":{\"Struct\":{\"address\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb\",\"module\":\"config\",\"name\":\"GlobalConfig\",\"typeParams\":[]}}},{\"Reference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"clock\",\"name\":\"Clock\",\"typeParams\":[]}}}],\"return\":[]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveModule")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"structs\":{\"GlobalConfig\":{\"abilities\":{\"abilities\":[\"Key\",\"Store\"]},\"typeParameters\":[],\"fields\":[{\"name\":\"id\",\"type\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"object\",\"name\":\"UID\",\"typeParams\":[]}}}]},\"Clock\":{\"abilities\":{\"abilities\":[\"Key\",\"Store\"]},\"typeParameters\":[],\"fields\":[{\"name\":\"id\",\"type\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"object\",\"name\":\"UID\",\"typeParams\":[]}}}]}}}}",
+                );
+            }
+            return error.OutOfMemory;
         }
     }.call;
 
@@ -3370,14 +3459,22 @@ test "runCommand move function with --summarize adds owned object discovery temp
 
     const callback = struct {
         fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
-            std.debug.assert(std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction"));
-            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\"") != null);
-            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"pool\"") != null);
-            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"add_liquidity_fix_coin\"") != null);
-            return alloc.dupe(
-                u8,
-                "{\"result\":{\"visibility\":\"Public\",\"isEntry\":false,\"typeParameters\":[[],[]],\"parameters\":[{\"MutableReference\":{\"Struct\":{\"address\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb\",\"module\":\"pool\",\"name\":\"Pool\",\"typeParams\":[{\"TypeParameter\":0},{\"TypeParameter\":1}]}}},{\"MutableReference\":{\"Struct\":{\"address\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb\",\"module\":\"position\",\"name\":\"Position\",\"typeParams\":[]}}}],\"return\":[]}}",
-            );
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\"") != null);
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"pool\"") != null);
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"add_liquidity_fix_coin\"") != null);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"visibility\":\"Public\",\"isEntry\":false,\"typeParameters\":[[],[]],\"parameters\":[{\"MutableReference\":{\"Struct\":{\"address\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb\",\"module\":\"pool\",\"name\":\"Pool\",\"typeParams\":[{\"TypeParameter\":0},{\"TypeParameter\":1}]}}},{\"MutableReference\":{\"Struct\":{\"address\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb\",\"module\":\"position\",\"name\":\"Position\",\"typeParams\":[]}}}],\"return\":[]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveModule")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"structs\":{\"Pool\":{\"abilities\":{\"abilities\":[\"Key\",\"Store\"]},\"typeParameters\":[{\"constraints\":{\"abilities\":[]},\"isPhantom\":false},{\"constraints\":{\"abilities\":[]},\"isPhantom\":false}],\"fields\":[{\"name\":\"id\",\"type\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"object\",\"name\":\"UID\",\"typeParams\":[]}}}]},\"Position\":{\"abilities\":{\"abilities\":[\"Key\",\"Store\"]},\"typeParameters\":[],\"fields\":[{\"name\":\"id\",\"type\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"object\",\"name\":\"UID\",\"typeParams\":[]}}}]}}}}",
+                );
+            }
+            return error.OutOfMemory;
         }
     }.call;
 
@@ -3484,6 +3581,12 @@ test "runCommand move function with --summarize fills owner context into owned o
                     "{\"result\":{\"data\":{\"objectId\":\"0xposition1\",\"version\":\"7\",\"digest\":\"position-digest-1\",\"content\":{\"dataType\":\"moveObject\",\"fields\":{\"liquidity\":\"9\"}}}}}",
                 );
             }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveModule")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"structs\":{\"Position\":{\"abilities\":{\"abilities\":[\"Key\",\"Store\"]},\"typeParameters\":[],\"fields\":[{\"name\":\"id\",\"type\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"object\",\"name\":\"UID\",\"typeParams\":[]}}}]}}}}",
+                );
+            }
 
             std.debug.assert(std.mem.eql(u8, req.method, "suix_getOwnedObjects"));
             std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0xowner\"") != null);
@@ -3583,6 +3686,12 @@ test "runCommand move function with --summarize caches initial owner discovery a
                     "{\"result\":{\"data\":{\"objectId\":\"0xposition1\",\"version\":\"7\",\"digest\":\"position-digest-1\",\"type\":\"0x2a::position::Position\",\"owner\":{\"AddressOwner\":\"0xowner\"},\"content\":{\"dataType\":\"moveObject\",\"fields\":{\"liquidity\":\"9\"}}}}}",
                 );
             }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveModule")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"structs\":{\"Position\":{\"abilities\":{\"abilities\":[\"Key\",\"Store\"]},\"typeParameters\":[],\"fields\":[{\"name\":\"id\",\"type\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"object\",\"name\":\"UID\",\"typeParams\":[]}}}]}}}}",
+                );
+            }
 
             std.debug.assert(std.mem.eql(u8, req.method, "suix_getOwnedObjects"));
             callback_state.owned_object_requests += 1;
@@ -3667,6 +3776,12 @@ test "runCommand move function with --summarize discovers owned object candidate
                     "{\"result\":{\"data\":{\"objectId\":\"0xposition2\",\"version\":\"8\",\"digest\":\"position-digest-2\",\"content\":{\"dataType\":\"moveObject\",\"fields\":{\"liquidity\":\"3\"}}}}}",
                 );
             }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveModule")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"structs\":{\"Position\":{\"abilities\":{\"abilities\":[\"Key\",\"Store\"]},\"typeParameters\":[],\"fields\":[{\"name\":\"id\",\"type\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"object\",\"name\":\"UID\",\"typeParams\":[]}}}]}}}}",
+                );
+            }
 
             std.debug.assert(std.mem.eql(u8, req.method, "suix_getOwnedObjects"));
             request_count.* += 1;
@@ -3724,7 +3839,7 @@ test "runCommand move function with --summarize discovers owned object candidate
     try testing.expectEqualStrings("0xposition2", owned_candidates[1].object.get("object_id").?.string);
 }
 
-test "runCommand move function with --summarize discovers specialized generic owned objects from owner context" {
+test "runCommand move function with --summarize lowers specialized generic pure structs from owner context" {
     const testing = std.testing;
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -3739,25 +3854,13 @@ test "runCommand move function with --summarize discovers specialized generic ow
                     "{\"result\":{\"visibility\":\"Public\",\"isEntry\":false,\"typeParameters\":[[]],\"parameters\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"balance\",\"name\":\"Balance\",\"typeParams\":[{\"TypeParameter\":0}]}}],\"return\":[]}}",
                 );
             }
-
-            if (std.mem.eql(u8, req.method, "sui_getObject")) {
-                std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0xbalance1\"") != null);
-                std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"showContent\":true") != null);
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveModule")) {
                 return alloc.dupe(
                     u8,
-                    "{\"result\":{\"data\":{\"objectId\":\"0xbalance1\",\"version\":\"13\",\"digest\":\"balance-digest-1\",\"content\":{\"dataType\":\"moveObject\",\"fields\":{\"value\":\"9\"}}}}}",
+                    "{\"result\":{\"structs\":{\"Balance\":{\"abilities\":{\"abilities\":[\"Store\"]},\"typeParameters\":[{\"constraints\":{\"abilities\":[]},\"isPhantom\":true}],\"fields\":[{\"name\":\"value\",\"type\":\"U64\"}]}}}}",
                 );
             }
-
-            std.debug.assert(std.mem.eql(u8, req.method, "suix_getOwnedObjects"));
-            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0xowner\"") != null);
-            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"StructType\":\"0x2::balance::Balance<0x2::sui::SUI>\"") != null);
-            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"showType\":true") != null);
-            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"showOwner\":true") != null);
-            return alloc.dupe(
-                u8,
-                "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xbalance1\",\"version\":\"13\",\"digest\":\"balance-digest-1\",\"type\":\"0x2::balance::Balance<0x2::sui::SUI>\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
-            );
+            return error.OutOfMemory;
         }
     }.call;
 
@@ -3790,32 +3893,13 @@ test "runCommand move function with --summarize discovers specialized generic ow
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
     defer parsed.deinit();
     const parameter = parsed.value.object.get("parameters").?.array.items[0].object;
-    try testing.expectEqualStrings(
-        "select:{\"kind\":\"owned_object_struct_type\",\"owner\":\"0xowner\",\"structType\":\"0x2::balance::Balance<0x2::sui::SUI>\"}",
-        parameter.get("owned_object_select_token").?.string,
-    );
-    const owned_query_argv = parameter.get("owned_object_query_argv").?.array.items;
-    try testing.expectEqual(@as(usize, 6), owned_query_argv.len);
-    try testing.expectEqualStrings("account", owned_query_argv[0].string);
-    try testing.expectEqualStrings("objects", owned_query_argv[1].string);
-    try testing.expectEqualStrings("0xowner", owned_query_argv[2].string);
-    try testing.expectEqualStrings("--struct-type", owned_query_argv[3].string);
-    try testing.expectEqualStrings("0x2::balance::Balance<0x2::sui::SUI>", owned_query_argv[4].string);
-    const owned_candidates = parameter.get("owned_object_candidates").?.array.items;
-    try testing.expectEqual(@as(usize, 1), owned_candidates.len);
-    try testing.expectEqualStrings("0xbalance1", owned_candidates[0].object.get("object_id").?.string);
-    try testing.expectEqualStrings(
-        "0x2::balance::Balance<0x2::sui::SUI>",
-        owned_candidates[0].object.get("type_name").?.string,
-    );
-    try testing.expectEqualStrings(
-        "\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xbalance1\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":13,\\\"digest\\\":\\\"balance-digest-1\\\"}\"",
-        parameter.get("auto_selected_arg_json").?.string,
-    );
-    try testing.expectEqualStrings(
-        "[\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xbalance1\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":13,\\\"digest\\\":\\\"balance-digest-1\\\"}\"]",
-        parsed.value.object.get("call_template").?.object.get("preferred_args_json").?.string,
-    );
+    try testing.expectEqualStrings("pure_struct", parameter.get("lowering_kind").?.string);
+    try testing.expectEqualStrings("\"<arg0-manual-json-or-token>\"", parameter.get("placeholder_json").?.string);
+    try testing.expectEqual(std.json.Value.null, parameter.get("owned_object_select_token").?);
+    try testing.expectEqual(std.json.Value.null, parameter.get("owned_object_query_argv").?);
+    try testing.expectEqual(std.json.Value.null, parameter.get("owned_object_candidates").?);
+    try testing.expectEqual(std.json.Value.null, parameter.get("auto_selected_arg_json").?);
+    try testing.expectEqual(std.json.Value.null, parsed.value.object.get("call_template").?.object.get("preferred_args_json").?);
 }
 
 test "runCommand move function with --summarize links owned object candidates to selected shared objects" {
@@ -4733,6 +4817,12 @@ test "runCommand move function with --summarize tie-breaks zero-score owned cand
                     "{\"result\":{\"data\":{\"objectId\":\"0xposition-b\",\"version\":\"8\",\"digest\":\"position-digest-b\",\"content\":{\"dataType\":\"moveObject\",\"fields\":{\"liquidity\":\"4\"}}}}}",
                 );
             }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveModule")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"structs\":{\"Position\":{\"abilities\":{\"abilities\":[\"Key\",\"Store\"]},\"typeParameters\":[],\"fields\":[{\"name\":\"id\",\"type\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"object\",\"name\":\"UID\",\"typeParams\":[]}}}]}}}}",
+                );
+            }
 
             std.debug.assert(std.mem.eql(u8, req.method, "suix_getOwnedObjects"));
             std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0xowner\"") != null);
@@ -5092,6 +5182,12 @@ test "runCommand move function with --summarize discovers related shared candida
                 return alloc.dupe(
                     u8,
                     "{\"result\":{\"data\":[],\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveModule")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"structs\":{\"Position\":{\"abilities\":{\"abilities\":[\"Key\",\"Store\"]},\"typeParameters\":[],\"fields\":[{\"name\":\"id\",\"type\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"object\",\"name\":\"UID\",\"typeParams\":[]}}}]},\"Receipt\":{\"abilities\":{\"abilities\":[\"Key\",\"Store\"]},\"typeParameters\":[],\"fields\":[{\"name\":\"id\",\"type\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"object\",\"name\":\"UID\",\"typeParams\":[]}}}]}}}}",
                 );
             }
             std.debug.assert(std.mem.eql(u8, req.method, "sui_getObject"));
@@ -5489,6 +5585,12 @@ test "runCommand move function with --summarize discovers owned candidates from 
                     "{\"result\":{\"data\":[],\"hasNextPage\":false}}",
                 );
             }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveModule")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"structs\":{\"Position\":{\"abilities\":{\"abilities\":[\"Key\",\"Store\"]},\"typeParameters\":[],\"fields\":[{\"name\":\"id\",\"type\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"object\",\"name\":\"UID\",\"typeParams\":[]}}}]},\"Receipt\":{\"abilities\":{\"abilities\":[\"Key\",\"Store\"]},\"typeParameters\":[],\"fields\":[{\"name\":\"id\",\"type\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"object\",\"name\":\"UID\",\"typeParams\":[]}}}]}}}}",
+                );
+            }
             std.debug.assert(std.mem.eql(u8, req.method, "sui_getObject"));
             if (std.mem.indexOf(u8, req.params_json, "\"0xreceipt1\"") != null) {
                 if (std.mem.indexOf(u8, req.params_json, "\"showContent\":true") != null) {
@@ -5583,6 +5685,12 @@ test "runCommand move function with --summarize discovers owned candidates from 
                 return alloc.dupe(
                     u8,
                     "{\"result\":{\"data\":[],\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveModule")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"structs\":{\"Position\":{\"abilities\":{\"abilities\":[\"Key\",\"Store\"]},\"typeParameters\":[],\"fields\":[{\"name\":\"id\",\"type\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"object\",\"name\":\"UID\",\"typeParams\":[]}}}]}}}}",
                 );
             }
             std.debug.assert(std.mem.eql(u8, req.method, "sui_getObject"));
@@ -5686,6 +5794,12 @@ test "runCommand move function with --summarize merges owned candidates from con
                 return alloc.dupe(
                     u8,
                     "{\"result\":{\"data\":[],\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveModule")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"structs\":{\"Position\":{\"abilities\":{\"abilities\":[\"Key\",\"Store\"]},\"typeParameters\":[],\"fields\":[{\"name\":\"id\",\"type\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"object\",\"name\":\"UID\",\"typeParams\":[]}}}]},\"Receipt\":{\"abilities\":{\"abilities\":[\"Key\",\"Store\"]},\"typeParameters\":[],\"fields\":[{\"name\":\"id\",\"type\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"object\",\"name\":\"UID\",\"typeParams\":[]}}}]}}}}",
                 );
             }
             std.debug.assert(std.mem.eql(u8, req.method, "sui_getObject"));
@@ -5800,8 +5914,20 @@ test "runCommand move function with --summarize discovers owned candidates from 
                     "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xevent1\",\"eventSeq\":\"1\"},\"packageId\":\"0x2a\",\"transactionModule\":\"router\",\"parsedJson\":{\"position_id\":\"0xposition1\"}}],\"hasNextPage\":false}}",
                 );
             }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveModule")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"structs\":{\"Position\":{\"abilities\":{\"abilities\":[\"Key\",\"Store\"]},\"typeParameters\":[],\"fields\":[{\"name\":\"id\",\"type\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"object\",\"name\":\"UID\",\"typeParams\":[]}}}]}}}}",
+                );
+            }
             if (std.mem.eql(u8, req.method, "sui_getTransactionBlock")) {
                 return alloc.dupe(u8, "{\"result\":{\"objectChanges\":[]}}");
+            }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveModule")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"structs\":{\"Position\":{\"abilities\":{\"abilities\":[\"Key\",\"Store\"]},\"typeParameters\":[],\"fields\":[{\"name\":\"id\",\"type\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"object\",\"name\":\"UID\",\"typeParams\":[]}}}]}}}}",
+                );
             }
             if (std.mem.eql(u8, req.method, "sui_getObject")) {
                 std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0xposition1\"") != null);
@@ -5908,6 +6034,12 @@ test "runCommand move function with --summarize falls back to owned event discov
             if (std.mem.eql(u8, req.method, "sui_getTransactionBlock")) {
                 return alloc.dupe(u8, "{\"result\":{\"objectChanges\":[]}}");
             }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveModule")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"structs\":{\"Position\":{\"abilities\":{\"abilities\":[\"Key\",\"Store\"]},\"typeParameters\":[],\"fields\":[{\"name\":\"id\",\"type\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"object\",\"name\":\"UID\",\"typeParams\":[]}}}]}}}}",
+                );
+            }
             if (std.mem.eql(u8, req.method, "sui_getObject")) {
                 std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0xposition1\"") != null);
                 if (std.mem.indexOf(u8, req.params_json, "\"showContent\":true") != null) {
@@ -5990,6 +6122,12 @@ test "runCommand move function with --summarize avoids reusing generic owned obj
                 return alloc.dupe(
                     u8,
                     "{\"result\":{\"data\":{\"objectId\":\"0xposition-b\",\"version\":\"8\",\"digest\":\"position-digest-b\",\"content\":{\"dataType\":\"moveObject\",\"fields\":{\"liquidity\":\"4\"}}}}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveModule")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"structs\":{\"Position\":{\"abilities\":{\"abilities\":[\"Key\",\"Store\"]},\"typeParameters\":[],\"fields\":[{\"name\":\"id\",\"type\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"object\",\"name\":\"UID\",\"typeParams\":[]}}}]}}}}",
                 );
             }
 
@@ -6096,6 +6234,12 @@ test "runCommand move function with --summarize reserves later explicit owned ob
                     "{\"result\":{\"data\":{\"objectId\":\"0xposition-b\",\"version\":\"8\",\"digest\":\"position-digest-b\",\"type\":\"0x2a::position::Position\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}}",
                 );
             }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveModule")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"structs\":{\"Position\":{\"abilities\":{\"abilities\":[\"Key\",\"Store\"]},\"typeParameters\":[],\"fields\":[{\"name\":\"id\",\"type\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"object\",\"name\":\"UID\",\"typeParams\":[]}}}]}}}}",
+                );
+            }
 
             std.debug.assert(std.mem.eql(u8, req.method, "suix_getOwnedObjects"));
             std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0xowner\"") != null);
@@ -6174,6 +6318,12 @@ test "runCommand move function with --summarize avoids reusing scalar owned obje
                 return alloc.dupe(
                     u8,
                     "{\"result\":{\"data\":{\"objectId\":\"0xposition-b\",\"version\":\"8\",\"digest\":\"position-digest-b\",\"content\":{\"dataType\":\"moveObject\",\"fields\":{\"liquidity\":\"4\"}}}}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveModule")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"structs\":{\"Position\":{\"abilities\":{\"abilities\":[\"Key\",\"Store\"]},\"typeParameters\":[],\"fields\":[{\"name\":\"id\",\"type\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"object\",\"name\":\"UID\",\"typeParams\":[]}}}]}}}}",
                 );
             }
 
@@ -7063,6 +7213,12 @@ test "runCommand move function with --summarize carries sender and signer contex
             if (std.mem.eql(u8, req.method, "suix_queryEvents")) {
                 return alloc.dupe(u8, "{\"result\":{\"data\":[],\"hasNextPage\":false}}");
             }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveModule")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"structs\":{\"Pool\":{\"abilities\":{\"abilities\":[\"Key\",\"Store\"]},\"typeParameters\":[],\"fields\":[{\"name\":\"id\",\"type\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"object\",\"name\":\"UID\",\"typeParams\":[]}}}]}}}}",
+                );
+            }
 
             std.debug.assert(std.mem.eql(u8, req.method, "suix_getOwnedObjects"));
             std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0xowner\"") != null);
@@ -7152,6 +7308,12 @@ test "runCommand move function with --summarize falls back to sender address for
             }
             if (std.mem.eql(u8, req.method, "suix_queryEvents")) {
                 return alloc.dupe(u8, "{\"result\":{\"data\":[],\"hasNextPage\":false}}");
+            }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveModule")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"structs\":{\"Pool\":{\"abilities\":{\"abilities\":[\"Key\",\"Store\"]},\"typeParameters\":[],\"fields\":[{\"name\":\"id\",\"type\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"object\",\"name\":\"UID\",\"typeParams\":[]}}}]}}}}",
+                );
             }
 
             std.debug.assert(std.mem.eql(u8, req.method, "suix_getOwnedObjects"));
@@ -7627,11 +7789,19 @@ test "runCommand move function indexed explicit args override parameter position
 
     const callback = struct {
         fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
-            std.debug.assert(std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction"));
-            return alloc.dupe(
-                u8,
-                "{\"result\":{\"visibility\":\"Public\",\"isEntry\":true,\"typeParameters\":[],\"parameters\":[{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"pool\",\"name\":\"Pool\",\"typeParams\":[]}}},\"U64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[]}}",
-            );
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"visibility\":\"Public\",\"isEntry\":true,\"typeParameters\":[],\"parameters\":[{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"pool\",\"name\":\"Pool\",\"typeParams\":[]}}},\"U64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveModule")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"structs\":{\"Pool\":{\"abilities\":{\"abilities\":[\"Key\",\"Store\"]},\"typeParameters\":[],\"fields\":[{\"name\":\"id\",\"type\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"object\",\"name\":\"UID\",\"typeParams\":[]}}}]}}}}",
+                );
+            }
+            return error.OutOfMemory;
         }
     }.call;
 
@@ -7765,6 +7935,12 @@ test "runCommand move function indexed vector object args resolve exact object i
                     "{\"result\":{\"visibility\":\"Public\",\"isEntry\":true,\"typeParameters\":[],\"parameters\":[{\"Vector\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"coin\",\"name\":\"Coin\",\"typeParams\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"sui\",\"name\":\"SUI\",\"typeParams\":[]}}]}}},{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[]}}",
                 );
             }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveModule")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"structs\":{\"Coin\":{\"abilities\":{\"abilities\":[\"Key\",\"Store\"]},\"typeParameters\":[{\"constraints\":[]}],\"fields\":[{\"name\":\"id\",\"type\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"object\",\"name\":\"UID\",\"typeParams\":[]}}},{\"name\":\"balance\",\"type\":\"U64\"}]}}}}",
+                );
+            }
 
             std.debug.assert(std.mem.eql(u8, req.method, "sui_getObject"));
             std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"showType\":true") != null);
@@ -7865,11 +8041,19 @@ test "runCommand move function with direct execution rejects unresolved template
 
     const callback = struct {
         fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
-            std.debug.assert(std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction"));
-            return alloc.dupe(
-                u8,
-                "{\"result\":{\"visibility\":\"Public\",\"isEntry\":true,\"typeParameters\":[],\"parameters\":[{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"pool\",\"name\":\"Pool\",\"typeParams\":[]}}},{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[]}}",
-            );
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"visibility\":\"Public\",\"isEntry\":true,\"typeParameters\":[],\"parameters\":[{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"pool\",\"name\":\"Pool\",\"typeParams\":[]}}},{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveModule")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"structs\":{\"Pool\":{\"abilities\":{\"abilities\":[\"Key\",\"Store\"]},\"typeParameters\":[],\"fields\":[{\"name\":\"id\",\"type\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"object\",\"name\":\"UID\",\"typeParams\":[]}}}]}}}}",
+                );
+            }
+            return error.OutOfMemory;
         }
     }.call;
 
@@ -8158,12 +8342,20 @@ test "runCommand move function with --emit-template falls back to base send requ
 
     const callback = struct {
         fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
-            std.debug.assert(std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction"));
-            std.debug.assert(std.mem.eql(u8, req.params_json, "[\"0x2\",\"pool\",\"swap\"]"));
-            return alloc.dupe(
-                u8,
-                "{\"result\":{\"visibility\":\"Public\",\"isEntry\":true,\"typeParameters\":[],\"parameters\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"pool\",\"name\":\"Pool\",\"typeParams\":[]}},\"U64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[]}}",
-            );
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                std.debug.assert(std.mem.eql(u8, req.params_json, "[\"0x2\",\"pool\",\"swap\"]"));
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"visibility\":\"Public\",\"isEntry\":true,\"typeParameters\":[],\"parameters\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"pool\",\"name\":\"Pool\",\"typeParams\":[]}},\"U64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveModule")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"structs\":{\"Pool\":{\"abilities\":{\"abilities\":[\"Key\",\"Store\"]},\"typeParameters\":[],\"fields\":[{\"name\":\"id\",\"type\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"object\",\"name\":\"UID\",\"typeParams\":[]}}}]}}}}",
+                );
+            }
+            return error.OutOfMemory;
         }
     }.call;
 
@@ -8212,6 +8404,12 @@ test "runCommand move function with --summarize specializes generic signatures w
                 return alloc.dupe(
                     u8,
                     "{\"result\":{\"visibility\":\"Public\",\"isEntry\":true,\"typeParameters\":[[]],\"parameters\":[{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"pool\",\"name\":\"Pool\",\"typeParams\":[{\"TypeParameter\":0}]}}},{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"coin\",\"name\":\"Coin\",\"typeParams\":[{\"TypeParameter\":0}]}}]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveModule")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"structs\":{\"Pool\":{\"abilities\":{\"abilities\":[\"Key\",\"Store\"]},\"typeParameters\":[{\"constraints\":{\"abilities\":[]},\"isPhantom\":false}],\"fields\":[{\"name\":\"id\",\"type\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"object\",\"name\":\"UID\",\"typeParams\":[]}}}]}}}}",
                 );
             }
 
@@ -8280,14 +8478,22 @@ test "runCommand move function with --summarize adds vector object discovery tem
 
     const callback = struct {
         fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
-            std.debug.assert(std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction"));
-            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0x2\"") != null);
-            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"router\"") != null);
-            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"deposit_many\"") != null);
-            return alloc.dupe(
-                u8,
-                "{\"result\":{\"visibility\":\"Public\",\"isEntry\":true,\"typeParameters\":[[]],\"parameters\":[{\"Vector\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"coin\",\"name\":\"Coin\",\"typeParams\":[{\"TypeParameter\":0}]}}},{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[]}}",
-            );
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0x2\"") != null);
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"router\"") != null);
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"deposit_many\"") != null);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"visibility\":\"Public\",\"isEntry\":true,\"typeParameters\":[[]],\"parameters\":[{\"Vector\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"coin\",\"name\":\"Coin\",\"typeParams\":[{\"TypeParameter\":0}]}}},{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveModule")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"structs\":{\"Coin\":{\"abilities\":{\"abilities\":[\"Key\",\"Store\"]},\"typeParameters\":[{\"constraints\":{\"abilities\":[]},\"isPhantom\":false}],\"fields\":[{\"name\":\"id\",\"type\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"object\",\"name\":\"UID\",\"typeParams\":[]}}}]}}}}",
+                );
+            }
+            return error.OutOfMemory;
         }
     }.call;
 
@@ -8370,6 +8576,12 @@ test "runCommand move function with --summarize fills owner context into vector 
                 return alloc.dupe(
                     u8,
                     "{\"result\":{\"visibility\":\"Public\",\"isEntry\":true,\"typeParameters\":[[]],\"parameters\":[{\"Vector\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"coin\",\"name\":\"Coin\",\"typeParams\":[{\"TypeParameter\":0}]}}},{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveModule")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"structs\":{\"Coin\":{\"abilities\":{\"abilities\":[\"Key\",\"Store\"]},\"typeParameters\":[{\"constraints\":[]}],\"fields\":[{\"name\":\"id\",\"type\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"object\",\"name\":\"UID\",\"typeParams\":[]}}},{\"name\":\"balance\",\"type\":\"U64\"}]}}}}",
                 );
             }
 
@@ -8719,6 +8931,12 @@ test "runCommand move function with --summarize ranks vector owned candidates fr
                     "{\"result\":{\"visibility\":\"Public\",\"isEntry\":true,\"typeParameters\":[],\"parameters\":[{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"pool\",\"name\":\"Pool\",\"typeParams\":[]}}},{\"Vector\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"example\",\"name\":\"Receipt\",\"typeParams\":[]}}},{\"Reference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"vault\",\"name\":\"Vault\",\"typeParams\":[]}}},{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[]}}",
                 );
             }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveModule")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"structs\":{\"Receipt\":{\"abilities\":{\"abilities\":[\"Key\",\"Store\"]},\"typeParameters\":[],\"fields\":[{\"name\":\"id\",\"type\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"object\",\"name\":\"UID\",\"typeParams\":[]}}},{\"name\":\"pool_id\",\"type\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"object\",\"name\":\"ID\",\"typeParams\":[]}}}]}}}}",
+                );
+            }
             if (std.mem.eql(u8, req.method, "suix_getOwnedObjects")) {
                 std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0xowner\"") != null);
                 return alloc.dupe(
@@ -8813,6 +9031,12 @@ test "runCommand move function with --summarize chooses covering vector coin can
                 return alloc.dupe(
                     u8,
                     "{\"result\":{\"visibility\":\"Public\",\"isEntry\":true,\"typeParameters\":[[]],\"parameters\":[{\"Vector\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"coin\",\"name\":\"Coin\",\"typeParams\":[{\"TypeParameter\":0}]}}},\"u64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveModule")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"structs\":{\"Coin\":{\"abilities\":{\"abilities\":[\"Key\",\"Store\"]},\"typeParameters\":[{\"constraints\":[]}],\"fields\":[{\"name\":\"id\",\"type\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"object\",\"name\":\"UID\",\"typeParams\":[]}}},{\"name\":\"balance\",\"type\":\"U64\"}]}}}}",
                 );
             }
 
@@ -9699,11 +9923,19 @@ test "runCommand move function with --summarize lifts coin selector min balance 
 
     const callback = struct {
         fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
-            std.debug.assert(std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction"));
-            return alloc.dupe(
-                u8,
-                "{\"result\":{\"visibility\":\"Public\",\"isEntry\":true,\"typeParameters\":[[]],\"parameters\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"coin\",\"name\":\"Coin\",\"typeParams\":[{\"TypeParameter\":0}]}},\"u64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[]}}",
-            );
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"visibility\":\"Public\",\"isEntry\":true,\"typeParameters\":[[]],\"parameters\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"coin\",\"name\":\"Coin\",\"typeParams\":[{\"TypeParameter\":0}]}},\"u64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveModule")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"structs\":{\"Coin\":{\"abilities\":{\"abilities\":[\"Key\",\"Store\"]},\"typeParameters\":[{\"constraints\":{\"abilities\":[]},\"isPhantom\":false}],\"fields\":[{\"name\":\"id\",\"type\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"object\",\"name\":\"UID\",\"typeParams\":[]}}}]}}}}",
+                );
+            }
+            return error.OutOfMemory;
         }
     }.call;
 
@@ -16526,6 +16758,101 @@ test "runCommand tx_dry_run auto-lowers concrete pure structs from normalized mo
 
     try testing.expectEqual(@as(usize, 1), counts.normalized_function);
     try testing.expectEqual(@as(usize, 1), counts.normalized_module);
+    try testing.expectEqual(@as(usize, 0), counts.objects);
+    try testing.expectEqual(@as(usize, 1), counts.dry_run);
+    try testing.expectEqual(@as(usize, 0), counts.unsafe);
+}
+
+test "runCommand tx_dry_run auto-lowers nested generic pure structs without unsafe fallback" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const Counts = struct {
+        normalized_function: usize = 0,
+        normalized_module: usize = 0,
+        objects: usize = 0,
+        dry_run: usize = 0,
+        unsafe: usize = 0,
+    };
+    var counts = Counts{};
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const state = @as(*Counts, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                state.normalized_function += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"parameters\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"config\",\"name\":\"Complex\",\"typeParams\":[{\"TypeParameter\":0}]}},{\"Struct\":{\"address\":\"0x1\",\"module\":\"option\",\"name\":\"Option\",\"typeParams\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"config\",\"name\":\"Complex\",\"typeParams\":[{\"TypeParameter\":0}]}}]}},{\"Vector\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"balance\",\"name\":\"Balance\",\"typeParams\":[{\"TypeParameter\":0}]}}},{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"typeParameters\":[{\"constraints\":[]}],\"return\":[]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveModule")) {
+                state.normalized_module += 1;
+                if (std.mem.indexOf(u8, req.params_json, "\"config\"") != null) {
+                    return alloc.dupe(
+                        u8,
+                        "{\"result\":{\"structs\":{\"Complex\":{\"abilities\":{\"abilities\":[\"Store\"]},\"typeParameters\":[{\"constraints\":{\"abilities\":[]},\"isPhantom\":true}],\"fields\":[{\"name\":\"owner\",\"type\":\"Address\"},{\"name\":\"spending\",\"type\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"balance\",\"name\":\"Balance\",\"typeParams\":[{\"TypeParameter\":0}]}}},{\"name\":\"limit\",\"type\":{\"Struct\":{\"address\":\"0x1\",\"module\":\"option\",\"name\":\"Option\",\"typeParams\":[\"U64\"]}}},{\"name\":\"weights\",\"type\":{\"Vector\":\"U16\"}}]}}}}",
+                    );
+                }
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"structs\":{\"Balance\":{\"abilities\":{\"abilities\":[\"Store\"]},\"typeParameters\":[{\"constraints\":{\"abilities\":[]},\"isPhantom\":true}],\"fields\":[{\"name\":\"value\",\"type\":\"U64\"}]}}}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getObject")) {
+                state.objects += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":{\"objectId\":\"0xshould-not-be-used\",\"version\":\"1\",\"digest\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"owner\":{\"AddressOwner\":\"0x123\"}}}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_dryRunTransactionBlock")) {
+                state.dry_run += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"effects\":{\"status\":{\"status\":\"success\"}},\"balanceChanges\":[]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall") or std.mem.eql(u8, req.method, "unsafe_batchTransaction")) {
+                state.unsafe += 1;
+                return alloc.dupe(u8, "{\"result\":{\"txBytes\":\"AQIDBA==\"}}");
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+
+    var args = cli.ParsedArgs{
+        .command = .tx_dry_run,
+        .has_command = true,
+        .tx_build_package = "0x2",
+        .tx_build_module = "config_helpers",
+        .tx_build_function = "submit_complex",
+        .tx_build_type_args = "[\"0x2::sui::SUI\"]",
+        .tx_build_args = "[{\"owner\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"spending\":7,\"limit\":9,\"weights\":[1,2]},{\"owner\":\"0x2222222222222222222222222222222222222222222222222222222222222222\",\"spending\":11,\"limit\":null,\"weights\":[3]},[4,5]]",
+        .tx_build_sender = "0x123",
+        .tx_build_gas_budget = 1200,
+        .tx_build_gas_price = 8,
+        .tx_build_gas_payment = "[{\"objectId\":\"0x999\",\"version\":\"3\",\"digest\":\"0x3333333333333333333333333333333333333333333333333333333333333333\"}]",
+        .tx_send_summarize = true,
+    };
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = &counts,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    try testing.expectEqual(@as(usize, 1), counts.normalized_function);
+    try testing.expectEqual(@as(usize, 2), counts.normalized_module);
     try testing.expectEqual(@as(usize, 0), counts.objects);
     try testing.expectEqual(@as(usize, 1), counts.dry_run);
     try testing.expectEqual(@as(usize, 0), counts.unsafe);

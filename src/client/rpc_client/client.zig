@@ -2933,6 +2933,7 @@ pub const SuiRpcClient = struct {
         ascii_string,
         object_id,
         option,
+        pure_struct,
         unsupported,
     };
 
@@ -3055,6 +3056,58 @@ pub const SuiRpcClient = struct {
         }
     }
 
+    fn classifyKnownPureStructTypeWithModuleCache(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        module_cache: *std.ArrayList(NormalizedMoveModuleResponseCacheEntry),
+        value: std.json.Value,
+    ) !?LocalMoveCallParameterKind {
+        switch (value) {
+            .object => |object| {
+                if (object.get("Reference")) |inner| {
+                    return try self.classifyKnownPureStructTypeWithModuleCache(
+                        allocator,
+                        module_cache,
+                        inner,
+                    );
+                }
+                if (object.get("MutableReference")) |inner| {
+                    return try self.classifyKnownPureStructTypeWithModuleCache(
+                        allocator,
+                        module_cache,
+                        inner,
+                    );
+                }
+                const struct_value = object.get("Struct") orelse return null;
+                if (struct_value != .object) return null;
+                const struct_object = struct_value.object;
+                const type_params = try normalizedStructTypeArguments(struct_object);
+
+                if (try normalizedStructMatches(struct_object, "0x1", "string", "String")) {
+                    return if (type_params.len == 0) .utf8_string else .unsupported;
+                }
+                if (try normalizedStructMatches(struct_object, "0x1", "ascii", "String")) {
+                    return if (type_params.len == 0) .ascii_string else .unsupported;
+                }
+                if (try normalizedStructMatches(struct_object, "0x2", "object", "ID")) {
+                    return if (type_params.len == 0) .object_id else .unsupported;
+                }
+                if (try normalizedStructMatches(struct_object, "0x1", "option", "Option")) {
+                    return if (type_params.len == 1 and try self.normalizedTypeSupportsPureValueEncodingWithModuleCache(
+                        allocator,
+                        module_cache,
+                        type_params[0],
+                    ))
+                        .option
+                    else
+                        .unsupported;
+                }
+                return null;
+            },
+            else => return null,
+        }
+    }
+
     fn classifyNormalizedMoveType(
         allocator: std.mem.Allocator,
         value: std.json.Value,
@@ -3089,8 +3142,109 @@ pub const SuiRpcClient = struct {
                     if (try normalizedStructMatches(struct_value.object, "0x2", "tx_context", "TxContext")) {
                         return null;
                     }
+                    if (try normalizedStructMatches(struct_value.object, "0x2", "coin", "Coin")) {
+                        return .object;
+                    }
                     if (try classifyKnownPureStructType(value)) |kind| return kind;
                     if (try isKnownPureStructFamily(struct_value.object)) return .unsupported;
+                    return .object;
+                }
+                return .unsupported;
+            },
+            else => return .unsupported,
+        }
+    }
+
+    fn classifyNormalizedMoveTypeWithModuleCache(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        module_cache: *std.ArrayList(NormalizedMoveModuleResponseCacheEntry),
+        value: std.json.Value,
+    ) !?LocalMoveCallParameterKind {
+        switch (value) {
+            .string => |name| {
+                if (std.ascii.eqlIgnoreCase(name, "address")) return .address;
+                if (std.ascii.eqlIgnoreCase(name, "signer")) return .signer;
+                if (std.ascii.eqlIgnoreCase(name, "bool")) return .boolean;
+                if (std.ascii.eqlIgnoreCase(name, "u8")) return .u8;
+                if (std.ascii.eqlIgnoreCase(name, "u16")) return .u16;
+                if (std.ascii.eqlIgnoreCase(name, "u32")) return .u32;
+                if (std.ascii.eqlIgnoreCase(name, "u64")) return .u64;
+                if (std.ascii.eqlIgnoreCase(name, "u128")) return .u128;
+                if (std.ascii.eqlIgnoreCase(name, "u256")) return .u256;
+                return .unsupported;
+            },
+            .object => |object| {
+                if (object.get("Reference")) |inner| {
+                    if (inner == .object) {
+                        if (inner.object.get("Struct")) |struct_value| {
+                            if (struct_value != .object) return .unsupported;
+                            if (try normalizedStructMatches(struct_value.object, "0x2", "tx_context", "TxContext")) {
+                                return null;
+                            }
+                            if (try self.classifyKnownPureStructTypeWithModuleCache(
+                                allocator,
+                                module_cache,
+                                inner,
+                            )) |kind| return kind;
+                            return .object;
+                        }
+                    }
+                    return try self.classifyNormalizedMoveTypeWithModuleCache(
+                        allocator,
+                        module_cache,
+                        inner,
+                    );
+                }
+                if (object.get("MutableReference")) |inner| {
+                    if (inner == .object) {
+                        if (inner.object.get("Struct")) |struct_value| {
+                            if (struct_value != .object) return .unsupported;
+                            if (try normalizedStructMatches(struct_value.object, "0x2", "tx_context", "TxContext")) {
+                                return null;
+                            }
+                            if (try self.classifyKnownPureStructTypeWithModuleCache(
+                                allocator,
+                                module_cache,
+                                inner,
+                            )) |kind| return kind;
+                            return .object;
+                        }
+                    }
+                    return try self.classifyNormalizedMoveTypeWithModuleCache(
+                        allocator,
+                        module_cache,
+                        inner,
+                    );
+                }
+                if (object.get("Vector")) |inner| {
+                    const nested = try self.classifyNormalizedMoveTypeWithModuleCache(
+                        allocator,
+                        module_cache,
+                        inner,
+                    );
+                    if (nested == .u8) return .vector_u8;
+                    return .vector;
+                }
+                if (object.get("Struct")) |struct_value| {
+                    if (struct_value != .object) return .unsupported;
+                    if (try normalizedStructMatches(struct_value.object, "0x2", "tx_context", "TxContext")) {
+                        return null;
+                    }
+                    if (try normalizedStructMatches(struct_value.object, "0x2", "coin", "Coin")) {
+                        return .object;
+                    }
+                    if (try self.classifyKnownPureStructTypeWithModuleCache(
+                        allocator,
+                        module_cache,
+                        value,
+                    )) |kind| return kind;
+                    if (try isKnownPureStructFamily(struct_value.object)) return .unsupported;
+                    if (try self.normalizedTypeSupportsPureValueEncodingWithModuleCache(
+                        allocator,
+                        module_cache,
+                        value,
+                    )) return .pure_struct;
                     return .object;
                 }
                 return .unsupported;
@@ -3975,7 +4129,11 @@ pub const SuiRpcClient = struct {
                     }
                     return;
                 }
-                const struct_kind = try classifyKnownPureStructType(parameter_type);
+                const struct_kind = try self.classifyKnownPureStructTypeWithModuleCache(
+                    allocator,
+                    module_cache,
+                    parameter_type,
+                );
                 if (struct_kind) |known_kind| {
                     const struct_value = object.get("Struct") orelse return error.InvalidCli;
                     if (struct_value != .object) return error.InvalidCli;
@@ -4193,7 +4351,7 @@ pub const SuiRpcClient = struct {
             return try std.fmt.allocPrint(allocator, "\"<arg{d}-object-id-or-select-token>\"", .{index});
         }
         if (std.mem.eql(u8, kind, "vector")) {
-            if (concreteVectorObjectStructTypeFromSignature(parameter.signature) != null) {
+            if (parameter.vector_item_object_struct_type != null) {
                 return try std.fmt.allocPrint(allocator, "[\"<arg{d}-item0-object-id-or-select-token>\"]", .{index});
             }
             return try std.fmt.allocPrint(allocator, "[\"<arg{d}-item0>\"]", .{index});
@@ -4297,6 +4455,32 @@ pub const SuiRpcClient = struct {
         if (std.mem.indexOf(u8, element_signature, "::") == null) return null;
         if (containsMoveTypeParameterText(element_signature)) return null;
         return element_signature;
+    }
+
+    fn vectorObjectStructTypeForNormalizedParameterWithModuleCache(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        module_cache: *std.ArrayList(NormalizedMoveModuleResponseCacheEntry),
+        parameter_type: std.json.Value,
+        signature: []const u8,
+    ) !?[]u8 {
+        if (parameter_type != .object) return null;
+        const inner = parameter_type.object.get("Vector") orelse return null;
+        if (inner != .object) return null;
+        const inner_struct = inner.object.get("Struct") orelse return null;
+        if (inner_struct != .object) return null;
+
+        const element_signature = concreteVectorObjectStructTypeFromSignature(signature) orelse return null;
+        if (try normalizedStructMatches(inner_struct.object, "0x2", "coin", "Coin")) {
+            return try allocator.dupe(u8, element_signature);
+        }
+        if (try self.normalizedTypeSupportsPureValueEncodingWithModuleCache(
+            allocator,
+            module_cache,
+            inner,
+        )) return null;
+
+        return try allocator.dupe(u8, element_signature);
     }
 
     test "concreteObjectStructTypeFromSignature accepts concrete generic structs" {
@@ -7301,10 +7485,10 @@ pub const SuiRpcClient = struct {
             }
 
             const vector_struct_type = blk: {
-                const element_signature = vectorElementTypeSignature(parameter.signature) orelse break :blk null;
+                const element_signature = parameter.vector_item_object_struct_type orelse break :blk null;
                 if (coinTypeFromCoinStructType(element_signature) != null) break :blk null;
                 if (parameter.vector_item_owned_object_select_token == null) break :blk null;
-                break :blk concreteVectorObjectStructTypeFromSignature(parameter.signature);
+                break :blk element_signature;
             };
             if (vector_struct_type) |struct_type| {
                 const discovered_candidates = try self.discoverOwnedObjectCandidatesFromSeedObjectIds(
@@ -8746,7 +8930,7 @@ pub const SuiRpcClient = struct {
         if (parameter.omitted_from_explicit_args) return false;
         const lowering_kind = parameter.lowering_kind orelse return false;
         if (std.mem.eql(u8, lowering_kind, "object")) return false;
-        if (std.mem.eql(u8, lowering_kind, "vector") and concreteVectorObjectStructTypeFromSignature(parameter.signature) != null) {
+        if (std.mem.eql(u8, lowering_kind, "vector") and parameter.vector_item_object_struct_type != null) {
             return false;
         }
         return true;
@@ -8872,7 +9056,7 @@ pub const SuiRpcClient = struct {
         object_id_values: []const std.json.Value,
     ) ![]u8 {
         if (!std.mem.eql(u8, parameter.lowering_kind orelse "", "vector")) return error.InvalidCli;
-        if (concreteVectorObjectStructTypeFromSignature(parameter.signature) == null) return error.InvalidCli;
+        if (parameter.vector_item_object_struct_type == null) return error.InvalidCli;
 
         var output = std.ArrayList(u8){};
         defer output.deinit(allocator);
@@ -10285,7 +10469,9 @@ pub const SuiRpcClient = struct {
     }
 
     fn applyMoveFunctionTypeArgumentsToSummary(
+        self: *SuiRpcClient,
         allocator: std.mem.Allocator,
+        module_cache: *std.ArrayList(NormalizedMoveModuleResponseCacheEntry),
         summary: *move_result.OwnedMoveFunctionSummary,
         parameters_value: std.json.Value,
         returns_value: std.json.Value,
@@ -10308,11 +10494,25 @@ pub const SuiRpcClient = struct {
 
             allocator.free(summary.parameters[index].signature);
             summary.parameters[index].signature = try move_result.moveTypeText(allocator, resolved_parameter_parsed.value);
-            const classified = try classifyNormalizedMoveType(allocator, resolved_parameter_parsed.value);
+            const classified = try self.classifyNormalizedMoveTypeWithModuleCache(
+                allocator,
+                module_cache,
+                resolved_parameter_parsed.value,
+            );
             summary.parameters[index].lowering_kind = if (classified) |kind|
                 @tagName(kind)
             else
                 "runtime";
+            if (summary.parameters[index].vector_item_object_struct_type) |old_value| {
+                allocator.free(old_value);
+                summary.parameters[index].vector_item_object_struct_type = null;
+            }
+            summary.parameters[index].vector_item_object_struct_type = try self.vectorObjectStructTypeForNormalizedParameterWithModuleCache(
+                allocator,
+                module_cache,
+                resolved_parameter_parsed.value,
+                summary.parameters[index].signature,
+            );
         }
 
         for (returns_value.array.items, 0..) |item, index| {
@@ -10376,7 +10576,7 @@ pub const SuiRpcClient = struct {
             if (parameter.omitted_from_explicit_args) continue;
             const lowering_kind = parameter.lowering_kind orelse continue;
             if (std.mem.eql(u8, lowering_kind, "vector")) {
-                const item_struct_type = concreteVectorObjectStructTypeFromSignature(parameter.signature) orelse continue;
+                const item_struct_type = parameter.vector_item_object_struct_type orelse continue;
                 const object_id_placeholder = try std.fmt.allocPrint(
                     allocator,
                     "0x<arg{d}-item0-object-id>",
@@ -10805,6 +11005,9 @@ pub const SuiRpcClient = struct {
         if (returns != .array) return error.InvalidResponse;
         if (parameters.array.items.len != summary.parameters.len) return error.InvalidResponse;
 
+        var normalized_module_cache = std.ArrayList(NormalizedMoveModuleResponseCacheEntry){};
+        defer deinitNormalizedMoveModuleResponseCache(allocator, &normalized_module_cache);
+
         const parameter_allows_owned_discovery = try allocator.alloc(bool, parameters.array.items.len);
         defer allocator.free(parameter_allows_owned_discovery);
         for (parameters.array.items, 0..) |item, index| {
@@ -10812,8 +11015,9 @@ pub const SuiRpcClient = struct {
         }
 
         const resolved_type_arguments_json = if (type_arguments_json) |raw_type_arguments_json|
-            try applyMoveFunctionTypeArgumentsToSummary(
+            try self.applyMoveFunctionTypeArgumentsToSummary(
                 allocator,
+                &normalized_module_cache,
                 &summary,
                 parameters,
                 returns,
@@ -10821,11 +11025,25 @@ pub const SuiRpcClient = struct {
             )
         else blk: {
             for (parameters.array.items, 0..) |item, index| {
-                const classified = try classifyNormalizedMoveType(allocator, item);
+                const classified = try self.classifyNormalizedMoveTypeWithModuleCache(
+                    allocator,
+                    &normalized_module_cache,
+                    item,
+                );
                 summary.parameters[index].lowering_kind = if (classified) |kind|
                     @tagName(kind)
                 else
                     "runtime";
+                if (summary.parameters[index].vector_item_object_struct_type) |old_value| {
+                    allocator.free(old_value);
+                    summary.parameters[index].vector_item_object_struct_type = null;
+                }
+                summary.parameters[index].vector_item_object_struct_type = try self.vectorObjectStructTypeForNormalizedParameterWithModuleCache(
+                    allocator,
+                    &normalized_module_cache,
+                    item,
+                    summary.parameters[index].signature,
+                );
             }
             break :blk null;
         };
@@ -10915,6 +11133,8 @@ pub const SuiRpcClient = struct {
 
         var kinds = std.ArrayList(LocalMoveCallParameterKind){};
         defer kinds.deinit(allocator);
+        var normalized_module_cache = std.ArrayList(NormalizedMoveModuleResponseCacheEntry){};
+        defer deinitNormalizedMoveModuleResponseCache(allocator, &normalized_module_cache);
         for (parameters.array.items) |parameter| {
             const resolved_parameter_json = if (raw_type_arguments_json != null)
                 try substituteNormalizedMoveTypeJson(allocator, parameter, raw_type_arguments)
@@ -10924,7 +11144,11 @@ pub const SuiRpcClient = struct {
 
             const resolved_parameter_parsed = try std.json.parseFromSlice(std.json.Value, allocator, resolved_parameter_json, .{});
             defer resolved_parameter_parsed.deinit();
-            const classified = try classifyNormalizedMoveType(allocator, resolved_parameter_parsed.value);
+            const classified = try self.classifyNormalizedMoveTypeWithModuleCache(
+                allocator,
+                &normalized_module_cache,
+                resolved_parameter_parsed.value,
+            );
             if (classified == null) continue;
             try kinds.append(allocator, classified.?);
         }
@@ -11083,6 +11307,7 @@ pub const SuiRpcClient = struct {
             ) ![]u8 {
                 switch (kind) {
                     .object => return try ctx.lowerObjectArgument(value),
+                    .pure_struct => return error.InvalidCli,
                     .address, .signer => return switch (value) {
                         .string => |address| blk: {
                             const input_json = try buildPureAddressInputJson(ctx.allocator, address);
@@ -13144,6 +13369,144 @@ pub const SuiRpcClient = struct {
         try testing.expectEqual(@as(i64, 0), commands.value.array.items[1].object.get("arguments").?.array.items[1].object.get("Result").?.integer);
 
         try testing.expectEqual(@as(usize, 1), state.normalized_calls);
+        try testing.expectEqual(@as(usize, 0), state.object_calls);
+    }
+
+    test "local move-call lowering supports nested generic pure structs inside option and vector containers" {
+        const testing = std.testing;
+
+        var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+        defer _ = gpa.deinit();
+        const allocator = gpa.allocator();
+
+        const State = struct {
+            normalized_function_calls: usize = 0,
+            normalized_module_calls: usize = 0,
+            object_calls: usize = 0,
+        };
+
+        var rpc = SuiRpcClient.init(allocator, "https://rpc.invalid");
+        defer rpc.deinit();
+
+        var state = State{};
+        rpc.request_sender = .{
+            .context = &state,
+            .callback = struct {
+                fn send(
+                    ctx: *anyopaque,
+                    alloc: std.mem.Allocator,
+                    req: RpcRequest,
+                ) error{OutOfMemory}![]u8 {
+                    const local_state: *State = @ptrCast(@alignCast(ctx));
+                    if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                        local_state.normalized_function_calls += 1;
+                        return try alloc.dupe(
+                            u8,
+                            "{\"result\":{\"parameters\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"config\",\"name\":\"Complex\",\"typeParams\":[{\"TypeParameter\":0}]}},{\"Struct\":{\"address\":\"0x1\",\"module\":\"option\",\"name\":\"Option\",\"typeParams\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"config\",\"name\":\"Complex\",\"typeParams\":[{\"TypeParameter\":0}]}}]}},{\"Vector\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"balance\",\"name\":\"Balance\",\"typeParams\":[{\"TypeParameter\":0}]}}},{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[],\"typeParameters\":[{\"constraints\":[]}],\"visibility\":\"Public\",\"isEntry\":true}}",
+                        );
+                    }
+                    if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveModule")) {
+                        local_state.normalized_module_calls += 1;
+                        if (std.mem.indexOf(u8, req.params_json, "\"config\"") != null) {
+                            return try alloc.dupe(
+                                u8,
+                                "{\"result\":{\"structs\":{\"Complex\":{\"abilities\":{\"abilities\":[\"Store\"]},\"typeParameters\":[{\"constraints\":{\"abilities\":[]},\"isPhantom\":true}],\"fields\":[{\"name\":\"owner\",\"type\":\"Address\"},{\"name\":\"spending\",\"type\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"balance\",\"name\":\"Balance\",\"typeParams\":[{\"TypeParameter\":0}]}}},{\"name\":\"limit\",\"type\":{\"Struct\":{\"address\":\"0x1\",\"module\":\"option\",\"name\":\"Option\",\"typeParams\":[\"U64\"]}}},{\"name\":\"weights\",\"type\":{\"Vector\":\"U16\"}}]}}}}",
+                            );
+                        }
+                        return try alloc.dupe(
+                            u8,
+                            "{\"result\":{\"structs\":{\"Balance\":{\"abilities\":{\"abilities\":[\"Store\"]},\"typeParameters\":[{\"constraints\":{\"abilities\":[]},\"isPhantom\":true}],\"fields\":[{\"name\":\"value\",\"type\":\"U64\"}]}}}}",
+                        );
+                    }
+                    if (std.mem.eql(u8, req.method, "sui_getObject")) {
+                        local_state.object_calls += 1;
+                    }
+                    return error.OutOfMemory;
+                }
+            }.send,
+        };
+
+        var parts = try rpc.ownLocalProgrammableTransactionPartsFromCommandSource(
+            allocator,
+            .{
+                .move_call = .{
+                    .package_id = "0x2",
+                    .module = "config_helpers",
+                    .function_name = "submit_complex",
+                    .type_args = "[\"0x2::sui::SUI\"]",
+                    .arguments = "[{\"owner\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"spending\":7,\"limit\":9,\"weights\":[1,2]},{\"owner\":\"0x2222222222222222222222222222222222222222222222222222222222222222\",\"spending\":11,\"limit\":null,\"weights\":[3]},[4,5]]",
+                },
+            },
+            "0xsender",
+            "[{\"objectId\":\"0xgas\",\"version\":\"5\",\"digest\":\"gas-digest\"}]",
+            7,
+            1200,
+            null,
+        );
+        defer parts.deinit(allocator);
+
+        const inputs = try std.json.parseFromSlice(std.json.Value, allocator, parts.inputs_json, .{});
+        defer inputs.deinit();
+        const commands = try std.json.parseFromSlice(std.json.Value, allocator, parts.commands_json, .{});
+        defer commands.deinit();
+
+        try testing.expectEqual(@as(usize, 4), inputs.value.array.items.len);
+        for (inputs.value.array.items) |input| {
+            try testing.expect(input.object.get("Pure") != null);
+        }
+        try testing.expectEqual(@as(usize, 2), commands.value.array.items.len);
+        try testing.expectEqualStrings("MakeMoveVec", commands.value.array.items[0].object.get("kind").?.string);
+        try testing.expectEqualStrings("MoveCall", commands.value.array.items[1].object.get("kind").?.string);
+        try testing.expectEqual(@as(i64, 0), commands.value.array.items[1].object.get("arguments").?.array.items[0].object.get("Input").?.integer);
+        try testing.expectEqual(@as(i64, 1), commands.value.array.items[1].object.get("arguments").?.array.items[1].object.get("Input").?.integer);
+        try testing.expectEqual(@as(i64, 0), commands.value.array.items[1].object.get("arguments").?.array.items[2].object.get("Result").?.integer);
+
+        var expected_complex = std.ArrayList(u8){};
+        defer expected_complex.deinit(allocator);
+        try expected_complex.appendNTimes(allocator, 0x11, 32);
+        var u64_bytes: [8]u8 = undefined;
+        std.mem.writeInt(u64, &u64_bytes, 7, .little);
+        try expected_complex.appendSlice(allocator, &u64_bytes);
+        try expected_complex.append(allocator, 1);
+        std.mem.writeInt(u64, &u64_bytes, 9, .little);
+        try expected_complex.appendSlice(allocator, &u64_bytes);
+        try expected_complex.append(allocator, 2);
+        var u16_bytes: [2]u8 = undefined;
+        std.mem.writeInt(u16, &u16_bytes, 1, .little);
+        try expected_complex.appendSlice(allocator, &u16_bytes);
+        std.mem.writeInt(u16, &u16_bytes, 2, .little);
+        try expected_complex.appendSlice(allocator, &u16_bytes);
+
+        var expected_option_complex = std.ArrayList(u8){};
+        defer expected_option_complex.deinit(allocator);
+        try expected_option_complex.append(allocator, 1);
+        try expected_option_complex.appendNTimes(allocator, 0x22, 32);
+        std.mem.writeInt(u64, &u64_bytes, 11, .little);
+        try expected_option_complex.appendSlice(allocator, &u64_bytes);
+        try expected_option_complex.append(allocator, 0);
+        try expected_option_complex.append(allocator, 1);
+        std.mem.writeInt(u16, &u16_bytes, 3, .little);
+        try expected_option_complex.appendSlice(allocator, &u16_bytes);
+
+        const expected = [_][]const u8{
+            expected_complex.items,
+            expected_option_complex.items,
+            &.{ 4, 0, 0, 0, 0, 0, 0, 0 },
+            &.{ 5, 0, 0, 0, 0, 0, 0, 0 },
+        };
+
+        for (expected, 0..) |expected_bytes, index| {
+            const pure_value = inputs.value.array.items[index].object.get("Pure").?;
+            try testing.expect(pure_value == .string);
+            const decoded_len = try std.base64.standard.Decoder.calcSizeForSlice(pure_value.string);
+            const decoded = try allocator.alloc(u8, decoded_len);
+            defer allocator.free(decoded);
+            try std.base64.standard.Decoder.decode(decoded, pure_value.string);
+            try testing.expectEqualSlices(u8, expected_bytes, decoded);
+        }
+
+        try testing.expectEqual(@as(usize, 1), state.normalized_function_calls);
+        try testing.expectEqual(@as(usize, 2), state.normalized_module_calls);
         try testing.expectEqual(@as(usize, 0), state.object_calls);
     }
 

@@ -53,6 +53,7 @@ pub const OwnedMoveParameterSummary = struct {
     receiving_object_input_select_token: ?[]u8 = null,
     object_get_argv: ?[][]u8 = null,
     vector_item_coin_with_min_balance_select_token: ?[]u8 = null,
+    vector_item_object_struct_type: ?[]u8 = null,
     vector_item_imm_or_owned_object_input_select_token: ?[]u8 = null,
     vector_item_owned_object_select_token: ?[]u8 = null,
     vector_item_object_get_argv: ?[][]u8 = null,
@@ -84,6 +85,7 @@ pub const OwnedMoveParameterSummary = struct {
             allocator.free(argv);
         }
         if (self.vector_item_coin_with_min_balance_select_token) |value| allocator.free(value);
+        if (self.vector_item_object_struct_type) |value| allocator.free(value);
         if (self.vector_item_imm_or_owned_object_input_select_token) |value| allocator.free(value);
         if (self.vector_item_owned_object_select_token) |value| allocator.free(value);
         if (self.vector_item_object_get_argv) |argv| {
