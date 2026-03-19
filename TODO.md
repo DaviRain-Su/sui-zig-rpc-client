@@ -256,7 +256,7 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
   coverage.
 - [x] Add a `vector_router` package for `vector<object>`, `vector<Coin<T>>`,
   and `MakeMoveVec` coverage.
-- [ ] Add a `receipt_flow_lab` package for receipt/capability multi-step
+- [x] Add a `receipt_flow_lab` package for receipt/capability multi-step
   flows.
 - [ ] Add a `dynamic_registry` package for content/dynamic-field-based
   discovery coverage.

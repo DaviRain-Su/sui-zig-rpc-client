@@ -1,0 +1,6 @@
+[package]
+name = "receipt_flow_lab"
+edition = "2024"
+
+[addresses]
+receipt_flow_lab = "0x0"

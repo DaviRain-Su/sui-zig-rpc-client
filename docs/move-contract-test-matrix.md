@@ -106,6 +106,10 @@
 
 用途：模拟 flash-loan / repay / claim 一类 receipt-driven 流程。
 
+当前状态：
+- 已落地：[`fixtures/move/receipt_flow_lab`](/Users/davirian/dev/zig/sui-zig-rpc-client/fixtures/move/receipt_flow_lab)
+- 已验证：`sui move test --path fixtures/move/receipt_flow_lab`
+
 建议覆盖：
 - `borrow -> receipt -> repay`
 - capability / receipt object
