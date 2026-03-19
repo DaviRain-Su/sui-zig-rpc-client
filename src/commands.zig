@@ -125,9 +125,10 @@ fn printMoveFunctionTemplateOutput(
 }
 
 fn moveFunctionExecutionRequestArtifact(
+    allocator: std.mem.Allocator,
     result: client.rpc_client.ReadQueryActionResult,
     command: cli.Command,
-) ![]const u8 {
+) !MoveFunctionExecutionRequestSelection {
     const output_kind = switch (command) {
         .tx_dry_run => cli.MoveFunctionTemplateOutput.preferred_tx_dry_run_request,
         .tx_send => cli.MoveFunctionTemplateOutput.preferred_tx_send_from_keystore_request,
@@ -137,7 +138,22 @@ fn moveFunctionExecutionRequestArtifact(
     return switch (result) {
         .summarized => |summary| switch (summary) {
             .move => |move| switch (move) {
-                .function => |value| try selectedMoveFunctionTemplateOutput(value, output_kind),
+                .function => |value| blk: {
+                    const template = value.call_template orelse return error.InvalidCli;
+                    break :blk try switch (output_kind) {
+                        .preferred_tx_dry_run_request => selectExecutableMoveFunctionRequestArtifact(
+                            allocator,
+                            template.preferred_tx_dry_run_request_json,
+                            template.tx_dry_run_request_json,
+                        ),
+                        .preferred_tx_send_from_keystore_request => selectExecutableMoveFunctionRequestArtifact(
+                            allocator,
+                            template.preferred_tx_send_from_keystore_request_json,
+                            template.tx_send_from_keystore_request_json,
+                        ),
+                        else => error.InvalidCli,
+                    };
+                },
                 else => return error.InvalidCli,
             },
             else => return error.InvalidCli,
@@ -182,6 +198,46 @@ fn ensureExecutableMoveFunctionRequestArtifact(
     if (jsonValueContainsUnresolvedMoveFunctionPlaceholder(parsed.value)) {
         return error.UnresolvedMoveFunctionExecutionTemplate;
     }
+}
+
+fn moveFunctionRequestArtifactIsExecutable(
+    allocator: std.mem.Allocator,
+    request_json: []const u8,
+) !bool {
+    ensureExecutableMoveFunctionRequestArtifact(allocator, request_json) catch |err| switch (err) {
+        error.UnresolvedMoveFunctionExecutionTemplate => return false,
+        else => return err,
+    };
+    return true;
+}
+
+const MoveFunctionExecutionRequestSelection = struct {
+    request_json: []const u8,
+    used_preferred: bool,
+};
+
+fn selectExecutableMoveFunctionRequestArtifact(
+    allocator: std.mem.Allocator,
+    preferred_request_json: ?[]const u8,
+    base_request_json: []const u8,
+) !MoveFunctionExecutionRequestSelection {
+    if (preferred_request_json) |preferred| {
+        if (try moveFunctionRequestArtifactIsExecutable(allocator, preferred)) {
+            return .{
+                .request_json = preferred,
+                .used_preferred = true,
+            };
+        }
+    }
+
+    if (try moveFunctionRequestArtifactIsExecutable(allocator, base_request_json)) {
+        return .{
+            .request_json = base_request_json,
+            .used_preferred = false,
+        };
+    }
+
+    return error.UnresolvedMoveFunctionExecutionTemplate;
 }
 
 fn buildDerivedMoveFunctionExecutionArgs(
@@ -2476,13 +2532,16 @@ pub fn runCommandWithProgrammaticProvider(
 
                 if (args.move_function_execute_dry_run or args.move_function_execute_send) {
                     const exec_command: cli.Command = if (args.move_function_execute_dry_run) .tx_dry_run else .tx_send;
-                    const request_json = try moveFunctionExecutionRequestArtifact(result, exec_command);
-                    try ensureExecutableMoveFunctionRequestArtifact(allocator, request_json);
+                    const request_selection = try moveFunctionExecutionRequestArtifact(
+                        allocator,
+                        result,
+                        exec_command,
+                    );
                     var derived_args = try buildDerivedMoveFunctionExecutionArgs(
                         allocator,
                         args,
                         exec_command,
-                        request_json,
+                        request_selection.request_json,
                     );
                     defer derived_args.deinit(allocator);
                     try runCommandWithProgrammaticProvider(
@@ -5688,6 +5747,40 @@ test "runCommand move function indexed vector object args resolve exact object i
     try testing.expectEqualStrings(
         "[[\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xcoin1\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":9,\\\"digest\\\":\\\"coin-digest-1\\\"}\",\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xcoin2\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":10,\\\"digest\\\":\\\"coin-digest-2\\\"}\"]]",
         parsed.value.object.get("call_template").?.object.get("preferred_args_json").?.string,
+    );
+}
+
+test "selectExecutableMoveFunctionRequestArtifact falls back to executable base request" {
+    const testing = std.testing;
+
+    const allocator = testing.allocator;
+    const selection = try selectExecutableMoveFunctionRequestArtifact(
+        allocator,
+        "{\"commands\":[{\"kind\":\"MoveCall\",\"arguments\":[\"<arg0-object-id-or-select-token>\"]}],\"preferredResolution\":{\"unresolved_parameter_indices\":[0]}}",
+        "{\"commands\":[{\"kind\":\"MoveCall\",\"arguments\":[7]}]}",
+    );
+
+    try testing.expect(!selection.used_preferred);
+    try testing.expectEqualStrings(
+        "{\"commands\":[{\"kind\":\"MoveCall\",\"arguments\":[7]}]}",
+        selection.request_json,
+    );
+}
+
+test "selectExecutableMoveFunctionRequestArtifact keeps executable preferred request" {
+    const testing = std.testing;
+
+    const allocator = testing.allocator;
+    const selection = try selectExecutableMoveFunctionRequestArtifact(
+        allocator,
+        "{\"commands\":[{\"kind\":\"MoveCall\",\"arguments\":[13]}],\"preferredResolution\":{\"unresolved_parameter_indices\":[]}}",
+        "{\"commands\":[{\"kind\":\"MoveCall\",\"arguments\":[7]}]}",
+    );
+
+    try testing.expect(selection.used_preferred);
+    try testing.expectEqualStrings(
+        "{\"commands\":[{\"kind\":\"MoveCall\",\"arguments\":[13]}],\"preferredResolution\":{\"unresolved_parameter_indices\":[]}}",
+        selection.request_json,
     );
 }
 

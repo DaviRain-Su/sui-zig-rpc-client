@@ -685,6 +685,8 @@ pub fn main() !void {
 - `move package <package-id-or-alias>`: 调用 `sui_getNormalizedMoveModulesByPackage`，发现 package 下有哪些模块。
 - `move module <package-id-or-alias> <module>`: 调用 `sui_getNormalizedMoveModule`，查看模块里的 structs / exposed functions。
 - `move function <package-id-or-alias> <module> <function>`: 调用 `sui_getNormalizedMoveFunction`，查看参数/返回类型；`--summarize` 会额外输出 CLI lowering hint 和可复用的 transaction 模板。可选 `--type-arg/--type-args` 会在本地先按具体类型实参特化 summary。`--args` / `--arg` 可以把你已知的显式参数先回填到 preferred template 里；`--arg-at <index> <value>` 可以按参数位精确覆盖某个参数；`--object-arg-at <index> <object-id-or-alias>` 会直接查对象元数据并回填精确 `object_input`；`--sender` / `--signer` / `--from-keystore` 会把 owner 上下文回填到 owned-object discovery hint 里。`--emit-template <kind>` 可以直接把生成好的 `commands` / `request artifact` 单独输出出来；`--dry-run` / `--send` 会直接消费 preferred request artifact 并进入执行路径。
+
+如果 preferred request artifact 里还残留 unresolved placeholder，但基础 request artifact 已经可执行，`move function --dry-run` / `--send` 现在会自动安全回退到基础 request，而不是直接报 `UnresolvedMoveFunctionExecutionTemplate`。
 - `tx simulate [params-json]`: 调用 `sui_devInspectTransactionBlock`。
 - `tx dry-run [tx-bytes|@file]`: 调用 `sui_dryRunTransactionBlock`。
 - `tx send [params-json]`: 调用 `sui_executeTransactionBlock`。

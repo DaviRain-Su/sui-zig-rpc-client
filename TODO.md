@@ -110,7 +110,7 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
 - [ ] Leave only genuinely unknowable parameters for manual input.
 - [ ] Reduce `UnresolvedMoveFunctionExecutionTemplate` failures in common
   protocol flows.
-- [ ] Make the default execution path prefer preferred request artifacts
+- [x] Make the default execution path prefer preferred request artifacts
   whenever a safe resolution exists.
 
 ## Medium Priority Remaining Work
