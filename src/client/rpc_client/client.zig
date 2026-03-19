@@ -4963,6 +4963,61 @@ pub const SuiRpcClient = struct {
         return try cloneOwnedMoveObjectCandidates(allocator, discovered);
     }
 
+    const OwnedMoveParameterDiscoveryCacheEntry = struct {
+        owner: []u8,
+        struct_type: []u8,
+        candidates: []move_result.OwnedMoveObjectCandidate,
+
+        fn deinit(self: *OwnedMoveParameterDiscoveryCacheEntry, allocator: std.mem.Allocator) void {
+            allocator.free(self.owner);
+            allocator.free(self.struct_type);
+            for (self.candidates) |*candidate| candidate.deinit(allocator);
+            allocator.free(self.candidates);
+        }
+    };
+
+    fn deinitOwnedMoveParameterDiscoveryCache(
+        allocator: std.mem.Allocator,
+        cache: *std.ArrayList(OwnedMoveParameterDiscoveryCacheEntry),
+    ) void {
+        for (cache.items) |*entry| entry.deinit(allocator);
+        cache.deinit(allocator);
+    }
+
+    fn discoverOwnedObjectCandidatesCached(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        cache: *std.ArrayList(OwnedMoveParameterDiscoveryCacheEntry),
+        owner: []const u8,
+        struct_type: []const u8,
+    ) ![]move_result.OwnedMoveObjectCandidate {
+        for (cache.items) |entry| {
+            if (!std.mem.eql(u8, entry.owner, owner)) continue;
+            if (!std.mem.eql(u8, entry.struct_type, struct_type)) continue;
+            return try cloneOwnedMoveObjectCandidates(allocator, entry.candidates);
+        }
+
+        const discovered = try self.discoverOwnedObjectCandidates(
+            allocator,
+            owner,
+            struct_type,
+        );
+        errdefer {
+            for (discovered) |*candidate| candidate.deinit(allocator);
+            allocator.free(discovered);
+        }
+
+        var entry = OwnedMoveParameterDiscoveryCacheEntry{
+            .owner = try allocator.dupe(u8, owner),
+            .struct_type = try allocator.dupe(u8, struct_type),
+            .candidates = discovered,
+        };
+        errdefer entry.deinit(allocator);
+
+        try cache.append(allocator, entry);
+        return try cloneOwnedMoveObjectCandidates(allocator, discovered);
+    }
+
     fn discoverOwnedObjectCandidates(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
@@ -8487,6 +8542,9 @@ pub const SuiRpcClient = struct {
         var object_summary_cache = std.ArrayList(MoveObjectSummaryCacheEntry).empty;
         defer deinitMoveObjectSummaryCache(allocator, &object_summary_cache);
 
+        var owned_parameter_cache = std.ArrayList(OwnedMoveParameterDiscoveryCacheEntry).empty;
+        defer deinitOwnedMoveParameterDiscoveryCache(allocator, &owned_parameter_cache);
+
         var owned_event_cache = std.ArrayList(OwnedModuleEventDiscoveryCacheEntry).empty;
         defer deinitOwnedModuleEventDiscoveryCache(allocator, &owned_event_cache);
 
@@ -8542,8 +8600,9 @@ pub const SuiRpcClient = struct {
                     item_struct_type,
                 );
                 if (owner_address) |owner| {
-                    parameter.vector_item_owned_object_candidates = try self.discoverOwnedObjectCandidates(
+                    parameter.vector_item_owned_object_candidates = try self.discoverOwnedObjectCandidatesCached(
                         allocator,
+                        &owned_parameter_cache,
                         owner,
                         item_struct_type,
                     );
@@ -8654,8 +8713,9 @@ pub const SuiRpcClient = struct {
                 break :blk try buildCoinQueryArgv(allocator, owner_address, coin_type);
             } else try buildOwnedObjectQueryArgv(allocator, owner_address, struct_type);
             if (owner_address) |owner| {
-                parameter.owned_object_candidates = try self.discoverOwnedObjectCandidates(
+                parameter.owned_object_candidates = try self.discoverOwnedObjectCandidatesCached(
                     allocator,
+                    &owned_parameter_cache,
                     owner,
                     struct_type,
                 );
