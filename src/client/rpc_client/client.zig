@@ -5261,6 +5261,101 @@ pub const SuiRpcClient = struct {
         return try cloneSharedMoveObjectCandidates(allocator, discovered);
     }
 
+    fn appendMergedSharedMoveObjectCandidates(
+        allocator: std.mem.Allocator,
+        merged: *std.ArrayList(move_result.SharedMoveObjectCandidate),
+        candidates: []const move_result.SharedMoveObjectCandidate,
+    ) !void {
+        var discovery_rank_offset: usize = 0;
+        for (merged.items) |existing| {
+            const next_rank = existing.discovery_rank + 1;
+            if (next_rank > discovery_rank_offset) discovery_rank_offset = next_rank;
+        }
+
+        for (candidates) |candidate| {
+            var already_present = false;
+            for (merged.items) |existing| {
+                if (std.mem.eql(u8, existing.object_id, candidate.object_id)) {
+                    already_present = true;
+                    break;
+                }
+            }
+            if (already_present) continue;
+            try merged.append(allocator, .{
+                .object_id = try allocator.dupe(u8, candidate.object_id),
+                .selection_score = candidate.selection_score,
+                .discovery_rank = candidate.discovery_rank + discovery_rank_offset,
+                .type_name = if (candidate.type_name) |value| try allocator.dupe(u8, value) else null,
+                .initial_shared_version = candidate.initial_shared_version,
+                .shared_object_input_select_token = try allocator.dupe(u8, candidate.shared_object_input_select_token),
+                .mutable_shared_object_input_select_token = try allocator.dupe(u8, candidate.mutable_shared_object_input_select_token),
+            });
+        }
+    }
+
+    fn discoverSharedObjectCandidatesFromEventSourcesCached(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        cache: *std.ArrayList(SharedModuleEventDiscoveryCacheEntry),
+        event_discovery_cache: *std.ArrayList(MoveModuleEventDiscoveryCacheEntry),
+        transaction_object_change_cache: *std.ArrayList(MoveTransactionObjectChangeDiscoveryCacheEntry),
+        object_summary_cache: *std.ArrayList(MoveObjectSummaryCacheEntry),
+        primary_event_package_id: ?[]const u8,
+        primary_event_module_name: ?[]const u8,
+        signature: []const u8,
+    ) ![]move_result.SharedMoveObjectCandidate {
+        var merged = std.ArrayList(move_result.SharedMoveObjectCandidate).empty;
+        errdefer {
+            for (merged.items) |*candidate| candidate.deinit(allocator);
+            merged.deinit(allocator);
+        }
+
+        if (primary_event_package_id != null and primary_event_module_name != null) {
+            const primary_candidates = try self.discoverSharedObjectCandidatesFromModuleEventsCached(
+                allocator,
+                cache,
+                event_discovery_cache,
+                transaction_object_change_cache,
+                object_summary_cache,
+                primary_event_package_id.?,
+                primary_event_module_name.?,
+                signature,
+            );
+            defer {
+                for (primary_candidates) |*candidate| candidate.deinit(allocator);
+                allocator.free(primary_candidates);
+            }
+            try appendMergedSharedMoveObjectCandidates(allocator, &merged, primary_candidates);
+        }
+
+        if (moveStructPackageAndModule(signature)) |type_source| {
+            if (primary_event_package_id != null and primary_event_module_name != null and
+                std.mem.eql(u8, primary_event_package_id.?, type_source.package) and
+                std.mem.eql(u8, primary_event_module_name.?, type_source.module))
+            {
+                return try merged.toOwnedSlice(allocator);
+            }
+
+            const type_candidates = try self.discoverSharedObjectCandidatesFromModuleEventsCached(
+                allocator,
+                cache,
+                event_discovery_cache,
+                transaction_object_change_cache,
+                object_summary_cache,
+                type_source.package,
+                type_source.module,
+                signature,
+            );
+            defer {
+                for (type_candidates) |*candidate| candidate.deinit(allocator);
+                allocator.free(type_candidates);
+            }
+            try appendMergedSharedMoveObjectCandidates(allocator, &merged, type_candidates);
+        }
+
+        return try merged.toOwnedSlice(allocator);
+    }
+
     const MoveTransactionObjectChangeDiscoveryCacheEntry = struct {
         tx_digest: []u8,
         discovered_object_ids: [][]u8,
@@ -10685,43 +10780,39 @@ pub const SuiRpcClient = struct {
                     if (std.mem.indexOfScalar(u8, trimmed_signature, '<') != null or
                         concreteObjectStructTypeFromSignature(parameter.signature) == null)
                     {
-                        if (summary.package_id) |event_package_id| {
-                            const event_module_name = summary.module_name orelse continue;
+                        const primary_event_package_id = if (summary.package_id != null and summary.module_name != null)
+                            summary.package_id
+                        else
+                            null;
+                        const primary_event_module_name = if (summary.package_id != null and summary.module_name != null)
+                            summary.module_name
+                        else
+                            null;
+                        if (primary_event_package_id) |event_package_id| {
+                            const event_module_name = primary_event_module_name.?;
                             parameter.shared_object_event_query_argv = try buildEventQueryArgv(
                                 allocator,
                                 event_package_id,
                                 event_module_name,
                             );
-                            if (!containsMoveTypeParameterText(trimMoveReferenceSignature(parameter.signature))) {
-                                parameter.shared_object_candidates = try self.discoverSharedObjectCandidatesFromModuleEventsCached(
-                                    allocator,
-                                    &shared_event_cache,
-                                    &event_discovery_cache,
-                                    &transaction_object_change_cache,
-                                    &object_summary_cache,
-                                    event_package_id,
-                                    event_module_name,
-                                    parameter.signature,
-                                );
-                            }
                         } else if (moveStructPackageAndModule(parameter.signature)) |package_and_module| {
                             parameter.shared_object_event_query_argv = try buildEventQueryArgv(
                                 allocator,
                                 package_and_module.package,
                                 package_and_module.module,
                             );
-                            if (!containsMoveTypeParameterText(trimMoveReferenceSignature(parameter.signature))) {
-                                parameter.shared_object_candidates = try self.discoverSharedObjectCandidatesFromModuleEventsCached(
-                                    allocator,
-                                    &shared_event_cache,
-                                    &event_discovery_cache,
-                                    &transaction_object_change_cache,
-                                    &object_summary_cache,
-                                    package_and_module.package,
-                                    package_and_module.module,
-                                    parameter.signature,
-                                );
-                            }
+                        }
+                        if (!containsMoveTypeParameterText(trimMoveReferenceSignature(parameter.signature))) {
+                            parameter.shared_object_candidates = try self.discoverSharedObjectCandidatesFromEventSourcesCached(
+                                allocator,
+                                &shared_event_cache,
+                                &event_discovery_cache,
+                                &transaction_object_change_cache,
+                                &object_summary_cache,
+                                primary_event_package_id,
+                                primary_event_module_name,
+                                parameter.signature,
+                            );
                         }
                     }
                 } else {

@@ -70,6 +70,8 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
 - [x] Reuse shared module-event discovery results across a single
   `move function` template build instead of rescanning the same module
   fallback in later parameters or fixed-point rounds.
+- [x] Aggregate shared-object event discovery across the current function
+  module and the shared type's own `package/module` when the two differ.
 - [x] `Pool -> Position` candidate linking across parameters.
 - [x] `Position -> Pool` candidate linking from selected objects.
 - [x] Candidate-set joint selection where owned candidates can resolve shared
