@@ -1,0 +1,6 @@
+[package]
+name = "vector_router"
+edition = "2024"
+
+[addresses]
+vector_router = "0x0"

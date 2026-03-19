@@ -254,7 +254,7 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
   object coverage.
 - [x] Add a `generic_vault` package for generic object and generic pure struct
   coverage.
-- [ ] Add a `vector_router` package for `vector<object>`, `vector<Coin<T>>`,
+- [x] Add a `vector_router` package for `vector<object>`, `vector<Coin<T>>`,
   and `MakeMoveVec` coverage.
 - [ ] Add a `receipt_flow_lab` package for receipt/capability multi-step
   flows.

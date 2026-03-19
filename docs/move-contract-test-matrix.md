@@ -85,6 +85,10 @@
 
 用途：锁定 `vector<T>` 相关的本地 builder 路径。
 
+当前状态：
+- 已落地：[`fixtures/move/vector_router`](/Users/davirian/dev/zig/sui-zig-rpc-client/fixtures/move/vector_router)
+- 已验证：`sui move test --path fixtures/move/vector_router`
+
 建议覆盖：
 - `vector<object>`
 - `vector<Coin<T>>`
