@@ -4343,7 +4343,7 @@ pub const SuiRpcClient = struct {
             cursor_event_seq = next_event_seq;
         }
 
-        if (discovered_ids.items.len == 0) {
+        if (discovered_ids.items.len < 16) {
             for (discovered_tx_digests.items) |tx_digest| {
                 if (discovered_ids.items.len >= 16) break;
                 const transaction_object_ids = self.getMoveTransactionObjectChangeDiscoveredObjectIdsCachedBorrowed(
@@ -5178,7 +5178,7 @@ pub const SuiRpcClient = struct {
             cursor_event_seq = next_event_seq;
         }
 
-        if (discovered_ids.items.len == 0) {
+        if (discovered_ids.items.len < 16) {
             for (discovered_tx_digests.items) |tx_digest| {
                 if (discovered_ids.items.len >= 16) break;
                 const transaction_object_ids = self.getMoveTransactionObjectChangeDiscoveredObjectIdsCachedBorrowed(
@@ -21652,6 +21652,86 @@ test "discoverOwnedObjectCandidatesFromModuleEvents falls back to event transact
     try testing.expectEqual(@as(usize, 1), state.object_requests);
     try testing.expectEqual(@as(usize, 1), borrowed.len);
     try testing.expectEqualStrings("0xposition-from-tx", borrowed[0].object_id);
+}
+
+test "discoverOwnedObjectCandidatesFromModuleEvents merges parsedJson and event transaction object changes" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const State = struct {
+        event_requests: usize = 0,
+        tx_requests: usize = 0,
+        object_requests: usize = 0,
+    };
+    var state = State{};
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const callback_state = @as(*State, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "suix_queryEvents")) {
+                callback_state.event_requests += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xtx-position\",\"eventSeq\":\"1\"},\"parsedJson\":{\"position_id\":\"0xposition-from-event\"}}],\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getTransactionBlock")) {
+                callback_state.tx_requests += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"objectChanges\":[{\"type\":\"created\",\"objectId\":\"0xposition-from-tx\"}]}}",
+                );
+            }
+            try testing.expectEqualStrings("sui_getObject", req.method);
+            callback_state.object_requests += 1;
+            if (std.mem.indexOf(u8, req.params_json, "\"0xposition-from-event\"") != null) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":{\"objectId\":\"0xposition-from-event\",\"version\":\"7\",\"digest\":\"digest-position-event\",\"type\":\"0x2a::position::Position\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}}",
+                );
+            }
+            if (std.mem.indexOf(u8, req.params_json, "\"0xposition-from-tx\"") != null) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":{\"objectId\":\"0xposition-from-tx\",\"version\":\"8\",\"digest\":\"digest-position-tx\",\"type\":\"0x2a::position::Position\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}}",
+                );
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &state,
+        .callback = callback,
+    };
+
+    var event_cache = std.ArrayList(SuiRpcClient.OwnedModuleEventDiscoveryCacheEntry).empty;
+    defer SuiRpcClient.deinitOwnedModuleEventDiscoveryCache(allocator, &event_cache);
+    var transaction_object_change_cache = std.ArrayList(SuiRpcClient.MoveTransactionObjectChangeDiscoveryCacheEntry).empty;
+    defer SuiRpcClient.deinitMoveTransactionObjectChangeDiscoveryCache(allocator, &transaction_object_change_cache);
+    var object_summary_cache = std.ArrayList(SuiRpcClient.MoveObjectSummaryCacheEntry).empty;
+    defer SuiRpcClient.deinitMoveObjectSummaryCache(allocator, &object_summary_cache);
+
+    const borrowed = try client_instance.discoverOwnedObjectCandidatesFromModuleEventsCachedBorrowed(
+        allocator,
+        &event_cache,
+        &transaction_object_change_cache,
+        &object_summary_cache,
+        "0xowner",
+        "0x2a::position::Position",
+        "0x2a",
+        "pool",
+    );
+    try testing.expectEqual(@as(usize, 1), state.event_requests);
+    try testing.expectEqual(@as(usize, 1), state.tx_requests);
+    try testing.expectEqual(@as(usize, 2), state.object_requests);
+    try testing.expectEqual(@as(usize, 2), borrowed.len);
+    try testing.expectEqualStrings("0xposition-from-event", borrowed[0].object_id);
+    try testing.expectEqualStrings("0xposition-from-tx", borrowed[1].object_id);
 }
 
 test "runObjectQueryAndSummarize supports typed object-get queries" {

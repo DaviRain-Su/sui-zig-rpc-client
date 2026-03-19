@@ -4094,6 +4094,87 @@ test "runCommand move function with --summarize discovers shared candidates from
     try testing.expectEqualStrings("0xpool-from-tx", shared_candidates[0].object.get("object_id").?.string);
 }
 
+test "runCommand move function with --summarize merges event parsedJson and transaction object changes" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"visibility\":\"Public\",\"isEntry\":true,\"typeParameters\":[[],[]],\"parameters\":[{\"MutableReference\":{\"Struct\":{\"address\":\"0x2a\",\"module\":\"pool\",\"name\":\"Pool\",\"typeParams\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"sui\",\"name\":\"SUI\",\"typeParams\":[]}},{\"Struct\":{\"address\":\"0x2\",\"module\":\"sui\",\"name\":\"SUI\",\"typeParams\":[]}}]}}},{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "suix_queryEvents")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xtx-pool\",\"eventSeq\":\"1\"},\"packageId\":\"0x2a\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool-from-event\"}}],\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getTransactionBlock")) {
+                std.debug.assert(std.mem.eql(u8, req.params_json, "[\"0xtx-pool\",{\"showObjectChanges\":true}]"));
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"objectChanges\":[{\"type\":\"created\",\"objectId\":\"0xpool-from-tx\"}]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getObject")) {
+                if (std.mem.indexOf(u8, req.params_json, "\"0xpool-from-event\"") != null) {
+                    return alloc.dupe(
+                        u8,
+                        "{\"result\":{\"data\":{\"objectId\":\"0xpool-from-event\",\"version\":\"10\",\"digest\":\"pool-digest-event\",\"type\":\"0x2a::pool::Pool<0x2::sui::SUI, 0x2::sui::SUI>\",\"owner\":{\"Shared\":{\"initial_shared_version\":\"6\"}}}}}",
+                    );
+                }
+                if (std.mem.indexOf(u8, req.params_json, "\"0xpool-from-tx\"") != null) {
+                    return alloc.dupe(
+                        u8,
+                        "{\"result\":{\"data\":{\"objectId\":\"0xpool-from-tx\",\"version\":\"11\",\"digest\":\"pool-digest-tx\",\"type\":\"0x2a::pool::Pool<0x2::sui::SUI, 0x2::sui::SUI>\",\"owner\":{\"Shared\":{\"initial_shared_version\":\"7\"}}}}}",
+                    );
+                }
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "move",
+        "function",
+        "0x2a",
+        "pool",
+        "resolve_from_event_merge",
+        "--type-arg",
+        "0x2::sui::SUI",
+        "--type-arg",
+        "0x2::sui::SUI",
+        "--summarize",
+    });
+    defer args.deinit(allocator);
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    const parameters = parsed.value.object.get("parameters").?.array.items;
+    const shared_candidates = parameters[0].object.get("shared_object_candidates").?.array.items;
+    try testing.expectEqual(@as(usize, 2), shared_candidates.len);
+    try testing.expectEqualStrings("0xpool-from-event", shared_candidates[0].object.get("object_id").?.string);
+    try testing.expectEqualStrings("0xpool-from-tx", shared_candidates[1].object.get("object_id").?.string);
+}
+
 test "runCommand move function with --summarize prefers shared candidate with highest owned reference score" {
     const testing = std.testing;
 
@@ -4833,6 +4914,12 @@ test "runCommand move function with --summarize merges shared candidates from ev
                     "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xposition1\",\"version\":\"7\",\"digest\":\"position-digest-1\",\"type\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb::position::Position\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
                 );
             }
+            if (std.mem.eql(u8, req.method, "sui_getTransactionBlock")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"objectChanges\":[]}}",
+                );
+            }
             std.debug.assert(std.mem.eql(u8, req.method, "sui_getObject"));
             if (std.mem.indexOf(u8, req.params_json, "\"0xpool1\"") != null) {
                 return alloc.dupe(
@@ -4921,6 +5008,9 @@ test "runCommand move function with --summarize caches shared event discovery ac
                     "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xevent1\",\"eventSeq\":\"1\"},\"packageId\":\"0x2a\",\"transactionModule\":\"router\",\"parsedJson\":{\"pool_id\":\"0xpool1\"}}],\"hasNextPage\":false}}",
                 );
             }
+            if (std.mem.eql(u8, req.method, "sui_getTransactionBlock")) {
+                return alloc.dupe(u8, "{\"result\":{\"objectChanges\":[]}}");
+            }
             std.debug.assert(std.mem.eql(u8, req.method, "sui_getObject"));
             if (std.mem.indexOf(u8, req.params_json, "\"showType\":true") != null and
                 std.mem.indexOf(u8, req.params_json, "\"showOwner\":true") != null and
@@ -4994,6 +5084,9 @@ test "runCommand move function with --summarize discovers related shared candida
                     u8,
                     "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xevent1\",\"eventSeq\":\"1\"},\"packageId\":\"0x2a\",\"transactionModule\":\"router\",\"parsedJson\":{\"pool_id\":\"0xpool1\"}}],\"hasNextPage\":false}}",
                 );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getTransactionBlock")) {
+                return alloc.dupe(u8, "{\"result\":{\"objectChanges\":[]}}");
             }
             if (std.mem.eql(u8, req.method, "suix_getDynamicFields")) {
                 return alloc.dupe(
@@ -5707,6 +5800,9 @@ test "runCommand move function with --summarize discovers owned candidates from 
                     "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xevent1\",\"eventSeq\":\"1\"},\"packageId\":\"0x2a\",\"transactionModule\":\"router\",\"parsedJson\":{\"position_id\":\"0xposition1\"}}],\"hasNextPage\":false}}",
                 );
             }
+            if (std.mem.eql(u8, req.method, "sui_getTransactionBlock")) {
+                return alloc.dupe(u8, "{\"result\":{\"objectChanges\":[]}}");
+            }
             if (std.mem.eql(u8, req.method, "sui_getObject")) {
                 std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0xposition1\"") != null);
                 if (std.mem.indexOf(u8, req.params_json, "\"showContent\":true") != null) {
@@ -5808,6 +5904,9 @@ test "runCommand move function with --summarize falls back to owned event discov
                     u8,
                     "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xevent1\",\"eventSeq\":\"1\"},\"packageId\":\"0x2a\",\"transactionModule\":\"position\",\"parsedJson\":{\"position_id\":\"0xposition1\"}}],\"hasNextPage\":false}}",
                 );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getTransactionBlock")) {
+                return alloc.dupe(u8, "{\"result\":{\"objectChanges\":[]}}");
             }
             if (std.mem.eql(u8, req.method, "sui_getObject")) {
                 std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0xposition1\"") != null);
@@ -6162,6 +6261,9 @@ test "runCommand move function with --summarize iterates joint candidate selecti
                     "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xevent1\",\"eventSeq\":\"1\"},\"packageId\":\"0x2a\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool1\",\"router_id\":\"0xrouter1\"}},{\"id\":{\"txDigest\":\"0xevent2\",\"eventSeq\":\"2\"},\"packageId\":\"0x2a\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool2\",\"router_id\":\"0xrouter2\"}}],\"hasNextPage\":false}}",
                 );
             }
+            if (std.mem.eql(u8, req.method, "sui_getTransactionBlock")) {
+                return alloc.dupe(u8, "{\"result\":{\"objectChanges\":[]}}");
+            }
             if (std.mem.eql(u8, req.method, "suix_getOwnedObjects")) {
                 if (std.mem.indexOf(u8, req.params_json, "\"0x2a::position::Position\"") != null) {
                     return alloc.dupe(
@@ -6348,6 +6450,9 @@ test "runCommand move function with --summarize prefers the larger connected can
                     u8,
                     "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xevent1\",\"eventSeq\":\"1\"},\"packageId\":\"0x2a\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool1\"}},{\"id\":{\"txDigest\":\"0xevent2\",\"eventSeq\":\"2\"},\"packageId\":\"0x2a\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool2\"}}],\"hasNextPage\":false}}",
                 );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getTransactionBlock")) {
+                return alloc.dupe(u8, "{\"result\":{\"objectChanges\":[]}}");
             }
             if (std.mem.eql(u8, req.method, "suix_getOwnedObjects")) {
                 if (std.mem.indexOf(u8, req.params_json, "\"0x2a::position::Position\"") != null) {
@@ -6645,6 +6750,9 @@ test "runCommand move function with --summarize prefers internally consistent ca
                     "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xevent1\",\"eventSeq\":\"1\"},\"packageId\":\"0x2c\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool1\"}},{\"id\":{\"txDigest\":\"0xevent2\",\"eventSeq\":\"2\"},\"packageId\":\"0x2c\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool2\"}}],\"hasNextPage\":false}}",
                 );
             }
+            if (std.mem.eql(u8, req.method, "sui_getTransactionBlock")) {
+                return alloc.dupe(u8, "{\"result\":{\"objectChanges\":[]}}");
+            }
             if (std.mem.eql(u8, req.method, "suix_getOwnedObjects")) {
                 if (std.mem.indexOf(u8, req.params_json, "\"0x2c::position::Position\"") != null) {
                     return alloc.dupe(
@@ -6799,6 +6907,9 @@ test "runCommand move function with --summarize deterministically tie-breaks equ
                     u8,
                     "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xevent1\",\"eventSeq\":\"1\"},\"packageId\":\"0x2d\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool1\"}},{\"id\":{\"txDigest\":\"0xevent2\",\"eventSeq\":\"2\"},\"packageId\":\"0x2d\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool2\"}}],\"hasNextPage\":false}}",
                 );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getTransactionBlock")) {
+                return alloc.dupe(u8, "{\"result\":{\"objectChanges\":[]}}");
             }
             if (std.mem.eql(u8, req.method, "suix_getOwnedObjects")) {
                 if (std.mem.indexOf(u8, req.params_json, "\"0x2d::position::Position\"") != null) {
@@ -7181,6 +7292,9 @@ test "runCommand move function with --emit-template prints preferred dry-run req
                     u8,
                     "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xevent1\",\"eventSeq\":\"1\"},\"packageId\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool1\"}}],\"hasNextPage\":false}}",
                 );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getTransactionBlock")) {
+                return alloc.dupe(u8, "{\"result\":{\"objectChanges\":[]}}");
             }
 
             std.debug.assert(std.mem.eql(u8, req.method, "sui_getObject"));
@@ -7811,6 +7925,9 @@ test "runCommand move function with --summarize uses queried package for shared 
                     "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xevent1\",\"eventSeq\":\"1\"},\"packageId\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool1\",\"partner_id\":\"0xpartner\"}}],\"hasNextPage\":false}}",
                 );
             }
+            if (std.mem.eql(u8, req.method, "sui_getTransactionBlock")) {
+                return alloc.dupe(u8, "{\"result\":{\"objectChanges\":[]}}");
+            }
 
             std.debug.assert(std.mem.eql(u8, req.method, "sui_getObject"));
             if (std.mem.indexOf(u8, req.params_json, "\"0xpool1\"") != null) {
@@ -7961,6 +8078,9 @@ test "runCommand move function with --summarize discovers shared object candidat
                     u8,
                     "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xevent2\",\"eventSeq\":\"3\"},\"packageId\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool1\"}}],\"hasNextPage\":false}}",
                 );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getTransactionBlock")) {
+                return alloc.dupe(u8, "{\"result\":{\"objectChanges\":[]}}");
             }
 
             std.debug.assert(std.mem.eql(u8, req.method, "sui_getObject"));
@@ -8372,6 +8492,9 @@ test "runCommand move function with --summarize scores shared candidates from se
                     "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xevent1\",\"eventSeq\":\"1\"},\"packageId\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool1\"}},{\"id\":{\"txDigest\":\"0xevent2\",\"eventSeq\":\"2\"},\"packageId\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool2\"}}],\"hasNextPage\":false}}",
                 );
             }
+            if (std.mem.eql(u8, req.method, "sui_getTransactionBlock")) {
+                return alloc.dupe(u8, "{\"result\":{\"objectChanges\":[]}}");
+            }
             if (std.mem.eql(u8, req.method, "sui_getObject")) {
                 if (std.mem.indexOf(u8, req.params_json, "\"0xpool1\"") != null) {
                     return alloc.dupe(
@@ -8483,6 +8606,9 @@ test "runCommand move function with --summarize weights explicit object referenc
                     u8,
                     "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xevent1\",\"eventSeq\":\"1\"},\"packageId\":\"0x2\",\"transactionModule\":\"example\",\"parsedJson\":{\"pool_id\":\"0xpoola\"}},{\"id\":{\"txDigest\":\"0xevent2\",\"eventSeq\":\"2\"},\"packageId\":\"0x2\",\"transactionModule\":\"example\",\"parsedJson\":{\"pool_id\":\"0xpoolb\"}}],\"hasNextPage\":false}}",
                 );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getTransactionBlock")) {
+                return alloc.dupe(u8, "{\"result\":{\"objectChanges\":[]}}");
             }
             if (std.mem.eql(u8, req.method, "suix_getOwnedObjects")) {
                 std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0xowner\"") != null);
