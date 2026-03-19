@@ -61,6 +61,8 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
   reach a stable fixed point.
 - [x] Connected-component scoring bonuses for tied candidate sets so larger,
   more internally consistent object clusters rank higher.
+- [x] Connected-component anchor bonuses so clusters already referenced by
+  explicit/selected transaction objects outrank otherwise similar candidates.
 
 ### Coin automation
 

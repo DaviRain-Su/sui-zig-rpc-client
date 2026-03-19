@@ -5398,6 +5398,52 @@ pub const SuiRpcClient = struct {
         return false;
     }
 
+    fn componentReferencesSelectedObjectResponses(
+        allocator: std.mem.Allocator,
+        component_nodes: []const usize,
+        nodes: []const MoveCandidateGraphNode,
+        selected_responses: []const ?[]u8,
+    ) usize {
+        var count: usize = 0;
+        for (selected_responses) |response_opt| {
+            const response = response_opt orelse continue;
+            for (component_nodes) |node_index| {
+                if (objectResponseContentReferencesObjectId(
+                    allocator,
+                    response,
+                    nodes[node_index].object_id,
+                )) {
+                    count += 1;
+                    break;
+                }
+            }
+        }
+        return count;
+    }
+
+    fn componentReferencesSelectedObjectIds(
+        allocator: std.mem.Allocator,
+        component_nodes: []const usize,
+        nodes: []const MoveCandidateGraphNode,
+        selected_object_ids: []const []const u8,
+    ) usize {
+        var count: usize = 0;
+        for (selected_object_ids) |selected_object_id| {
+            for (component_nodes) |node_index| {
+                const response = nodes[node_index].response_json orelse continue;
+                if (objectResponseContentReferencesObjectId(
+                    allocator,
+                    response,
+                    selected_object_id,
+                )) {
+                    count += 1;
+                    break;
+                }
+            }
+        }
+        return count;
+    }
+
     fn applyJointCandidateComponentSelectionHints(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
@@ -5411,6 +5457,46 @@ pub const SuiRpcClient = struct {
             }
         }
         if (!has_ambiguous_candidates) return;
+
+        const selected_object_ids = try collectSelectedObjectIdsFromMoveParametersBySource(
+            allocator,
+            parameters,
+        );
+        defer selected_object_ids.deinit(allocator);
+
+        const explicit_selected_responses = try allocator.alloc(
+            ?[]u8,
+            selected_object_ids.explicit_object_ids.len,
+        );
+        defer {
+            for (explicit_selected_responses) |response_opt| {
+                if (response_opt) |response| allocator.free(response);
+            }
+            allocator.free(explicit_selected_responses);
+        }
+        for (selected_object_ids.explicit_object_ids, 0..) |object_id, index| {
+            explicit_selected_responses[index] = self.getObjectWithOptions(
+                object_id,
+                .{ .show_content = true },
+            ) catch null;
+        }
+
+        const auto_selected_responses = try allocator.alloc(
+            ?[]u8,
+            selected_object_ids.auto_selected_object_ids.len,
+        );
+        defer {
+            for (auto_selected_responses) |response_opt| {
+                if (response_opt) |response| allocator.free(response);
+            }
+            allocator.free(auto_selected_responses);
+        }
+        for (selected_object_ids.auto_selected_object_ids, 0..) |object_id, index| {
+            auto_selected_responses[index] = self.getObjectWithOptions(
+                object_id,
+                .{ .show_content = true },
+            ) catch null;
+        }
 
         var nodes = std.ArrayList(MoveCandidateGraphNode).empty;
         defer {
@@ -5473,6 +5559,12 @@ pub const SuiRpcClient = struct {
         var component_parameter_counts = try allocator.alloc(usize, nodes.items.len);
         defer allocator.free(component_parameter_counts);
         @memset(component_parameter_counts, 1);
+        var component_explicit_anchor_counts = try allocator.alloc(usize, nodes.items.len);
+        defer allocator.free(component_explicit_anchor_counts);
+        @memset(component_explicit_anchor_counts, 0);
+        var component_auto_anchor_counts = try allocator.alloc(usize, nodes.items.len);
+        defer allocator.free(component_auto_anchor_counts);
+        @memset(component_auto_anchor_counts, 0);
 
         var stack = std.ArrayList(usize).empty;
         defer stack.deinit(allocator);
@@ -5519,12 +5611,43 @@ pub const SuiRpcClient = struct {
                 }
             }
 
+            const explicit_anchor_count =
+                componentReferencesSelectedObjectResponses(
+                    allocator,
+                    component_nodes.items,
+                    nodes.items,
+                    explicit_selected_responses,
+                ) +
+                componentReferencesSelectedObjectIds(
+                    allocator,
+                    component_nodes.items,
+                    nodes.items,
+                    selected_object_ids.explicit_object_ids,
+                );
+            const auto_anchor_count =
+                componentReferencesSelectedObjectResponses(
+                    allocator,
+                    component_nodes.items,
+                    nodes.items,
+                    auto_selected_responses,
+                ) +
+                componentReferencesSelectedObjectIds(
+                    allocator,
+                    component_nodes.items,
+                    nodes.items,
+                    selected_object_ids.auto_selected_object_ids,
+                );
+
             for (component_nodes.items) |node_index| {
                 component_sizes[node_index] = component_nodes.items.len;
                 component_parameter_counts[node_index] = component_parameter_indices.items.len;
+                component_explicit_anchor_counts[node_index] = explicit_anchor_count;
+                component_auto_anchor_counts[node_index] = auto_anchor_count;
             }
         }
 
+        const auto_anchor_weight = parameters.len + 1;
+        const explicit_anchor_weight = auto_anchor_weight + selected_object_ids.auto_selected_object_ids.len + 1;
         for (nodes.items, 0..) |node, node_index| {
             if (!node.apply_component_bonus) continue;
             if (component_sizes[node_index] <= 1) continue;
@@ -5533,7 +5656,11 @@ pub const SuiRpcClient = struct {
             else
                 0;
             const size_bonus = component_sizes[node_index] - 1;
-            moveCandidateGraphNodeSelectionScorePointer(parameters, node).* += parameter_bonus + size_bonus;
+            const anchor_bonus =
+                component_explicit_anchor_counts[node_index] * explicit_anchor_weight +
+                component_auto_anchor_counts[node_index] * auto_anchor_weight;
+            moveCandidateGraphNodeSelectionScorePointer(parameters, node).* +=
+                parameter_bonus + size_bonus + anchor_bonus;
         }
 
         for (parameters) |*parameter| {
