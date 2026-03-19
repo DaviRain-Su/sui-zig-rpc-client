@@ -4195,6 +4195,7 @@ pub const SuiRpcClient = struct {
     fn appendSharedObjectCandidatesFromObjectIds(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
+        object_summary_cache: *std.ArrayList(MoveObjectSummaryCacheEntry),
         candidates: *std.ArrayList(move_result.SharedMoveObjectCandidate),
         object_ids: []const []const u8,
         signature: []const u8,
@@ -4202,13 +4203,10 @@ pub const SuiRpcClient = struct {
         const struct_type = trimMoveReferenceSignature(signature);
 
         for (object_ids) |object_id| {
-            var summary = self.getObjectAndSummarizeWithOptions(
+            var summary = self.getMoveObjectSummaryCached(
                 allocator,
+                object_summary_cache,
                 object_id,
-                .{
-                    .show_type = true,
-                    .show_owner = true,
-                },
             ) catch continue;
             defer summary.deinit(allocator);
 
@@ -4244,6 +4242,7 @@ pub const SuiRpcClient = struct {
     fn discoverSharedObjectCandidatesFromModuleEvents(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
+        object_summary_cache: *std.ArrayList(MoveObjectSummaryCacheEntry),
         event_package_id: []const u8,
         event_module_name: []const u8,
         signature: []const u8,
@@ -4298,6 +4297,7 @@ pub const SuiRpcClient = struct {
 
         try self.appendSharedObjectCandidatesFromObjectIds(
             allocator,
+            object_summary_cache,
             &candidates,
             discovered_ids.items,
             signature,
@@ -4354,6 +4354,7 @@ pub const SuiRpcClient = struct {
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
         cache: *std.ArrayList(SharedModuleEventDiscoveryCacheEntry),
+        object_summary_cache: *std.ArrayList(MoveObjectSummaryCacheEntry),
         event_package_id: []const u8,
         event_module_name: []const u8,
         signature: []const u8,
@@ -4367,6 +4368,7 @@ pub const SuiRpcClient = struct {
 
         const discovered = try self.discoverSharedObjectCandidatesFromModuleEvents(
             allocator,
+            object_summary_cache,
             event_package_id,
             event_module_name,
             signature,
@@ -4515,6 +4517,53 @@ pub const SuiRpcClient = struct {
         return try cloneMoveDiscoveredObjectIds(allocator, owned_ids);
     }
 
+    const MoveObjectSummaryCacheEntry = struct {
+        object_id: []u8,
+        summary: object_result.OwnedObjectSummary,
+
+        fn deinit(self: *MoveObjectSummaryCacheEntry, allocator: std.mem.Allocator) void {
+            allocator.free(self.object_id);
+            self.summary.deinit(allocator);
+        }
+    };
+
+    fn deinitMoveObjectSummaryCache(
+        allocator: std.mem.Allocator,
+        cache: *std.ArrayList(MoveObjectSummaryCacheEntry),
+    ) void {
+        for (cache.items) |*entry| entry.deinit(allocator);
+        cache.deinit(allocator);
+    }
+
+    fn getMoveObjectSummaryCached(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        cache: *std.ArrayList(MoveObjectSummaryCacheEntry),
+        object_id: []const u8,
+    ) !object_result.OwnedObjectSummary {
+        for (cache.items) |entry| {
+            if (std.mem.eql(u8, entry.object_id, object_id)) {
+                return try entry.summary.clone(allocator);
+            }
+        }
+
+        var summary = try self.getObjectAndSummarizeWithOptions(
+            allocator,
+            object_id,
+            objectDataOptionsForSummaries(.{}),
+        );
+        errdefer summary.deinit(allocator);
+
+        var entry = MoveObjectSummaryCacheEntry{
+            .object_id = try allocator.dupe(u8, object_id),
+            .summary = summary,
+        };
+        errdefer entry.deinit(allocator);
+
+        try cache.append(allocator, entry);
+        return try summary.clone(allocator);
+    }
+
     fn collectObjectDiscoverySeedObjectIdsFromMoveParameters(
         allocator: std.mem.Allocator,
         parameters: []const move_result.OwnedMoveParameterSummary,
@@ -4560,6 +4609,7 @@ pub const SuiRpcClient = struct {
         allocator: std.mem.Allocator,
         object_content_cache: *std.ArrayList(MoveObjectContentResponseCacheEntry),
         dynamic_field_cache: *std.ArrayList(MoveDynamicFieldDiscoveryCacheEntry),
+        object_summary_cache: *std.ArrayList(MoveObjectSummaryCacheEntry),
         parameters: []const move_result.OwnedMoveParameterSummary,
         signature: []const u8,
         allow_dynamic_field_fallback: bool,
@@ -4619,6 +4669,7 @@ pub const SuiRpcClient = struct {
 
         try self.appendSharedObjectCandidatesFromObjectIds(
             allocator,
+            object_summary_cache,
             &candidates,
             discovered_ids.items,
             signature,
@@ -4630,16 +4681,17 @@ pub const SuiRpcClient = struct {
     fn appendOwnedObjectCandidatesFromObjectIds(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
+        object_summary_cache: *std.ArrayList(MoveObjectSummaryCacheEntry),
         candidates: *std.ArrayList(move_result.OwnedMoveObjectCandidate),
         object_ids: []const []const u8,
         owner: []const u8,
         struct_type: []const u8,
     ) !void {
         for (object_ids) |object_id| {
-            var summary = self.getObjectAndSummarizeWithOptions(
+            var summary = self.getMoveObjectSummaryCached(
                 allocator,
+                object_summary_cache,
                 object_id,
-                objectDataOptionsForSummaries(.{}),
             ) catch continue;
             defer summary.deinit(allocator);
 
@@ -4679,6 +4731,7 @@ pub const SuiRpcClient = struct {
         allocator: std.mem.Allocator,
         object_content_cache: *std.ArrayList(MoveObjectContentResponseCacheEntry),
         dynamic_field_cache: *std.ArrayList(MoveDynamicFieldDiscoveryCacheEntry),
+        object_summary_cache: *std.ArrayList(MoveObjectSummaryCacheEntry),
         parameters: []const move_result.OwnedMoveParameterSummary,
         owner: []const u8,
         struct_type: []const u8,
@@ -4739,6 +4792,7 @@ pub const SuiRpcClient = struct {
 
         try self.appendOwnedObjectCandidatesFromObjectIds(
             allocator,
+            object_summary_cache,
             &candidates,
             discovered_ids.items,
             owner,
@@ -4751,6 +4805,7 @@ pub const SuiRpcClient = struct {
     fn discoverOwnedObjectCandidatesFromModuleEvents(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
+        object_summary_cache: *std.ArrayList(MoveObjectSummaryCacheEntry),
         owner: []const u8,
         struct_type: []const u8,
         event_package_id: []const u8,
@@ -4806,6 +4861,7 @@ pub const SuiRpcClient = struct {
 
         try self.appendOwnedObjectCandidatesFromObjectIds(
             allocator,
+            object_summary_cache,
             &candidates,
             discovered_ids.items,
             owner,
@@ -4867,6 +4923,7 @@ pub const SuiRpcClient = struct {
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
         cache: *std.ArrayList(OwnedModuleEventDiscoveryCacheEntry),
+        object_summary_cache: *std.ArrayList(MoveObjectSummaryCacheEntry),
         owner: []const u8,
         struct_type: []const u8,
         event_package_id: []const u8,
@@ -4882,6 +4939,7 @@ pub const SuiRpcClient = struct {
 
         const discovered = try self.discoverOwnedObjectCandidatesFromModuleEvents(
             allocator,
+            object_summary_cache,
             owner,
             struct_type,
             event_package_id,
@@ -5592,6 +5650,7 @@ pub const SuiRpcClient = struct {
         allocator: std.mem.Allocator,
         object_content_cache: *std.ArrayList(MoveObjectContentResponseCacheEntry),
         dynamic_field_cache: *std.ArrayList(MoveDynamicFieldDiscoveryCacheEntry),
+        object_summary_cache: *std.ArrayList(MoveObjectSummaryCacheEntry),
         parameters: []move_result.OwnedMoveParameterSummary,
     ) !void {
         for (parameters) |*parameter| {
@@ -5605,6 +5664,7 @@ pub const SuiRpcClient = struct {
                 allocator,
                 object_content_cache,
                 dynamic_field_cache,
+                object_summary_cache,
                 parameters,
                 parameter.signature,
                 parameter.shared_object_candidates == null or parameter.shared_object_candidates.?.len == 0,
@@ -5679,6 +5739,7 @@ pub const SuiRpcClient = struct {
         allocator: std.mem.Allocator,
         object_content_cache: *std.ArrayList(MoveObjectContentResponseCacheEntry),
         dynamic_field_cache: *std.ArrayList(MoveDynamicFieldDiscoveryCacheEntry),
+        object_summary_cache: *std.ArrayList(MoveObjectSummaryCacheEntry),
         parameters: []move_result.OwnedMoveParameterSummary,
         owner_address: ?[]const u8,
         event_package_id: ?[]const u8,
@@ -5701,6 +5762,7 @@ pub const SuiRpcClient = struct {
                     allocator,
                     object_content_cache,
                     dynamic_field_cache,
+                    object_summary_cache,
                     parameters,
                     owner,
                     struct_type,
@@ -5714,6 +5776,7 @@ pub const SuiRpcClient = struct {
                         const current = try self.discoverOwnedObjectCandidatesFromModuleEventsCached(
                             allocator,
                             owned_event_cache,
+                            object_summary_cache,
                             owner,
                             struct_type,
                             event_package_id.?,
@@ -5732,6 +5795,7 @@ pub const SuiRpcClient = struct {
                         break :blk try self.discoverOwnedObjectCandidatesFromModuleEventsCached(
                             allocator,
                             owned_event_cache,
+                            object_summary_cache,
                             owner,
                             struct_type,
                             package_and_module.package,
@@ -5844,6 +5908,7 @@ pub const SuiRpcClient = struct {
                     allocator,
                     object_content_cache,
                     dynamic_field_cache,
+                    object_summary_cache,
                     parameters,
                     owner,
                     struct_type,
@@ -5857,6 +5922,7 @@ pub const SuiRpcClient = struct {
                         const current = try self.discoverOwnedObjectCandidatesFromModuleEventsCached(
                             allocator,
                             owned_event_cache,
+                            object_summary_cache,
                             owner,
                             struct_type,
                             event_package_id.?,
@@ -5875,6 +5941,7 @@ pub const SuiRpcClient = struct {
                         break :blk try self.discoverOwnedObjectCandidatesFromModuleEventsCached(
                             allocator,
                             owned_event_cache,
+                            object_summary_cache,
                             owner,
                             struct_type,
                             package_and_module.package,
@@ -6735,6 +6802,7 @@ pub const SuiRpcClient = struct {
         allocator: std.mem.Allocator,
         object_content_cache: *std.ArrayList(MoveObjectContentResponseCacheEntry),
         dynamic_field_cache: *std.ArrayList(MoveDynamicFieldDiscoveryCacheEntry),
+        object_summary_cache: *std.ArrayList(MoveObjectSummaryCacheEntry),
         parameters: []move_result.OwnedMoveParameterSummary,
         owner_address: ?[]const u8,
         event_package_id: ?[]const u8,
@@ -6750,12 +6818,14 @@ pub const SuiRpcClient = struct {
                 allocator,
                 object_content_cache,
                 dynamic_field_cache,
+                object_summary_cache,
                 parameters,
             );
             try self.populateOwnedObjectCandidateFallbacksFromMoveParameters(
                 allocator,
                 object_content_cache,
                 dynamic_field_cache,
+                object_summary_cache,
                 parameters,
                 owner_address,
                 event_package_id,
@@ -8414,6 +8484,9 @@ pub const SuiRpcClient = struct {
         var dynamic_field_cache = std.ArrayList(MoveDynamicFieldDiscoveryCacheEntry).empty;
         defer deinitMoveDynamicFieldDiscoveryCache(allocator, &dynamic_field_cache);
 
+        var object_summary_cache = std.ArrayList(MoveObjectSummaryCacheEntry).empty;
+        defer deinitMoveObjectSummaryCache(allocator, &object_summary_cache);
+
         var owned_event_cache = std.ArrayList(OwnedModuleEventDiscoveryCacheEntry).empty;
         defer deinitOwnedModuleEventDiscoveryCache(allocator, &owned_event_cache);
 
@@ -8520,6 +8593,7 @@ pub const SuiRpcClient = struct {
                                 parameter.shared_object_candidates = try self.discoverSharedObjectCandidatesFromModuleEventsCached(
                                     allocator,
                                     &shared_event_cache,
+                                    &object_summary_cache,
                                     event_package_id,
                                     event_module_name,
                                     parameter.signature,
@@ -8535,6 +8609,7 @@ pub const SuiRpcClient = struct {
                                 parameter.shared_object_candidates = try self.discoverSharedObjectCandidatesFromModuleEventsCached(
                                     allocator,
                                     &shared_event_cache,
+                                    &object_summary_cache,
                                     package_and_module.package,
                                     package_and_module.module,
                                     parameter.signature,
@@ -8618,6 +8693,7 @@ pub const SuiRpcClient = struct {
             allocator,
             &object_content_cache,
             &dynamic_field_cache,
+            &object_summary_cache,
             summary.parameters,
             owner_address,
             summary.package_id,

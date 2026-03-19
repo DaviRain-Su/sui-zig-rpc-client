@@ -146,6 +146,9 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
 - [x] Reuse repeated seed-object dynamic-field scans across a single
   `move function` template build instead of rescanning the same object during
   shared/owned fallback discovery rounds.
+- [x] Reuse repeated candidate object summary reads across a single
+  `move function` template build instead of refetching the same object during
+  shared/owned candidate filtering.
 - [x] Make the default execution path prefer preferred request artifacts
   whenever a safe resolution exists.
 

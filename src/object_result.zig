@@ -44,6 +44,25 @@ pub const OwnedObjectSummary = struct {
         if (self.previous_transaction) |value| allocator.free(value);
         if (self.error_code) |value| allocator.free(value);
     }
+
+    pub fn clone(self: OwnedObjectSummary, allocator: std.mem.Allocator) !OwnedObjectSummary {
+        return .{
+            .status = self.status,
+            .object_id = if (self.object_id) |value| try allocator.dupe(u8, value) else null,
+            .version = self.version,
+            .digest = if (self.digest) |value| try allocator.dupe(u8, value) else null,
+            .type_name = if (self.type_name) |value| try allocator.dupe(u8, value) else null,
+            .owner_kind = self.owner_kind,
+            .owner_value = if (self.owner_value) |value| try allocator.dupe(u8, value) else null,
+            .shared_object_input_select_token = if (self.shared_object_input_select_token) |value| try allocator.dupe(u8, value) else null,
+            .mutable_shared_object_input_select_token = if (self.mutable_shared_object_input_select_token) |value| try allocator.dupe(u8, value) else null,
+            .imm_or_owned_object_input_select_token = if (self.imm_or_owned_object_input_select_token) |value| try allocator.dupe(u8, value) else null,
+            .receiving_object_input_select_token = if (self.receiving_object_input_select_token) |value| try allocator.dupe(u8, value) else null,
+            .previous_transaction = if (self.previous_transaction) |value| try allocator.dupe(u8, value) else null,
+            .storage_rebate = self.storage_rebate,
+            .error_code = if (self.error_code) |value| try allocator.dupe(u8, value) else null,
+        };
+    }
 };
 
 const ParsedOwner = struct {

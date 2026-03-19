@@ -4742,6 +4742,7 @@ test "runCommand move function with --summarize caches shared event discovery ac
 
     const State = struct {
         query_events_requests: usize = 0,
+        shared_summary_requests: usize = 0,
     };
     var state = State{};
 
@@ -4762,6 +4763,12 @@ test "runCommand move function with --summarize caches shared event discovery ac
                 );
             }
             std.debug.assert(std.mem.eql(u8, req.method, "sui_getObject"));
+            if (std.mem.indexOf(u8, req.params_json, "\"showType\":true") != null and
+                std.mem.indexOf(u8, req.params_json, "\"showOwner\":true") != null and
+                std.mem.indexOf(u8, req.params_json, "\"showContent\":true") == null)
+            {
+                callback_state.shared_summary_requests += 1;
+            }
             std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0xpool1\"") != null);
             return alloc.dupe(
                 u8,
@@ -4805,6 +4812,7 @@ test "runCommand move function with --summarize caches shared event discovery ac
         );
     }
     try testing.expectEqual(@as(usize, 1), state.query_events_requests);
+    try testing.expectEqual(@as(usize, 1), state.shared_summary_requests);
 }
 
 test "runCommand move function with --summarize discovers related shared candidates from existing shared candidates" {
