@@ -785,6 +785,7 @@ pub fn main() !void {
 同样的隐式 gas-payment 本地 fallback 现在也覆盖 `tx build --emit-tx-block`、`tx simulate`、`tx dry-run` 的 programmable 路径，尽量让构造、模拟、执行走同一条本地 builder 主线。
 复用型的 `run/build command-source` helper 现在也对齐到了这条本地主线：direct-signature 和 default-keystore 在做 selected-argument 解析或 auto gas payment 后，会继续通过本地 authorized request 构造 execute payload，而不是再退回远端 `unsafe_*` builder。
 同样，`AccountProvider` 里的 direct-signatures、keystore-contents、default-keystore，以及已经完成 challenge-response 的 remote/future-wallet provider，在 command-source execute helper 里也会优先留在本地 authorized-request / local builder 路径；只有仍然显式依赖远端 `tx_bytes` 契约的分支，才继续走旧的 real-builder 路径。
+本地 programmable command-source execute payload 路径现在也和这条行为对齐了：对 challenge-approved 的 account-provider，如果没有自定义 `expiration`，会直接走 owned-plan / local builder，而不是先落成 `tx_bytes` 再交给 provider authorizer。
 - `tx build programmable`: 提供 `--commands` JSON 数组直接构建任意 PTB `ProgrammableTransaction`。
 - `tx build --signer`: 可复用 keystore 选择器（alias/address/key）；未提供 `--sender` 时优先使用首个可解析出地址的 signer。
 - `account list`: 列出 keystore 条目。

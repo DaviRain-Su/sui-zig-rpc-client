@@ -251,6 +251,9 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
 - [x] Keep challenge-approved remote/future-wallet account-provider
   command-source execute payloads on the local owned-plan / local builder
   path instead of dropping back to real-builder `tx_bytes`.
+- [x] Keep local programmable command-source execute payloads on the same
+  local owned-plan / local builder path for challenge-approved account
+  providers when no custom expiration is requested.
 - [ ] Continue shrinking `unsafe_moveCall` usage.
 - [ ] Continue shrinking `unsafe_batchTransaction` usage.
 - [ ] Keep construction, simulation, and execution aligned to the same local

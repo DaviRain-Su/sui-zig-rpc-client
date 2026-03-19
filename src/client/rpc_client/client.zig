@@ -12266,6 +12266,20 @@ pub const SuiRpcClient = struct {
         );
         defer parts.deinit(allocator);
 
+        if (expiration_json == null and accountProviderCanUseLocalOwnedPlanExecutePayload(provider)) {
+            var owned = try tx_request_builder.ownOptions(allocator, .{
+                .source = .{ .commands_json = parts.commands_json },
+                .sender = parts.sender,
+                .gas_budget = gas_budget,
+                .gas_price = gas_price,
+                .gas_payment_json = gas_payment_json,
+                .options_json = options_json,
+            });
+            var plan = owned.authorizationPlan(provider);
+            defer plan.deinit(allocator);
+            return try self.buildOwnedPlanArtifact(allocator, &plan, .execute_payload);
+        }
+
         const tx_bytes = try self.buildLocalProgrammableTransactionTxBytesFromParts(
             allocator,
             parts.inputs_json,
@@ -12314,6 +12328,20 @@ pub const SuiRpcClient = struct {
         );
         defer parts.deinit(allocator);
 
+        if (expiration_json == null and accountProviderCanUseLocalOwnedPlanExecutePayload(provider)) {
+            var owned = try tx_request_builder.ownOptions(allocator, .{
+                .source = .{ .commands_json = parts.commands_json },
+                .sender = parts.sender,
+                .gas_budget = gas_budget,
+                .gas_price = gas_price,
+                .gas_payment_json = gas_payment_json,
+                .options_json = options_json,
+            });
+            var plan = owned.authorizationPlan(provider);
+            defer plan.deinit(allocator);
+            return try self.runOwnedPlanOrChallengePrompt(allocator, &plan, action);
+        }
+
         const options: tx_request_builder.ProgrammaticRequestOptions = .{
             .source = .{ .commands_json = parts.commands_json },
             .sender = sender,
@@ -12361,6 +12389,31 @@ pub const SuiRpcClient = struct {
         action: ProgrammaticClientAction,
     ) !ProgrammaticClientActionResult {
         const updated_provider = try self.applySessionChallengeResponse(provider, response);
+        if (expiration_json == null and accountProviderCanUseLocalOwnedPlanExecutePayload(updated_provider)) {
+            var parts = try self.ownLocalProgrammableTransactionPartsFromCommandSource(
+                allocator,
+                source,
+                sender,
+                gas_payment_json,
+                gas_price,
+                gas_budget,
+                expiration_json,
+            );
+            defer parts.deinit(allocator);
+
+            var owned = try tx_request_builder.ownOptions(allocator, .{
+                .source = .{ .commands_json = parts.commands_json },
+                .sender = parts.sender,
+                .gas_budget = gas_budget,
+                .gas_price = gas_price,
+                .gas_payment_json = gas_payment_json,
+                .options_json = options_json,
+            });
+            var plan = owned.authorizationPlan(updated_provider);
+            defer plan.deinit(allocator);
+            return try self.runOwnedPlan(allocator, &plan, action);
+        }
+
         const payload = try self.buildLocalProgrammableTransactionExecutePayloadFromCommandSourceWithAccountProvider(
             allocator,
             source,
@@ -27051,9 +27104,7 @@ test "runCommandSourceResolvingSelectedArgumentTokensWithChallengeResponseWithAc
                     "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xapprove-real\",\"type\":\"0x2::example::Thing\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
                 );
             }
-            if (std.mem.eql(u8, req.method, "unsafe_moveCall")) {
-                return alloc.dupe(u8, "{\"result\":{\"txBytes\":\"AQIDBA==\"}}");
-            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall") or std.mem.eql(u8, req.method, "unsafe_batchTransaction")) return error.TestUnexpectedResult;
             if (std.mem.eql(u8, req.method, "sui_executeTransactionBlock")) {
                 return alloc.dupe(u8, "{\"result\":{\"digest\":\"selected-provider-digest\"}}");
             }
@@ -27068,7 +27119,7 @@ test "runCommandSourceResolvingSelectedArgumentTokensWithChallengeResponseWithAc
     const authorizer = struct {
         fn call(_: *anyopaque, _: std.mem.Allocator, req: tx_request_builder.RemoteAuthorizationRequest) !tx_request_builder.RemoteAuthorizationResult {
             try testing.expect(req.tx_bytes_base64 != null);
-            try testing.expectEqualStrings("AQIDBA==", req.tx_bytes_base64.?);
+            try testing.expect(req.tx_bytes_base64.?.len > 0);
             try testing.expectEqualStrings("approved-real-selected", req.account_session.session_id.?);
             return .{
                 .sender = "0xowner",
@@ -27131,7 +27182,7 @@ test "runCommandSourceResolvingSelectedArgumentTokensWithChallengeResponseWithAc
         },
         else => try testing.expect(false),
     }
-    try testing.expectEqual(@as(usize, 4), state.request_count);
+    try testing.expectEqual(@as(usize, 3), state.request_count);
 }
 
 test "runCommandSourceWithAutoGasPaymentOrChallengePromptWithAccountProvider returns structured prompts" {
@@ -27232,9 +27283,7 @@ test "runCommandSourceWithAutoGasPaymentWithChallengeResponseWithAccountProvider
                     "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xapprove-auto-coin\",\"version\":\"8\",\"digest\":\"digest-approve-auto-coin\",\"balance\":\"95\"}],\"hasNextPage\":false}}",
                 );
             }
-            if (std.mem.eql(u8, req.method, "unsafe_batchTransaction")) {
-                return alloc.dupe(u8, "{\"result\":{\"txBytes\":\"AQIDBA==\"}}");
-            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall") or std.mem.eql(u8, req.method, "unsafe_batchTransaction")) return error.TestUnexpectedResult;
             if (std.mem.eql(u8, req.method, "sui_executeTransactionBlock")) {
                 return alloc.dupe(u8, "{\"result\":{\"digest\":\"auto-provider-digest\"}}");
             }
@@ -27249,7 +27298,7 @@ test "runCommandSourceWithAutoGasPaymentWithChallengeResponseWithAccountProvider
     const authorizer = struct {
         fn call(_: *anyopaque, _: std.mem.Allocator, req: tx_request_builder.RemoteAuthorizationRequest) !tx_request_builder.RemoteAuthorizationResult {
             try testing.expect(req.tx_bytes_base64 != null);
-            try testing.expectEqualStrings("AQIDBA==", req.tx_bytes_base64.?);
+            try testing.expect(req.tx_bytes_base64.?.len > 0);
             try testing.expectEqualStrings("approved-real-auto", req.account_session.session_id.?);
             return .{
                 .sender = "0xowner",
@@ -27306,7 +27355,7 @@ test "runCommandSourceWithAutoGasPaymentWithChallengeResponseWithAccountProvider
         },
         else => try testing.expect(false),
     }
-    try testing.expectEqual(@as(usize, 4), state.request_count);
+    try testing.expectEqual(@as(usize, 3), state.request_count);
 }
 
 test "SelectedArgumentDslBuilder runOrChallengePrompt returns structured prompts from selected arguments" {
