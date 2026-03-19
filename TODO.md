@@ -57,6 +57,8 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
 - [x] Reuse owned module-event discovery results across a single
   `move function` template build instead of rescanning the same module
   fallback in later parameters or fixed-point rounds.
+- [x] Reuse borrowed owned module-event candidates inside fallback merge paths
+  instead of recloning temporary candidate arrays on each lookup.
 - [x] Shared object candidate discovery from module events.
 - [x] Aggregate multiple recent event pages when discovering shared object
   candidates from module events.
