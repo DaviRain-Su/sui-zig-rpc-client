@@ -4638,6 +4638,50 @@ pub const SuiRpcClient = struct {
         return try cloneMoveDiscoveredObjectIds(allocator, owned_ids);
     }
 
+    fn getMoveDynamicFieldDiscoveredObjectIdsCachedBorrowed(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        cache: *std.ArrayList(MoveDynamicFieldDiscoveryCacheEntry),
+        parent_object_id: []const u8,
+    ) ![]const []const u8 {
+        for (cache.items) |entry| {
+            if (std.mem.eql(u8, entry.parent_object_id, parent_object_id)) {
+                return entry.discovered_object_ids;
+            }
+        }
+
+        var page = try self.getAllDynamicFieldsWithRequest(
+            allocator,
+            parent_object_id,
+            .{ .limit = 20 },
+        );
+        defer page.deinit(allocator);
+
+        var discovered_ids = std.ArrayList([]u8).empty;
+        defer {
+            for (discovered_ids.items) |value| allocator.free(value);
+            discovered_ids.deinit(allocator);
+        }
+        try appendDiscoveredObjectIdsFromDynamicFields(
+            allocator,
+            &discovered_ids,
+            page,
+            16,
+        );
+
+        const owned_ids = try discovered_ids.toOwnedSlice(allocator);
+        errdefer freeMoveDiscoveredObjectIds(allocator, owned_ids);
+
+        var entry = MoveDynamicFieldDiscoveryCacheEntry{
+            .parent_object_id = try allocator.dupe(u8, parent_object_id),
+            .discovered_object_ids = owned_ids,
+        };
+        errdefer entry.deinit(allocator);
+
+        try cache.append(allocator, entry);
+        return cache.items[cache.items.len - 1].discovered_object_ids;
+    }
+
     const MoveObjectSummaryCacheEntry = struct {
         object_id: []u8,
         summary: object_result.OwnedObjectSummary,
@@ -4794,15 +4838,11 @@ pub const SuiRpcClient = struct {
         if (allow_dynamic_field_fallback and discovered_ids.items.len < 16) {
             for (seed_object_ids) |object_id| {
                 if (discovered_ids.items.len >= 16) break;
-                const dynamic_field_object_ids = self.getMoveDynamicFieldDiscoveredObjectIdsCached(
+                const dynamic_field_object_ids = self.getMoveDynamicFieldDiscoveredObjectIdsCachedBorrowed(
                     allocator,
                     dynamic_field_cache,
                     object_id,
                 ) catch continue;
-                defer {
-                    for (dynamic_field_object_ids) |value| allocator.free(value);
-                    allocator.free(dynamic_field_object_ids);
-                }
                 for (dynamic_field_object_ids) |dynamic_field_object_id| {
                     if (discovered_ids.items.len >= 16) break;
                     try appendUniqueMoveSelectedObjectId(allocator, &discovered_ids, dynamic_field_object_id);
@@ -4915,15 +4955,11 @@ pub const SuiRpcClient = struct {
         if (allow_dynamic_field_fallback and discovered_ids.items.len < 16) {
             for (seed_object_ids) |object_id| {
                 if (discovered_ids.items.len >= 16) break;
-                const dynamic_field_object_ids = self.getMoveDynamicFieldDiscoveredObjectIdsCached(
+                const dynamic_field_object_ids = self.getMoveDynamicFieldDiscoveredObjectIdsCachedBorrowed(
                     allocator,
                     dynamic_field_cache,
                     object_id,
                 ) catch continue;
-                defer {
-                    for (dynamic_field_object_ids) |value| allocator.free(value);
-                    allocator.free(dynamic_field_object_ids);
-                }
                 for (dynamic_field_object_ids) |dynamic_field_object_id| {
                     if (discovered_ids.items.len >= 16) break;
                     try appendUniqueMoveSelectedObjectId(allocator, &discovered_ids, dynamic_field_object_id);
@@ -20299,6 +20335,69 @@ test "getMoveObjectContentDiscoveredObjectIdsCached reuses cached discoveries af
     try testing.expectEqual(@as(usize, 2), borrowed.len);
     try testing.expectEqualStrings("0xpool1", borrowed[0]);
     try testing.expectEqualStrings("0xposition1", borrowed[1]);
+}
+
+test "getMoveDynamicFieldDiscoveredObjectIdsCachedBorrowed reuses cached discoveries" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const State = struct {
+        request_count: usize = 0,
+    };
+    var state = State{};
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const callback_state = @as(*State, @ptrCast(@alignCast(context)));
+            try testing.expectEqualStrings("suix_getDynamicFields", req.method);
+            try testing.expectEqualStrings("[\"0xparent\",null,20]", req.params_json);
+            callback_state.request_count += 1;
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"name\":{\"type\":\"address\",\"value\":\"0xowner\"},\"type\":\"DynamicField\",\"objectType\":\"0x2a::pool::Pool\",\"objectId\":\"0xpool1\",\"version\":\"4\",\"digest\":\"pool-digest-1\"},{\"name\":{\"type\":\"address\",\"value\":\"0xowner2\"},\"type\":\"DynamicField\",\"objectType\":\"0x2a::position::Position\",\"objectId\":\"0xposition1\",\"version\":\"5\",\"digest\":\"position-digest-1\"}],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &state,
+        .callback = callback,
+    };
+
+    var discovery_cache = std.ArrayList(SuiRpcClient.MoveDynamicFieldDiscoveryCacheEntry).empty;
+    defer SuiRpcClient.deinitMoveDynamicFieldDiscoveryCache(allocator, &discovery_cache);
+
+    const borrowed_first = try client_instance.getMoveDynamicFieldDiscoveredObjectIdsCachedBorrowed(
+        allocator,
+        &discovery_cache,
+        "0xparent",
+    );
+    try testing.expectEqual(@as(usize, 1), state.request_count);
+    try testing.expectEqual(@as(usize, 2), borrowed_first.len);
+    try testing.expectEqualStrings("0xpool1", borrowed_first[0]);
+    try testing.expectEqualStrings("0xposition1", borrowed_first[1]);
+
+    const cloned = try client_instance.getMoveDynamicFieldDiscoveredObjectIdsCached(
+        allocator,
+        &discovery_cache,
+        "0xparent",
+    );
+    defer SuiRpcClient.freeMoveDiscoveredObjectIds(allocator, cloned);
+    try testing.expectEqual(@as(usize, 1), state.request_count);
+    try testing.expectEqual(@as(usize, 2), cloned.len);
+
+    const borrowed_second = try client_instance.getMoveDynamicFieldDiscoveredObjectIdsCachedBorrowed(
+        allocator,
+        &discovery_cache,
+        "0xparent",
+    );
+    try testing.expectEqual(@as(usize, 1), state.request_count);
+    try testing.expectEqualStrings("0xpool1", borrowed_second[0]);
+    try testing.expectEqualStrings("0xposition1", borrowed_second[1]);
 }
 
 test "runObjectQueryAndSummarize supports typed object-get queries" {

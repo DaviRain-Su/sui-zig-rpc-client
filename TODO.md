@@ -153,6 +153,8 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
 - [x] Reuse repeated seed-object dynamic-field scans across a single
   `move function` template build instead of rescanning the same object during
   shared/owned fallback discovery rounds.
+- [x] Reuse borrowed cached dynamic-field discoveries inside shared/owned
+  fallback hot paths instead of recloning temporary object-id lists.
 - [x] Reuse repeated candidate object summary reads across a single
   `move function` template build instead of refetching the same object during
   shared/owned candidate filtering.

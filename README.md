@@ -1035,6 +1035,7 @@ zig build run -- move function cetus_clmm_mainnet pool swap \
 同一轮模板生成里，重复命中的 seed object `showContent` 读取现在也会缓存复用，所以 shared/owned fallback、候选打分和 fixed-point 联动不会再反复读取同一个对象内容。
 而且同一个 seed object 从 `showContent` 内容里抽出来的 object id 列表本身也会缓存复用，不再在 shared/owned fallback 和候选评分里重复解析同一份内容 JSON。
 同样地，seed object 的 `dynamic fields` 扫描现在也会在单次模板构建里缓存复用，不再因为 shared/owned fallback 交替推进而重复扫同一个对象。
+而且 dynamic-field 发现结果在 shared/owned fallback 热路径里现在也会直接借用缓存，不再每次都 clone/free 一份临时 object id 列表。
 候选过滤阶段复用的 `object get --summarize` 读取现在也会在单次模板构建里缓存复用，所以相同 object id 不会因为多个参数或多轮联动重复做 summary 过滤。
 而且 shared/owned candidate filtering 现在也会直接借用这层 cached object summary，不再在内部热路径里反复 clone/free 同一份摘要结构。
 连通簇联合评分这层也不再反复扫原始 `showContent` JSON，而是直接复用前面已经缓存好的 content-derived object id 列表来判断候选之间的引用关系和锚定关系。
