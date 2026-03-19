@@ -262,7 +262,7 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
   discovery coverage.
 - [x] Add an `admin_upgrade_lab` package for capability/publish/upgrade
   coverage.
-- [ ] Add a `pool_like_protocol_lab` package for transaction-level
+- [x] Add a `pool_like_protocol_lab` package for transaction-level
   `Pool + Position + Coin + gas` coverage.
 - [ ] Wire the local package matrix into deterministic regression docs/tests,
   not only live protocol smoke checks.

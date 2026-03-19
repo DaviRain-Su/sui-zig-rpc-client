@@ -106,6 +106,14 @@ sui move test --path fixtures/move/dynamic_registry
 sui move test --path fixtures/move/admin_upgrade_lab
 ```
 
+- [`fixtures/move/pool_like_protocol_lab`](/Users/davirian/dev/zig/sui-zig-rpc-client/fixtures/move/pool_like_protocol_lab)
+  - 覆盖 shared `Pool<X, Y>`、owned `Position`、owned `PoolManager`、dual-coin scalar/vector add-liquidity、receipt 和 snapshot
+  - 可直接运行：
+
+```bash
+sui move test --path fixtures/move/pool_like_protocol_lab
+```
+
 接下来更关键的补强，不是继续堆 live 协议样例，而是把一组本地可控的复杂
 Move package 收成固定矩阵。这样 shared/owned/generic/vector/receipt/dynamic
 fields 这些能力才能被 deterministic 地锁住，而不是只靠 Cetus 主网 smoke

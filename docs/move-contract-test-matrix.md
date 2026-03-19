@@ -177,6 +177,9 @@
 - preferred request artifact 生成
 - unresolved placeholder 继续缩减
 
+- 已落地：[`fixtures/move/pool_like_protocol_lab`](/Users/davirian/dev/zig/sui-zig-rpc-client/fixtures/move/pool_like_protocol_lab)
+- 已验证：`sui move test --path fixtures/move/pool_like_protocol_lab`
+
 ## 推荐落地顺序
 
 如果要按收益排序，不建议从最大最复杂的 pool-like package 开始。

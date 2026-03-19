@@ -1,0 +1,6 @@
+[package]
+name = "pool_like_protocol_lab"
+edition = "2024"
+
+[addresses]
+pool_like_protocol_lab = "0x0"
