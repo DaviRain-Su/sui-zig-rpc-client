@@ -4390,7 +4390,7 @@ pub const SuiRpcClient = struct {
             return try coin_candidates.toOwnedSlice(allocator);
         }
 
-        var page = try self.getOwnedObjectsPageWithRequest(allocator, owner, .{
+        var page = try self.getAllOwnedObjectsWithRequest(allocator, owner, .{
             .filter = .{ .struct_type = struct_type },
             .options = .{
                 .typed = .{
@@ -4398,7 +4398,7 @@ pub const SuiRpcClient = struct {
                     .show_owner = true,
                 },
             },
-            .limit = 5,
+            .limit = 20,
         });
         defer page.deinit(allocator);
 

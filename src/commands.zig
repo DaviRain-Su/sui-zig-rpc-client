@@ -3422,7 +3422,7 @@ test "runCommand move function with --summarize fills owner context into owned o
             std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"StructType\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb::position::Position\"") != null);
             std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"showType\":true") != null);
             std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"showOwner\":true") != null);
-            std.debug.assert(std.mem.indexOf(u8, req.params_json, ",5]") != null);
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, ",20]") != null);
             return alloc.dupe(
                 u8,
                 "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xposition1\",\"version\":\"7\",\"digest\":\"position-digest-1\",\"type\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb::position::Position\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
@@ -3483,6 +3483,96 @@ test "runCommand move function with --summarize fills owner context into owned o
         "[\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xposition1\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":7,\\\"digest\\\":\\\"position-digest-1\\\"}\"]",
         parsed.value.object.get("call_template").?.object.get("preferred_args_json").?.string,
     );
+}
+
+test "runCommand move function with --summarize discovers owned object candidates across owned-object pages" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var owned_request_count: usize = 0;
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const request_count = @as(*usize, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"visibility\":\"Public\",\"isEntry\":false,\"typeParameters\":[[],[]],\"parameters\":[{\"MutableReference\":{\"Struct\":{\"address\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb\",\"module\":\"position\",\"name\":\"Position\",\"typeParams\":[]}}}],\"return\":[]}}",
+                );
+            }
+
+            if (std.mem.eql(u8, req.method, "sui_getObject")) {
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"showContent\":true") != null);
+                if (std.mem.indexOf(u8, req.params_json, "\"0xposition1\"") != null) {
+                    return alloc.dupe(
+                        u8,
+                        "{\"result\":{\"data\":{\"objectId\":\"0xposition1\",\"version\":\"7\",\"digest\":\"position-digest-1\",\"content\":{\"dataType\":\"moveObject\",\"fields\":{\"liquidity\":\"9\"}}}}}",
+                    );
+                }
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0xposition2\"") != null);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":{\"objectId\":\"0xposition2\",\"version\":\"8\",\"digest\":\"position-digest-2\",\"content\":{\"dataType\":\"moveObject\",\"fields\":{\"liquidity\":\"3\"}}}}}",
+                );
+            }
+
+            std.debug.assert(std.mem.eql(u8, req.method, "suix_getOwnedObjects"));
+            request_count.* += 1;
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0xowner\"") != null);
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"StructType\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb::position::Position\"") != null);
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"showType\":true") != null);
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"showOwner\":true") != null);
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, ",20]") != null);
+
+            if (request_count.* == 1) {
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, ",null,20]") != null);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xposition1\",\"version\":\"7\",\"digest\":\"position-digest-1\",\"type\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb::position::Position\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"nextCursor\":\"cursor-next\",\"hasNextPage\":true}}",
+                );
+            }
+
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"cursor-next\"") != null);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xposition2\",\"version\":\"8\",\"digest\":\"position-digest-2\",\"type\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb::position::Position\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"nextCursor\":null,\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var args = cli.ParsedArgs{
+        .command = .move_function,
+        .has_command = true,
+        .move_package = client.package_preset.cetus_clmm_mainnet,
+        .move_module = "pool",
+        .move_function = "add_liquidity_fix_coin",
+        .tx_build_sender = "0xowner",
+        .tx_send_summarize = true,
+    };
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = &owned_request_count,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    const parameter = parsed.value.object.get("parameters").?.array.items[0].object;
+    const owned_candidates = parameter.get("owned_object_candidates").?.array.items;
+    try testing.expectEqual(@as(usize, 2), owned_request_count);
+    try testing.expectEqual(@as(usize, 2), owned_candidates.len);
+    try testing.expectEqualStrings("0xposition1", owned_candidates[0].object.get("object_id").?.string);
+    try testing.expectEqualStrings("0xposition2", owned_candidates[1].object.get("object_id").?.string);
 }
 
 test "runCommand move function with --summarize discovers specialized generic owned objects from owner context" {
