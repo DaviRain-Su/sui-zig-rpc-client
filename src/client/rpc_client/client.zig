@@ -4991,6 +4991,7 @@ pub const SuiRpcClient = struct {
     fn collectObjectDiscoverySeedObjectIdsFromMoveParameters(
         allocator: std.mem.Allocator,
         parameters: []const move_result.OwnedMoveParameterSummary,
+        arg_json_cache: *std.ArrayList(MoveArgumentSelectedObjectIdsCacheEntry),
     ) ![][]u8 {
         const move_object_discovery_seed_global_limit: usize = 32;
         const move_object_discovery_seed_per_parameter_limit: usize = 4;
@@ -5001,7 +5002,11 @@ pub const SuiRpcClient = struct {
             collected.deinit(allocator);
         }
 
-        const selected_object_ids = try collectSelectedObjectIdsFromMoveParameters(allocator, parameters);
+        const selected_object_ids = try collectSelectedObjectIdsFromMoveParameters(
+            allocator,
+            parameters,
+            arg_json_cache,
+        );
         defer {
             for (selected_object_ids) |value| allocator.free(value);
             allocator.free(selected_object_ids);
@@ -5149,7 +5154,14 @@ pub const SuiRpcClient = struct {
         signature: []const u8,
         allow_dynamic_field_fallback: bool,
     ) ![]move_result.SharedMoveObjectCandidate {
-        const seed_object_ids = try collectObjectDiscoverySeedObjectIdsFromMoveParameters(allocator, parameters);
+        var arg_json_cache = std.ArrayList(MoveArgumentSelectedObjectIdsCacheEntry).empty;
+        defer deinitMoveArgumentSelectedObjectIdsCache(allocator, &arg_json_cache);
+
+        const seed_object_ids = try collectObjectDiscoverySeedObjectIdsFromMoveParameters(
+            allocator,
+            parameters,
+            &arg_json_cache,
+        );
         defer freeMoveDiscoveredObjectIds(allocator, seed_object_ids);
 
         return try self.discoverSharedObjectCandidatesFromSeedObjectIds(
@@ -5224,7 +5236,14 @@ pub const SuiRpcClient = struct {
         struct_type: []const u8,
         allow_dynamic_field_fallback: bool,
     ) ![]move_result.OwnedMoveObjectCandidate {
-        const seed_object_ids = try collectObjectDiscoverySeedObjectIdsFromMoveParameters(allocator, parameters);
+        var arg_json_cache = std.ArrayList(MoveArgumentSelectedObjectIdsCacheEntry).empty;
+        defer deinitMoveArgumentSelectedObjectIdsCache(allocator, &arg_json_cache);
+
+        const seed_object_ids = try collectObjectDiscoverySeedObjectIdsFromMoveParameters(
+            allocator,
+            parameters,
+            &arg_json_cache,
+        );
         defer freeMoveDiscoveredObjectIds(allocator, seed_object_ids);
 
         return try self.discoverOwnedObjectCandidatesFromSeedObjectIds(
@@ -5904,8 +5923,13 @@ pub const SuiRpcClient = struct {
     fn collectSelectedObjectIdsFromMoveParameters(
         allocator: std.mem.Allocator,
         parameters: []const move_result.OwnedMoveParameterSummary,
+        arg_json_cache: *std.ArrayList(MoveArgumentSelectedObjectIdsCacheEntry),
     ) ![][]u8 {
-        const bucketed = try collectSelectedObjectIdsFromMoveParametersBySource(allocator, parameters);
+        const bucketed = try collectSelectedObjectIdsFromMoveParametersBySource(
+            allocator,
+            parameters,
+            arg_json_cache,
+        );
         defer bucketed.deinit(allocator);
 
         var collected = std.ArrayList([]u8).empty;
@@ -5936,9 +5960,68 @@ pub const SuiRpcClient = struct {
         }
     };
 
+    const MoveArgumentSelectedObjectIdsCacheEntry = struct {
+        arg_json: []u8,
+        object_ids: [][]u8,
+
+        fn deinit(self: *MoveArgumentSelectedObjectIdsCacheEntry, allocator: std.mem.Allocator) void {
+            allocator.free(self.arg_json);
+            for (self.object_ids) |value| allocator.free(value);
+            allocator.free(self.object_ids);
+        }
+    };
+
+    fn deinitMoveArgumentSelectedObjectIdsCache(
+        allocator: std.mem.Allocator,
+        cache: *std.ArrayList(MoveArgumentSelectedObjectIdsCacheEntry),
+    ) void {
+        for (cache.items) |*entry| entry.deinit(allocator);
+        cache.deinit(allocator);
+    }
+
+    fn collectSelectedObjectIdsFromArgumentJson(
+        allocator: std.mem.Allocator,
+        arg_json: []const u8,
+    ) ![][]u8 {
+        var collected = std.ArrayList([]u8).empty;
+        errdefer {
+            for (collected.items) |value| allocator.free(value);
+            collected.deinit(allocator);
+        }
+
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, arg_json, .{});
+        defer parsed.deinit();
+        try appendSelectedObjectIdsFromArgumentJsonValue(allocator, &collected, parsed.value);
+
+        return try collected.toOwnedSlice(allocator);
+    }
+
+    fn getMoveArgumentSelectedObjectIdsCachedBorrowed(
+        allocator: std.mem.Allocator,
+        cache: *std.ArrayList(MoveArgumentSelectedObjectIdsCacheEntry),
+        arg_json: []const u8,
+    ) ![]const []const u8 {
+        for (cache.items) |entry| {
+            if (std.mem.eql(u8, entry.arg_json, arg_json)) return entry.object_ids;
+        }
+
+        const object_ids = try collectSelectedObjectIdsFromArgumentJson(allocator, arg_json);
+        errdefer freeMoveDiscoveredObjectIds(allocator, object_ids);
+
+        var entry = MoveArgumentSelectedObjectIdsCacheEntry{
+            .arg_json = try allocator.dupe(u8, arg_json),
+            .object_ids = object_ids,
+        };
+        errdefer entry.deinit(allocator);
+
+        try cache.append(allocator, entry);
+        return cache.items[cache.items.len - 1].object_ids;
+    }
+
     fn collectSelectedObjectIdsFromMoveParametersBySource(
         allocator: std.mem.Allocator,
         parameters: []const move_result.OwnedMoveParameterSummary,
+        arg_json_cache: *std.ArrayList(MoveArgumentSelectedObjectIdsCacheEntry),
     ) !SelectedMoveObjectIdBuckets {
         var explicit_object_ids = std.ArrayList([]u8).empty;
         errdefer {
@@ -5954,16 +6037,26 @@ pub const SuiRpcClient = struct {
 
         for (parameters) |parameter| {
             if (parameter.explicit_arg_json) |arg_json| {
-                const parsed = std.json.parseFromSlice(std.json.Value, allocator, arg_json, .{}) catch continue;
-                defer parsed.deinit();
-                try appendSelectedObjectIdsFromArgumentJsonValue(allocator, &explicit_object_ids, parsed.value);
+                const object_ids = getMoveArgumentSelectedObjectIdsCachedBorrowed(
+                    allocator,
+                    arg_json_cache,
+                    arg_json,
+                ) catch continue;
+                for (object_ids) |object_id| {
+                    try appendUniqueMoveSelectedObjectId(allocator, &explicit_object_ids, object_id);
+                }
             }
 
             if (!parameter.auto_selected_via_tiebreak) {
                 if (parameter.auto_selected_arg_json) |arg_json| {
-                    const parsed = std.json.parseFromSlice(std.json.Value, allocator, arg_json, .{}) catch continue;
-                    defer parsed.deinit();
-                    try appendSelectedObjectIdsFromArgumentJsonValue(allocator, &auto_selected_object_ids, parsed.value);
+                    const object_ids = getMoveArgumentSelectedObjectIdsCachedBorrowed(
+                        allocator,
+                        arg_json_cache,
+                        arg_json,
+                    ) catch continue;
+                    for (object_ids) |object_id| {
+                        try appendUniqueMoveSelectedObjectId(allocator, &auto_selected_object_ids, object_id);
+                    }
                 }
             }
         }
@@ -6142,8 +6235,13 @@ pub const SuiRpcClient = struct {
         object_content_cache: *std.ArrayList(MoveObjectContentResponseCacheEntry),
         object_content_discovery_cache: *std.ArrayList(MoveObjectContentDiscoveryCacheEntry),
         parameters: []move_result.OwnedMoveParameterSummary,
+        arg_json_cache: *std.ArrayList(MoveArgumentSelectedObjectIdsCacheEntry),
     ) !void {
-        const selected_object_ids = try collectSelectedObjectIdsFromMoveParameters(allocator, parameters);
+        const selected_object_ids = try collectSelectedObjectIdsFromMoveParameters(
+            allocator,
+            parameters,
+            arg_json_cache,
+        );
         defer {
             for (selected_object_ids) |value| allocator.free(value);
             allocator.free(selected_object_ids);
@@ -6261,6 +6359,7 @@ pub const SuiRpcClient = struct {
         dynamic_field_cache: *std.ArrayList(MoveDynamicFieldDiscoveryCacheEntry),
         object_summary_cache: *std.ArrayList(MoveObjectSummaryCacheEntry),
         parameters: []move_result.OwnedMoveParameterSummary,
+        arg_json_cache: *std.ArrayList(MoveArgumentSelectedObjectIdsCacheEntry),
     ) !void {
         var cached_seed_object_ids: ?[][]u8 = null;
         defer if (cached_seed_object_ids) |seed_object_ids| {
@@ -6275,7 +6374,11 @@ pub const SuiRpcClient = struct {
             if (containsMoveTypeParameterText(trimMoveReferenceSignature(parameter.signature))) continue;
 
             if (cached_seed_object_ids == null) {
-                cached_seed_object_ids = try collectObjectDiscoverySeedObjectIdsFromMoveParameters(allocator, parameters);
+                cached_seed_object_ids = try collectObjectDiscoverySeedObjectIdsFromMoveParameters(
+                    allocator,
+                    parameters,
+                    arg_json_cache,
+                );
             }
 
             const discovered_candidates = try self.discoverSharedObjectCandidatesFromSeedObjectIds(
@@ -6374,6 +6477,7 @@ pub const SuiRpcClient = struct {
         event_package_id: ?[]const u8,
         event_module_name: ?[]const u8,
         owned_event_cache: *std.ArrayList(OwnedModuleEventDiscoveryCacheEntry),
+        arg_json_cache: *std.ArrayList(MoveArgumentSelectedObjectIdsCacheEntry),
     ) !void {
         const owner = owner_address orelse return;
         var cached_seed_object_ids: ?[][]u8 = null;
@@ -6386,7 +6490,11 @@ pub const SuiRpcClient = struct {
             if (parameter.explicit_arg_json != null) continue;
 
             if (cached_seed_object_ids == null) {
-                cached_seed_object_ids = try collectObjectDiscoverySeedObjectIdsFromMoveParameters(allocator, parameters);
+                cached_seed_object_ids = try collectObjectDiscoverySeedObjectIdsFromMoveParameters(
+                    allocator,
+                    parameters,
+                    arg_json_cache,
+                );
             }
 
             const scalar_struct_type = blk: {
@@ -6744,8 +6852,13 @@ pub const SuiRpcClient = struct {
         object_content_cache: *std.ArrayList(MoveObjectContentResponseCacheEntry),
         object_content_discovery_cache: *std.ArrayList(MoveObjectContentDiscoveryCacheEntry),
         parameters: []move_result.OwnedMoveParameterSummary,
+        arg_json_cache: *std.ArrayList(MoveArgumentSelectedObjectIdsCacheEntry),
     ) !void {
-        const selected_object_ids = try collectSelectedObjectIdsFromMoveParametersBySource(allocator, parameters);
+        const selected_object_ids = try collectSelectedObjectIdsFromMoveParametersBySource(
+            allocator,
+            parameters,
+            arg_json_cache,
+        );
         defer selected_object_ids.deinit(allocator);
 
         var total_owned_hint_count: usize = 0;
@@ -6864,8 +6977,13 @@ pub const SuiRpcClient = struct {
         object_content_cache: *std.ArrayList(MoveObjectContentResponseCacheEntry),
         object_content_discovery_cache: *std.ArrayList(MoveObjectContentDiscoveryCacheEntry),
         parameters: []move_result.OwnedMoveParameterSummary,
+        arg_json_cache: *std.ArrayList(MoveArgumentSelectedObjectIdsCacheEntry),
     ) !void {
-        const selected_object_ids = try collectSelectedObjectIdsFromMoveParametersBySource(allocator, parameters);
+        const selected_object_ids = try collectSelectedObjectIdsFromMoveParametersBySource(
+            allocator,
+            parameters,
+            arg_json_cache,
+        );
         defer selected_object_ids.deinit(allocator);
         if (selected_object_ids.explicit_object_ids.len == 0 and selected_object_ids.auto_selected_object_ids.len == 0) return;
 
@@ -6921,8 +7039,13 @@ pub const SuiRpcClient = struct {
         object_content_cache: *std.ArrayList(MoveObjectContentResponseCacheEntry),
         object_content_discovery_cache: *std.ArrayList(MoveObjectContentDiscoveryCacheEntry),
         parameters: []move_result.OwnedMoveParameterSummary,
+        arg_json_cache: *std.ArrayList(MoveArgumentSelectedObjectIdsCacheEntry),
     ) !void {
-        const selected_object_ids = try collectSelectedObjectIdsFromMoveParametersBySource(allocator, parameters);
+        const selected_object_ids = try collectSelectedObjectIdsFromMoveParametersBySource(
+            allocator,
+            parameters,
+            arg_json_cache,
+        );
         defer selected_object_ids.deinit(allocator);
         if (selected_object_ids.explicit_object_ids.len == 0 and selected_object_ids.auto_selected_object_ids.len == 0) return;
 
@@ -7390,6 +7513,7 @@ pub const SuiRpcClient = struct {
         object_content_cache: *std.ArrayList(MoveObjectContentResponseCacheEntry),
         object_content_discovery_cache: *std.ArrayList(MoveObjectContentDiscoveryCacheEntry),
         parameters: []move_result.OwnedMoveParameterSummary,
+        arg_json_cache: *std.ArrayList(MoveArgumentSelectedObjectIdsCacheEntry),
     ) !void {
         var has_ambiguous_candidates = false;
         for (parameters) |parameter| {
@@ -7403,6 +7527,7 @@ pub const SuiRpcClient = struct {
         const selected_object_ids = try collectSelectedObjectIdsFromMoveParametersBySource(
             allocator,
             parameters,
+            arg_json_cache,
         );
         defer selected_object_ids.deinit(allocator);
 
@@ -7812,6 +7937,9 @@ pub const SuiRpcClient = struct {
         event_module_name: ?[]const u8,
         owned_event_cache: *std.ArrayList(OwnedModuleEventDiscoveryCacheEntry),
     ) !void {
+        var arg_json_cache = std.ArrayList(MoveArgumentSelectedObjectIdsCacheEntry).empty;
+        defer deinitMoveArgumentSelectedObjectIdsCache(allocator, &arg_json_cache);
+
         var round: usize = 0;
         while (round < move_candidate_resolution_max_rounds) : (round += 1) {
             const before = moveParameterSelectionStateFingerprint(parameters);
@@ -7824,6 +7952,7 @@ pub const SuiRpcClient = struct {
                 dynamic_field_cache,
                 object_summary_cache,
                 parameters,
+                &arg_json_cache,
             );
             try self.populateOwnedObjectCandidateFallbacksFromMoveParameters(
                 allocator,
@@ -7838,48 +7967,56 @@ pub const SuiRpcClient = struct {
                 event_package_id,
                 event_module_name,
                 owned_event_cache,
+                &arg_json_cache,
             );
             try self.applyReferencedSharedObjectCandidateSelectionHints(
                 allocator,
                 object_content_cache,
                 object_content_discovery_cache,
                 parameters,
+                &arg_json_cache,
             );
             try self.applySharedCandidateSelectionHintsFromOwnedCandidates(
                 allocator,
                 object_content_cache,
                 object_content_discovery_cache,
                 parameters,
+                &arg_json_cache,
             );
             try self.applyReferencedOwnedObjectCandidateSelectionHints(
                 allocator,
                 object_content_cache,
                 object_content_discovery_cache,
                 parameters,
+                &arg_json_cache,
             );
             try self.applyReferencedSharedObjectCandidateSelectionHints(
                 allocator,
                 object_content_cache,
                 object_content_discovery_cache,
                 parameters,
+                &arg_json_cache,
             );
             try self.applyReferencedOwnedObjectCandidateSelectionHints(
                 allocator,
                 object_content_cache,
                 object_content_discovery_cache,
                 parameters,
+                &arg_json_cache,
             );
             try self.applyReferencedVectorOwnedObjectCandidateSelectionHints(
                 allocator,
                 object_content_cache,
                 object_content_discovery_cache,
                 parameters,
+                &arg_json_cache,
             );
             try self.applyJointCandidateComponentSelectionHints(
                 allocator,
                 object_content_cache,
                 object_content_discovery_cache,
                 parameters,
+                &arg_json_cache,
             );
 
             const after = moveParameterSelectionStateFingerprint(parameters);
@@ -21794,6 +21931,37 @@ test "getMoveObjectContentDiscoveredObjectIdsCached reuses cached discoveries af
     try testing.expectEqualStrings("0xposition1", borrowed[1]);
 }
 
+test "getMoveArgumentSelectedObjectIdsCachedBorrowed reuses cached parsed object ids" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var cache = std.ArrayList(SuiRpcClient.MoveArgumentSelectedObjectIdsCacheEntry).empty;
+    defer SuiRpcClient.deinitMoveArgumentSelectedObjectIdsCache(allocator, &cache);
+
+    const arg_json =
+        "\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xpool1\\\",\\\"inputKind\\\":\\\"shared\\\",\\\"initialSharedVersion\\\":7,\\\"mutable\\\":true}\"";
+
+    const borrowed_first = try SuiRpcClient.getMoveArgumentSelectedObjectIdsCachedBorrowed(
+        allocator,
+        &cache,
+        arg_json,
+    );
+    try testing.expectEqual(@as(usize, 1), cache.items.len);
+    try testing.expectEqual(@as(usize, 1), borrowed_first.len);
+    try testing.expectEqualStrings("0xpool1", borrowed_first[0]);
+
+    const borrowed_second = try SuiRpcClient.getMoveArgumentSelectedObjectIdsCachedBorrowed(
+        allocator,
+        &cache,
+        arg_json,
+    );
+    try testing.expectEqual(@as(usize, 1), cache.items.len);
+    try testing.expectEqual(@as(usize, 1), borrowed_second.len);
+    try testing.expectEqualStrings("0xpool1", borrowed_second[0]);
+}
+
 test "collectObjectDiscoverySeedObjectIdsFromMoveParameters prioritizes selected ids and caps candidate seeds" {
     const testing = std.testing;
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -21878,9 +22046,13 @@ test "collectObjectDiscoverySeedObjectIdsFromMoveParameters prioritizes selected
         .vector_item_owned_object_candidates = vector_candidates,
     };
 
+    var arg_json_cache = std.ArrayList(SuiRpcClient.MoveArgumentSelectedObjectIdsCacheEntry).empty;
+    defer SuiRpcClient.deinitMoveArgumentSelectedObjectIdsCache(allocator, &arg_json_cache);
+
     const seeds = try SuiRpcClient.collectObjectDiscoverySeedObjectIdsFromMoveParameters(
         allocator,
         parameters,
+        &arg_json_cache,
     );
     defer SuiRpcClient.freeMoveDiscoveredObjectIds(allocator, seeds);
 
@@ -21965,9 +22137,13 @@ test "collectObjectDiscoverySeedObjectIdsFromMoveParameters skips candidate seed
         .shared_object_candidates = tiebreak_candidates,
     };
 
+    var arg_json_cache = std.ArrayList(SuiRpcClient.MoveArgumentSelectedObjectIdsCacheEntry).empty;
+    defer SuiRpcClient.deinitMoveArgumentSelectedObjectIdsCache(allocator, &arg_json_cache);
+
     const seeds = try SuiRpcClient.collectObjectDiscoverySeedObjectIdsFromMoveParameters(
         allocator,
         parameters,
+        &arg_json_cache,
     );
     defer SuiRpcClient.freeMoveDiscoveredObjectIds(allocator, seeds);
 

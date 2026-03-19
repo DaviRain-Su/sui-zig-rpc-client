@@ -183,6 +183,9 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
 - [x] Reuse collected seed object ids across a single shared/owned fallback
   pass, and only rebuild them when the current round actually changes a
   parameter's candidates or automatic selection.
+- [x] Reuse parsed selected-object ids for repeated `explicit_arg_json` /
+  `auto_selected_arg_json` values instead of reparsing the same argument JSON
+  across fixed-point scoring passes.
 - [x] Reuse repeated initial owner-context owned-object discovery reads across
   a single `move function` template build instead of requerying the same
   `(owner, struct type)` for multiple identical parameters.
