@@ -4334,10 +4334,15 @@ pub const SuiRpcClient = struct {
             for (discovered_ids.items) |value| allocator.free(value);
             discovered_ids.deinit(allocator);
         }
-        var discovered_tx_digests = std.ArrayList([]u8).empty;
+        var missing_id_tx_digests = std.ArrayList([]u8).empty;
         defer {
-            for (discovered_tx_digests.items) |value| allocator.free(value);
-            discovered_tx_digests.deinit(allocator);
+            for (missing_id_tx_digests.items) |value| allocator.free(value);
+            missing_id_tx_digests.deinit(allocator);
+        }
+        var supplemental_tx_digests = std.ArrayList([]u8).empty;
+        defer {
+            for (supplemental_tx_digests.items) |value| allocator.free(value);
+            supplemental_tx_digests.deinit(allocator);
         }
 
         var cursor_tx_digest: ?[]u8 = null;
@@ -4361,13 +4366,19 @@ pub const SuiRpcClient = struct {
             defer page.deinit(allocator);
 
             for (page.entries) |entry| {
-                if (entry.tx_digest) |tx_digest| {
-                    try appendUniqueMoveSelectedObjectId(allocator, &discovered_tx_digests, tx_digest);
+                const before_count = discovered_ids.items.len;
+                if (entry.parsed_json) |parsed_json| {
+                    const parsed = std.json.parseFromSlice(std.json.Value, allocator, parsed_json, .{}) catch continue;
+                    defer parsed.deinit();
+                    try appendDiscoveredObjectIdsFromJsonValue(allocator, &discovered_ids, parsed.value, 16);
                 }
-                const parsed_json = entry.parsed_json orelse continue;
-                const parsed = std.json.parseFromSlice(std.json.Value, allocator, parsed_json, .{}) catch continue;
-                defer parsed.deinit();
-                try appendDiscoveredObjectIdsFromJsonValue(allocator, &discovered_ids, parsed.value, 16);
+                if (entry.tx_digest) |tx_digest| {
+                    if (discovered_ids.items.len == before_count) {
+                        try appendUniqueMoveSelectedObjectId(allocator, &missing_id_tx_digests, tx_digest);
+                    } else {
+                        try appendUniqueMoveSelectedObjectId(allocator, &supplemental_tx_digests, tx_digest);
+                    }
+                }
                 if (discovered_ids.items.len >= 16) break;
             }
 
@@ -4380,8 +4391,23 @@ pub const SuiRpcClient = struct {
         }
 
         if (discovered_ids.items.len < 16) {
-            for (discovered_tx_digests.items) |tx_digest| {
+            for (missing_id_tx_digests.items) |tx_digest| {
                 if (discovered_ids.items.len >= 16) break;
+                const transaction_object_ids = self.getMoveTransactionObjectChangeDiscoveredObjectIdsCachedBorrowed(
+                    allocator,
+                    transaction_object_change_cache,
+                    tx_digest,
+                ) catch continue;
+                for (transaction_object_ids) |object_id| {
+                    if (discovered_ids.items.len >= 16) break;
+                    try appendUniqueMoveSelectedObjectId(allocator, &discovered_ids, object_id);
+                }
+            }
+            for_supplemental: for (supplemental_tx_digests.items) |tx_digest| {
+                if (discovered_ids.items.len >= 16) break;
+                for (missing_id_tx_digests.items) |existing| {
+                    if (std.mem.eql(u8, existing, tx_digest)) continue :for_supplemental;
+                }
                 const transaction_object_ids = self.getMoveTransactionObjectChangeDiscoveredObjectIdsCachedBorrowed(
                     allocator,
                     transaction_object_change_cache,
@@ -21945,7 +21971,7 @@ test "getMoveDynamicFieldDiscoveredObjectIdsCachedBorrowed reuses cached discove
     try testing.expectEqualStrings("0xposition1", borrowed_second[1]);
 }
 
-test "getMoveTransactionObjectChangeDiscoveredObjectIdsCachedBorrowed reuses cached discoveries" {
+    test "getMoveTransactionObjectChangeDiscoveredObjectIdsCachedBorrowed reuses cached discoveries" {
     const testing = std.testing;
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -22000,6 +22026,67 @@ test "getMoveTransactionObjectChangeDiscoveredObjectIdsCachedBorrowed reuses cac
     try testing.expectEqual(@as(usize, 1), state.request_count);
     try testing.expectEqualStrings("0xpool1", borrowed_second[0]);
     try testing.expectEqualStrings("0xposition1", borrowed_second[1]);
+}
+
+test "getMoveModuleEventDiscoveredObjectIdsCachedBorrowed prioritizes tx followups for events without parsed object ids" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const State = struct {
+        event_requests: usize = 0,
+        tx_requests: usize = 0,
+    };
+    var state = State{};
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const callback_state = @as(*State, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "suix_queryEvents")) {
+                callback_state.event_requests += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xtx-with-id\",\"eventSeq\":\"1\"},\"parsedJson\":{\"pool_id\":\"0xpool-from-event\"}},{\"id\":{\"txDigest\":\"0xtx-missing-id\",\"eventSeq\":\"2\"},\"parsedJson\":{\"amount\":\"9\"}}],\"hasNextPage\":false}}",
+                );
+            }
+            try testing.expectEqualStrings("sui_getTransactionBlock", req.method);
+            callback_state.tx_requests += 1;
+            try testing.expectEqualStrings(
+                "[\"0xtx-missing-id\",{\"showObjectChanges\":true}]",
+                req.params_json,
+            );
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"objectChanges\":[{\"type\":\"created\",\"objectId\":\"0xposition-01\"},{\"type\":\"created\",\"objectId\":\"0xposition-02\"},{\"type\":\"created\",\"objectId\":\"0xposition-03\"},{\"type\":\"created\",\"objectId\":\"0xposition-04\"},{\"type\":\"created\",\"objectId\":\"0xposition-05\"},{\"type\":\"created\",\"objectId\":\"0xposition-06\"},{\"type\":\"created\",\"objectId\":\"0xposition-07\"},{\"type\":\"created\",\"objectId\":\"0xposition-08\"},{\"type\":\"created\",\"objectId\":\"0xposition-09\"},{\"type\":\"created\",\"objectId\":\"0xposition-10\"},{\"type\":\"created\",\"objectId\":\"0xposition-11\"},{\"type\":\"created\",\"objectId\":\"0xposition-12\"},{\"type\":\"created\",\"objectId\":\"0xposition-13\"},{\"type\":\"created\",\"objectId\":\"0xposition-14\"},{\"type\":\"created\",\"objectId\":\"0xposition-15\"}]}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &state,
+        .callback = callback,
+    };
+
+    var event_cache = std.ArrayList(SuiRpcClient.MoveModuleEventDiscoveryCacheEntry).empty;
+    defer SuiRpcClient.deinitMoveModuleEventDiscoveryCache(allocator, &event_cache);
+    var transaction_object_change_cache = std.ArrayList(SuiRpcClient.MoveTransactionObjectChangeDiscoveryCacheEntry).empty;
+    defer SuiRpcClient.deinitMoveTransactionObjectChangeDiscoveryCache(allocator, &transaction_object_change_cache);
+
+    const discovered = try client_instance.getMoveModuleEventDiscoveredObjectIdsCachedBorrowed(
+        allocator,
+        &event_cache,
+        &transaction_object_change_cache,
+        "0x2a",
+        "pool",
+    );
+    try testing.expectEqual(@as(usize, 1), state.event_requests);
+    try testing.expectEqual(@as(usize, 1), state.tx_requests);
+    try testing.expectEqual(@as(usize, 16), discovered.len);
+    try testing.expectEqualStrings("0xpool-from-event", discovered[0]);
+    try testing.expectEqualStrings("0xposition-01", discovered[1]);
 }
 
 test "discoverOwnedObjectCandidatesFromModuleEventsCachedBorrowed reuses cached event discoveries" {

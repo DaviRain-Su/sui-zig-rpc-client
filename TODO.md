@@ -54,6 +54,8 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
 - [x] Aggregate object ids discovered from recent module event `parsedJson`
   and transaction `objectChanges` instead of treating the two sources as
   mutually exclusive.
+- [x] Prioritize `txDigest -> showObjectChanges` followups for recent module
+  events that do not already expose object ids in `parsedJson`.
 - [x] Owned event fallback can continue from the parameter type's own
   `package/module` when the current function module exposes no useful
   candidates.

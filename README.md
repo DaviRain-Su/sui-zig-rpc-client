@@ -1031,6 +1031,7 @@ zig build run -- move function cetus_clmm_mainnet pool swap \
 
 这些字段都是“候选调用/发现路径”，不是 ownership 或 sharedness 断言。像 Cetus `Pool<T0,T1>` 这类非 preset shared object，CLI 现在除了 `object get` 和 `object_input(shared)` 骨架，还会给出 `events --package --module` discovery argv；如果 recent event 里能抽出匹配 object id，还会直接带 `shared_object_candidates`。如果事件里没有 usable candidate，但另一个已选/已发现的 owned object 内容里引用了 shared object id，CLI 现在还会把这些引用 id 当成第二层 discovery source，再过滤成匹配类型的 shared candidate。除此之外，已经显式给出的 object 参数和已自动选中的 object 参数，也会继续参与 shared candidate 打分，所以像 `Position -> Pool` 这种关系在多候选时会更容易自动收口。 而 `Position` 这类 concrete owned object 还会额外带 `account objects --struct-type` 查询模板。
 如果 recent module events 的 `parsedJson` 本身直接暴露了 object id，CLI 会先把这些 id 纳入 shared/owned discovery；同时也会继续用这些事件的 `txDigest` 去读 `sui_getTransactionBlock(showObjectChanges)`，把 `objectChanges` 里补出来的 id 一起聚合进同一批 discovery source，而不是把 `parsedJson` 和 `objectChanges` 当成互斥来源。
+在这条 event discovery 路径里，没直接暴露 object id 的事件 `txDigest` 现在会优先触发 `showObjectChanges` 跟进；已经在 `parsedJson` 里给过 object id 的事件，会放到后面作为 supplemental source，减少高层 live 路径里的无效 `sui_getTransactionBlock`。
 在单次 `move function` 模板构建里，重复命中的 shared module-event discovery 结果现在也会缓存复用，不再因为多个相同 shared 参数或 fixed-point 轮次而反复扫描同一个模块。
 
 对于 `vector<Coin<T>>` 这类对象向量，summary 现在也会补“单个元素”的 discovery/input skeleton。这对 Cetus 一类要求 coin vector 的接口更实用，因为你可以先拿 `vector_item_owned_object_query_argv` 找一批候选 coin，再把返回的 object id 或 select token 填回 `--args` 数组。
