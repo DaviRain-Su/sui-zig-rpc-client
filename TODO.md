@@ -124,7 +124,7 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
 
 - [ ] Rank complete `Pool / Position / Coin / gas` combinations instead of
   selecting each parameter mostly in isolation.
-- [ ] Prefer candidate sets that are internally consistent for a single
+- [x] Prefer candidate sets that are internally consistent for a single
   transaction.
 - [ ] Make the final automatic choice deterministic when multiple valid
   combinations exist.

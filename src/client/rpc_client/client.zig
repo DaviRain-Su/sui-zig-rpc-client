@@ -6760,6 +6760,28 @@ pub const SuiRpcClient = struct {
         return count;
     }
 
+    fn componentInternalReferenceCount(
+        component_nodes: []const usize,
+        nodes: []const MoveCandidateGraphNode,
+    ) usize {
+        var count: usize = 0;
+        for (component_nodes) |source_index| {
+            const source = nodes[source_index];
+            for (component_nodes) |target_index| {
+                if (source_index == target_index) continue;
+                const target = nodes[target_index];
+                if (source.parameter_index == target.parameter_index) continue;
+                if (discoveredObjectIdsReferenceObjectId(
+                    source.discovered_object_ids,
+                    target.object_id,
+                )) {
+                    count += 1;
+                }
+            }
+        }
+        return count;
+    }
+
     fn applyJointCandidateComponentSelectionHints(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
@@ -6895,6 +6917,9 @@ pub const SuiRpcClient = struct {
         var component_auto_anchor_counts = try allocator.alloc(usize, nodes.items.len);
         defer allocator.free(component_auto_anchor_counts);
         @memset(component_auto_anchor_counts, 0);
+        var component_internal_reference_counts = try allocator.alloc(usize, nodes.items.len);
+        defer allocator.free(component_internal_reference_counts);
+        @memset(component_internal_reference_counts, 0);
 
         var stack = std.ArrayList(usize).empty;
         defer stack.deinit(allocator);
@@ -6959,12 +6984,17 @@ pub const SuiRpcClient = struct {
                     nodes.items,
                     selected_object_ids.auto_selected_object_ids,
                 );
+            const internal_reference_count = componentInternalReferenceCount(
+                component_nodes.items,
+                nodes.items,
+            );
 
             for (component_nodes.items) |node_index| {
                 component_sizes[node_index] = component_nodes.items.len;
                 component_parameter_counts[node_index] = component_parameter_indices.items.len;
                 component_explicit_anchor_counts[node_index] = explicit_anchor_count;
                 component_auto_anchor_counts[node_index] = auto_anchor_count;
+                component_internal_reference_counts[node_index] = internal_reference_count;
             }
         }
 
@@ -6978,11 +7008,12 @@ pub const SuiRpcClient = struct {
             else
                 0;
             const size_bonus = component_sizes[node_index] - 1;
+            const consistency_bonus = component_internal_reference_counts[node_index];
             const anchor_bonus =
                 component_explicit_anchor_counts[node_index] * explicit_anchor_weight +
                 component_auto_anchor_counts[node_index] * auto_anchor_weight;
             moveCandidateGraphNodeSelectionScorePointer(parameters, node).* +=
-                parameter_bonus + size_bonus + anchor_bonus;
+                parameter_bonus + size_bonus + consistency_bonus + anchor_bonus;
         }
 
         for (parameters) |*parameter| {
