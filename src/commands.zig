@@ -6701,6 +6701,160 @@ test "runCommand move function with --summarize prefers internally consistent ca
     try testing.expect(receipt_candidates[0].object.get("selection_score").?.integer > receipt_candidates[1].object.get("selection_score").?.integer);
 }
 
+test "runCommand move function with --summarize deterministically tie-breaks equally consistent candidate clusters" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"visibility\":\"Public\",\"isEntry\":true,\"typeParameters\":[[]],\"parameters\":[{\"MutableReference\":{\"Struct\":{\"address\":\"0x2d\",\"module\":\"pool\",\"name\":\"Pool\",\"typeParams\":[{\"TypeParameter\":0}]}}},{\"MutableReference\":{\"Struct\":{\"address\":\"0x2d\",\"module\":\"position\",\"name\":\"Position\",\"typeParams\":[]}}},{\"Reference\":{\"Struct\":{\"address\":\"0x2d\",\"module\":\"receipt\",\"name\":\"Receipt\",\"typeParams\":[]}}},{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "suix_queryEvents")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xevent1\",\"eventSeq\":\"1\"},\"packageId\":\"0x2d\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool1\"}},{\"id\":{\"txDigest\":\"0xevent2\",\"eventSeq\":\"2\"},\"packageId\":\"0x2d\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool2\"}}],\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "suix_getOwnedObjects")) {
+                if (std.mem.indexOf(u8, req.params_json, "\"0x2d::position::Position\"") != null) {
+                    return alloc.dupe(
+                        u8,
+                        "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xposition1\",\"version\":\"7\",\"digest\":\"position-digest-1\",\"type\":\"0x2d::position::Position\",\"owner\":{\"AddressOwner\":\"0xowner\"}}},{\"data\":{\"objectId\":\"0xposition2\",\"version\":\"8\",\"digest\":\"position-digest-2\",\"type\":\"0x2d::position::Position\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
+                    );
+                }
+                if (std.mem.indexOf(u8, req.params_json, "\"0x2d::receipt::Receipt\"") != null) {
+                    return alloc.dupe(
+                        u8,
+                        "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xreceipt1\",\"version\":\"9\",\"digest\":\"receipt-digest-1\",\"type\":\"0x2d::receipt::Receipt\",\"owner\":{\"AddressOwner\":\"0xowner\"}}},{\"data\":{\"objectId\":\"0xreceipt2\",\"version\":\"10\",\"digest\":\"receipt-digest-2\",\"type\":\"0x2d::receipt::Receipt\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
+                    );
+                }
+                return alloc.dupe(u8, "{\"result\":{\"data\":[],\"hasNextPage\":false}}");
+            }
+            if (std.mem.eql(u8, req.method, "sui_getObject")) {
+                if (std.mem.indexOf(u8, req.params_json, "\"0xpool1\"") != null) {
+                    return alloc.dupe(
+                        u8,
+                        "{\"result\":{\"data\":{\"objectId\":\"0xpool1\",\"version\":\"11\",\"digest\":\"pool-digest-1\",\"type\":\"0x2d::pool::Pool<0x2::sui::SUI>\",\"owner\":{\"Shared\":{\"initial_shared_version\":\"5\"}}}}}",
+                    );
+                }
+                if (std.mem.indexOf(u8, req.params_json, "\"0xpool2\"") != null) {
+                    return alloc.dupe(
+                        u8,
+                        "{\"result\":{\"data\":{\"objectId\":\"0xpool2\",\"version\":\"12\",\"digest\":\"pool-digest-2\",\"type\":\"0x2d::pool::Pool<0x2::sui::SUI>\",\"owner\":{\"Shared\":{\"initial_shared_version\":\"6\"}}}}}",
+                    );
+                }
+                if (std.mem.indexOf(u8, req.params_json, "\"0xposition1\"") != null) {
+                    if (std.mem.indexOf(u8, req.params_json, "\"showContent\":true") == null) {
+                        return alloc.dupe(
+                            u8,
+                            "{\"result\":{\"data\":{\"objectId\":\"0xposition1\",\"version\":\"7\",\"digest\":\"position-digest-1\",\"type\":\"0x2d::position::Position\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}}",
+                        );
+                    }
+                    return alloc.dupe(
+                        u8,
+                        "{\"result\":{\"data\":{\"objectId\":\"0xposition1\",\"version\":\"7\",\"digest\":\"position-digest-1\",\"content\":{\"dataType\":\"moveObject\",\"fields\":{\"pool_id\":\"0xpool1\"}}}}}",
+                    );
+                }
+                if (std.mem.indexOf(u8, req.params_json, "\"0xposition2\"") != null) {
+                    if (std.mem.indexOf(u8, req.params_json, "\"showContent\":true") == null) {
+                        return alloc.dupe(
+                            u8,
+                            "{\"result\":{\"data\":{\"objectId\":\"0xposition2\",\"version\":\"8\",\"digest\":\"position-digest-2\",\"type\":\"0x2d::position::Position\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}}",
+                        );
+                    }
+                    return alloc.dupe(
+                        u8,
+                        "{\"result\":{\"data\":{\"objectId\":\"0xposition2\",\"version\":\"8\",\"digest\":\"position-digest-2\",\"content\":{\"dataType\":\"moveObject\",\"fields\":{\"pool_id\":\"0xpool2\"}}}}}",
+                    );
+                }
+                if (std.mem.indexOf(u8, req.params_json, "\"0xreceipt1\"") != null) {
+                    if (std.mem.indexOf(u8, req.params_json, "\"showContent\":true") == null) {
+                        return alloc.dupe(
+                            u8,
+                            "{\"result\":{\"data\":{\"objectId\":\"0xreceipt1\",\"version\":\"9\",\"digest\":\"receipt-digest-1\",\"type\":\"0x2d::receipt::Receipt\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}}",
+                        );
+                    }
+                    return alloc.dupe(
+                        u8,
+                        "{\"result\":{\"data\":{\"objectId\":\"0xreceipt1\",\"version\":\"9\",\"digest\":\"receipt-digest-1\",\"content\":{\"dataType\":\"moveObject\",\"fields\":{\"pool_id\":\"0xpool1\"}}}}}",
+                    );
+                }
+                if (std.mem.indexOf(u8, req.params_json, "\"0xreceipt2\"") != null) {
+                    if (std.mem.indexOf(u8, req.params_json, "\"showContent\":true") == null) {
+                        return alloc.dupe(
+                            u8,
+                            "{\"result\":{\"data\":{\"objectId\":\"0xreceipt2\",\"version\":\"10\",\"digest\":\"receipt-digest-2\",\"type\":\"0x2d::receipt::Receipt\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}}",
+                        );
+                    }
+                    return alloc.dupe(
+                        u8,
+                        "{\"result\":{\"data\":{\"objectId\":\"0xreceipt2\",\"version\":\"10\",\"digest\":\"receipt-digest-2\",\"content\":{\"dataType\":\"moveObject\",\"fields\":{\"pool_id\":\"0xpool2\"}}}}}",
+                    );
+                }
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "move",
+        "function",
+        "0x2d",
+        "pool",
+        "deterministic_cluster",
+        "--type-arg",
+        "0x2::sui::SUI",
+        "--sender",
+        "0xowner",
+        "--summarize",
+    });
+    defer args.deinit(allocator);
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    const parameters = parsed.value.object.get("parameters").?.array.items;
+    try testing.expectEqualStrings(
+        "\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xpool1\\\",\\\"inputKind\\\":\\\"shared\\\",\\\"initialSharedVersion\\\":5,\\\"mutable\\\":true}\"",
+        parameters[0].object.get("auto_selected_arg_json").?.string,
+    );
+    try testing.expectEqualStrings(
+        "\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xposition1\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":7,\\\"digest\\\":\\\"position-digest-1\\\"}\"",
+        parameters[1].object.get("auto_selected_arg_json").?.string,
+    );
+    try testing.expectEqualStrings(
+        "\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xreceipt1\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":9,\\\"digest\\\":\\\"receipt-digest-1\\\"}\"",
+        parameters[2].object.get("auto_selected_arg_json").?.string,
+    );
+    const preferred_resolution = parsed.value.object.get("call_template").?.object.get("preferred_resolution").?.object;
+    try testing.expectEqualStrings(
+        "auto_selected_tiebreak",
+        preferred_resolution.get("parameters").?.array.items[0].object.get("resolution_kind").?.string,
+    );
+    try testing.expectEqualStrings(
+        "auto_selected_tiebreak",
+        preferred_resolution.get("parameters").?.array.items[1].object.get("resolution_kind").?.string,
+    );
+}
+
 test "runCommand move function with --summarize carries sender and signer context into call templates" {
     const testing = std.testing;
 

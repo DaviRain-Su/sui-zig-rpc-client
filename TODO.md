@@ -126,7 +126,7 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
   selecting each parameter mostly in isolation.
 - [x] Prefer candidate sets that are internally consistent for a single
   transaction.
-- [ ] Make the final automatic choice deterministic when multiple valid
+- [x] Make the final automatic choice deterministic when multiple valid
   combinations exist.
 - [x] Expose the winning combination clearly in preferred summaries and request
   artifacts.

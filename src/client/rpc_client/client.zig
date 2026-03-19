@@ -6700,6 +6700,21 @@ pub const SuiRpcClient = struct {
         }
     };
 
+    const MoveCandidateComponentRecord = struct {
+        node_indices: []usize,
+        size: usize,
+        parameter_count: usize,
+        explicit_anchor_count: usize,
+        auto_anchor_count: usize,
+        internal_reference_count: usize,
+        deterministic_key: []u8,
+
+        fn deinit(self: *MoveCandidateComponentRecord, allocator: std.mem.Allocator) void {
+            allocator.free(self.node_indices);
+            allocator.free(self.deterministic_key);
+        }
+    };
+
     fn moveCandidateGraphNodeSelectionScorePointer(
         parameters: []move_result.OwnedMoveParameterSummary,
         node: MoveCandidateGraphNode,
@@ -6738,6 +6753,173 @@ pub const SuiRpcClient = struct {
             }
         }
         return count;
+    }
+
+    fn buildMoveCandidateComponentDeterministicKey(
+        allocator: std.mem.Allocator,
+        component_nodes: []const usize,
+        nodes: []const MoveCandidateGraphNode,
+    ) ![]u8 {
+        const sorted_indices = try allocator.dupe(usize, component_nodes);
+        defer allocator.free(sorted_indices);
+
+        var index: usize = 1;
+        while (index < sorted_indices.len) : (index += 1) {
+            var scan = index;
+            while (scan > 0 and std.mem.order(
+                u8,
+                nodes[sorted_indices[scan]].object_id,
+                nodes[sorted_indices[scan - 1]].object_id,
+            ) == .lt) : (scan -= 1) {
+                std.mem.swap(usize, &sorted_indices[scan], &sorted_indices[scan - 1]);
+            }
+        }
+
+        var output = std.ArrayList(u8){};
+        defer output.deinit(allocator);
+        const writer = output.writer(allocator);
+        for (sorted_indices, 0..) |node_index, sorted_index| {
+            if (sorted_index != 0) try writer.writeByte(0);
+            try writer.writeAll(nodes[node_index].object_id);
+        }
+        return try output.toOwnedSlice(allocator);
+    }
+
+    fn moveCandidateComponentShouldSortBefore(
+        left: MoveCandidateComponentRecord,
+        right: MoveCandidateComponentRecord,
+    ) bool {
+        if (left.explicit_anchor_count != right.explicit_anchor_count) {
+            return left.explicit_anchor_count > right.explicit_anchor_count;
+        }
+        if (left.auto_anchor_count != right.auto_anchor_count) {
+            return left.auto_anchor_count > right.auto_anchor_count;
+        }
+        if (left.parameter_count != right.parameter_count) {
+            return left.parameter_count > right.parameter_count;
+        }
+        if (left.internal_reference_count != right.internal_reference_count) {
+            return left.internal_reference_count > right.internal_reference_count;
+        }
+        if (left.size != right.size) {
+            return left.size > right.size;
+        }
+        return std.mem.order(u8, left.deterministic_key, right.deterministic_key) == .lt;
+    }
+
+    fn moveCandidateComponentRankForObjectId(
+        nodes: []const MoveCandidateGraphNode,
+        component_rank_by_node: []const usize,
+        kind: MoveCandidateGraphNodeKind,
+        parameter_index: usize,
+        object_id: []const u8,
+    ) usize {
+        for (nodes, 0..) |node, node_index| {
+            if (node.kind != kind) continue;
+            if (node.parameter_index != parameter_index) continue;
+            if (!std.mem.eql(u8, node.object_id, object_id)) continue;
+            return component_rank_by_node[node_index];
+        }
+        return std.math.maxInt(usize);
+    }
+
+    fn sortSharedObjectCandidatesByScoreAndComponentRank(
+        parameter_index: usize,
+        candidates: []move_result.SharedMoveObjectCandidate,
+        nodes: []const MoveCandidateGraphNode,
+        component_rank_by_node: []const usize,
+    ) void {
+        var index: usize = 1;
+        while (index < candidates.len) : (index += 1) {
+            var scan = index;
+            while (scan > 0) : (scan -= 1) {
+                const current = candidates[scan];
+                const previous = candidates[scan - 1];
+                if (current.selection_score != previous.selection_score) {
+                    if (current.selection_score > previous.selection_score) {
+                        std.mem.swap(move_result.SharedMoveObjectCandidate, &candidates[scan], &candidates[scan - 1]);
+                        continue;
+                    }
+                    break;
+                }
+                const current_rank = moveCandidateComponentRankForObjectId(
+                    nodes,
+                    component_rank_by_node,
+                    .shared,
+                    parameter_index,
+                    current.object_id,
+                );
+                const previous_rank = moveCandidateComponentRankForObjectId(
+                    nodes,
+                    component_rank_by_node,
+                    .shared,
+                    parameter_index,
+                    previous.object_id,
+                );
+                if (current_rank != previous_rank) {
+                    if (current_rank < previous_rank) {
+                        std.mem.swap(move_result.SharedMoveObjectCandidate, &candidates[scan], &candidates[scan - 1]);
+                        continue;
+                    }
+                    break;
+                }
+                if (std.mem.order(u8, current.object_id, previous.object_id) == .lt) {
+                    std.mem.swap(move_result.SharedMoveObjectCandidate, &candidates[scan], &candidates[scan - 1]);
+                    continue;
+                }
+                break;
+            }
+        }
+    }
+
+    fn sortOwnedObjectCandidatesByScoreAndComponentRank(
+        parameter_index: usize,
+        kind: MoveCandidateGraphNodeKind,
+        candidates: []move_result.OwnedMoveObjectCandidate,
+        nodes: []const MoveCandidateGraphNode,
+        component_rank_by_node: []const usize,
+    ) void {
+        var index: usize = 1;
+        while (index < candidates.len) : (index += 1) {
+            var scan = index;
+            while (scan > 0) : (scan -= 1) {
+                const current = candidates[scan];
+                const previous = candidates[scan - 1];
+                if (current.selection_score != previous.selection_score) {
+                    if (current.selection_score > previous.selection_score) {
+                        std.mem.swap(move_result.OwnedMoveObjectCandidate, &candidates[scan], &candidates[scan - 1]);
+                        continue;
+                    }
+                    break;
+                }
+                const current_rank = moveCandidateComponentRankForObjectId(
+                    nodes,
+                    component_rank_by_node,
+                    kind,
+                    parameter_index,
+                    current.object_id,
+                );
+                const previous_rank = moveCandidateComponentRankForObjectId(
+                    nodes,
+                    component_rank_by_node,
+                    kind,
+                    parameter_index,
+                    previous.object_id,
+                );
+                if (current_rank != previous_rank) {
+                    if (current_rank < previous_rank) {
+                        std.mem.swap(move_result.OwnedMoveObjectCandidate, &candidates[scan], &candidates[scan - 1]);
+                        continue;
+                    }
+                    break;
+                }
+                if (std.mem.order(u8, current.object_id, previous.object_id) == .lt) {
+                    std.mem.swap(move_result.OwnedMoveObjectCandidate, &candidates[scan], &candidates[scan - 1]);
+                    continue;
+                }
+                break;
+            }
+        }
     }
 
     fn componentReferencesSelectedObjectIds(
@@ -6920,6 +7102,15 @@ pub const SuiRpcClient = struct {
         var component_internal_reference_counts = try allocator.alloc(usize, nodes.items.len);
         defer allocator.free(component_internal_reference_counts);
         @memset(component_internal_reference_counts, 0);
+        var component_rank_by_node = try allocator.alloc(usize, nodes.items.len);
+        defer allocator.free(component_rank_by_node);
+        @memset(component_rank_by_node, std.math.maxInt(usize));
+
+        var component_records = std.ArrayList(MoveCandidateComponentRecord).empty;
+        defer {
+            for (component_records.items) |*record| record.deinit(allocator);
+            component_records.deinit(allocator);
+        }
 
         var stack = std.ArrayList(usize).empty;
         defer stack.deinit(allocator);
@@ -6988,6 +7179,23 @@ pub const SuiRpcClient = struct {
                 component_nodes.items,
                 nodes.items,
             );
+            const component_key = try buildMoveCandidateComponentDeterministicKey(
+                allocator,
+                component_nodes.items,
+                nodes.items,
+            );
+            errdefer allocator.free(component_key);
+            const component_node_indices = try allocator.dupe(usize, component_nodes.items);
+            errdefer allocator.free(component_node_indices);
+            try component_records.append(allocator, .{
+                .node_indices = component_node_indices,
+                .size = component_nodes.items.len,
+                .parameter_count = component_parameter_indices.items.len,
+                .explicit_anchor_count = explicit_anchor_count,
+                .auto_anchor_count = auto_anchor_count,
+                .internal_reference_count = internal_reference_count,
+                .deterministic_key = component_key,
+            });
 
             for (component_nodes.items) |node_index| {
                 component_sizes[node_index] = component_nodes.items.len;
@@ -7016,9 +7224,35 @@ pub const SuiRpcClient = struct {
                 parameter_bonus + size_bonus + consistency_bonus + anchor_bonus;
         }
 
-        for (parameters) |*parameter| {
+        var component_index: usize = 1;
+        while (component_index < component_records.items.len) : (component_index += 1) {
+            var scan = component_index;
+            while (scan > 0 and moveCandidateComponentShouldSortBefore(
+                component_records.items[scan],
+                component_records.items[scan - 1],
+            )) : (scan -= 1) {
+                std.mem.swap(
+                    MoveCandidateComponentRecord,
+                    &component_records.items[scan],
+                    &component_records.items[scan - 1],
+                );
+            }
+        }
+
+        for (component_records.items, 0..) |record, rank| {
+            for (record.node_indices) |node_index| {
+                component_rank_by_node[node_index] = rank;
+            }
+        }
+
+        for (parameters, 0..) |*parameter, parameter_index| {
             if (parameter.shared_object_candidates) |candidates| {
-                sortSharedObjectCandidatesByScore(candidates);
+                sortSharedObjectCandidatesByScoreAndComponentRank(
+                    parameter_index,
+                    candidates,
+                    nodes.items,
+                    component_rank_by_node,
+                );
                 if (parameter.explicit_arg_json == null) {
                     if (selectSortedSharedCandidateToken(parameter.*, candidates)) |selection| {
                         replaceMoveParameterAutoSelectedArgJson(
@@ -7032,7 +7266,13 @@ pub const SuiRpcClient = struct {
             }
 
             if (parameter.owned_object_candidates) |candidates| {
-                sortOwnedObjectCandidatesByScore(candidates);
+                sortOwnedObjectCandidatesByScoreAndComponentRank(
+                    parameter_index,
+                    .owned,
+                    candidates,
+                    nodes.items,
+                    component_rank_by_node,
+                );
                 if (parameter.explicit_arg_json == null) {
                     if (selectSortedOwnedCandidateToken(candidates)) |selection| {
                         replaceMoveParameterAutoSelectedArgJson(
@@ -7046,7 +7286,13 @@ pub const SuiRpcClient = struct {
             }
 
             if (parameter.vector_item_owned_object_candidates) |candidates| {
-                sortOwnedObjectCandidatesByScore(candidates);
+                sortOwnedObjectCandidatesByScoreAndComponentRank(
+                    parameter_index,
+                    .vector_owned,
+                    candidates,
+                    nodes.items,
+                    component_rank_by_node,
+                );
                 if (parameter.explicit_arg_json == null) {
                     replaceMoveParameterAutoSelectedArgJson(
                         allocator,
