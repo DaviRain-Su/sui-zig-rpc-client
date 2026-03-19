@@ -174,6 +174,9 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
 - [x] Reuse repeated coin-page reads across a single selected-argument
   resolution flow instead of requerying the same `(owner, coin type)` during
   merge/split and repeated coin selector resolution.
+- [x] Reuse repeated owned-object page reads across a single selected-argument
+  resolution flow instead of requerying the same `(owner, owned-object
+  request)` during repeated object selector resolution.
 - [x] Make the default execution path prefer preferred request artifacts
   whenever a safe resolution exists.
 

@@ -17113,6 +17113,145 @@ pub const SuiRpcClient = struct {
         cache.deinit(allocator);
     }
 
+    fn deinitOwnedObjectsFilter(
+        allocator: std.mem.Allocator,
+        filter: *OwnedObjectsFilter,
+    ) void {
+        switch (filter.*) {
+            .json => |value| allocator.free(value),
+            .struct_type => |value| allocator.free(value),
+            .object_id => |value| allocator.free(value),
+            .package => |value| allocator.free(value),
+            .move_module => |value| {
+                allocator.free(value.package);
+                allocator.free(value.module);
+            },
+            .none => {},
+        }
+    }
+
+    fn cloneOwnedObjectsFilter(
+        allocator: std.mem.Allocator,
+        filter: OwnedObjectsFilter,
+    ) !OwnedObjectsFilter {
+        return switch (filter) {
+            .none => .none,
+            .json => |value| .{ .json = try allocator.dupe(u8, value) },
+            .struct_type => |value| .{ .struct_type = try allocator.dupe(u8, value) },
+            .object_id => |value| .{ .object_id = try allocator.dupe(u8, value) },
+            .package => |value| .{ .package = try allocator.dupe(u8, value) },
+            .move_module => |value| .{
+                .move_module = .{
+                    .package = try allocator.dupe(u8, value.package),
+                    .module = try allocator.dupe(u8, value.module),
+                },
+            },
+        };
+    }
+
+    fn ownedObjectsFilterEqual(left: OwnedObjectsFilter, right: OwnedObjectsFilter) bool {
+        return switch (left) {
+            .none => right == .none,
+            .json => |value| switch (right) {
+                .json => |other| std.mem.eql(u8, value, other),
+                else => false,
+            },
+            .struct_type => |value| switch (right) {
+                .struct_type => |other| std.mem.eql(u8, value, other),
+                else => false,
+            },
+            .object_id => |value| switch (right) {
+                .object_id => |other| std.mem.eql(u8, value, other),
+                else => false,
+            },
+            .package => |value| switch (right) {
+                .package => |other| std.mem.eql(u8, value, other),
+                else => false,
+            },
+            .move_module => |value| switch (right) {
+                .move_module => |other| std.mem.eql(u8, value.package, other.package) and
+                    std.mem.eql(u8, value.module, other.module),
+                else => false,
+            },
+        };
+    }
+
+    fn deinitObjectReadOptions(
+        allocator: std.mem.Allocator,
+        options: *ObjectReadOptions,
+    ) void {
+        switch (options.*) {
+            .json => |value| allocator.free(value),
+            .typed, .none => {},
+        }
+    }
+
+    fn cloneObjectReadOptions(
+        allocator: std.mem.Allocator,
+        options: ObjectReadOptions,
+    ) !ObjectReadOptions {
+        return switch (options) {
+            .none => .none,
+            .json => |value| .{ .json = try allocator.dupe(u8, value) },
+            .typed => |value| .{ .typed = value },
+        };
+    }
+
+    fn objectReadOptionsEqual(left: ObjectReadOptions, right: ObjectReadOptions) bool {
+        return switch (left) {
+            .none => right == .none,
+            .json => |value| switch (right) {
+                .json => |other| std.mem.eql(u8, value, other),
+                else => false,
+            },
+            .typed => |value| switch (right) {
+                .typed => |other| std.meta.eql(value, other),
+                else => false,
+            },
+        };
+    }
+
+    fn deinitOwnedObjectsPageRequest(
+        allocator: std.mem.Allocator,
+        request: *OwnedObjectsPageRequest,
+    ) void {
+        deinitOwnedObjectsFilter(allocator, &request.filter);
+        deinitObjectReadOptions(allocator, &request.options);
+        if (request.cursor) |value| allocator.free(value);
+    }
+
+    fn cloneOwnedObjectsPageRequest(
+        allocator: std.mem.Allocator,
+        request: OwnedObjectsPageRequest,
+    ) !OwnedObjectsPageRequest {
+        return .{
+            .filter = try cloneOwnedObjectsFilter(allocator, request.filter),
+            .options = try cloneObjectReadOptions(allocator, request.options),
+            .cursor = if (request.cursor) |value| try allocator.dupe(u8, value) else null,
+            .limit = request.limit,
+        };
+    }
+
+    const OwnedObjectPageSelectionCacheEntry = struct {
+        owner: []u8,
+        request: OwnedObjectsPageRequest,
+        page: owned_object_result.OwnedObjectPage,
+
+        fn deinit(self: *OwnedObjectPageSelectionCacheEntry, allocator: std.mem.Allocator) void {
+            allocator.free(self.owner);
+            deinitOwnedObjectsPageRequest(allocator, &self.request);
+            self.page.deinit(allocator);
+        }
+    };
+
+    fn deinitOwnedObjectPageSelectionCache(
+        allocator: std.mem.Allocator,
+        cache: *std.ArrayList(OwnedObjectPageSelectionCacheEntry),
+    ) void {
+        for (cache.items) |*entry| entry.deinit(allocator);
+        cache.deinit(allocator);
+    }
+
     fn optionalStringsEqual(left: ?[]const u8, right: ?[]const u8) bool {
         if (left == null and right == null) return true;
         if (left == null or right == null) return false;
@@ -17128,6 +17267,18 @@ pub const SuiRpcClient = struct {
         if (!optionalStringsEqual(entry.coin_type, request.coin_type)) return false;
         if (!optionalStringsEqual(entry.cursor, request.cursor)) return false;
         return entry.limit == request.limit;
+    }
+
+    fn ownedObjectsPageRequestMatches(
+        entry: OwnedObjectPageSelectionCacheEntry,
+        owner: []const u8,
+        request: OwnedObjectsPageRequest,
+    ) bool {
+        if (!std.mem.eql(u8, entry.owner, owner)) return false;
+        if (!ownedObjectsFilterEqual(entry.request.filter, request.filter)) return false;
+        if (!objectReadOptionsEqual(entry.request.options, request.options)) return false;
+        if (!optionalStringsEqual(entry.request.cursor, request.cursor)) return false;
+        return entry.request.limit == request.limit;
     }
 
     fn getAllCoinsWithRequestCachedBorrowed(
@@ -17150,6 +17301,33 @@ pub const SuiRpcClient = struct {
             .coin_type = if (request.coin_type) |value| try allocator.dupe(u8, value) else null,
             .cursor = if (request.cursor) |value| try allocator.dupe(u8, value) else null,
             .limit = request.limit,
+            .page = page,
+        });
+
+        return &cache.items[cache.items.len - 1].page;
+    }
+
+    fn getAllOwnedObjectsWithRequestCachedBorrowed(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        cache: *std.ArrayList(OwnedObjectPageSelectionCacheEntry),
+        owner: []const u8,
+        request: OwnedObjectsPageRequest,
+    ) !*const owned_object_result.OwnedObjectPage {
+        for (cache.items) |*entry| {
+            if (!ownedObjectsPageRequestMatches(entry.*, owner, request)) continue;
+            return &entry.page;
+        }
+
+        const page = try self.getAllOwnedObjectsWithRequest(allocator, owner, request);
+        errdefer page.deinit(allocator);
+
+        var owned_request = try cloneOwnedObjectsPageRequest(allocator, request);
+        errdefer deinitOwnedObjectsPageRequest(allocator, &owned_request);
+
+        try cache.append(allocator, .{
+            .owner = try allocator.dupe(u8, owner),
+            .request = owned_request,
             .page = page,
         });
 
@@ -17557,6 +17735,24 @@ pub const SuiRpcClient = struct {
         return try page.entries[index].clone(allocator);
     }
 
+    fn selectOwnedObjectCached(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        cache: *std.ArrayList(OwnedObjectPageSelectionCacheEntry),
+        owner: []const u8,
+        request: OwnedObjectsPageRequest,
+    ) !?owned_object_result.OwnedObjectEntry {
+        const page = try self.getAllOwnedObjectsWithRequestCachedBorrowed(
+            allocator,
+            cache,
+            owner,
+            request,
+        );
+
+        const index = page.selectFirstFoundIndex() orelse return null;
+        return try page.entries[index].clone(allocator);
+    }
+
     pub fn selectOwnedObjectByStructType(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
@@ -17607,6 +17803,18 @@ pub const SuiRpcClient = struct {
         return try ownedSelectedArgumentValueFromObjectId(allocator, if (selection) |entry| entry.object_id else null);
     }
 
+    fn selectOwnedObjectArgumentValueCached(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        cache: *std.ArrayList(OwnedObjectPageSelectionCacheEntry),
+        owner: []const u8,
+        request: OwnedObjectsPageRequest,
+    ) !?OwnedSelectedArgumentValue {
+        var selection = try self.selectOwnedObjectCached(allocator, cache, owner, request);
+        defer if (selection) |*entry| entry.deinit(allocator);
+        return try ownedSelectedArgumentValueFromObjectId(allocator, if (selection) |entry| entry.object_id else null);
+    }
+
     pub fn selectOwnedObjectArgumentValueByStructType(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
@@ -17616,6 +17824,18 @@ pub const SuiRpcClient = struct {
         var selection = try self.selectOwnedObjectByStructType(allocator, owner, struct_type);
         defer if (selection) |*entry| entry.deinit(allocator);
         return try ownedSelectedArgumentValueFromObjectId(allocator, if (selection) |entry| entry.object_id else null);
+    }
+
+    fn selectOwnedObjectArgumentValueByStructTypeCached(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        cache: *std.ArrayList(OwnedObjectPageSelectionCacheEntry),
+        owner: []const u8,
+        struct_type: []const u8,
+    ) !?OwnedSelectedArgumentValue {
+        return try self.selectOwnedObjectArgumentValueCached(allocator, cache, owner, .{
+            .filter = .{ .struct_type = struct_type },
+        });
     }
 
     pub fn selectOwnedObjectArgumentValueByObjectId(
@@ -17629,6 +17849,18 @@ pub const SuiRpcClient = struct {
         return try ownedSelectedArgumentValueFromObjectId(allocator, if (selection) |entry| entry.object_id else null);
     }
 
+    fn selectOwnedObjectArgumentValueByObjectIdCached(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        cache: *std.ArrayList(OwnedObjectPageSelectionCacheEntry),
+        owner: []const u8,
+        object_id: []const u8,
+    ) !?OwnedSelectedArgumentValue {
+        return try self.selectOwnedObjectArgumentValueCached(allocator, cache, owner, .{
+            .filter = .{ .object_id = object_id },
+        });
+    }
+
     pub fn selectOwnedObjectArgumentValueByModule(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
@@ -17639,6 +17871,24 @@ pub const SuiRpcClient = struct {
         var selection = try self.selectOwnedObjectByModule(allocator, owner, package, module);
         defer if (selection) |*entry| entry.deinit(allocator);
         return try ownedSelectedArgumentValueFromObjectId(allocator, if (selection) |entry| entry.object_id else null);
+    }
+
+    fn selectOwnedObjectArgumentValueByModuleCached(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        cache: *std.ArrayList(OwnedObjectPageSelectionCacheEntry),
+        owner: []const u8,
+        package: []const u8,
+        module: []const u8,
+    ) !?OwnedSelectedArgumentValue {
+        return try self.selectOwnedObjectArgumentValueCached(allocator, cache, owner, .{
+            .filter = .{
+                .move_module = .{
+                    .package = package,
+                    .module = module,
+                },
+            },
+        });
     }
 
     pub fn selectArgumentValue(
@@ -17687,43 +17937,81 @@ pub const SuiRpcClient = struct {
         };
     }
 
-    fn selectArgumentValueWithCoinPageCache(
+    const SelectedArgumentResolutionCaches = struct {
+        coin_page_cache: std.ArrayList(CoinPageSelectionCacheEntry) = .empty,
+        owned_object_page_cache: std.ArrayList(OwnedObjectPageSelectionCacheEntry) = .empty,
+    };
+
+    fn deinitSelectedArgumentResolutionCaches(
+        allocator: std.mem.Allocator,
+        caches: *SelectedArgumentResolutionCaches,
+    ) void {
+        deinitCoinPageSelectionCache(allocator, &caches.coin_page_cache);
+        deinitOwnedObjectPageSelectionCache(allocator, &caches.owned_object_page_cache);
+    }
+
+    fn selectArgumentValueWithSelectionCaches(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
-        coin_page_cache: *std.ArrayList(CoinPageSelectionCacheEntry),
+        caches: *SelectedArgumentResolutionCaches,
         request: SelectedArgumentRequest,
     ) !?OwnedSelectedArgumentValue {
         return switch (request) {
             .gas_coin => |spec| try self.selectGasCoinArgumentValueCached(
                 allocator,
-                coin_page_cache,
+                &caches.coin_page_cache,
                 spec.owner,
                 spec.min_balance,
             ),
             .coin_with_min_balance => |spec| try self.selectCoinArgumentValueWithMinBalanceCached(
                 allocator,
-                coin_page_cache,
+                &caches.coin_page_cache,
                 spec.owner,
                 spec.request,
                 spec.min_balance,
+            ),
+            .owned_object => |spec| try self.selectOwnedObjectArgumentValueCached(
+                allocator,
+                &caches.owned_object_page_cache,
+                spec.owner,
+                spec.request,
+            ),
+            .owned_object_struct_type => |spec| try self.selectOwnedObjectArgumentValueByStructTypeCached(
+                allocator,
+                &caches.owned_object_page_cache,
+                spec.owner,
+                spec.struct_type,
+            ),
+            .owned_object_object_id => |spec| try self.selectOwnedObjectArgumentValueByObjectIdCached(
+                allocator,
+                &caches.owned_object_page_cache,
+                spec.owner,
+                spec.object_id,
+            ),
+            .owned_object_module => |spec| try self.selectOwnedObjectArgumentValueByModuleCached(
+                allocator,
+                &caches.owned_object_page_cache,
+                spec.owner,
+                spec.package,
+                spec.module,
             ),
             else => try self.selectArgumentValue(allocator, request),
         };
     }
 
-    fn selectArgumentValuesWithCoinPageCache(
+    fn selectArgumentValuesWithSelectionCaches(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
-        coin_page_cache: *std.ArrayList(CoinPageSelectionCacheEntry),
+        caches: *SelectedArgumentResolutionCaches,
         requests: []const SelectedArgumentRequest,
     ) !OwnedSelectedArgumentValues {
         var values = OwnedSelectedArgumentValues{};
         errdefer values.deinit(allocator);
 
         for (requests) |request| {
-            const selected = try self.selectArgumentValueWithCoinPageCache(
+            const selected = try self.selectArgumentValueWithSelectionCaches(
                 allocator,
-                coin_page_cache,
+                caches,
                 request,
             ) orelse return error.SelectionNotFound;
             try values.appendOwned(allocator, selected);
@@ -19029,11 +19317,11 @@ pub const SuiRpcClient = struct {
         allocator: std.mem.Allocator,
         requests: []const SelectedArgumentRequest,
     ) !OwnedSelectedArgumentValues {
-        var coin_page_cache = std.ArrayList(CoinPageSelectionCacheEntry).empty;
-        defer deinitCoinPageSelectionCache(allocator, &coin_page_cache);
-        return try self.selectArgumentValuesWithCoinPageCache(
+        var caches = SelectedArgumentResolutionCaches{};
+        defer deinitSelectedArgumentResolutionCaches(allocator, &caches);
+        return try self.selectArgumentValuesWithSelectionCaches(
             allocator,
-            &coin_page_cache,
+            &caches,
             requests,
         );
     }
@@ -19105,11 +19393,11 @@ pub const SuiRpcClient = struct {
         coin_request: SelectedArgumentRequest,
         amounts: []const tx_request_builder.ArgumentValue,
     ) !void {
-        var coin_page_cache = std.ArrayList(CoinPageSelectionCacheEntry).empty;
-        defer deinitCoinPageSelectionCache(allocator, &coin_page_cache);
-        var coin = try self.selectArgumentValueWithCoinPageCache(
+        var caches = SelectedArgumentResolutionCaches{};
+        defer deinitSelectedArgumentResolutionCaches(allocator, &caches);
+        var coin = try self.selectArgumentValueWithSelectionCaches(
             allocator,
-            &coin_page_cache,
+            &caches,
             coin_request,
         ) orelse return error.SelectionNotFound;
         defer coin.deinit(allocator);
@@ -19123,11 +19411,11 @@ pub const SuiRpcClient = struct {
         coin_request: SelectedArgumentRequest,
         amounts: []const tx_request_builder.ArgumentValue,
     ) !tx_request_builder.ArgumentValue {
-        var coin_page_cache = std.ArrayList(CoinPageSelectionCacheEntry).empty;
-        defer deinitCoinPageSelectionCache(allocator, &coin_page_cache);
-        var coin = try self.selectArgumentValueWithCoinPageCache(
+        var caches = SelectedArgumentResolutionCaches{};
+        defer deinitSelectedArgumentResolutionCaches(allocator, &caches);
+        var coin = try self.selectArgumentValueWithSelectionCaches(
             allocator,
-            &coin_page_cache,
+            &caches,
             coin_request,
         ) orelse return error.SelectionNotFound;
         defer coin.deinit(allocator);
@@ -19165,17 +19453,17 @@ pub const SuiRpcClient = struct {
         destination_request: SelectedArgumentRequest,
         source_requests: []const SelectedArgumentRequest,
     ) !void {
-        var coin_page_cache = std.ArrayList(CoinPageSelectionCacheEntry).empty;
-        defer deinitCoinPageSelectionCache(allocator, &coin_page_cache);
-        var destination = try self.selectArgumentValueWithCoinPageCache(
+        var caches = SelectedArgumentResolutionCaches{};
+        defer deinitSelectedArgumentResolutionCaches(allocator, &caches);
+        var destination = try self.selectArgumentValueWithSelectionCaches(
             allocator,
-            &coin_page_cache,
+            &caches,
             destination_request,
         ) orelse return error.SelectionNotFound;
         defer destination.deinit(allocator);
-        var sources = try self.selectArgumentValuesWithCoinPageCache(
+        var sources = try self.selectArgumentValuesWithSelectionCaches(
             allocator,
-            &coin_page_cache,
+            &caches,
             source_requests,
         );
         defer sources.deinit(allocator);
@@ -19189,17 +19477,17 @@ pub const SuiRpcClient = struct {
         destination_request: SelectedArgumentRequest,
         source_requests: []const SelectedArgumentRequest,
     ) !tx_request_builder.ArgumentValue {
-        var coin_page_cache = std.ArrayList(CoinPageSelectionCacheEntry).empty;
-        defer deinitCoinPageSelectionCache(allocator, &coin_page_cache);
-        var destination = try self.selectArgumentValueWithCoinPageCache(
+        var caches = SelectedArgumentResolutionCaches{};
+        defer deinitSelectedArgumentResolutionCaches(allocator, &caches);
+        var destination = try self.selectArgumentValueWithSelectionCaches(
             allocator,
-            &coin_page_cache,
+            &caches,
             destination_request,
         ) orelse return error.SelectionNotFound;
         defer destination.deinit(allocator);
-        var sources = try self.selectArgumentValuesWithCoinPageCache(
+        var sources = try self.selectArgumentValuesWithSelectionCaches(
             allocator,
-            &coin_page_cache,
+            &caches,
             source_requests,
         );
         defer sources.deinit(allocator);
@@ -22554,6 +22842,55 @@ test "selectArgumentValues batches gas and owned-object selections into DSL-read
     }
     switch (values.slice()[1]) {
         .object_id => |value| try testing.expectEqualStrings("0xobject-batch", value),
+        else => try testing.expect(false),
+    }
+}
+
+test "selectArgumentValues reuses owned-object pages across repeated selectors" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var request_count: usize = 0;
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const count = @as(*usize, @ptrCast(@alignCast(context)));
+            count.* += 1;
+            try testing.expectEqualStrings("suix_getOwnedObjects", req.method);
+            try testing.expectEqualStrings(
+                "[\"0xowner\",{\"filter\":{\"StructType\":\"0x2::example::Thing\"}},null,null]",
+                req.params_json,
+            );
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xcached-object\",\"type\":\"0x2::example::Thing\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &request_count,
+        .callback = callback,
+    };
+
+    var values = try client_instance.selectArgumentValues(allocator, &.{
+        .{ .owned_object_struct_type = .{ .owner = "0xowner", .struct_type = "0x2::example::Thing" } },
+        .{ .owned_object_struct_type = .{ .owner = "0xowner", .struct_type = "0x2::example::Thing" } },
+    });
+    defer values.deinit(allocator);
+
+    try testing.expectEqual(@as(usize, 1), request_count);
+    try testing.expectEqual(@as(usize, 2), values.slice().len);
+    switch (values.slice()[0]) {
+        .object_id => |value| try testing.expectEqualStrings("0xcached-object", value),
+        else => try testing.expect(false),
+    }
+    switch (values.slice()[1]) {
+        .object_id => |value| try testing.expectEqualStrings("0xcached-object", value),
         else => try testing.expect(false),
     }
 }
