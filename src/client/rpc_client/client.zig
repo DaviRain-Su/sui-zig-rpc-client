@@ -2577,6 +2577,15 @@ pub const SuiRpcClient = struct {
             allocator.free(self.object_id);
             allocator.free(self.digest);
         }
+
+        fn clone(self: LocalObjectReference, allocator: std.mem.Allocator) !LocalObjectReference {
+            return .{
+                .object_id = try allocator.dupe(u8, self.object_id),
+                .version = self.version,
+                .digest = try allocator.dupe(u8, self.digest),
+                .shared_initial_version = self.shared_initial_version,
+            };
+        }
     };
 
     fn parseUnsignedJsonValue(value: std.json.Value) !u64 {
@@ -17594,6 +17603,24 @@ pub const SuiRpcClient = struct {
         cache.deinit(allocator);
     }
 
+    const LocalObjectReferenceSelectionCacheEntry = struct {
+        object_id: []u8,
+        reference: LocalObjectReference,
+
+        fn deinit(self: *LocalObjectReferenceSelectionCacheEntry, allocator: std.mem.Allocator) void {
+            allocator.free(self.object_id);
+            self.reference.deinit(allocator);
+        }
+    };
+
+    fn deinitLocalObjectReferenceSelectionCache(
+        allocator: std.mem.Allocator,
+        cache: *std.ArrayList(LocalObjectReferenceSelectionCacheEntry),
+    ) void {
+        for (cache.items) |*entry| entry.deinit(allocator);
+        cache.deinit(allocator);
+    }
+
     fn optionalStringsEqual(left: ?[]const u8, right: ?[]const u8) bool {
         if (left == null and right == null) return true;
         if (left == null or right == null) return false;
@@ -17997,6 +18024,134 @@ pub const SuiRpcClient = struct {
         );
     }
 
+    fn resolveLocalObjectReferenceCachedBorrowed(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        cache: *std.ArrayList(LocalObjectReferenceSelectionCacheEntry),
+        object_id: []const u8,
+    ) !*const LocalObjectReference {
+        for (cache.items) |*entry| {
+            if (std.mem.eql(u8, entry.object_id, object_id)) return &entry.reference;
+        }
+
+        const resolved = try self.resolveLocalObjectReference(allocator, object_id);
+        errdefer {
+            var owned = resolved;
+            owned.deinit(allocator);
+        }
+
+        try cache.append(allocator, .{
+            .object_id = try allocator.dupe(u8, object_id),
+            .reference = resolved,
+        });
+
+        return &cache.items[cache.items.len - 1].reference;
+    }
+
+    fn resolveObjectInputArgumentValueCached(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        cache: *std.ArrayList(LocalObjectReferenceSelectionCacheEntry),
+        object_id: []const u8,
+        input_kind: ObjectInputKind,
+        mutable: bool,
+        version: ?u64,
+        digest: ?[]const u8,
+        initial_shared_version: ?u64,
+    ) !OwnedSelectedArgumentValue {
+        const owned_json = switch (input_kind) {
+            .imm_or_owned => blk: {
+                if (initial_shared_version != null) return error.InvalidCli;
+                if (version != null or digest != null) {
+                    break :blk try buildImmOrOwnedObjectInputJson(
+                        allocator,
+                        object_id,
+                        version orelse return error.InvalidCli,
+                        digest orelse return error.InvalidCli,
+                    );
+                }
+                const resolved = try self.resolveLocalObjectReferenceCachedBorrowed(
+                    allocator,
+                    cache,
+                    object_id,
+                );
+                if (resolved.shared_initial_version != null) return error.InvalidCli;
+                break :blk try buildImmOrOwnedObjectInputJson(
+                    allocator,
+                    resolved.object_id,
+                    resolved.version,
+                    resolved.digest,
+                );
+            },
+            .receiving => blk: {
+                if (initial_shared_version != null) return error.InvalidCli;
+                if (version != null or digest != null) {
+                    break :blk try buildReceivingObjectInputJson(
+                        allocator,
+                        object_id,
+                        version orelse return error.InvalidCli,
+                        digest orelse return error.InvalidCli,
+                    );
+                }
+                const resolved = try self.resolveLocalObjectReferenceCachedBorrowed(
+                    allocator,
+                    cache,
+                    object_id,
+                );
+                if (resolved.shared_initial_version != null) return error.InvalidCli;
+                break :blk try buildReceivingObjectInputJson(
+                    allocator,
+                    resolved.object_id,
+                    resolved.version,
+                    resolved.digest,
+                );
+            },
+            .shared => blk: {
+                if (version != null or digest != null) return error.InvalidCli;
+                if (initial_shared_version) |resolved_initial_shared_version| {
+                    break :blk try buildSharedObjectInputJson(
+                        allocator,
+                        object_id,
+                        resolved_initial_shared_version,
+                        mutable,
+                    );
+                }
+                const resolved = try self.resolveLocalObjectReferenceCachedBorrowed(
+                    allocator,
+                    cache,
+                    object_id,
+                );
+                const resolved_initial_shared_version = resolved.shared_initial_version orelse return error.InvalidCli;
+                break :blk try buildSharedObjectInputJson(
+                    allocator,
+                    resolved.object_id,
+                    resolved_initial_shared_version,
+                    mutable,
+                );
+            },
+        };
+        return OwnedSelectedArgumentValue.initOwnedRawJson(owned_json);
+    }
+
+    fn resolveObjectPresetArgumentValueCached(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        cache: *std.ArrayList(LocalObjectReferenceSelectionCacheEntry),
+        preset: ObjectPresetKind,
+    ) !OwnedSelectedArgumentValue {
+        const spec = objectInputPreset(preset);
+        return try self.resolveObjectInputArgumentValueCached(
+            allocator,
+            cache,
+            spec.object_id,
+            spec.input_kind,
+            spec.mutable,
+            spec.version,
+            spec.digest,
+            spec.initial_shared_version,
+        );
+    }
+
     pub fn selectCoinArgumentValueWithMinBalance(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
@@ -18282,6 +18437,7 @@ pub const SuiRpcClient = struct {
     const SelectedArgumentResolutionCaches = struct {
         coin_page_cache: std.ArrayList(CoinPageSelectionCacheEntry) = .empty,
         owned_object_page_cache: std.ArrayList(OwnedObjectPageSelectionCacheEntry) = .empty,
+        local_object_reference_cache: std.ArrayList(LocalObjectReferenceSelectionCacheEntry) = .empty,
     };
 
     fn deinitSelectedArgumentResolutionCaches(
@@ -18290,6 +18446,7 @@ pub const SuiRpcClient = struct {
     ) void {
         deinitCoinPageSelectionCache(allocator, &caches.coin_page_cache);
         deinitOwnedObjectPageSelectionCache(allocator, &caches.owned_object_page_cache);
+        deinitLocalObjectReferenceSelectionCache(allocator, &caches.local_object_reference_cache);
     }
 
     fn selectArgumentValueWithSelectionCaches(
@@ -18299,6 +18456,21 @@ pub const SuiRpcClient = struct {
         request: SelectedArgumentRequest,
     ) !?OwnedSelectedArgumentValue {
         return switch (request) {
+            .object_preset => |spec| try self.resolveObjectPresetArgumentValueCached(
+                allocator,
+                &caches.local_object_reference_cache,
+                spec.preset,
+            ),
+            .object_input => |spec| try self.resolveObjectInputArgumentValueCached(
+                allocator,
+                &caches.local_object_reference_cache,
+                spec.object_id,
+                spec.input_kind,
+                spec.mutable,
+                spec.version,
+                spec.digest,
+                spec.initial_shared_version,
+            ),
             .gas_coin => |spec| try self.selectGasCoinArgumentValueCached(
                 allocator,
                 &caches.coin_page_cache,
@@ -23831,6 +24003,74 @@ test "appendMoveCallFromSelectedArguments resolves resources directly into DSL c
     try testing.expect(std.mem.indexOf(u8, commands_json, "\"MoveCall\"") != null);
     try testing.expect(std.mem.indexOf(u8, commands_json, "0xgas-helper") != null);
     try testing.expect(std.mem.indexOf(u8, commands_json, "0xcap-helper") != null);
+}
+
+test "selectArgumentValueWithSelectionCaches reuses local object references for repeated object inputs" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var request_count: usize = 0;
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const count = @as(*usize, @ptrCast(@alignCast(context)));
+            count.* += 1;
+            try testing.expectEqualStrings("sui_getObject", req.method);
+            try testing.expectEqualStrings(
+                "[\"0xshared-selected\",{\"showOwner\":true}]",
+                req.params_json,
+            );
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":{\"objectId\":\"0xshared-selected\",\"version\":\"9\",\"digest\":\"shared-selected-digest\",\"owner\":{\"Shared\":{\"initial_shared_version\":\"7\"}}}}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &request_count,
+        .callback = callback,
+    };
+
+    var caches = SuiRpcClient.SelectedArgumentResolutionCaches{};
+    defer SuiRpcClient.deinitSelectedArgumentResolutionCaches(allocator, &caches);
+
+    var first = (try client_instance.selectArgumentValueWithSelectionCaches(
+        allocator,
+        &caches,
+        .{
+            .object_input = .{
+                .object_id = "0xshared-selected",
+                .input_kind = .shared,
+                .mutable = true,
+            },
+        },
+    )) orelse return error.TestUnexpectedResult;
+    defer first.deinit(allocator);
+
+    var second = (try client_instance.selectArgumentValueWithSelectionCaches(
+        allocator,
+        &caches,
+        .{
+            .object_input = .{
+                .object_id = "0xshared-selected",
+                .input_kind = .shared,
+                .mutable = true,
+            },
+        },
+    )) orelse return error.TestUnexpectedResult;
+    defer second.deinit(allocator);
+
+    try testing.expectEqual(@as(usize, 1), request_count);
+    try testing.expectEqualStrings(first.owned_text.?, second.owned_text.?);
+    try testing.expectEqualStrings(
+        "{\"Object\":{\"SharedObject\":{\"objectId\":\"0xshared-selected\",\"initialSharedVersion\":7,\"mutable\":true}}}",
+        first.owned_text.?,
+    );
 }
 
 test "appendSplitCoinsFromSelectedArgument resolves selected gas coins into DSL commands" {

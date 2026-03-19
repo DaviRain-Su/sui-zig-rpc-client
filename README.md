@@ -935,6 +935,7 @@ zig build run -- events \
 这条约束也已经接进了 preferred `MergeCoins / SplitCoins` 规划，不只是 summary 里的 `auto_selected_arg_json`。也就是说，后面的显式 coin 参数现在同样会从前面的自动 split source 候选里被排除。
 在直接执行层，selected-argument token 解析现在也会复用同一批 `suix_getCoins` 结果。也就是说，同一个 `(owner, coin type)` 在一次 `MoveCall` / `MergeCoins` / `SplitCoins` / `MakeMoveVec` 选参过程中，不会因为多个 coin selector 再反复打同一页 coin 查询。
 同样地，selected-argument 里的 owned object 选择现在也会复用同一个 `(owner, owned-object request)` 的分页结果，不会因为多个相同 object selector 在一次执行里反复打 `suix_getOwnedObjects`。
+如果同一个 `object_input` / `object_preset` 在一次 selected-argument 选参里被重复引用，CLI 现在也会复用同一个 `sui_getObject(showOwner)` 结果，而不是重复读取同一对象元数据。
 
 普通 owned object 现在也有同类的跨参数去重。像 `Position, Position` 或 `Position, vector<Position>` 这类签名里，后面的 auto-selected 参数会优先避开前面已经占用的同一 owned object，尽量不再生成“同一个 object input 被多个业务参数重复使用”的坏模板。
 

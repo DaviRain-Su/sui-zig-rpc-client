@@ -187,6 +187,9 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
 - [x] Reuse repeated owned-object page reads across a single selected-argument
   resolution flow instead of requerying the same `(owner, owned-object
   request)` during repeated object selector resolution.
+- [x] Reuse repeated `sui_getObject(showOwner)` reads across a single
+  selected-argument resolution flow instead of requerying the same object
+  metadata for repeated `object_input` / `object_preset` selectors.
 - [x] Make the default execution path prefer preferred request artifacts
   whenever a safe resolution exists.
 
