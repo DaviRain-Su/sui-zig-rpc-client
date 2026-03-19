@@ -4169,6 +4169,29 @@ pub const SuiRpcClient = struct {
         try appendDiscoveredObjectIdsFromJsonValue(allocator, collected, content, max_items);
     }
 
+    fn appendDiscoveredObjectIdsFromDynamicFields(
+        allocator: std.mem.Allocator,
+        collected: *std.ArrayList([]u8),
+        page: dynamic_field_result.OwnedDynamicFieldPage,
+        max_items: usize,
+    ) !void {
+        if (collected.items.len >= max_items) return;
+
+        for (page.entries) |entry| {
+            if (collected.items.len >= max_items) return;
+            const object_id = entry.object_id orelse continue;
+            var already_present = false;
+            for (collected.items) |existing| {
+                if (std.mem.eql(u8, existing, object_id)) {
+                    already_present = true;
+                    break;
+                }
+            }
+            if (already_present) continue;
+            try collected.append(allocator, try allocator.dupe(u8, object_id));
+        }
+    }
+
     fn appendSharedObjectCandidatesFromObjectIds(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
@@ -4328,6 +4351,7 @@ pub const SuiRpcClient = struct {
         allocator: std.mem.Allocator,
         parameters: []const move_result.OwnedMoveParameterSummary,
         signature: []const u8,
+        allow_dynamic_field_fallback: bool,
     ) ![]move_result.SharedMoveObjectCandidate {
         const seed_object_ids = try collectObjectDiscoverySeedObjectIdsFromMoveParameters(allocator, parameters);
         defer {
@@ -4351,6 +4375,24 @@ pub const SuiRpcClient = struct {
                 response,
                 16,
             );
+        }
+
+        if (allow_dynamic_field_fallback and discovered_ids.items.len == 0) {
+            for (seed_object_ids) |object_id| {
+                if (discovered_ids.items.len >= 16) break;
+                var page = self.getAllDynamicFieldsWithRequest(
+                    allocator,
+                    object_id,
+                    .{ .limit = 20 },
+                ) catch continue;
+                defer page.deinit(allocator);
+                try appendDiscoveredObjectIdsFromDynamicFields(
+                    allocator,
+                    &discovered_ids,
+                    page,
+                    16,
+                );
+            }
         }
 
         var candidates = std.ArrayList(move_result.SharedMoveObjectCandidate).empty;
@@ -5157,6 +5199,7 @@ pub const SuiRpcClient = struct {
                 allocator,
                 parameters,
                 parameter.signature,
+                parameter.shared_object_candidates == null or parameter.shared_object_candidates.?.len == 0,
             );
             if (discovered_candidates.len == 0) {
                 allocator.free(discovered_candidates);
