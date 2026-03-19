@@ -4592,6 +4592,96 @@ pub const SuiRpcClient = struct {
         return try candidates.toOwnedSlice(allocator);
     }
 
+    const OwnedModuleEventDiscoveryCacheEntry = struct {
+        owner: []u8,
+        struct_type: []u8,
+        event_package_id: []u8,
+        event_module_name: []u8,
+        candidates: []move_result.OwnedMoveObjectCandidate,
+
+        fn deinit(self: *OwnedModuleEventDiscoveryCacheEntry, allocator: std.mem.Allocator) void {
+            allocator.free(self.owner);
+            allocator.free(self.struct_type);
+            allocator.free(self.event_package_id);
+            allocator.free(self.event_module_name);
+            for (self.candidates) |*candidate| candidate.deinit(allocator);
+            allocator.free(self.candidates);
+        }
+    };
+
+    fn deinitOwnedModuleEventDiscoveryCache(
+        allocator: std.mem.Allocator,
+        cache: *std.ArrayList(OwnedModuleEventDiscoveryCacheEntry),
+    ) void {
+        for (cache.items) |*entry| entry.deinit(allocator);
+        cache.deinit(allocator);
+    }
+
+    fn cloneOwnedMoveObjectCandidates(
+        allocator: std.mem.Allocator,
+        candidates: []const move_result.OwnedMoveObjectCandidate,
+    ) ![]move_result.OwnedMoveObjectCandidate {
+        const cloned = try allocator.alloc(move_result.OwnedMoveObjectCandidate, candidates.len);
+        errdefer allocator.free(cloned);
+
+        for (candidates, 0..) |candidate, index| {
+            cloned[index] = .{
+                .object_id = try allocator.dupe(u8, candidate.object_id),
+                .version = candidate.version,
+                .digest = try allocator.dupe(u8, candidate.digest),
+                .selection_score = candidate.selection_score,
+                .balance = candidate.balance,
+                .type_name = if (candidate.type_name) |value| try allocator.dupe(u8, value) else null,
+                .owner_value = if (candidate.owner_value) |value| try allocator.dupe(u8, value) else null,
+                .object_input_select_token = try allocator.dupe(u8, candidate.object_input_select_token),
+            };
+        }
+
+        return cloned;
+    }
+
+    fn discoverOwnedObjectCandidatesFromModuleEventsCached(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        cache: *std.ArrayList(OwnedModuleEventDiscoveryCacheEntry),
+        owner: []const u8,
+        struct_type: []const u8,
+        event_package_id: []const u8,
+        event_module_name: []const u8,
+    ) ![]move_result.OwnedMoveObjectCandidate {
+        for (cache.items) |entry| {
+            if (!std.mem.eql(u8, entry.owner, owner)) continue;
+            if (!std.mem.eql(u8, entry.struct_type, struct_type)) continue;
+            if (!std.mem.eql(u8, entry.event_package_id, event_package_id)) continue;
+            if (!std.mem.eql(u8, entry.event_module_name, event_module_name)) continue;
+            return try cloneOwnedMoveObjectCandidates(allocator, entry.candidates);
+        }
+
+        const discovered = try self.discoverOwnedObjectCandidatesFromModuleEvents(
+            allocator,
+            owner,
+            struct_type,
+            event_package_id,
+            event_module_name,
+        );
+        errdefer {
+            for (discovered) |*candidate| candidate.deinit(allocator);
+            allocator.free(discovered);
+        }
+
+        var entry = OwnedModuleEventDiscoveryCacheEntry{
+            .owner = try allocator.dupe(u8, owner),
+            .struct_type = try allocator.dupe(u8, struct_type),
+            .event_package_id = try allocator.dupe(u8, event_package_id),
+            .event_module_name = try allocator.dupe(u8, event_module_name),
+            .candidates = discovered,
+        };
+        errdefer entry.deinit(allocator);
+
+        try cache.append(allocator, entry);
+        return try cloneOwnedMoveObjectCandidates(allocator, discovered);
+    }
+
     fn discoverOwnedObjectCandidates(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
@@ -5359,6 +5449,7 @@ pub const SuiRpcClient = struct {
         owner_address: ?[]const u8,
         event_package_id: ?[]const u8,
         event_module_name: ?[]const u8,
+        owned_event_cache: *std.ArrayList(OwnedModuleEventDiscoveryCacheEntry),
     ) !void {
         const owner = owner_address orelse return;
 
@@ -5384,8 +5475,9 @@ pub const SuiRpcClient = struct {
                 const event_candidates = blk: {
                     if (!need_event_fallback) break :blk try allocator.alloc(move_result.OwnedMoveObjectCandidate, 0);
                     if (event_package_id != null and event_module_name != null) {
-                        const current = try self.discoverOwnedObjectCandidatesFromModuleEvents(
+                        const current = try self.discoverOwnedObjectCandidatesFromModuleEventsCached(
                             allocator,
+                            owned_event_cache,
                             owner,
                             struct_type,
                             event_package_id.?,
@@ -5401,8 +5493,9 @@ pub const SuiRpcClient = struct {
                         {
                             break :blk try allocator.alloc(move_result.OwnedMoveObjectCandidate, 0);
                         }
-                        break :blk try self.discoverOwnedObjectCandidatesFromModuleEvents(
+                        break :blk try self.discoverOwnedObjectCandidatesFromModuleEventsCached(
                             allocator,
+                            owned_event_cache,
                             owner,
                             struct_type,
                             package_and_module.package,
@@ -5523,8 +5616,9 @@ pub const SuiRpcClient = struct {
                 const event_candidates = blk: {
                     if (!need_event_fallback) break :blk try allocator.alloc(move_result.OwnedMoveObjectCandidate, 0);
                     if (event_package_id != null and event_module_name != null) {
-                        const current = try self.discoverOwnedObjectCandidatesFromModuleEvents(
+                        const current = try self.discoverOwnedObjectCandidatesFromModuleEventsCached(
                             allocator,
+                            owned_event_cache,
                             owner,
                             struct_type,
                             event_package_id.?,
@@ -5540,8 +5634,9 @@ pub const SuiRpcClient = struct {
                         {
                             break :blk try allocator.alloc(move_result.OwnedMoveObjectCandidate, 0);
                         }
-                        break :blk try self.discoverOwnedObjectCandidatesFromModuleEvents(
+                        break :blk try self.discoverOwnedObjectCandidatesFromModuleEventsCached(
                             allocator,
+                            owned_event_cache,
                             owner,
                             struct_type,
                             package_and_module.package,
@@ -6362,6 +6457,7 @@ pub const SuiRpcClient = struct {
         owner_address: ?[]const u8,
         event_package_id: ?[]const u8,
         event_module_name: ?[]const u8,
+        owned_event_cache: *std.ArrayList(OwnedModuleEventDiscoveryCacheEntry),
     ) !void {
         var round: usize = 0;
         while (round < move_candidate_resolution_max_rounds) : (round += 1) {
@@ -6375,6 +6471,7 @@ pub const SuiRpcClient = struct {
                 owner_address,
                 event_package_id,
                 event_module_name,
+                owned_event_cache,
             );
             try self.applyReferencedSharedObjectCandidateSelectionHints(allocator, parameters);
             try self.applySharedCandidateSelectionHintsFromOwnedCandidates(allocator, parameters);
@@ -7991,6 +8088,9 @@ pub const SuiRpcClient = struct {
         owner_address: ?[]const u8,
         signer_selector: ?[]const u8,
     ) !void {
+        var owned_event_cache = std.ArrayList(OwnedModuleEventDiscoveryCacheEntry).empty;
+        defer deinitOwnedModuleEventDiscoveryCache(allocator, &owned_event_cache);
+
         for (summary.parameters, 0..) |*parameter, index| {
             parameter.placeholder_json = try placeholderJsonForMoveParameter(allocator, parameter.*, index);
             parameter.omitted_from_explicit_args = parameter.placeholder_json == null;
@@ -8192,6 +8292,7 @@ pub const SuiRpcClient = struct {
             owner_address,
             summary.package_id,
             summary.module_name,
+            &owned_event_cache,
         );
         try applyCrossParameterBusinessCoinSelectionHints(allocator, summary.parameters);
         try applyCrossParameterOwnedObjectSelectionHints(allocator, summary.parameters);

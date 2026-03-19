@@ -5346,24 +5346,32 @@ test "runCommand move function with --summarize discovers owned candidates from 
                     "{\"result\":{\"data\":[],\"hasNextPage\":false}}",
                 );
             }
+            if (std.mem.eql(u8, req.method, "suix_getDynamicFields")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[],\"hasNextPage\":false}}",
+                );
+            }
             if (std.mem.eql(u8, req.method, "suix_queryEvents")) {
                 return alloc.dupe(
                     u8,
                     "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xevent1\",\"eventSeq\":\"1\"},\"packageId\":\"0x2a\",\"transactionModule\":\"router\",\"parsedJson\":{\"position_id\":\"0xposition1\"}}],\"hasNextPage\":false}}",
                 );
             }
-            std.debug.assert(std.mem.eql(u8, req.method, "sui_getObject"));
-            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0xposition1\"") != null);
-            if (std.mem.indexOf(u8, req.params_json, "\"showContent\":true") != null) {
+            if (std.mem.eql(u8, req.method, "sui_getObject")) {
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0xposition1\"") != null);
+                if (std.mem.indexOf(u8, req.params_json, "\"showContent\":true") != null) {
+                    return alloc.dupe(
+                        u8,
+                        "{\"result\":{\"data\":{\"objectId\":\"0xposition1\",\"version\":\"11\",\"digest\":\"position-digest-1\",\"content\":{\"dataType\":\"moveObject\",\"fields\":{\"liquidity\":\"9\"}}}}}",
+                    );
+                }
                 return alloc.dupe(
                     u8,
-                    "{\"result\":{\"data\":{\"objectId\":\"0xposition1\",\"version\":\"11\",\"digest\":\"position-digest-1\",\"content\":{\"dataType\":\"moveObject\",\"fields\":{\"liquidity\":\"9\"}}}}}",
+                    "{\"result\":{\"data\":{\"objectId\":\"0xposition1\",\"version\":\"11\",\"digest\":\"position-digest-1\",\"type\":\"0x2a::position::Position\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}}",
                 );
             }
-            return alloc.dupe(
-                u8,
-                "{\"result\":{\"data\":{\"objectId\":\"0xposition1\",\"version\":\"11\",\"digest\":\"position-digest-1\",\"type\":\"0x2a::position::Position\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}}",
-            );
+            std.debug.panic("unexpected method {s}", .{req.method});
         }
     }.call;
 
@@ -5410,12 +5418,19 @@ test "runCommand move function with --summarize falls back to owned event discov
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
+    const State = struct {
+        router_event_requests: usize = 0,
+        position_event_requests: usize = 0,
+    };
+    var state = State{};
+
     const callback = struct {
-        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const callback_state = @as(*State, @ptrCast(@alignCast(context)));
             if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
                 return alloc.dupe(
                     u8,
-                    "{\"result\":{\"visibility\":\"Public\",\"isEntry\":true,\"typeParameters\":[],\"parameters\":[{\"Struct\":{\"address\":\"0x2a\",\"module\":\"position\",\"name\":\"Position\",\"typeParams\":[]}},{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[]}}",
+                    "{\"result\":{\"visibility\":\"Public\",\"isEntry\":true,\"typeParameters\":[],\"parameters\":[{\"Struct\":{\"address\":\"0x2a\",\"module\":\"position\",\"name\":\"Position\",\"typeParams\":[]}},{\"Struct\":{\"address\":\"0x2a\",\"module\":\"position\",\"name\":\"Position\",\"typeParams\":[]}},{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[]}}",
                 );
             }
             if (std.mem.eql(u8, req.method, "suix_getOwnedObjects")) {
@@ -5424,31 +5439,41 @@ test "runCommand move function with --summarize falls back to owned event discov
                     "{\"result\":{\"data\":[],\"hasNextPage\":false}}",
                 );
             }
+            if (std.mem.eql(u8, req.method, "suix_getDynamicFields")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[],\"hasNextPage\":false}}",
+                );
+            }
             if (std.mem.eql(u8, req.method, "suix_queryEvents")) {
                 if (std.mem.indexOf(u8, req.params_json, "\"module\":\"router\"") != null) {
+                    callback_state.router_event_requests += 1;
                     return alloc.dupe(
                         u8,
                         "{\"result\":{\"data\":[],\"hasNextPage\":false}}",
                     );
                 }
                 std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"module\":\"position\"") != null);
+                callback_state.position_event_requests += 1;
                 return alloc.dupe(
                     u8,
                     "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xevent1\",\"eventSeq\":\"1\"},\"packageId\":\"0x2a\",\"transactionModule\":\"position\",\"parsedJson\":{\"position_id\":\"0xposition1\"}}],\"hasNextPage\":false}}",
                 );
             }
-            std.debug.assert(std.mem.eql(u8, req.method, "sui_getObject"));
-            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0xposition1\"") != null);
-            if (std.mem.indexOf(u8, req.params_json, "\"showContent\":true") != null) {
+            if (std.mem.eql(u8, req.method, "sui_getObject")) {
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0xposition1\"") != null);
+                if (std.mem.indexOf(u8, req.params_json, "\"showContent\":true") != null) {
+                    return alloc.dupe(
+                        u8,
+                        "{\"result\":{\"data\":{\"objectId\":\"0xposition1\",\"version\":\"11\",\"digest\":\"position-digest-1\",\"content\":{\"dataType\":\"moveObject\",\"fields\":{\"liquidity\":\"9\"}}}}}",
+                    );
+                }
                 return alloc.dupe(
                     u8,
-                    "{\"result\":{\"data\":{\"objectId\":\"0xposition1\",\"version\":\"11\",\"digest\":\"position-digest-1\",\"content\":{\"dataType\":\"moveObject\",\"fields\":{\"liquidity\":\"9\"}}}}}",
+                    "{\"result\":{\"data\":{\"objectId\":\"0xposition1\",\"version\":\"11\",\"digest\":\"position-digest-1\",\"type\":\"0x2a::position::Position\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}}",
                 );
             }
-            return alloc.dupe(
-                u8,
-                "{\"result\":{\"data\":{\"objectId\":\"0xposition1\",\"version\":\"11\",\"digest\":\"position-digest-1\",\"type\":\"0x2a::position::Position\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}}",
-            );
+            std.debug.panic("unexpected method {s}", .{req.method});
         }
     }.call;
 
@@ -5467,7 +5492,7 @@ test "runCommand move function with --summarize falls back to owned event discov
     var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
     defer rpc.deinit();
     rpc.request_sender = .{
-        .context = undefined,
+        .context = &state,
         .callback = callback,
     };
 
@@ -5486,6 +5511,8 @@ test "runCommand move function with --summarize falls back to owned event discov
         "\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xposition1\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":11,\\\"digest\\\":\\\"position-digest-1\\\"}\"",
         parameter.get("auto_selected_arg_json").?.string,
     );
+    try testing.expectEqual(@as(usize, 1), state.router_event_requests);
+    try testing.expectEqual(@as(usize, 1), state.position_event_requests);
 }
 
 test "runCommand move function with --summarize avoids reusing generic owned objects across scalar params" {

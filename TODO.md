@@ -51,6 +51,9 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
 - [x] Owned event fallback can continue from the parameter type's own
   `package/module` when the current function module exposes no useful
   candidates.
+- [x] Reuse owned module-event discovery results across a single
+  `move function` template build instead of rescanning the same module
+  fallback in later parameters or fixed-point rounds.
 - [x] Shared object candidate discovery from module events.
 - [x] Aggregate multiple recent event pages when discovering shared object
   candidates from module events.
@@ -129,6 +132,8 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
 - [ ] Leave only genuinely unknowable parameters for manual input.
 - [ ] Reduce `UnresolvedMoveFunctionExecutionTemplate` failures in common
   protocol flows.
+- [ ] Keep owner-context candidate resolution bounded in live RPC paths by
+  caching more repeated discovery work than module-event scans alone.
 - [x] Make the default execution path prefer preferred request artifacts
   whenever a safe resolution exists.
 
