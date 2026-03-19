@@ -6018,7 +6018,39 @@ pub const SuiRpcClient = struct {
         return cache.items[cache.items.len - 1].object_ids;
     }
 
-    fn collectSelectedObjectIdsFromMoveParametersBySource(
+    fn moveParameterSelectedObjectIdsFingerprint(
+        parameters: []const move_result.OwnedMoveParameterSummary,
+    ) u64 {
+        var hasher = std.hash.Wyhash.init(0);
+        for (parameters) |parameter| {
+            updateMoveSelectionStateHasher(&hasher, parameter.explicit_arg_json);
+            updateMoveSelectionStateHasher(&hasher, parameter.auto_selected_arg_json);
+            hasher.update(&.{@intFromBool(parameter.auto_selected_via_tiebreak)});
+            hasher.update(&.{0xff});
+        }
+        return hasher.final();
+    }
+
+    const MoveSelectedObjectIdsBySourceCache = struct {
+        state_fingerprint: u64 = 0,
+        valid: bool = false,
+        buckets: SelectedMoveObjectIdBuckets = .{
+            .explicit_object_ids = &.{},
+            .auto_selected_object_ids = &.{},
+        },
+
+        fn deinit(self: *MoveSelectedObjectIdsBySourceCache, allocator: std.mem.Allocator) void {
+            if (!self.valid) return;
+            self.buckets.deinit(allocator);
+            self.valid = false;
+            self.buckets = .{
+                .explicit_object_ids = &.{},
+                .auto_selected_object_ids = &.{},
+            };
+        }
+    };
+
+    fn buildSelectedObjectIdsFromMoveParametersBySource(
         allocator: std.mem.Allocator,
         parameters: []const move_result.OwnedMoveParameterSummary,
         arg_json_cache: *std.ArrayList(MoveArgumentSelectedObjectIdsCacheEntry),
@@ -6085,6 +6117,38 @@ pub const SuiRpcClient = struct {
             .explicit_object_ids = try explicit_object_ids.toOwnedSlice(allocator),
             .auto_selected_object_ids = try filtered_auto_selected_object_ids.toOwnedSlice(allocator),
         };
+    }
+
+    fn getSelectedObjectIdsFromMoveParametersBySourceCachedBorrowed(
+        allocator: std.mem.Allocator,
+        parameters: []const move_result.OwnedMoveParameterSummary,
+        arg_json_cache: *std.ArrayList(MoveArgumentSelectedObjectIdsCacheEntry),
+        cache: *MoveSelectedObjectIdsBySourceCache,
+    ) !*const SelectedMoveObjectIdBuckets {
+        const fingerprint = moveParameterSelectedObjectIdsFingerprint(parameters);
+        if (cache.valid and cache.state_fingerprint == fingerprint) return &cache.buckets;
+
+        cache.deinit(allocator);
+        cache.buckets = try buildSelectedObjectIdsFromMoveParametersBySource(
+            allocator,
+            parameters,
+            arg_json_cache,
+        );
+        cache.state_fingerprint = fingerprint;
+        cache.valid = true;
+        return &cache.buckets;
+    }
+
+    fn collectSelectedObjectIdsFromMoveParametersBySource(
+        allocator: std.mem.Allocator,
+        parameters: []const move_result.OwnedMoveParameterSummary,
+        arg_json_cache: *std.ArrayList(MoveArgumentSelectedObjectIdsCacheEntry),
+    ) !SelectedMoveObjectIdBuckets {
+        return try buildSelectedObjectIdsFromMoveParametersBySource(
+            allocator,
+            parameters,
+            arg_json_cache,
+        );
     }
 
     fn jsonValueContainsExactString(
@@ -6236,17 +6300,26 @@ pub const SuiRpcClient = struct {
         object_content_discovery_cache: *std.ArrayList(MoveObjectContentDiscoveryCacheEntry),
         parameters: []move_result.OwnedMoveParameterSummary,
         arg_json_cache: *std.ArrayList(MoveArgumentSelectedObjectIdsCacheEntry),
+        selected_object_ids_cache: *MoveSelectedObjectIdsBySourceCache,
     ) !void {
-        const selected_object_ids = try collectSelectedObjectIdsFromMoveParameters(
+        const selected_object_ids_buckets = try getSelectedObjectIdsFromMoveParametersBySourceCachedBorrowed(
             allocator,
             parameters,
             arg_json_cache,
+            selected_object_ids_cache,
         );
+        var selected_object_ids = std.ArrayList([]u8).empty;
         defer {
-            for (selected_object_ids) |value| allocator.free(value);
-            allocator.free(selected_object_ids);
+            for (selected_object_ids.items) |value| allocator.free(value);
+            selected_object_ids.deinit(allocator);
         }
-        if (selected_object_ids.len == 0) return;
+        for (selected_object_ids_buckets.explicit_object_ids) |object_id| {
+            try appendUniqueMoveSelectedObjectId(allocator, &selected_object_ids, object_id);
+        }
+        for (selected_object_ids_buckets.auto_selected_object_ids) |object_id| {
+            try appendUniqueMoveSelectedObjectId(allocator, &selected_object_ids, object_id);
+        }
+        if (selected_object_ids.items.len == 0) return;
 
         for (parameters) |*parameter| {
             if (parameter.omitted_from_explicit_args) continue;
@@ -6262,7 +6335,7 @@ pub const SuiRpcClient = struct {
             }
 
             var matched_index: ?usize = null;
-            for (selected_object_ids) |selected_object_id| {
+            for (selected_object_ids.items) |selected_object_id| {
                 const discovered_object_ids = self.getMoveObjectContentDiscoveredObjectIdsCachedBorrowed(
                     allocator,
                     object_content_cache,
@@ -6853,13 +6926,14 @@ pub const SuiRpcClient = struct {
         object_content_discovery_cache: *std.ArrayList(MoveObjectContentDiscoveryCacheEntry),
         parameters: []move_result.OwnedMoveParameterSummary,
         arg_json_cache: *std.ArrayList(MoveArgumentSelectedObjectIdsCacheEntry),
+        selected_object_ids_cache: *MoveSelectedObjectIdsBySourceCache,
     ) !void {
-        const selected_object_ids = try collectSelectedObjectIdsFromMoveParametersBySource(
+        const selected_object_ids = try getSelectedObjectIdsFromMoveParametersBySourceCachedBorrowed(
             allocator,
             parameters,
             arg_json_cache,
+            selected_object_ids_cache,
         );
-        defer selected_object_ids.deinit(allocator);
 
         var total_owned_hint_count: usize = 0;
         for (parameters) |other_parameter| {
@@ -6978,13 +7052,14 @@ pub const SuiRpcClient = struct {
         object_content_discovery_cache: *std.ArrayList(MoveObjectContentDiscoveryCacheEntry),
         parameters: []move_result.OwnedMoveParameterSummary,
         arg_json_cache: *std.ArrayList(MoveArgumentSelectedObjectIdsCacheEntry),
+        selected_object_ids_cache: *MoveSelectedObjectIdsBySourceCache,
     ) !void {
-        const selected_object_ids = try collectSelectedObjectIdsFromMoveParametersBySource(
+        const selected_object_ids = try getSelectedObjectIdsFromMoveParametersBySourceCachedBorrowed(
             allocator,
             parameters,
             arg_json_cache,
+            selected_object_ids_cache,
         );
-        defer selected_object_ids.deinit(allocator);
         if (selected_object_ids.explicit_object_ids.len == 0 and selected_object_ids.auto_selected_object_ids.len == 0) return;
 
         const explicit_reference_weight = selected_object_ids.auto_selected_object_ids.len + 1;
@@ -7040,13 +7115,14 @@ pub const SuiRpcClient = struct {
         object_content_discovery_cache: *std.ArrayList(MoveObjectContentDiscoveryCacheEntry),
         parameters: []move_result.OwnedMoveParameterSummary,
         arg_json_cache: *std.ArrayList(MoveArgumentSelectedObjectIdsCacheEntry),
+        selected_object_ids_cache: *MoveSelectedObjectIdsBySourceCache,
     ) !void {
-        const selected_object_ids = try collectSelectedObjectIdsFromMoveParametersBySource(
+        const selected_object_ids = try getSelectedObjectIdsFromMoveParametersBySourceCachedBorrowed(
             allocator,
             parameters,
             arg_json_cache,
+            selected_object_ids_cache,
         );
-        defer selected_object_ids.deinit(allocator);
         if (selected_object_ids.explicit_object_ids.len == 0 and selected_object_ids.auto_selected_object_ids.len == 0) return;
 
         const explicit_reference_weight = selected_object_ids.auto_selected_object_ids.len + 1;
@@ -7514,6 +7590,7 @@ pub const SuiRpcClient = struct {
         object_content_discovery_cache: *std.ArrayList(MoveObjectContentDiscoveryCacheEntry),
         parameters: []move_result.OwnedMoveParameterSummary,
         arg_json_cache: *std.ArrayList(MoveArgumentSelectedObjectIdsCacheEntry),
+        selected_object_ids_cache: *MoveSelectedObjectIdsBySourceCache,
     ) !void {
         var has_ambiguous_candidates = false;
         for (parameters) |parameter| {
@@ -7524,12 +7601,12 @@ pub const SuiRpcClient = struct {
         }
         if (!has_ambiguous_candidates) return;
 
-        const selected_object_ids = try collectSelectedObjectIdsFromMoveParametersBySource(
+        const selected_object_ids = try getSelectedObjectIdsFromMoveParametersBySourceCachedBorrowed(
             allocator,
             parameters,
             arg_json_cache,
+            selected_object_ids_cache,
         );
-        defer selected_object_ids.deinit(allocator);
 
         const explicit_selected_discovered_object_ids = try allocator.alloc(
             []const []const u8,
@@ -7939,6 +8016,8 @@ pub const SuiRpcClient = struct {
     ) !void {
         var arg_json_cache = std.ArrayList(MoveArgumentSelectedObjectIdsCacheEntry).empty;
         defer deinitMoveArgumentSelectedObjectIdsCache(allocator, &arg_json_cache);
+        var selected_object_ids_cache = MoveSelectedObjectIdsBySourceCache{};
+        defer selected_object_ids_cache.deinit(allocator);
 
         var round: usize = 0;
         while (round < move_candidate_resolution_max_rounds) : (round += 1) {
@@ -7975,6 +8054,7 @@ pub const SuiRpcClient = struct {
                 object_content_discovery_cache,
                 parameters,
                 &arg_json_cache,
+                &selected_object_ids_cache,
             );
             try self.applySharedCandidateSelectionHintsFromOwnedCandidates(
                 allocator,
@@ -7982,6 +8062,7 @@ pub const SuiRpcClient = struct {
                 object_content_discovery_cache,
                 parameters,
                 &arg_json_cache,
+                &selected_object_ids_cache,
             );
             try self.applyReferencedOwnedObjectCandidateSelectionHints(
                 allocator,
@@ -7989,6 +8070,7 @@ pub const SuiRpcClient = struct {
                 object_content_discovery_cache,
                 parameters,
                 &arg_json_cache,
+                &selected_object_ids_cache,
             );
             try self.applyReferencedSharedObjectCandidateSelectionHints(
                 allocator,
@@ -7996,6 +8078,7 @@ pub const SuiRpcClient = struct {
                 object_content_discovery_cache,
                 parameters,
                 &arg_json_cache,
+                &selected_object_ids_cache,
             );
             try self.applyReferencedOwnedObjectCandidateSelectionHints(
                 allocator,
@@ -8003,6 +8086,7 @@ pub const SuiRpcClient = struct {
                 object_content_discovery_cache,
                 parameters,
                 &arg_json_cache,
+                &selected_object_ids_cache,
             );
             try self.applyReferencedVectorOwnedObjectCandidateSelectionHints(
                 allocator,
@@ -8010,6 +8094,7 @@ pub const SuiRpcClient = struct {
                 object_content_discovery_cache,
                 parameters,
                 &arg_json_cache,
+                &selected_object_ids_cache,
             );
             try self.applyJointCandidateComponentSelectionHints(
                 allocator,
@@ -8017,6 +8102,7 @@ pub const SuiRpcClient = struct {
                 object_content_discovery_cache,
                 parameters,
                 &arg_json_cache,
+                &selected_object_ids_cache,
             );
 
             const after = moveParameterSelectionStateFingerprint(parameters);
@@ -21960,6 +22046,74 @@ test "getMoveArgumentSelectedObjectIdsCachedBorrowed reuses cached parsed object
     try testing.expectEqual(@as(usize, 1), cache.items.len);
     try testing.expectEqual(@as(usize, 1), borrowed_second.len);
     try testing.expectEqualStrings("0xpool1", borrowed_second[0]);
+}
+
+test "getSelectedObjectIdsFromMoveParametersBySourceCachedBorrowed reuses and invalidates by selected-id state" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const parameters = try allocator.alloc(move_result.OwnedMoveParameterSummary, 2);
+    defer {
+        for (parameters) |*parameter| parameter.deinit(allocator);
+        allocator.free(parameters);
+    }
+
+    parameters[0] = .{
+        .signature = try allocator.dupe(u8, "&0x2::clock::Clock"),
+        .explicit_arg_json = try allocator.dupe(
+            u8,
+            "\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xexplicit\\\",\\\"inputKind\\\":\\\"shared\\\",\\\"initialSharedVersion\\\":1,\\\"mutable\\\":false}\"",
+        ),
+    };
+    parameters[1] = .{
+        .signature = try allocator.dupe(u8, "&0x2::clock::Clock"),
+        .auto_selected_arg_json = try allocator.dupe(
+            u8,
+            "\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xauto1\\\",\\\"inputKind\\\":\\\"shared\\\",\\\"initialSharedVersion\\\":2,\\\"mutable\\\":false}\"",
+        ),
+    };
+
+    var arg_json_cache = std.ArrayList(SuiRpcClient.MoveArgumentSelectedObjectIdsCacheEntry).empty;
+    defer SuiRpcClient.deinitMoveArgumentSelectedObjectIdsCache(allocator, &arg_json_cache);
+    var selected_object_ids_cache = SuiRpcClient.MoveSelectedObjectIdsBySourceCache{};
+    defer selected_object_ids_cache.deinit(allocator);
+
+    const first = try SuiRpcClient.getSelectedObjectIdsFromMoveParametersBySourceCachedBorrowed(
+        allocator,
+        parameters,
+        &arg_json_cache,
+        &selected_object_ids_cache,
+    );
+    try testing.expectEqual(@as(usize, 1), first.explicit_object_ids.len);
+    try testing.expectEqual(@as(usize, 1), first.auto_selected_object_ids.len);
+    try testing.expectEqualStrings("0xexplicit", first.explicit_object_ids[0]);
+    try testing.expectEqualStrings("0xauto1", first.auto_selected_object_ids[0]);
+
+    const second = try SuiRpcClient.getSelectedObjectIdsFromMoveParametersBySourceCachedBorrowed(
+        allocator,
+        parameters,
+        &arg_json_cache,
+        &selected_object_ids_cache,
+    );
+    try testing.expectEqual(first.explicit_object_ids.ptr, second.explicit_object_ids.ptr);
+    try testing.expectEqual(first.auto_selected_object_ids.ptr, second.auto_selected_object_ids.ptr);
+
+    allocator.free(parameters[1].auto_selected_arg_json.?);
+    parameters[1].auto_selected_arg_json = try allocator.dupe(
+        u8,
+        "\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xauto2\\\",\\\"inputKind\\\":\\\"shared\\\",\\\"initialSharedVersion\\\":3,\\\"mutable\\\":false}\"",
+    );
+
+    const third = try SuiRpcClient.getSelectedObjectIdsFromMoveParametersBySourceCachedBorrowed(
+        allocator,
+        parameters,
+        &arg_json_cache,
+        &selected_object_ids_cache,
+    );
+    try testing.expectEqual(@as(usize, 1), third.auto_selected_object_ids.len);
+    try testing.expectEqualStrings("0xauto2", third.auto_selected_object_ids[0]);
 }
 
 test "collectObjectDiscoverySeedObjectIdsFromMoveParameters prioritizes selected ids and caps candidate seeds" {

@@ -186,6 +186,8 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
 - [x] Reuse parsed selected-object ids for repeated `explicit_arg_json` /
   `auto_selected_arg_json` values instead of reparsing the same argument JSON
   across fixed-point scoring passes.
+- [x] Reuse selected-object id buckets across repeated fixed-point scoring
+  passes until the explicit/auto-selected parameter state actually changes.
 - [x] Reuse repeated initial owner-context owned-object discovery reads across
   a single `move function` template build instead of requerying the same
   `(owner, struct type)` for multiple identical parameters.
