@@ -12,6 +12,10 @@
 - local Move package matrix：确认复杂类型、shared/owned/capability/receipt/vector/generic
   这些行为能被稳定回归
 
+当前 deterministic 入口：
+- `zig build move-fixture-test`
+- `zig build test`，现在也会依赖并运行整组本地 Move fixture matrix
+
 ## 设计原则
 
 1. 每个 package 都要覆盖一类明确的 generic invocation 风险，而不是做协议特例。

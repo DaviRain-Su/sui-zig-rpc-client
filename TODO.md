@@ -264,7 +264,7 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
   coverage.
 - [x] Add a `pool_like_protocol_lab` package for transaction-level
   `Pool + Position + Coin + gas` coverage.
-- [ ] Wire the local package matrix into deterministic regression docs/tests,
+- [x] Wire the local package matrix into deterministic regression docs/tests,
   not only live protocol smoke checks.
 
 ## Cetus Readiness Gaps
