@@ -45,6 +45,10 @@
 
 用途：锁定 shared object 输入和版本化 shared object 行为。
 
+当前状态：
+- 已落地：[`fixtures/move/shared_state_lab`](/Users/davirian/dev/zig/sui-zig-rpc-client/fixtures/move/shared_state_lab)
+- 已验证：`sui move test --path fixtures/move/shared_state_lab`
+
 建议覆盖：
 - `&T` / `&mut T` shared object
 - shared object creation / mutation

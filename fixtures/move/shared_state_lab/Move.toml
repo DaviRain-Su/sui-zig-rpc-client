@@ -1,0 +1,6 @@
+[package]
+name = "shared_state_lab"
+edition = "2024"
+
+[addresses]
+shared_state_lab = "0x0"

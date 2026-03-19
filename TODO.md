@@ -250,7 +250,7 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
 
 - [ ] Add a `counter_baseline` package for pure-value and sender/signer
   invocation coverage.
-- [ ] Add a `shared_state_lab` package for shared object and versioned shared
+- [x] Add a `shared_state_lab` package for shared object and versioned shared
   object coverage.
 - [ ] Add a `generic_vault` package for generic object and generic pure struct
   coverage.

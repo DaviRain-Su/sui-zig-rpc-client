@@ -57,6 +57,15 @@ zig build test --summary all
 - `H1 Upgrade preconditions and Versioned Shared Objects`
 - `K2 ZKLogin / session-backed account flow`
 
+本地 Move 合约矩阵现在已经开始落地，第一项是：
+- [`fixtures/move/shared_state_lab`](/Users/davirian/dev/zig/sui-zig-rpc-client/fixtures/move/shared_state_lab)
+  - 覆盖 shared object、owned admin cap、shared object 跨交易修改、version migration
+  - 可直接运行：
+
+```bash
+sui move test --path fixtures/move/shared_state_lab
+```
+
 接下来更关键的补强，不是继续堆 live 协议样例，而是把一组本地可控的复杂
 Move package 收成固定矩阵。这样 shared/owned/generic/vector/receipt/dynamic
 fields 这些能力才能被 deterministic 地锁住，而不是只靠 Cetus 主网 smoke
