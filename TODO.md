@@ -69,6 +69,8 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
   more internally consistent object clusters rank higher.
 - [x] Connected-component anchor bonuses so clusters already referenced by
   explicit/selected transaction objects outrank otherwise similar candidates.
+- [x] Avoid reusing the same non-coin owned object across later scalar/vector
+  object parameters during auto-selection.
 
 ### Coin automation
 

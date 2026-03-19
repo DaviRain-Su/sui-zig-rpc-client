@@ -6172,7 +6172,12 @@ pub const SuiRpcClient = struct {
         token: []const u8,
     };
 
-    fn coinCandidateObjectIdIsExcluded(
+    const SelectedOwnedObjectCandidate = struct {
+        object_id: []const u8,
+        token: []const u8,
+    };
+
+    fn moveObjectIdIsExcluded(
         excluded_object_ids: []const []const u8,
         object_id: []const u8,
     ) bool {
@@ -6190,7 +6195,7 @@ pub const SuiRpcClient = struct {
         var selected: ?SelectedCoinCandidate = null;
         var selected_balance: u64 = 0;
         for (candidates) |candidate| {
-            if (coinCandidateObjectIdIsExcluded(excluded_object_ids, candidate.object_id)) continue;
+            if (moveObjectIdIsExcluded(excluded_object_ids, candidate.object_id)) continue;
             const balance = candidate.balance orelse continue;
             if (balance < min_balance) continue;
             if (selected == null or balance < selected_balance) {
@@ -6236,7 +6241,7 @@ pub const SuiRpcClient = struct {
             var next_balance: u64 = 0;
             for (candidates, 0..) |candidate, index| {
                 if (used[index]) continue;
-                if (coinCandidateObjectIdIsExcluded(excluded_object_ids, candidate.object_id)) continue;
+                if (moveObjectIdIsExcluded(excluded_object_ids, candidate.object_id)) continue;
                 const balance = candidate.balance orelse continue;
                 if (next_index == null or balance > next_balance) {
                     next_index = index;
@@ -6262,7 +6267,7 @@ pub const SuiRpcClient = struct {
         excluded_object_ids: []const []const u8,
     ) !bool {
         for (candidates) |candidate| {
-            if (coinCandidateObjectIdIsExcluded(excluded_object_ids, candidate.object_id)) continue;
+            if (moveObjectIdIsExcluded(excluded_object_ids, candidate.object_id)) continue;
             try selected_candidates.append(allocator, .{
                 .object_id = candidate.object_id,
                 .token = candidate.object_input_select_token,
@@ -6278,7 +6283,7 @@ pub const SuiRpcClient = struct {
         var selected: ?SelectedCoinCandidate = null;
         var selected_balance: u64 = 0;
         for (candidates) |candidate| {
-            if (coinCandidateObjectIdIsExcluded(excluded_object_ids, candidate.object_id)) continue;
+            if (moveObjectIdIsExcluded(excluded_object_ids, candidate.object_id)) continue;
             const balance = candidate.balance orelse continue;
             if (selected == null or balance > selected_balance) {
                 selected = .{
@@ -6289,6 +6294,51 @@ pub const SuiRpcClient = struct {
             }
         }
         return selected;
+    }
+
+    fn isNonCoinOwnedMoveParameter(
+        parameter: move_result.OwnedMoveParameterSummary,
+    ) bool {
+        return parameter.owned_object_candidates != null and
+            coinTypeFromMoveSignature(parameter.signature) == null;
+    }
+
+    fn isNonCoinVectorOwnedMoveParameter(
+        parameter: move_result.OwnedMoveParameterSummary,
+    ) bool {
+        const element_signature = vectorElementTypeSignature(parameter.signature) orelse return false;
+        if (coinTypeFromCoinStructType(element_signature) != null) return false;
+        return parameter.vector_item_owned_object_candidates != null;
+    }
+
+    fn selectFirstOwnedObjectCandidateExcluding(
+        candidates: []const move_result.OwnedMoveObjectCandidate,
+        excluded_object_ids: []const []const u8,
+    ) ?SelectedOwnedObjectCandidate {
+        for (candidates) |candidate| {
+            if (moveObjectIdIsExcluded(excluded_object_ids, candidate.object_id)) continue;
+            return .{
+                .object_id = candidate.object_id,
+                .token = candidate.object_input_select_token,
+            };
+        }
+        return null;
+    }
+
+    fn appendAllOwnedObjectCandidatesExcluding(
+        allocator: std.mem.Allocator,
+        selected_candidates: *std.ArrayList(SelectedOwnedObjectCandidate),
+        candidates: []const move_result.OwnedMoveObjectCandidate,
+        excluded_object_ids: []const []const u8,
+    ) !bool {
+        for (candidates) |candidate| {
+            if (moveObjectIdIsExcluded(excluded_object_ids, candidate.object_id)) continue;
+            try selected_candidates.append(allocator, .{
+                .object_id = candidate.object_id,
+                .token = candidate.object_input_select_token,
+            });
+        }
+        return selected_candidates.items.len != 0;
     }
 
     fn appendReservedMoveObjectIdsFromArgumentJsonText(
@@ -6303,6 +6353,118 @@ pub const SuiRpcClient = struct {
             reserved_object_ids,
             parsed.value,
         );
+    }
+
+    fn argumentJsonUsesExcludedObjectIds(
+        allocator: std.mem.Allocator,
+        arg_json: []const u8,
+        excluded_object_ids: []const []const u8,
+    ) bool {
+        if (excluded_object_ids.len == 0) return false;
+
+        var selected_object_ids = std.ArrayList([]u8).empty;
+        defer {
+            for (selected_object_ids.items) |value| allocator.free(value);
+            selected_object_ids.deinit(allocator);
+        }
+
+        appendReservedMoveObjectIdsFromArgumentJsonText(
+            allocator,
+            &selected_object_ids,
+            arg_json,
+        ) catch return false;
+
+        for (selected_object_ids.items) |object_id| {
+            if (moveObjectIdIsExcluded(excluded_object_ids, object_id)) return true;
+        }
+        return false;
+    }
+
+    fn applyCrossParameterOwnedObjectSelectionHints(
+        allocator: std.mem.Allocator,
+        parameters: []move_result.OwnedMoveParameterSummary,
+    ) !void {
+        var reserved_object_ids = std.ArrayList([]u8).empty;
+        defer {
+            for (reserved_object_ids.items) |value| allocator.free(value);
+            reserved_object_ids.deinit(allocator);
+        }
+
+        for (parameters) |*parameter| {
+            if (parameter.omitted_from_explicit_args) continue;
+
+            if (parameter.explicit_arg_json) |value| {
+                if (isNonCoinOwnedMoveParameter(parameter.*) or isNonCoinVectorOwnedMoveParameter(parameter.*)) {
+                    try appendReservedMoveObjectIdsFromArgumentJsonText(
+                        allocator,
+                        &reserved_object_ids,
+                        value,
+                    );
+                }
+                continue;
+            }
+
+            if (parameter.auto_selected_arg_json) |value| {
+                if ((isNonCoinOwnedMoveParameter(parameter.*) or isNonCoinVectorOwnedMoveParameter(parameter.*)) and
+                    !argumentJsonUsesExcludedObjectIds(
+                        allocator,
+                        value,
+                        reserved_object_ids.items,
+                    ))
+                {
+                    try appendReservedMoveObjectIdsFromArgumentJsonText(
+                        allocator,
+                        &reserved_object_ids,
+                        value,
+                    );
+                    continue;
+                }
+            }
+
+            if (isNonCoinOwnedMoveParameter(parameter.*)) {
+                const candidates = parameter.owned_object_candidates orelse continue;
+                const selected_value = if (selectFirstOwnedObjectCandidateExcluding(
+                    candidates,
+                    reserved_object_ids.items,
+                )) |selected| blk: {
+                    try reserved_object_ids.append(
+                        allocator,
+                        try allocator.dupe(u8, selected.object_id),
+                    );
+                    break :blk try buildAutoSelectedScalarArgJson(allocator, selected.token);
+                } else null;
+                replaceMoveParameterAutoSelectedArgJson(allocator, parameter, selected_value);
+                continue;
+            }
+
+            if (isNonCoinVectorOwnedMoveParameter(parameter.*)) {
+                const candidates = parameter.vector_item_owned_object_candidates orelse continue;
+                var selected_candidates = std.ArrayList(SelectedOwnedObjectCandidate).empty;
+                defer selected_candidates.deinit(allocator);
+                const found = try appendAllOwnedObjectCandidatesExcluding(
+                    allocator,
+                    &selected_candidates,
+                    candidates,
+                    reserved_object_ids.items,
+                );
+                const selected_value = if (found) blk: {
+                    var selected_tokens = std.ArrayList([]const u8).empty;
+                    defer selected_tokens.deinit(allocator);
+                    for (selected_candidates.items) |selected| {
+                        try reserved_object_ids.append(
+                            allocator,
+                            try allocator.dupe(u8, selected.object_id),
+                        );
+                        try selected_tokens.append(allocator, selected.token);
+                    }
+                    break :blk try buildAutoSelectedVectorArgJsonFromTokens(
+                        allocator,
+                        selected_tokens.items,
+                    );
+                } else null;
+                replaceMoveParameterAutoSelectedArgJson(allocator, parameter, selected_value);
+            }
+        }
     }
 
     fn applyCrossParameterBusinessCoinSelectionHints(
@@ -7452,6 +7614,7 @@ pub const SuiRpcClient = struct {
         }
         try self.resolveMoveParameterCandidatesToFixedPoint(allocator, summary.parameters);
         try applyCrossParameterBusinessCoinSelectionHints(allocator, summary.parameters);
+        try applyCrossParameterOwnedObjectSelectionHints(allocator, summary.parameters);
 
         const type_args_json = try resolvedMoveFunctionTypeArgsTemplateJson(
             allocator,
