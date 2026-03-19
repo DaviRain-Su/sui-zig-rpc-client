@@ -260,7 +260,7 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
   flows.
 - [x] Add a `dynamic_registry` package for content/dynamic-field-based
   discovery coverage.
-- [ ] Add an `admin_upgrade_lab` package for capability/publish/upgrade
+- [x] Add an `admin_upgrade_lab` package for capability/publish/upgrade
   coverage.
 - [ ] Add a `pool_like_protocol_lab` package for transaction-level
   `Pool + Position + Coin + gas` coverage.

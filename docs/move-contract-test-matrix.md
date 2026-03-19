@@ -145,6 +145,10 @@
 
 用途：覆盖 capability、admin policy、publish/upgrade 尾部能力。
 
+当前状态：
+- 已落地：[`fixtures/move/admin_upgrade_lab`](/Users/davirian/dev/zig/sui-zig-rpc-client/fixtures/move/admin_upgrade_lab)
+- 已验证：`sui move test --path fixtures/move/admin_upgrade_lab`
+
 建议覆盖：
 - `AdminCap`
 - `UpgradeCap`

@@ -1,0 +1,6 @@
+[package]
+name = "admin_upgrade_lab"
+edition = "2024"
+
+[addresses]
+admin_upgrade_lab = "0x0"
