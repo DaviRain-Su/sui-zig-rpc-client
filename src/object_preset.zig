@@ -1,4 +1,6 @@
 const std = @import("std");
+const built_in_object_preset = @import("./builtin_object_preset.zig");
+const protocol_object_registry = @import("./protocol_object_registry.zig");
 
 pub const Kind = enum {
     clock,
@@ -6,10 +8,10 @@ pub const Kind = enum {
     cetus_clmm_global_config_testnet,
 };
 
-pub const clock = "0x6";
-pub const cetus_clmm_global_config_mainnet = "0xdaa46292632c3c4d8f31f23ea0f9b36a28ff3677e9684980e4438403a67a3d8f";
-pub const cetus_clmm_global_config_testnet = "0xc6273f844b4bc258952c4e477697aa12c918c8e08106fac6b934811298c9820a";
-pub const cetus_clmm_global_config_mainnet_type = "0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb::config::GlobalConfig";
+pub const clock = built_in_object_preset.clock;
+pub const cetus_clmm_global_config_mainnet = protocol_object_registry.cetus_clmm_global_config_mainnet;
+pub const cetus_clmm_global_config_testnet = protocol_object_registry.cetus_clmm_global_config_testnet;
+pub const cetus_clmm_global_config_mainnet_type = protocol_object_registry.cetus_clmm_global_config_mainnet_type;
 
 fn trimPresetPrefix(raw: []const u8) []const u8 {
     if (std.mem.startsWith(u8, raw, "preset:")) return raw["preset:".len..];
@@ -27,17 +29,17 @@ fn trimReferencePrefix(raw: []const u8) []const u8 {
 
 pub fn objectId(kind: Kind) []const u8 {
     return switch (kind) {
-        .clock => clock,
-        .cetus_clmm_global_config_mainnet => cetus_clmm_global_config_mainnet,
-        .cetus_clmm_global_config_testnet => cetus_clmm_global_config_testnet,
+        .clock => built_in_object_preset.objectId(.clock),
+        .cetus_clmm_global_config_mainnet => protocol_object_registry.objectId(.cetus_clmm_global_config_mainnet),
+        .cetus_clmm_global_config_testnet => protocol_object_registry.objectId(.cetus_clmm_global_config_testnet),
     };
 }
 
 pub fn canonicalName(kind: Kind) []const u8 {
     return switch (kind) {
-        .clock => "clock",
-        .cetus_clmm_global_config_mainnet => "cetus_clmm_global_config_mainnet",
-        .cetus_clmm_global_config_testnet => "cetus_clmm_global_config_testnet",
+        .clock => built_in_object_preset.canonicalName(.clock),
+        .cetus_clmm_global_config_mainnet => protocol_object_registry.canonicalName(.cetus_clmm_global_config_mainnet),
+        .cetus_clmm_global_config_testnet => protocol_object_registry.canonicalName(.cetus_clmm_global_config_testnet),
     };
 }
 
@@ -48,26 +50,13 @@ pub fn resolveKind(raw: []const u8) ?Kind {
 
     const name = trimPresetPrefix(trimmed);
 
-    if (std.ascii.eqlIgnoreCase(name, "clock") or
-        std.ascii.eqlIgnoreCase(name, "sui_clock") or
-        std.ascii.eqlIgnoreCase(name, "system_clock"))
-    {
-        return .clock;
-    }
-    if (std.ascii.eqlIgnoreCase(name, "cetus_clmm_global_config_mainnet") or
-        std.ascii.eqlIgnoreCase(name, "cetus-global-config-mainnet") or
-        std.ascii.eqlIgnoreCase(name, "cetus_global_config_mainnet") or
-        std.ascii.eqlIgnoreCase(name, "cetus.mainnet.clmm.global_config"))
-    {
-        return .cetus_clmm_global_config_mainnet;
-    }
-    if (std.ascii.eqlIgnoreCase(name, "cetus_clmm_global_config_testnet") or
-        std.ascii.eqlIgnoreCase(name, "cetus-global-config-testnet") or
-        std.ascii.eqlIgnoreCase(name, "cetus_global_config_testnet") or
-        std.ascii.eqlIgnoreCase(name, "cetus.testnet.clmm.global_config"))
-    {
-        return .cetus_clmm_global_config_testnet;
-    }
+    if (built_in_object_preset.resolveKindName(name)) |kind| return switch (kind) {
+        .clock => .clock,
+    };
+    if (protocol_object_registry.resolveKindName(name)) |kind| return switch (kind) {
+        .cetus_clmm_global_config_mainnet => .cetus_clmm_global_config_mainnet,
+        .cetus_clmm_global_config_testnet => .cetus_clmm_global_config_testnet,
+    };
     return null;
 }
 
@@ -78,10 +67,13 @@ pub fn resolveObjectIdAlias(raw: []const u8) ?[]const u8 {
 
 pub fn inferKindFromTypeSignature(signature: []const u8) ?Kind {
     const trimmed = trimReferencePrefix(signature);
-    if (std.mem.eql(u8, trimmed, "0x2::clock::Clock")) return .clock;
-    if (std.mem.eql(u8, trimmed, cetus_clmm_global_config_mainnet_type)) {
-        return .cetus_clmm_global_config_mainnet;
-    }
+    if (built_in_object_preset.inferKindFromTypeSignature(trimmed)) |kind| return switch (kind) {
+        .clock => .clock,
+    };
+    if (protocol_object_registry.inferKindFromTypeSignature(trimmed)) |kind| return switch (kind) {
+        .cetus_clmm_global_config_mainnet => .cetus_clmm_global_config_mainnet,
+        .cetus_clmm_global_config_testnet => .cetus_clmm_global_config_testnet,
+    };
     return null;
 }
 

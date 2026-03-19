@@ -1015,6 +1015,8 @@ zig build run -- move function cetus_clmm_mainnet pool swap \
 - `&0x2::clock::Clock` -> `select:{"kind":"object_preset","name":"clock"}`
 - Cetus mainnet `&config::GlobalConfig` -> `select:{"kind":"object_preset","name":"cetus_clmm_global_config_mainnet"}`
 
+这些 preset 现在已经按职责拆开：链级 built-in object 走 built-in preset 层，协议级固定对象走独立的 protocol object registry。也就是说，preset 只是“已知固定对象的快捷层”，不是任意合约 object 解析的主路径；通用对象交互仍然默认走 `object get` / `object_input` / owner/shared candidate discovery。
+
 对于没法直接映射成 preset、但类型已经是 concrete struct 的 object 参数，CLI 现在还会额外给 discovery 候选。例如 `Position` 一类 owned object 会带出：
 - `parameters[*].shared_object_input_select_token`
 - `parameters[*].imm_or_owned_object_input_select_token`

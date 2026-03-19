@@ -21,4 +21,6 @@ pub const tx_request_builder = @import("./tx_request_builder.zig");
 pub const ptb_bytes_builder = @import("./ptb_bytes_builder.zig");
 pub const keystore = @import("./keystore.zig");
 pub const package_preset = @import("./package_preset.zig");
+pub const built_in_object_preset = @import("./builtin_object_preset.zig");
+pub const protocol_object_registry = @import("./protocol_object_registry.zig");
 pub const object_preset = @import("./object_preset.zig");

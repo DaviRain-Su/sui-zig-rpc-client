@@ -35,6 +35,9 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
 ### Object discovery and candidate linking
 
 - [x] Shared/owned object input token generation from object summaries.
+- [x] Separate chain built-in object presets from protocol-specific object
+  registry entries so protocol aliases do not live in the generic built-in
+  preset layer.
 - [x] Preset object aliases such as `clock` and Cetus global config.
 - [x] Owned object candidate discovery from owner context.
 - [x] Aggregate owned object candidate discovery across all owner pages instead
