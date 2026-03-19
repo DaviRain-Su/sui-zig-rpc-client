@@ -4489,6 +4489,14 @@ pub const SuiRpcClient = struct {
         return cloned;
     }
 
+    fn freeMoveDiscoveredObjectIds(
+        allocator: std.mem.Allocator,
+        object_ids: [][]u8,
+    ) void {
+        for (object_ids) |object_id| allocator.free(object_id);
+        allocator.free(object_ids);
+    }
+
     fn collectDiscoveredObjectIdsFromObjectResponseContent(
         allocator: std.mem.Allocator,
         response_json: []const u8,
@@ -5709,6 +5717,16 @@ pub const SuiRpcClient = struct {
         return matched_index;
     }
 
+    fn discoveredObjectIdsReferenceObjectId(
+        discovered_object_ids: []const []const u8,
+        object_id: []const u8,
+    ) bool {
+        for (discovered_object_ids) |discovered_object_id| {
+            if (std.mem.eql(u8, discovered_object_id, object_id)) return true;
+        }
+        return false;
+    }
+
     fn applyReferencedSharedObjectCandidateSelectionHints(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
@@ -6576,11 +6594,11 @@ pub const SuiRpcClient = struct {
         parameter_index: usize,
         candidate_index: usize,
         object_id: []const u8,
-        response_json: ?[]u8,
+        discovered_object_ids: [][]u8,
         apply_component_bonus: bool,
 
         fn deinit(self: MoveCandidateGraphNode, allocator: std.mem.Allocator) void {
-            if (self.response_json) |value| allocator.free(value);
+            freeMoveDiscoveredObjectIds(allocator, self.discovered_object_ids);
         }
     };
 
@@ -6595,42 +6613,25 @@ pub const SuiRpcClient = struct {
         };
     }
 
-    fn objectResponseContentReferencesObjectId(
-        allocator: std.mem.Allocator,
-        response_json: []const u8,
-        object_id: []const u8,
-    ) bool {
-        return objectResponseContentReferenceScore(allocator, response_json, &.{object_id}) != 0;
-    }
-
     fn moveCandidateGraphNodesAreConnected(
-        allocator: std.mem.Allocator,
         left: MoveCandidateGraphNode,
         right: MoveCandidateGraphNode,
     ) bool {
         if (left.parameter_index == right.parameter_index) return false;
-        if (left.response_json) |response| {
-            if (objectResponseContentReferencesObjectId(allocator, response, right.object_id)) return true;
-        }
-        if (right.response_json) |response| {
-            if (objectResponseContentReferencesObjectId(allocator, response, left.object_id)) return true;
-        }
-        return false;
+        return discoveredObjectIdsReferenceObjectId(left.discovered_object_ids, right.object_id) or
+            discoveredObjectIdsReferenceObjectId(right.discovered_object_ids, left.object_id);
     }
 
-    fn componentReferencesSelectedObjectResponses(
-        allocator: std.mem.Allocator,
+    fn componentReferencesSelectedDiscoveredObjectIds(
         component_nodes: []const usize,
         nodes: []const MoveCandidateGraphNode,
-        selected_responses: []const ?[]u8,
+        selected_discovered_object_ids: []const [][]u8,
     ) usize {
         var count: usize = 0;
-        for (selected_responses) |response_opt| {
-            const response = response_opt orelse continue;
+        for (selected_discovered_object_ids) |discovered_object_ids| {
             for (component_nodes) |node_index| {
-                if (objectResponseContentReferencesObjectId(
-                    allocator,
-                    response,
+                if (discoveredObjectIdsReferenceObjectId(
+                    discovered_object_ids,
                     nodes[node_index].object_id,
                 )) {
                     count += 1;
@@ -6642,7 +6643,6 @@ pub const SuiRpcClient = struct {
     }
 
     fn componentReferencesSelectedObjectIds(
-        allocator: std.mem.Allocator,
         component_nodes: []const usize,
         nodes: []const MoveCandidateGraphNode,
         selected_object_ids: []const []const u8,
@@ -6650,10 +6650,8 @@ pub const SuiRpcClient = struct {
         var count: usize = 0;
         for (selected_object_ids) |selected_object_id| {
             for (component_nodes) |node_index| {
-                const response = nodes[node_index].response_json orelse continue;
-                if (objectResponseContentReferencesObjectId(
-                    allocator,
-                    response,
+                if (discoveredObjectIdsReferenceObjectId(
+                    nodes[node_index].discovered_object_ids,
                     selected_object_id,
                 )) {
                     count += 1;
@@ -6668,6 +6666,7 @@ pub const SuiRpcClient = struct {
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
         object_content_cache: *std.ArrayList(MoveObjectContentResponseCacheEntry),
+        object_content_discovery_cache: *std.ArrayList(MoveObjectContentDiscoveryCacheEntry),
         parameters: []move_result.OwnedMoveParameterSummary,
     ) !void {
         var has_ambiguous_candidates = false;
@@ -6685,40 +6684,42 @@ pub const SuiRpcClient = struct {
         );
         defer selected_object_ids.deinit(allocator);
 
-        const explicit_selected_responses = try allocator.alloc(
-            ?[]u8,
+        const explicit_selected_discovered_object_ids = try allocator.alloc(
+            [][]u8,
             selected_object_ids.explicit_object_ids.len,
         );
         defer {
-            for (explicit_selected_responses) |response_opt| {
-                if (response_opt) |response| allocator.free(response);
+            for (explicit_selected_discovered_object_ids) |discovered_object_ids| {
+                freeMoveDiscoveredObjectIds(allocator, discovered_object_ids);
             }
-            allocator.free(explicit_selected_responses);
+            allocator.free(explicit_selected_discovered_object_ids);
         }
         for (selected_object_ids.explicit_object_ids, 0..) |object_id, index| {
-            explicit_selected_responses[index] = self.getMoveObjectContentResponseCached(
+            explicit_selected_discovered_object_ids[index] = self.getMoveObjectContentDiscoveredObjectIdsCached(
                 allocator,
                 object_content_cache,
+                object_content_discovery_cache,
                 object_id,
-            ) catch null;
+            ) catch try allocator.alloc([]u8, 0);
         }
 
-        const auto_selected_responses = try allocator.alloc(
-            ?[]u8,
+        const auto_selected_discovered_object_ids = try allocator.alloc(
+            [][]u8,
             selected_object_ids.auto_selected_object_ids.len,
         );
         defer {
-            for (auto_selected_responses) |response_opt| {
-                if (response_opt) |response| allocator.free(response);
+            for (auto_selected_discovered_object_ids) |discovered_object_ids| {
+                freeMoveDiscoveredObjectIds(allocator, discovered_object_ids);
             }
-            allocator.free(auto_selected_responses);
+            allocator.free(auto_selected_discovered_object_ids);
         }
         for (selected_object_ids.auto_selected_object_ids, 0..) |object_id, index| {
-            auto_selected_responses[index] = self.getMoveObjectContentResponseCached(
+            auto_selected_discovered_object_ids[index] = self.getMoveObjectContentDiscoveredObjectIdsCached(
                 allocator,
                 object_content_cache,
+                object_content_discovery_cache,
                 object_id,
-            ) catch null;
+            ) catch try allocator.alloc([]u8, 0);
         }
 
         var nodes = std.ArrayList(MoveCandidateGraphNode).empty;
@@ -6732,16 +6733,19 @@ pub const SuiRpcClient = struct {
 
             if (parameter.shared_object_candidates) |candidates| {
                 for (candidates, 0..) |candidate, candidate_index| {
+                    const discovered_object_ids = self.getMoveObjectContentDiscoveredObjectIdsCached(
+                        allocator,
+                        object_content_cache,
+                        object_content_discovery_cache,
+                        candidate.object_id,
+                    ) catch try allocator.alloc([]u8, 0);
+                    errdefer freeMoveDiscoveredObjectIds(allocator, discovered_object_ids);
                     try nodes.append(allocator, .{
                         .kind = .shared,
                         .parameter_index = parameter_index,
                         .candidate_index = candidate_index,
                         .object_id = candidate.object_id,
-                        .response_json = self.getMoveObjectContentResponseCached(
-                            allocator,
-                            object_content_cache,
-                            candidate.object_id,
-                        ) catch null,
+                        .discovered_object_ids = discovered_object_ids,
                         .apply_component_bonus = apply_component_bonus,
                     });
                 }
@@ -6749,16 +6753,19 @@ pub const SuiRpcClient = struct {
 
             if (parameter.owned_object_candidates) |candidates| {
                 for (candidates, 0..) |candidate, candidate_index| {
+                    const discovered_object_ids = self.getMoveObjectContentDiscoveredObjectIdsCached(
+                        allocator,
+                        object_content_cache,
+                        object_content_discovery_cache,
+                        candidate.object_id,
+                    ) catch try allocator.alloc([]u8, 0);
+                    errdefer freeMoveDiscoveredObjectIds(allocator, discovered_object_ids);
                     try nodes.append(allocator, .{
                         .kind = .owned,
                         .parameter_index = parameter_index,
                         .candidate_index = candidate_index,
                         .object_id = candidate.object_id,
-                        .response_json = self.getMoveObjectContentResponseCached(
-                            allocator,
-                            object_content_cache,
-                            candidate.object_id,
-                        ) catch null,
+                        .discovered_object_ids = discovered_object_ids,
                         .apply_component_bonus = apply_component_bonus,
                     });
                 }
@@ -6766,16 +6773,19 @@ pub const SuiRpcClient = struct {
 
             if (parameter.vector_item_owned_object_candidates) |candidates| {
                 for (candidates, 0..) |candidate, candidate_index| {
+                    const discovered_object_ids = self.getMoveObjectContentDiscoveredObjectIdsCached(
+                        allocator,
+                        object_content_cache,
+                        object_content_discovery_cache,
+                        candidate.object_id,
+                    ) catch try allocator.alloc([]u8, 0);
+                    errdefer freeMoveDiscoveredObjectIds(allocator, discovered_object_ids);
                     try nodes.append(allocator, .{
                         .kind = .vector_owned,
                         .parameter_index = parameter_index,
                         .candidate_index = candidate_index,
                         .object_id = candidate.object_id,
-                        .response_json = self.getMoveObjectContentResponseCached(
-                            allocator,
-                            object_content_cache,
-                            candidate.object_id,
-                        ) catch null,
+                        .discovered_object_ids = discovered_object_ids,
                         .apply_component_bonus = apply_component_bonus,
                     });
                 }
@@ -6836,38 +6846,30 @@ pub const SuiRpcClient = struct {
 
                 for (nodes.items, 0..) |candidate, other_index| {
                     if (visited[other_index]) continue;
-                    if (!moveCandidateGraphNodesAreConnected(
-                        allocator,
-                        nodes.items[current_index],
-                        candidate,
-                    )) continue;
+                    if (!moveCandidateGraphNodesAreConnected(nodes.items[current_index], candidate)) continue;
                     visited[other_index] = true;
                     try stack.append(allocator, other_index);
                 }
             }
 
             const explicit_anchor_count =
-                componentReferencesSelectedObjectResponses(
-                    allocator,
+                componentReferencesSelectedDiscoveredObjectIds(
                     component_nodes.items,
                     nodes.items,
-                    explicit_selected_responses,
+                    explicit_selected_discovered_object_ids,
                 ) +
                 componentReferencesSelectedObjectIds(
-                    allocator,
                     component_nodes.items,
                     nodes.items,
                     selected_object_ids.explicit_object_ids,
                 );
             const auto_anchor_count =
-                componentReferencesSelectedObjectResponses(
-                    allocator,
+                componentReferencesSelectedDiscoveredObjectIds(
                     component_nodes.items,
                     nodes.items,
-                    auto_selected_responses,
+                    auto_selected_discovered_object_ids,
                 ) +
                 componentReferencesSelectedObjectIds(
-                    allocator,
                     component_nodes.items,
                     nodes.items,
                     selected_object_ids.auto_selected_object_ids,
@@ -7080,6 +7082,7 @@ pub const SuiRpcClient = struct {
             try self.applyJointCandidateComponentSelectionHints(
                 allocator,
                 object_content_cache,
+                object_content_discovery_cache,
                 parameters,
             );
 
@@ -20137,6 +20140,75 @@ test "getObjectAndSummarizeWithOptions extracts summaries from typed object opti
     try testing.expectEqual(object_result.ObjectOwnerKind.address_owner, summary.owner_kind.?);
     try testing.expectEqualStrings("0xowner", summary.owner_value.?);
     try testing.expectEqual(@as(?u64, 42), summary.storage_rebate);
+}
+
+test "getMoveObjectContentDiscoveredObjectIdsCached reuses cached discoveries after response cache reset" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const State = struct {
+        request_count: usize = 0,
+    };
+    var state = State{};
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const callback_state = @as(*State, @ptrCast(@alignCast(context)));
+            try testing.expectEqualStrings("sui_getObject", req.method);
+            try testing.expectEqualStrings(
+                "[\"0xregistry1\",{\"showContent\":true}]",
+                req.params_json,
+            );
+            callback_state.request_count += 1;
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":{\"objectId\":\"0xregistry1\",\"content\":{\"dataType\":\"moveObject\",\"fields\":{\"pool_id\":\"0xpool1\",\"position_id\":\"0xposition1\"}}}}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &state,
+        .callback = callback,
+    };
+
+    var response_cache = std.ArrayList(SuiRpcClient.MoveObjectContentResponseCacheEntry).empty;
+    defer SuiRpcClient.deinitMoveObjectContentResponseCache(allocator, &response_cache);
+    var discovery_cache = std.ArrayList(SuiRpcClient.MoveObjectContentDiscoveryCacheEntry).empty;
+    defer SuiRpcClient.deinitMoveObjectContentDiscoveryCache(allocator, &discovery_cache);
+
+    const first = try client_instance.getMoveObjectContentDiscoveredObjectIdsCached(
+        allocator,
+        &response_cache,
+        &discovery_cache,
+        "0xregistry1",
+    );
+    defer SuiRpcClient.freeMoveDiscoveredObjectIds(allocator, first);
+
+    try testing.expectEqual(@as(usize, 1), state.request_count);
+    try testing.expectEqual(@as(usize, 2), first.len);
+    try testing.expectEqualStrings("0xpool1", first[0]);
+    try testing.expectEqualStrings("0xposition1", first[1]);
+
+    SuiRpcClient.deinitMoveObjectContentResponseCache(allocator, &response_cache);
+    response_cache = std.ArrayList(SuiRpcClient.MoveObjectContentResponseCacheEntry).empty;
+
+    const second = try client_instance.getMoveObjectContentDiscoveredObjectIdsCached(
+        allocator,
+        &response_cache,
+        &discovery_cache,
+        "0xregistry1",
+    );
+    defer SuiRpcClient.freeMoveDiscoveredObjectIds(allocator, second);
+
+    try testing.expectEqual(@as(usize, 1), state.request_count);
+    try testing.expectEqual(@as(usize, 2), second.len);
+    try testing.expectEqualStrings("0xpool1", second[0]);
+    try testing.expectEqualStrings("0xposition1", second[1]);
 }
 
 test "runObjectQueryAndSummarize supports typed object-get queries" {
