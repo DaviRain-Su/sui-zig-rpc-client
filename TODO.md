@@ -156,6 +156,8 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
 - [x] Reuse repeated candidate object summary reads across a single
   `move function` template build instead of refetching the same object during
   shared/owned candidate filtering.
+- [x] Reuse borrowed cached object summaries inside shared/owned candidate
+  filtering instead of recloning the same summary struct on each lookup.
 - [x] Reuse cached content-derived object ids inside joint candidate component
   scoring instead of rescanning raw `showContent` JSON while computing
   candidate-cluster connectivity and anchor bonuses.

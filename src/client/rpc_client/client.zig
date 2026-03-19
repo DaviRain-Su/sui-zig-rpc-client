@@ -4203,12 +4203,11 @@ pub const SuiRpcClient = struct {
         const struct_type = trimMoveReferenceSignature(signature);
 
         for (object_ids) |object_id| {
-            var summary = self.getMoveObjectSummaryCached(
+            const summary = self.getMoveObjectSummaryCachedBorrowed(
                 allocator,
                 object_summary_cache,
                 object_id,
             ) catch continue;
-            defer summary.deinit(allocator);
 
             if (summary.status != .found) continue;
             if ((summary.owner_kind orelse .unknown) != .shared) continue;
@@ -4686,6 +4685,35 @@ pub const SuiRpcClient = struct {
         return try summary.clone(allocator);
     }
 
+    fn getMoveObjectSummaryCachedBorrowed(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        cache: *std.ArrayList(MoveObjectSummaryCacheEntry),
+        object_id: []const u8,
+    ) !*const object_result.OwnedObjectSummary {
+        for (cache.items) |*entry| {
+            if (std.mem.eql(u8, entry.object_id, object_id)) {
+                return &entry.summary;
+            }
+        }
+
+        var summary = try self.getObjectAndSummarizeWithOptions(
+            allocator,
+            object_id,
+            objectDataOptionsForSummaries(.{}),
+        );
+        errdefer summary.deinit(allocator);
+
+        var entry = MoveObjectSummaryCacheEntry{
+            .object_id = try allocator.dupe(u8, object_id),
+            .summary = summary,
+        };
+        errdefer entry.deinit(allocator);
+
+        try cache.append(allocator, entry);
+        return &cache.items[cache.items.len - 1].summary;
+    }
+
     fn collectObjectDiscoverySeedObjectIdsFromMoveParameters(
         allocator: std.mem.Allocator,
         parameters: []const move_result.OwnedMoveParameterSummary,
@@ -4809,12 +4837,11 @@ pub const SuiRpcClient = struct {
         struct_type: []const u8,
     ) !void {
         for (object_ids) |object_id| {
-            var summary = self.getMoveObjectSummaryCached(
+            const summary = self.getMoveObjectSummaryCachedBorrowed(
                 allocator,
                 object_summary_cache,
                 object_id,
             ) catch continue;
-            defer summary.deinit(allocator);
 
             if (summary.status != .found) continue;
             if ((summary.owner_kind orelse .unknown) != .address_owner) continue;
@@ -20128,6 +20155,70 @@ test "getObjectAndSummarizeWithOptions extracts summaries from typed object opti
     try testing.expectEqual(object_result.ObjectOwnerKind.address_owner, summary.owner_kind.?);
     try testing.expectEqualStrings("0xowner", summary.owner_value.?);
     try testing.expectEqual(@as(?u64, 42), summary.storage_rebate);
+}
+
+test "getMoveObjectSummaryCachedBorrowed reuses cached summaries" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const State = struct {
+        request_count: usize = 0,
+    };
+    var state = State{};
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const callback_state = @as(*State, @ptrCast(@alignCast(context)));
+            try testing.expectEqualStrings("sui_getObject", req.method);
+            try testing.expectEqualStrings(
+                "[\"0xobject\",{\"showType\":true,\"showOwner\":true}]",
+                req.params_json,
+            );
+            callback_state.request_count += 1;
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":{\"objectId\":\"0xobject\",\"version\":\"7\",\"digest\":\"digest-1\",\"type\":\"0x2::coin::Coin<0x2::sui::SUI>\",\"owner\":{\"AddressOwner\":\"0xowner\"},\"previousTransaction\":\"0xprev\",\"storageRebate\":\"42\"}}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &state,
+        .callback = callback,
+    };
+
+    var summary_cache = std.ArrayList(SuiRpcClient.MoveObjectSummaryCacheEntry).empty;
+    defer SuiRpcClient.deinitMoveObjectSummaryCache(allocator, &summary_cache);
+
+    const borrowed_first = try client_instance.getMoveObjectSummaryCachedBorrowed(
+        allocator,
+        &summary_cache,
+        "0xobject",
+    );
+    try testing.expectEqual(@as(usize, 1), state.request_count);
+    try testing.expectEqual(object_result.ObjectReadStatus.found, borrowed_first.status);
+    try testing.expectEqualStrings("0xobject", borrowed_first.object_id.?);
+
+    var cloned = try client_instance.getMoveObjectSummaryCached(
+        allocator,
+        &summary_cache,
+        "0xobject",
+    );
+    defer cloned.deinit(allocator);
+    try testing.expectEqual(@as(usize, 1), state.request_count);
+    try testing.expectEqualStrings("0xowner", cloned.owner_value.?);
+
+    const borrowed_second = try client_instance.getMoveObjectSummaryCachedBorrowed(
+        allocator,
+        &summary_cache,
+        "0xobject",
+    );
+    try testing.expectEqual(@as(usize, 1), state.request_count);
+    try testing.expectEqualStrings("digest-1", borrowed_second.digest.?);
 }
 
 test "getMoveObjectContentDiscoveredObjectIdsCached reuses cached discoveries after response cache reset" {
