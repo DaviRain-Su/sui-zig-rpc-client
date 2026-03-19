@@ -5052,9 +5052,6 @@ pub const SuiRpcClient = struct {
             if (std.mem.indexOfScalar(u8, trimMoveReferenceSignature(parameter.signature), '<') == null) continue;
             if (object_preset.inferKindFromTypeSignature(parameter.signature) != null) continue;
             if (containsMoveTypeParameterText(trimMoveReferenceSignature(parameter.signature))) continue;
-            if (parameter.shared_object_candidates) |candidates| {
-                if (candidates.len != 0) continue;
-            }
 
             const discovered_candidates = try self.discoverSharedObjectCandidatesFromMoveParameters(
                 allocator,
@@ -5066,16 +5063,57 @@ pub const SuiRpcClient = struct {
                 continue;
             }
 
+            var merged_candidates = std.ArrayList(move_result.SharedMoveObjectCandidate).empty;
+            errdefer {
+                for (merged_candidates.items) |*candidate| candidate.deinit(allocator);
+                merged_candidates.deinit(allocator);
+            }
+
+            if (parameter.shared_object_candidates) |old_candidates| {
+                for (old_candidates) |old_candidate| {
+                    try merged_candidates.append(allocator, .{
+                        .object_id = try allocator.dupe(u8, old_candidate.object_id),
+                        .selection_score = old_candidate.selection_score,
+                        .type_name = if (old_candidate.type_name) |value| try allocator.dupe(u8, value) else null,
+                        .initial_shared_version = old_candidate.initial_shared_version,
+                        .shared_object_input_select_token = try allocator.dupe(u8, old_candidate.shared_object_input_select_token),
+                        .mutable_shared_object_input_select_token = try allocator.dupe(u8, old_candidate.mutable_shared_object_input_select_token),
+                    });
+                }
+            }
+
+            for (discovered_candidates) |candidate| {
+                var already_present = false;
+                for (merged_candidates.items) |existing| {
+                    if (std.mem.eql(u8, existing.object_id, candidate.object_id)) {
+                        already_present = true;
+                        break;
+                    }
+                }
+                if (already_present) continue;
+                try merged_candidates.append(allocator, .{
+                    .object_id = try allocator.dupe(u8, candidate.object_id),
+                    .selection_score = candidate.selection_score,
+                    .type_name = if (candidate.type_name) |value| try allocator.dupe(u8, value) else null,
+                    .initial_shared_version = candidate.initial_shared_version,
+                    .shared_object_input_select_token = try allocator.dupe(u8, candidate.shared_object_input_select_token),
+                    .mutable_shared_object_input_select_token = try allocator.dupe(u8, candidate.mutable_shared_object_input_select_token),
+                });
+            }
+
             if (parameter.shared_object_candidates) |old_candidates| {
                 for (old_candidates) |*candidate| candidate.deinit(allocator);
                 allocator.free(old_candidates);
             }
-            parameter.shared_object_candidates = discovered_candidates;
-            if (parameter.auto_selected_arg_json == null and discovered_candidates.len == 1) {
+            for (discovered_candidates) |*candidate| candidate.deinit(allocator);
+            allocator.free(discovered_candidates);
+
+            parameter.shared_object_candidates = try merged_candidates.toOwnedSlice(allocator);
+            if (parameter.auto_selected_arg_json == null and parameter.shared_object_candidates.?.len == 1) {
                 const token = if (isMoveMutableReferenceSignature(parameter.signature))
-                    discovered_candidates[0].mutable_shared_object_input_select_token
+                    parameter.shared_object_candidates.?[0].mutable_shared_object_input_select_token
                 else
-                    discovered_candidates[0].shared_object_input_select_token;
+                    parameter.shared_object_candidates.?[0].shared_object_input_select_token;
                 replaceMoveParameterAutoSelectedArgJson(
                     allocator,
                     parameter,

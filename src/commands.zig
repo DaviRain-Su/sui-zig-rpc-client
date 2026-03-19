@@ -4628,6 +4628,93 @@ test "runCommand move function with --summarize links shared object candidates t
     );
 }
 
+test "runCommand move function with --summarize merges shared candidates from events and owned content" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"visibility\":\"Public\",\"isEntry\":true,\"typeParameters\":[[],[]],\"parameters\":[{\"MutableReference\":{\"Struct\":{\"address\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb\",\"module\":\"pool\",\"name\":\"Pool\",\"typeParams\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"sui\",\"name\":\"SUI\",\"typeParams\":[]}},{\"Struct\":{\"address\":\"0x2\",\"module\":\"sui\",\"name\":\"SUI\",\"typeParams\":[]}}]}}},{\"MutableReference\":{\"Struct\":{\"address\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb\",\"module\":\"position\",\"name\":\"Position\",\"typeParams\":[]}}},{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "suix_queryEvents")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xevent1\",\"eventSeq\":\"1\"},\"packageId\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool1\"}}],\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "suix_getOwnedObjects")) {
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"StructType\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb::position::Position\"") != null);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xposition1\",\"version\":\"7\",\"digest\":\"position-digest-1\",\"type\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb::position::Position\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
+                );
+            }
+            std.debug.assert(std.mem.eql(u8, req.method, "sui_getObject"));
+            if (std.mem.indexOf(u8, req.params_json, "\"0xpool1\"") != null) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":{\"objectId\":\"0xpool1\",\"version\":\"11\",\"digest\":\"pool-digest-1\",\"type\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb::pool::Pool<0x2::sui::SUI, 0x2::sui::SUI>\",\"owner\":{\"Shared\":{\"initial_shared_version\":\"7\"}}}}}",
+                );
+            }
+            if (std.mem.indexOf(u8, req.params_json, "\"0xpool2\"") != null) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":{\"objectId\":\"0xpool2\",\"version\":\"12\",\"digest\":\"pool-digest-2\",\"type\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb::pool::Pool<0x2::sui::SUI, 0x2::sui::SUI>\",\"owner\":{\"Shared\":{\"initial_shared_version\":\"9\"}}}}}",
+                );
+            }
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0xposition1\"") != null);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":{\"objectId\":\"0xposition1\",\"version\":\"7\",\"digest\":\"position-digest-1\",\"content\":{\"dataType\":\"moveObject\",\"fields\":{\"pool_id\":\"0xpool2\",\"liquidity\":\"9\"}}}}}",
+            );
+        }
+    }.call;
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "move",
+        "function",
+        client.package_preset.cetus_clmm_mainnet,
+        "pool",
+        "add_liquidity_fix_coin",
+        "--type-arg",
+        "0x2::sui::SUI",
+        "--type-arg",
+        "0x2::sui::SUI",
+        "--sender",
+        "0xowner",
+        "--summarize",
+    });
+    defer args.deinit(allocator);
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    const parameters = parsed.value.object.get("parameters").?.array.items;
+    const shared_candidates = parameters[0].object.get("shared_object_candidates").?.array.items;
+    try testing.expectEqual(@as(usize, 2), shared_candidates.len);
+    try testing.expectEqualStrings("0xpool2", shared_candidates[0].object.get("object_id").?.string);
+    try testing.expectEqualStrings("0xpool1", shared_candidates[1].object.get("object_id").?.string);
+    try testing.expect(shared_candidates[0].object.get("selection_score").?.integer > shared_candidates[1].object.get("selection_score").?.integer);
+}
+
 test "runCommand move function with --summarize avoids reusing generic owned objects across scalar params" {
     const testing = std.testing;
 
@@ -4887,28 +4974,48 @@ test "runCommand move function with --summarize iterates joint candidate selecti
                     );
                 }
                 if (std.mem.indexOf(u8, req.params_json, "\"0xposition1\"") != null) {
-                    std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"showContent\":true") != null);
+                    if (std.mem.indexOf(u8, req.params_json, "\"showContent\":true") == null) {
+                        return alloc.dupe(
+                            u8,
+                            "{\"result\":{\"data\":{\"objectId\":\"0xposition1\",\"version\":\"7\",\"digest\":\"position-digest-1\",\"type\":\"0x2a::position::Position\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}}",
+                        );
+                    }
                     return alloc.dupe(
                         u8,
                         "{\"result\":{\"data\":{\"objectId\":\"0xposition1\",\"version\":\"7\",\"digest\":\"position-digest-1\",\"content\":{\"dataType\":\"moveObject\",\"fields\":{\"vault_id\":\"0xvault1\",\"pool_id\":\"0xpool1\"}}}}}",
                     );
                 }
                 if (std.mem.indexOf(u8, req.params_json, "\"0xposition2\"") != null) {
-                    std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"showContent\":true") != null);
+                    if (std.mem.indexOf(u8, req.params_json, "\"showContent\":true") == null) {
+                        return alloc.dupe(
+                            u8,
+                            "{\"result\":{\"data\":{\"objectId\":\"0xposition2\",\"version\":\"8\",\"digest\":\"position-digest-2\",\"type\":\"0x2a::position::Position\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}}",
+                        );
+                    }
                     return alloc.dupe(
                         u8,
                         "{\"result\":{\"data\":{\"objectId\":\"0xposition2\",\"version\":\"8\",\"digest\":\"position-digest-2\",\"content\":{\"dataType\":\"moveObject\",\"fields\":{\"pool_id\":\"0xpool2\"}}}}}",
                     );
                 }
                 if (std.mem.indexOf(u8, req.params_json, "\"0xreceipt1\"") != null) {
-                    std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"showContent\":true") != null);
+                    if (std.mem.indexOf(u8, req.params_json, "\"showContent\":true") == null) {
+                        return alloc.dupe(
+                            u8,
+                            "{\"result\":{\"data\":{\"objectId\":\"0xreceipt1\",\"version\":\"9\",\"digest\":\"receipt-digest-1\",\"type\":\"0x2a::receipt::Receipt\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}}",
+                        );
+                    }
                     return alloc.dupe(
                         u8,
                         "{\"result\":{\"data\":{\"objectId\":\"0xreceipt1\",\"version\":\"9\",\"digest\":\"receipt-digest-1\",\"content\":{\"dataType\":\"moveObject\",\"fields\":{\"position_id\":\"0xposition1\",\"router_id\":\"0xrouter1\"}}}}}",
                     );
                 }
                 if (std.mem.indexOf(u8, req.params_json, "\"0xreceipt2\"") != null) {
-                    std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"showContent\":true") != null);
+                    if (std.mem.indexOf(u8, req.params_json, "\"showContent\":true") == null) {
+                        return alloc.dupe(
+                            u8,
+                            "{\"result\":{\"data\":{\"objectId\":\"0xreceipt2\",\"version\":\"10\",\"digest\":\"receipt-digest-2\",\"type\":\"0x2a::receipt::Receipt\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}}",
+                        );
+                    }
                     return alloc.dupe(
                         u8,
                         "{\"result\":{\"data\":{\"objectId\":\"0xreceipt2\",\"version\":\"10\",\"digest\":\"receipt-digest-2\",\"content\":{\"dataType\":\"moveObject\",\"fields\":{\"position_id\":\"0xposition2\",\"router_id\":\"0xrouter2\"}}}}}",
@@ -5030,28 +5137,48 @@ test "runCommand move function with --summarize prefers the larger connected can
                     );
                 }
                 if (std.mem.indexOf(u8, req.params_json, "\"0xposition1\"") != null) {
-                    std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"showContent\":true") != null);
+                    if (std.mem.indexOf(u8, req.params_json, "\"showContent\":true") == null) {
+                        return alloc.dupe(
+                            u8,
+                            "{\"result\":{\"data\":{\"objectId\":\"0xposition1\",\"version\":\"7\",\"digest\":\"position-digest-1\",\"type\":\"0x2a::position::Position\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}}",
+                        );
+                    }
                     return alloc.dupe(
                         u8,
                         "{\"result\":{\"data\":{\"objectId\":\"0xposition1\",\"version\":\"7\",\"digest\":\"position-digest-1\",\"content\":{\"dataType\":\"moveObject\",\"fields\":{\"pool_id\":\"0xpool1\"}}}}}",
                     );
                 }
                 if (std.mem.indexOf(u8, req.params_json, "\"0xposition2\"") != null) {
-                    std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"showContent\":true") != null);
+                    if (std.mem.indexOf(u8, req.params_json, "\"showContent\":true") == null) {
+                        return alloc.dupe(
+                            u8,
+                            "{\"result\":{\"data\":{\"objectId\":\"0xposition2\",\"version\":\"8\",\"digest\":\"position-digest-2\",\"type\":\"0x2a::position::Position\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}}",
+                        );
+                    }
                     return alloc.dupe(
                         u8,
                         "{\"result\":{\"data\":{\"objectId\":\"0xposition2\",\"version\":\"8\",\"digest\":\"position-digest-2\",\"content\":{\"dataType\":\"moveObject\",\"fields\":{\"pool_id\":\"0xpool2\"}}}}}",
                     );
                 }
                 if (std.mem.indexOf(u8, req.params_json, "\"0xreceipt2a\"") != null) {
-                    std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"showContent\":true") != null);
+                    if (std.mem.indexOf(u8, req.params_json, "\"showContent\":true") == null) {
+                        return alloc.dupe(
+                            u8,
+                            "{\"result\":{\"data\":{\"objectId\":\"0xreceipt2a\",\"version\":\"9\",\"digest\":\"receipt-digest-2a\",\"type\":\"0x2a::receipt::Receipt\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}}",
+                        );
+                    }
                     return alloc.dupe(
                         u8,
                         "{\"result\":{\"data\":{\"objectId\":\"0xreceipt2a\",\"version\":\"9\",\"digest\":\"receipt-digest-2a\",\"content\":{\"dataType\":\"moveObject\",\"fields\":{\"position_id\":\"0xposition2\"}}}}}",
                     );
                 }
                 if (std.mem.indexOf(u8, req.params_json, "\"0xreceipt2b\"") != null) {
-                    std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"showContent\":true") != null);
+                    if (std.mem.indexOf(u8, req.params_json, "\"showContent\":true") == null) {
+                        return alloc.dupe(
+                            u8,
+                            "{\"result\":{\"data\":{\"objectId\":\"0xreceipt2b\",\"version\":\"10\",\"digest\":\"receipt-digest-2b\",\"type\":\"0x2a::receipt::Receipt\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}}",
+                        );
+                    }
                     return alloc.dupe(
                         u8,
                         "{\"result\":{\"data\":{\"objectId\":\"0xreceipt2b\",\"version\":\"10\",\"digest\":\"receipt-digest-2b\",\"content\":{\"dataType\":\"moveObject\",\"fields\":{\"position_id\":\"0xposition2\"}}}}}",
@@ -5161,14 +5288,24 @@ test "runCommand move function with --summarize prefers candidate clusters ancho
                     );
                 }
                 if (std.mem.indexOf(u8, req.params_json, "\"0xposition1\"") != null) {
-                    std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"showContent\":true") != null);
+                    if (std.mem.indexOf(u8, req.params_json, "\"showContent\":true") == null) {
+                        return alloc.dupe(
+                            u8,
+                            "{\"result\":{\"data\":{\"objectId\":\"0xposition1\",\"version\":\"7\",\"digest\":\"position-digest-1\",\"type\":\"0x2b::position::Position\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}}",
+                        );
+                    }
                     return alloc.dupe(
                         u8,
                         "{\"result\":{\"data\":{\"objectId\":\"0xposition1\",\"version\":\"7\",\"digest\":\"position-digest-1\",\"content\":{\"dataType\":\"moveObject\",\"fields\":{\"pool_id\":\"0xpool1\"}}}}}",
                     );
                 }
                 if (std.mem.indexOf(u8, req.params_json, "\"0xposition2\"") != null) {
-                    std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"showContent\":true") != null);
+                    if (std.mem.indexOf(u8, req.params_json, "\"showContent\":true") == null) {
+                        return alloc.dupe(
+                            u8,
+                            "{\"result\":{\"data\":{\"objectId\":\"0xposition2\",\"version\":\"8\",\"digest\":\"position-digest-2\",\"type\":\"0x2b::position::Position\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}}",
+                        );
+                    }
                     return alloc.dupe(
                         u8,
                         "{\"result\":{\"data\":{\"objectId\":\"0xposition2\",\"version\":\"8\",\"digest\":\"position-digest-2\",\"content\":{\"dataType\":\"moveObject\",\"fields\":{\"pool_id\":\"0xpool2\"}}}}}",
@@ -6120,14 +6257,28 @@ test "runCommand move function with --summarize uses queried package for shared 
             }
 
             std.debug.assert(std.mem.eql(u8, req.method, "sui_getObject"));
-            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"showType\":true") != null);
-            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"showOwner\":true") != null);
             if (std.mem.indexOf(u8, req.params_json, "\"0xpool1\"") != null) {
+                if (std.mem.indexOf(u8, req.params_json, "\"showContent\":true") != null) {
+                    return alloc.dupe(
+                        u8,
+                        "{\"result\":{\"data\":{\"objectId\":\"0xpool1\",\"version\":\"11\",\"digest\":\"pool-digest-1\",\"content\":{\"dataType\":\"moveObject\",\"fields\":{\"note\":\"pool\"}}}}}",
+                    );
+                }
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"showType\":true") != null);
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"showOwner\":true") != null);
                 return alloc.dupe(
                     u8,
                     "{\"result\":{\"data\":{\"objectId\":\"0xpool1\",\"version\":\"11\",\"digest\":\"pool-digest-1\",\"type\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb::pool::Pool<0x2::sui::SUI, 0x2::sui::SUI>\",\"owner\":{\"Shared\":{\"initial_shared_version\":\"7\"}}}}}",
                 );
             }
+            if (std.mem.indexOf(u8, req.params_json, "\"showContent\":true") != null) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":{\"objectId\":\"0xpartner\",\"version\":\"12\",\"digest\":\"partner-digest-1\",\"content\":{\"dataType\":\"moveObject\",\"fields\":{\"note\":\"partner\"}}}}}",
+                );
+            }
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"showType\":true") != null);
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"showOwner\":true") != null);
             return alloc.dupe(
                 u8,
                 "{\"result\":{\"data\":{\"objectId\":\"0xpartner\",\"version\":\"12\",\"digest\":\"partner-digest-1\",\"type\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3::partner::Partner\",\"owner\":{\"Shared\":{\"initial_shared_version\":\"3\"}}}}}",
@@ -6257,9 +6408,15 @@ test "runCommand move function with --summarize discovers shared object candidat
             }
 
             std.debug.assert(std.mem.eql(u8, req.method, "sui_getObject"));
-            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"showType\":true") != null);
-            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"showOwner\":true") != null);
             if (std.mem.indexOf(u8, req.params_json, "\"0xpartner\"") != null) {
+                if (std.mem.indexOf(u8, req.params_json, "\"showContent\":true") != null) {
+                    return alloc.dupe(
+                        u8,
+                        "{\"result\":{\"data\":{\"objectId\":\"0xpartner\",\"version\":\"12\",\"digest\":\"partner-digest-1\",\"content\":{\"dataType\":\"moveObject\",\"fields\":{\"note\":\"partner\"}}}}}",
+                    );
+                }
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"showType\":true") != null);
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"showOwner\":true") != null);
                 return alloc.dupe(
                     u8,
                     "{\"result\":{\"data\":{\"objectId\":\"0xpartner\",\"version\":\"12\",\"digest\":\"partner-digest-1\",\"type\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3::partner::Partner\",\"owner\":{\"Shared\":{\"initial_shared_version\":\"3\"}}}}}",
@@ -6267,6 +6424,14 @@ test "runCommand move function with --summarize discovers shared object candidat
             }
 
             std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0xpool1\"") != null);
+            if (std.mem.indexOf(u8, req.params_json, "\"showContent\":true") != null) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":{\"objectId\":\"0xpool1\",\"version\":\"11\",\"digest\":\"pool-digest-1\",\"content\":{\"dataType\":\"moveObject\",\"fields\":{\"note\":\"pool\"}}}}}",
+                );
+            }
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"showType\":true") != null);
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"showOwner\":true") != null);
             return alloc.dupe(
                 u8,
                 "{\"result\":{\"data\":{\"objectId\":\"0xpool1\",\"version\":\"11\",\"digest\":\"pool-digest-1\",\"type\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb::pool::Pool<0x2::sui::SUI, 0x2::sui::SUI>\",\"owner\":{\"Shared\":{\"initial_shared_version\":\"7\"}}}}}",
