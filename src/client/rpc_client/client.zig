@@ -7593,15 +7593,34 @@ pub const SuiRpcClient = struct {
             reserved_coin_object_ids.deinit(allocator);
         }
 
-        for (parameters, 0..) |*parameter, index| {
+        for (parameters) |parameter| {
             if (parameter.omitted_from_explicit_args) continue;
+            const explicit_value = parameter.explicit_arg_json orelse continue;
 
-            if (parameter.explicit_arg_json) |value| {
+            if (coinTypeFromMoveSignature(parameter.signature) != null) {
                 try appendReservedMoveObjectIdsFromArgumentJsonText(
                     allocator,
                     &reserved_coin_object_ids,
-                    value,
+                    explicit_value,
                 );
+                continue;
+            }
+
+            if (vectorElementTypeSignature(parameter.signature)) |element_signature| {
+                if (coinTypeFromCoinStructType(element_signature) != null) {
+                    try appendReservedMoveObjectIdsFromArgumentJsonText(
+                        allocator,
+                        &reserved_coin_object_ids,
+                        explicit_value,
+                    );
+                }
+            }
+        }
+
+        for (parameters, 0..) |*parameter, index| {
+            if (parameter.omitted_from_explicit_args) continue;
+
+            if (parameter.explicit_arg_json != null) {
                 continue;
             }
 

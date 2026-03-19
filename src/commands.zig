@@ -8852,6 +8852,76 @@ test "runCommand move function with --summarize avoids reusing scalar coins in l
     );
 }
 
+test "runCommand move function with --summarize reserves later explicit scalar coin args" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"visibility\":\"Public\",\"isEntry\":true,\"typeParameters\":[],\"parameters\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"coin\",\"name\":\"Coin\",\"typeParams\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"sui\",\"name\":\"SUI\",\"typeParams\":[]}}]}},{\"Struct\":{\"address\":\"0x2\",\"module\":\"coin\",\"name\":\"Coin\",\"typeParams\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"sui\",\"name\":\"SUI\",\"typeParams\":[]}}]}},{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[]}}",
+                );
+            }
+
+            std.debug.assert(std.mem.eql(u8, req.method, "suix_getCoins"));
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0xowner\"") != null);
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0x2::sui::SUI\"") != null);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xcoin-large\",\"version\":\"9\",\"digest\":\"coin-digest-large\",\"balance\":\"9\"},{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xcoin-mid\",\"version\":\"10\",\"digest\":\"coin-digest-mid\",\"balance\":\"5\"}],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "move",
+        "function",
+        "0x2",
+        "router",
+        "deposit_pair",
+        "--sender",
+        "0xowner",
+        "--arg-at",
+        "1",
+        "select:{\"kind\":\"object_input\",\"objectId\":\"0xcoin-large\",\"inputKind\":\"imm_or_owned\",\"version\":9,\"digest\":\"coin-digest-large\"}",
+        "--summarize",
+    });
+    defer args.deinit(allocator);
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    const parameters = parsed.value.object.get("parameters").?.array.items;
+    try testing.expectEqualStrings(
+        "\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xcoin-mid\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":10,\\\"digest\\\":\\\"coin-digest-mid\\\"}\"",
+        parameters[0].object.get("auto_selected_arg_json").?.string,
+    );
+    try testing.expectEqualStrings(
+        "\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xcoin-large\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":9,\\\"digest\\\":\\\"coin-digest-large\\\"}\"",
+        parameters[1].object.get("explicit_arg_json").?.string,
+    );
+    try testing.expectEqualStrings(
+        "[\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xcoin-mid\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":10,\\\"digest\\\":\\\"coin-digest-mid\\\"}\",\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xcoin-large\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":9,\\\"digest\\\":\\\"coin-digest-large\\\"}\"]",
+        parsed.value.object.get("call_template").?.object.get("preferred_args_json").?.string,
+    );
+}
+
 test "runCommand move function with --summarize plans merge split make-move-vec for vector coin amount" {
     const testing = std.testing;
 

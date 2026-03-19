@@ -931,6 +931,7 @@ zig build run -- events \
 对同币种的多标量 coin 参数，这套 preferred 规划现在也会避免重复复用同一枚 owned coin。也就是说，像 `Coin<SUI>, Coin<SUI>, u64, u64` 这类签名在自动选币时，会优先给两个参数分配不同的 source coin；只有真的没有足够的独立候选时，CLI 才会停在未解析，而不会生成表面可执行、实际会因为一枚 coin 被业务参数重复占用而冲突的模板。
 
 这条“不复用业务 coin”的约束现在也会继续延伸到 mixed scalar/vector 场景。像 `Coin<SUI>, vector<Coin<SUI>>` 这类签名里，后面的 coin vector 自动选择会先剔除前一个标量参数已经占用的 coin，再生成 `preferred_args_json` 和后续 request artifact。
+同样地，后面如果有显式给出的 coin 参数，前面的 auto-selected coin 参数现在也会先把这些显式 object id 预留掉，不再生成“前面自动选中了后面已经显式指定的 coin”这种坏模板。
 
 普通 owned object 现在也有同类的跨参数去重。像 `Position, Position` 或 `Position, vector<Position>` 这类签名里，后面的 auto-selected 参数会优先避开前面已经占用的同一 owned object，尽量不再生成“同一个 object input 被多个业务参数重复使用”的坏模板。
 
