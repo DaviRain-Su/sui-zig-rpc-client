@@ -229,6 +229,9 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
 
 ### 6. Remove remaining unsafe fallbacks
 
+- [x] Keep direct-signature execute-payload paths on the local programmable
+  builder when `--sender` / `--gas-budget` are explicit but `--gas-payment` is
+  omitted.
 - [ ] Continue shrinking `unsafe_moveCall` usage.
 - [ ] Continue shrinking `unsafe_batchTransaction` usage.
 - [ ] Keep construction, simulation, and execution aligned to the same local
