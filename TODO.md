@@ -225,7 +225,7 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
 
 - [x] Support more unknown pure struct lowering.
 - [x] Support more nested generic/container combinations.
-- [ ] Broaden coverage for complex pure-value encoding paths.
+- [x] Broaden coverage for complex pure-value encoding paths.
 
 ### 6. Remove remaining unsafe fallbacks
 

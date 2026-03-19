@@ -3985,7 +3985,20 @@ pub const SuiRpcClient = struct {
                 break :blk .{ .array = items.items };
             },
             .object => |object_value| blk: {
-                if (object_value.count() != fields.len) return error.InvalidCli;
+                var provided = object_value.iterator();
+                while (provided.next()) |entry| {
+                    var known = false;
+                    for (fields) |field| {
+                        if (field != .object) return error.InvalidResponse;
+                        const field_name = field.object.get("name") orelse return error.InvalidResponse;
+                        if (field_name != .string) return error.InvalidResponse;
+                        if (std.mem.eql(u8, field_name.string, entry.key_ptr.*)) {
+                            known = true;
+                            break;
+                        }
+                    }
+                    if (!known) return error.InvalidCli;
+                }
                 break :blk .{ .object = object_value };
             },
             .null => blk: {
@@ -4020,7 +4033,18 @@ pub const SuiRpcClient = struct {
             const field_value = switch (source) {
                 .scalar => |scalar| scalar,
                 .array => |items| items[index],
-                .object => |object_value| object_value.get(field_name.string) orelse return error.InvalidCli,
+                .object => |object_value| object_value.get(field_name.string) orelse blk: {
+                    const allows_omission = switch (try self.classifyKnownPureStructTypeWithModuleCache(
+                        allocator,
+                        module_cache,
+                        resolved_field.value,
+                    ) orelse .unsupported) {
+                        .option => true,
+                        else => false,
+                    };
+                    if (!allows_omission) return error.InvalidCli;
+                    break :blk std.json.Value.null;
+                },
             };
 
             try self.appendNormalizedPureValueBytesWithModuleCache(
@@ -13470,6 +13494,131 @@ pub const SuiRpcClient = struct {
         try expected_complex.append(allocator, 1);
         std.mem.writeInt(u64, &u64_bytes, 9, .little);
         try expected_complex.appendSlice(allocator, &u64_bytes);
+        try expected_complex.append(allocator, 2);
+        var u16_bytes: [2]u8 = undefined;
+        std.mem.writeInt(u16, &u16_bytes, 1, .little);
+        try expected_complex.appendSlice(allocator, &u16_bytes);
+        std.mem.writeInt(u16, &u16_bytes, 2, .little);
+        try expected_complex.appendSlice(allocator, &u16_bytes);
+
+        var expected_option_complex = std.ArrayList(u8){};
+        defer expected_option_complex.deinit(allocator);
+        try expected_option_complex.append(allocator, 1);
+        try expected_option_complex.appendNTimes(allocator, 0x22, 32);
+        std.mem.writeInt(u64, &u64_bytes, 11, .little);
+        try expected_option_complex.appendSlice(allocator, &u64_bytes);
+        try expected_option_complex.append(allocator, 0);
+        try expected_option_complex.append(allocator, 1);
+        std.mem.writeInt(u16, &u16_bytes, 3, .little);
+        try expected_option_complex.appendSlice(allocator, &u16_bytes);
+
+        const expected = [_][]const u8{
+            expected_complex.items,
+            expected_option_complex.items,
+            &.{ 4, 0, 0, 0, 0, 0, 0, 0 },
+            &.{ 5, 0, 0, 0, 0, 0, 0, 0 },
+        };
+
+        for (expected, 0..) |expected_bytes, index| {
+            const pure_value = inputs.value.array.items[index].object.get("Pure").?;
+            try testing.expect(pure_value == .string);
+            const decoded_len = try std.base64.standard.Decoder.calcSizeForSlice(pure_value.string);
+            const decoded = try allocator.alloc(u8, decoded_len);
+            defer allocator.free(decoded);
+            try std.base64.standard.Decoder.decode(decoded, pure_value.string);
+            try testing.expectEqualSlices(u8, expected_bytes, decoded);
+        }
+
+        try testing.expectEqual(@as(usize, 1), state.normalized_function_calls);
+        try testing.expectEqual(@as(usize, 2), state.normalized_module_calls);
+        try testing.expectEqual(@as(usize, 0), state.object_calls);
+    }
+
+    test "local move-call lowering treats omitted option fields inside generic pure structs as none" {
+        const testing = std.testing;
+
+        var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+        defer _ = gpa.deinit();
+        const allocator = gpa.allocator();
+
+        const State = struct {
+            normalized_function_calls: usize = 0,
+            normalized_module_calls: usize = 0,
+            object_calls: usize = 0,
+        };
+
+        var rpc = SuiRpcClient.init(allocator, "https://rpc.invalid");
+        defer rpc.deinit();
+
+        var state = State{};
+        rpc.request_sender = .{
+            .context = &state,
+            .callback = struct {
+                fn send(
+                    ctx: *anyopaque,
+                    alloc: std.mem.Allocator,
+                    req: RpcRequest,
+                ) error{OutOfMemory}![]u8 {
+                    const local_state: *State = @ptrCast(@alignCast(ctx));
+                    if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                        local_state.normalized_function_calls += 1;
+                        return try alloc.dupe(
+                            u8,
+                            "{\"result\":{\"parameters\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"config\",\"name\":\"Complex\",\"typeParams\":[{\"TypeParameter\":0}]}},{\"Struct\":{\"address\":\"0x1\",\"module\":\"option\",\"name\":\"Option\",\"typeParams\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"config\",\"name\":\"Complex\",\"typeParams\":[{\"TypeParameter\":0}]}}]}},{\"Vector\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"balance\",\"name\":\"Balance\",\"typeParams\":[{\"TypeParameter\":0}]}}},{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[],\"typeParameters\":[{\"constraints\":[]}],\"visibility\":\"Public\",\"isEntry\":true}}",
+                        );
+                    }
+                    if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveModule")) {
+                        local_state.normalized_module_calls += 1;
+                        if (std.mem.indexOf(u8, req.params_json, "\"config\"") != null) {
+                            return try alloc.dupe(
+                                u8,
+                                "{\"result\":{\"structs\":{\"Complex\":{\"abilities\":{\"abilities\":[\"Store\"]},\"typeParameters\":[{\"constraints\":{\"abilities\":[]},\"isPhantom\":true}],\"fields\":[{\"name\":\"owner\",\"type\":\"Address\"},{\"name\":\"spending\",\"type\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"balance\",\"name\":\"Balance\",\"typeParams\":[{\"TypeParameter\":0}]}}},{\"name\":\"limit\",\"type\":{\"Struct\":{\"address\":\"0x1\",\"module\":\"option\",\"name\":\"Option\",\"typeParams\":[\"U64\"]}}},{\"name\":\"weights\",\"type\":{\"Vector\":\"U16\"}}]}}}}",
+                            );
+                        }
+                        return try alloc.dupe(
+                            u8,
+                            "{\"result\":{\"structs\":{\"Balance\":{\"abilities\":{\"abilities\":[\"Store\"]},\"typeParameters\":[{\"constraints\":{\"abilities\":[]},\"isPhantom\":true}],\"fields\":[{\"name\":\"value\",\"type\":\"U64\"}]}}}}",
+                        );
+                    }
+                    if (std.mem.eql(u8, req.method, "sui_getObject")) {
+                        local_state.object_calls += 1;
+                    }
+                    return error.OutOfMemory;
+                }
+            }.send,
+        };
+
+        var parts = try rpc.ownLocalProgrammableTransactionPartsFromCommandSource(
+            allocator,
+            .{
+                .move_call = .{
+                    .package_id = "0x2",
+                    .module = "config_helpers",
+                    .function_name = "submit_complex",
+                    .type_args = "[\"0x2::sui::SUI\"]",
+                    .arguments = "[{\"owner\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"spending\":7,\"weights\":[1,2]},{\"owner\":\"0x2222222222222222222222222222222222222222222222222222222222222222\",\"spending\":11,\"weights\":[3]},[4,5]]",
+                },
+            },
+            "0xsender",
+            "[{\"objectId\":\"0xgas\",\"version\":\"5\",\"digest\":\"gas-digest\"}]",
+            7,
+            1200,
+            null,
+        );
+        defer parts.deinit(allocator);
+
+        const inputs = try std.json.parseFromSlice(std.json.Value, allocator, parts.inputs_json, .{});
+        defer inputs.deinit();
+
+        try testing.expectEqual(@as(usize, 4), inputs.value.array.items.len);
+
+        var expected_complex = std.ArrayList(u8){};
+        defer expected_complex.deinit(allocator);
+        try expected_complex.appendNTimes(allocator, 0x11, 32);
+        var u64_bytes: [8]u8 = undefined;
+        std.mem.writeInt(u64, &u64_bytes, 7, .little);
+        try expected_complex.appendSlice(allocator, &u64_bytes);
+        try expected_complex.append(allocator, 0);
         try expected_complex.append(allocator, 2);
         var u16_bytes: [2]u8 = undefined;
         std.mem.writeInt(u16, &u16_bytes, 1, .little);

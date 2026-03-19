@@ -16858,6 +16858,101 @@ test "runCommand tx_dry_run auto-lowers nested generic pure structs without unsa
     try testing.expectEqual(@as(usize, 0), counts.unsafe);
 }
 
+test "runCommand tx_dry_run treats omitted option fields in nested generic pure structs as none" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const Counts = struct {
+        normalized_function: usize = 0,
+        normalized_module: usize = 0,
+        objects: usize = 0,
+        dry_run: usize = 0,
+        unsafe: usize = 0,
+    };
+    var counts = Counts{};
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const state = @as(*Counts, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                state.normalized_function += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"parameters\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"config\",\"name\":\"Complex\",\"typeParams\":[{\"TypeParameter\":0}]}},{\"Struct\":{\"address\":\"0x1\",\"module\":\"option\",\"name\":\"Option\",\"typeParams\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"config\",\"name\":\"Complex\",\"typeParams\":[{\"TypeParameter\":0}]}}]}},{\"Vector\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"balance\",\"name\":\"Balance\",\"typeParams\":[{\"TypeParameter\":0}]}}},{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"typeParameters\":[{\"constraints\":[]}],\"return\":[]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveModule")) {
+                state.normalized_module += 1;
+                if (std.mem.indexOf(u8, req.params_json, "\"config\"") != null) {
+                    return alloc.dupe(
+                        u8,
+                        "{\"result\":{\"structs\":{\"Complex\":{\"abilities\":{\"abilities\":[\"Store\"]},\"typeParameters\":[{\"constraints\":{\"abilities\":[]},\"isPhantom\":true}],\"fields\":[{\"name\":\"owner\",\"type\":\"Address\"},{\"name\":\"spending\",\"type\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"balance\",\"name\":\"Balance\",\"typeParams\":[{\"TypeParameter\":0}]}}},{\"name\":\"limit\",\"type\":{\"Struct\":{\"address\":\"0x1\",\"module\":\"option\",\"name\":\"Option\",\"typeParams\":[\"U64\"]}}},{\"name\":\"weights\",\"type\":{\"Vector\":\"U16\"}}]}}}}",
+                    );
+                }
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"structs\":{\"Balance\":{\"abilities\":{\"abilities\":[\"Store\"]},\"typeParameters\":[{\"constraints\":{\"abilities\":[]},\"isPhantom\":true}],\"fields\":[{\"name\":\"value\",\"type\":\"U64\"}]}}}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getObject")) {
+                state.objects += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":{\"objectId\":\"0xshould-not-be-used\",\"version\":\"1\",\"digest\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"owner\":{\"AddressOwner\":\"0x123\"}}}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_dryRunTransactionBlock")) {
+                state.dry_run += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"effects\":{\"status\":{\"status\":\"success\"}},\"balanceChanges\":[]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall") or std.mem.eql(u8, req.method, "unsafe_batchTransaction")) {
+                state.unsafe += 1;
+                return alloc.dupe(u8, "{\"result\":{\"txBytes\":\"AQIDBA==\"}}");
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+
+    var args = cli.ParsedArgs{
+        .command = .tx_dry_run,
+        .has_command = true,
+        .tx_build_package = "0x2",
+        .tx_build_module = "config_helpers",
+        .tx_build_function = "submit_complex",
+        .tx_build_type_args = "[\"0x2::sui::SUI\"]",
+        .tx_build_args = "[{\"owner\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"spending\":7,\"weights\":[1,2]},{\"owner\":\"0x2222222222222222222222222222222222222222222222222222222222222222\",\"spending\":11,\"weights\":[3]},[4,5]]",
+        .tx_build_sender = "0x123",
+        .tx_build_gas_budget = 1200,
+        .tx_build_gas_price = 8,
+        .tx_build_gas_payment = "[{\"objectId\":\"0x999\",\"version\":\"3\",\"digest\":\"0x3333333333333333333333333333333333333333333333333333333333333333\"}]",
+        .tx_send_summarize = true,
+    };
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = &counts,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    try testing.expectEqual(@as(usize, 1), counts.normalized_function);
+    try testing.expectEqual(@as(usize, 2), counts.normalized_module);
+    try testing.expectEqual(@as(usize, 0), counts.objects);
+    try testing.expectEqual(@as(usize, 1), counts.dry_run);
+    try testing.expectEqual(@as(usize, 0), counts.unsafe);
+}
+
 test "runCommand tx_dry_run substitutes concrete struct type args for generic object vectors without unsafe fallback" {
     const testing = std.testing;
 
