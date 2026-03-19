@@ -4285,15 +4285,41 @@ pub const SuiRpcClient = struct {
         }
     }
 
-    fn discoverSharedObjectCandidatesFromModuleEvents(
+    const MoveModuleEventDiscoveryCacheEntry = struct {
+        event_package_id: []u8,
+        event_module_name: []u8,
+        discovered_object_ids: [][]u8,
+
+        fn deinit(self: *MoveModuleEventDiscoveryCacheEntry, allocator: std.mem.Allocator) void {
+            allocator.free(self.event_package_id);
+            allocator.free(self.event_module_name);
+            for (self.discovered_object_ids) |value| allocator.free(value);
+            allocator.free(self.discovered_object_ids);
+        }
+    };
+
+    fn deinitMoveModuleEventDiscoveryCache(
+        allocator: std.mem.Allocator,
+        cache: *std.ArrayList(MoveModuleEventDiscoveryCacheEntry),
+    ) void {
+        for (cache.items) |*entry| entry.deinit(allocator);
+        cache.deinit(allocator);
+    }
+
+    fn getMoveModuleEventDiscoveredObjectIdsCachedBorrowed(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
+        cache: *std.ArrayList(MoveModuleEventDiscoveryCacheEntry),
         transaction_object_change_cache: *std.ArrayList(MoveTransactionObjectChangeDiscoveryCacheEntry),
-        object_summary_cache: *std.ArrayList(MoveObjectSummaryCacheEntry),
         event_package_id: []const u8,
         event_module_name: []const u8,
-        signature: []const u8,
-    ) ![]move_result.SharedMoveObjectCandidate {
+    ) ![]const []const u8 {
+        for (cache.items) |entry| {
+            if (!std.mem.eql(u8, entry.event_package_id, event_package_id)) continue;
+            if (!std.mem.eql(u8, entry.event_module_name, event_module_name)) continue;
+            return entry.discovered_object_ids;
+        }
+
         var discovered_ids = std.ArrayList([]u8).empty;
         defer {
             for (discovered_ids.items) |value| allocator.free(value);
@@ -4359,6 +4385,38 @@ pub const SuiRpcClient = struct {
             }
         }
 
+        const owned_ids = try discovered_ids.toOwnedSlice(allocator);
+        errdefer freeMoveDiscoveredObjectIds(allocator, owned_ids);
+
+        var entry = MoveModuleEventDiscoveryCacheEntry{
+            .event_package_id = try allocator.dupe(u8, event_package_id),
+            .event_module_name = try allocator.dupe(u8, event_module_name),
+            .discovered_object_ids = owned_ids,
+        };
+        errdefer entry.deinit(allocator);
+
+        try cache.append(allocator, entry);
+        return cache.items[cache.items.len - 1].discovered_object_ids;
+    }
+
+    fn discoverSharedObjectCandidatesFromModuleEvents(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        event_discovery_cache: *std.ArrayList(MoveModuleEventDiscoveryCacheEntry),
+        transaction_object_change_cache: *std.ArrayList(MoveTransactionObjectChangeDiscoveryCacheEntry),
+        object_summary_cache: *std.ArrayList(MoveObjectSummaryCacheEntry),
+        event_package_id: []const u8,
+        event_module_name: []const u8,
+        signature: []const u8,
+    ) ![]move_result.SharedMoveObjectCandidate {
+        const discovered_ids = try self.getMoveModuleEventDiscoveredObjectIdsCachedBorrowed(
+            allocator,
+            event_discovery_cache,
+            transaction_object_change_cache,
+            event_package_id,
+            event_module_name,
+        );
+
         var candidates = std.ArrayList(move_result.SharedMoveObjectCandidate).empty;
         errdefer {
             for (candidates.items) |*value| value.deinit(allocator);
@@ -4369,7 +4427,7 @@ pub const SuiRpcClient = struct {
             allocator,
             object_summary_cache,
             &candidates,
-            discovered_ids.items,
+            discovered_ids,
             signature,
         );
 
@@ -4425,6 +4483,7 @@ pub const SuiRpcClient = struct {
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
         cache: *std.ArrayList(SharedModuleEventDiscoveryCacheEntry),
+        event_discovery_cache: *std.ArrayList(MoveModuleEventDiscoveryCacheEntry),
         transaction_object_change_cache: *std.ArrayList(MoveTransactionObjectChangeDiscoveryCacheEntry),
         object_summary_cache: *std.ArrayList(MoveObjectSummaryCacheEntry),
         event_package_id: []const u8,
@@ -4440,6 +4499,7 @@ pub const SuiRpcClient = struct {
 
         const discovered = try self.discoverSharedObjectCandidatesFromModuleEvents(
             allocator,
+            event_discovery_cache,
             transaction_object_change_cache,
             object_summary_cache,
             event_package_id,
@@ -5124,6 +5184,7 @@ pub const SuiRpcClient = struct {
     fn discoverOwnedObjectCandidatesFromModuleEvents(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
+        event_discovery_cache: *std.ArrayList(MoveModuleEventDiscoveryCacheEntry),
         transaction_object_change_cache: *std.ArrayList(MoveTransactionObjectChangeDiscoveryCacheEntry),
         object_summary_cache: *std.ArrayList(MoveObjectSummaryCacheEntry),
         owner: []const u8,
@@ -5131,70 +5192,13 @@ pub const SuiRpcClient = struct {
         event_package_id: []const u8,
         event_module_name: []const u8,
     ) ![]move_result.OwnedMoveObjectCandidate {
-        var discovered_ids = std.ArrayList([]u8).empty;
-        defer {
-            for (discovered_ids.items) |value| allocator.free(value);
-            discovered_ids.deinit(allocator);
-        }
-        var discovered_tx_digests = std.ArrayList([]u8).empty;
-        defer {
-            for (discovered_tx_digests.items) |value| allocator.free(value);
-            discovered_tx_digests.deinit(allocator);
-        }
-
-        var cursor_tx_digest: ?[]u8 = null;
-        defer if (cursor_tx_digest) |value| allocator.free(value);
-        var cursor_event_seq: ?u64 = null;
-
-        var page_count: usize = 0;
-        while (page_count < 4 and discovered_ids.items.len < 16) : (page_count += 1) {
-            var page = try self.getEventsPageWithRequest(allocator, .{
-                .filter = .{
-                    .move_module = .{
-                        .package = event_package_id,
-                        .module = event_module_name,
-                    },
-                },
-                .cursor_tx_digest = cursor_tx_digest,
-                .cursor_event_seq = cursor_event_seq,
-                .limit = 20,
-                .descending_order = true,
-            });
-            defer page.deinit(allocator);
-
-            for (page.entries) |entry| {
-                if (entry.tx_digest) |tx_digest| {
-                    try appendUniqueMoveSelectedObjectId(allocator, &discovered_tx_digests, tx_digest);
-                }
-                const parsed_json = entry.parsed_json orelse continue;
-                const parsed = std.json.parseFromSlice(std.json.Value, allocator, parsed_json, .{}) catch continue;
-                defer parsed.deinit();
-                try appendDiscoveredObjectIdsFromJsonValue(allocator, &discovered_ids, parsed.value, 16);
-                if (discovered_ids.items.len >= 16) break;
-            }
-
-            if (!page.has_next_page or discovered_ids.items.len >= 16) break;
-            const next_cursor = page.next_cursor_tx_digest orelse break;
-            const next_event_seq = page.next_cursor_event_seq orelse break;
-            if (cursor_tx_digest) |value| allocator.free(value);
-            cursor_tx_digest = try allocator.dupe(u8, next_cursor);
-            cursor_event_seq = next_event_seq;
-        }
-
-        if (discovered_ids.items.len < 16) {
-            for (discovered_tx_digests.items) |tx_digest| {
-                if (discovered_ids.items.len >= 16) break;
-                const transaction_object_ids = self.getMoveTransactionObjectChangeDiscoveredObjectIdsCachedBorrowed(
-                    allocator,
-                    transaction_object_change_cache,
-                    tx_digest,
-                ) catch continue;
-                for (transaction_object_ids) |object_id| {
-                    if (discovered_ids.items.len >= 16) break;
-                    try appendUniqueMoveSelectedObjectId(allocator, &discovered_ids, object_id);
-                }
-            }
-        }
+        const discovered_ids = try self.getMoveModuleEventDiscoveredObjectIdsCachedBorrowed(
+            allocator,
+            event_discovery_cache,
+            transaction_object_change_cache,
+            event_package_id,
+            event_module_name,
+        );
 
         var candidates = std.ArrayList(move_result.OwnedMoveObjectCandidate).empty;
         errdefer {
@@ -5206,7 +5210,7 @@ pub const SuiRpcClient = struct {
             allocator,
             object_summary_cache,
             &candidates,
-            discovered_ids.items,
+            discovered_ids,
             owner,
             struct_type,
         );
@@ -5267,6 +5271,7 @@ pub const SuiRpcClient = struct {
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
         cache: *std.ArrayList(OwnedModuleEventDiscoveryCacheEntry),
+        event_discovery_cache: *std.ArrayList(MoveModuleEventDiscoveryCacheEntry),
         transaction_object_change_cache: *std.ArrayList(MoveTransactionObjectChangeDiscoveryCacheEntry),
         object_summary_cache: *std.ArrayList(MoveObjectSummaryCacheEntry),
         owner: []const u8,
@@ -5284,6 +5289,7 @@ pub const SuiRpcClient = struct {
 
         const discovered = try self.discoverOwnedObjectCandidatesFromModuleEvents(
             allocator,
+            event_discovery_cache,
             transaction_object_change_cache,
             object_summary_cache,
             owner,
@@ -5313,6 +5319,7 @@ pub const SuiRpcClient = struct {
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
         cache: *std.ArrayList(OwnedModuleEventDiscoveryCacheEntry),
+        event_discovery_cache: *std.ArrayList(MoveModuleEventDiscoveryCacheEntry),
         transaction_object_change_cache: *std.ArrayList(MoveTransactionObjectChangeDiscoveryCacheEntry),
         object_summary_cache: *std.ArrayList(MoveObjectSummaryCacheEntry),
         owner: []const u8,
@@ -5330,6 +5337,7 @@ pub const SuiRpcClient = struct {
 
         const discovered = try self.discoverOwnedObjectCandidatesFromModuleEvents(
             allocator,
+            event_discovery_cache,
             transaction_object_change_cache,
             object_summary_cache,
             owner,
@@ -6246,6 +6254,7 @@ pub const SuiRpcClient = struct {
         object_content_discovery_cache: *std.ArrayList(MoveObjectContentDiscoveryCacheEntry),
         dynamic_field_cache: *std.ArrayList(MoveDynamicFieldDiscoveryCacheEntry),
         object_summary_cache: *std.ArrayList(MoveObjectSummaryCacheEntry),
+        event_discovery_cache: *std.ArrayList(MoveModuleEventDiscoveryCacheEntry),
         transaction_object_change_cache: *std.ArrayList(MoveTransactionObjectChangeDiscoveryCacheEntry),
         parameters: []move_result.OwnedMoveParameterSummary,
         owner_address: ?[]const u8,
@@ -6284,6 +6293,7 @@ pub const SuiRpcClient = struct {
                         const current = try self.discoverOwnedObjectCandidatesFromModuleEventsCachedBorrowed(
                             allocator,
                             owned_event_cache,
+                            event_discovery_cache,
                             transaction_object_change_cache,
                             object_summary_cache,
                             owner,
@@ -6303,6 +6313,7 @@ pub const SuiRpcClient = struct {
                         break :blk try self.discoverOwnedObjectCandidatesFromModuleEventsCachedBorrowed(
                             allocator,
                             owned_event_cache,
+                            event_discovery_cache,
                             transaction_object_change_cache,
                             object_summary_cache,
                             owner,
@@ -6431,6 +6442,7 @@ pub const SuiRpcClient = struct {
                         const current = try self.discoverOwnedObjectCandidatesFromModuleEventsCachedBorrowed(
                             allocator,
                             owned_event_cache,
+                            event_discovery_cache,
                             transaction_object_change_cache,
                             object_summary_cache,
                             owner,
@@ -6450,6 +6462,7 @@ pub const SuiRpcClient = struct {
                         break :blk try self.discoverOwnedObjectCandidatesFromModuleEventsCachedBorrowed(
                             allocator,
                             owned_event_cache,
+                            event_discovery_cache,
                             transaction_object_change_cache,
                             object_summary_cache,
                             owner,
@@ -7662,6 +7675,7 @@ pub const SuiRpcClient = struct {
         object_content_discovery_cache: *std.ArrayList(MoveObjectContentDiscoveryCacheEntry),
         dynamic_field_cache: *std.ArrayList(MoveDynamicFieldDiscoveryCacheEntry),
         object_summary_cache: *std.ArrayList(MoveObjectSummaryCacheEntry),
+        event_discovery_cache: *std.ArrayList(MoveModuleEventDiscoveryCacheEntry),
         transaction_object_change_cache: *std.ArrayList(MoveTransactionObjectChangeDiscoveryCacheEntry),
         parameters: []move_result.OwnedMoveParameterSummary,
         owner_address: ?[]const u8,
@@ -7688,6 +7702,7 @@ pub const SuiRpcClient = struct {
                 object_content_discovery_cache,
                 dynamic_field_cache,
                 object_summary_cache,
+                event_discovery_cache,
                 transaction_object_change_cache,
                 parameters,
                 owner_address,
@@ -9394,6 +9409,9 @@ pub const SuiRpcClient = struct {
         var shared_event_cache = std.ArrayList(SharedModuleEventDiscoveryCacheEntry).empty;
         defer deinitSharedModuleEventDiscoveryCache(allocator, &shared_event_cache);
 
+        var event_discovery_cache = std.ArrayList(MoveModuleEventDiscoveryCacheEntry).empty;
+        defer deinitMoveModuleEventDiscoveryCache(allocator, &event_discovery_cache);
+
         var object_content_cache = std.ArrayList(MoveObjectContentResponseCacheEntry).empty;
         defer deinitMoveObjectContentResponseCache(allocator, &object_content_cache);
 
@@ -9519,6 +9537,7 @@ pub const SuiRpcClient = struct {
                                 parameter.shared_object_candidates = try self.discoverSharedObjectCandidatesFromModuleEventsCached(
                                     allocator,
                                     &shared_event_cache,
+                                    &event_discovery_cache,
                                     &transaction_object_change_cache,
                                     &object_summary_cache,
                                     event_package_id,
@@ -9536,6 +9555,7 @@ pub const SuiRpcClient = struct {
                                 parameter.shared_object_candidates = try self.discoverSharedObjectCandidatesFromModuleEventsCached(
                                     allocator,
                                     &shared_event_cache,
+                                    &event_discovery_cache,
                                     &transaction_object_change_cache,
                                     &object_summary_cache,
                                     package_and_module.package,
@@ -9624,6 +9644,7 @@ pub const SuiRpcClient = struct {
             &object_content_discovery_cache,
             &dynamic_field_cache,
             &object_summary_cache,
+            &event_discovery_cache,
             &transaction_object_change_cache,
             summary.parameters,
             owner_address,
@@ -21645,6 +21666,8 @@ test "discoverOwnedObjectCandidatesFromModuleEventsCachedBorrowed reuses cached 
 
     var event_cache = std.ArrayList(SuiRpcClient.OwnedModuleEventDiscoveryCacheEntry).empty;
     defer SuiRpcClient.deinitOwnedModuleEventDiscoveryCache(allocator, &event_cache);
+    var event_discovery_cache = std.ArrayList(SuiRpcClient.MoveModuleEventDiscoveryCacheEntry).empty;
+    defer SuiRpcClient.deinitMoveModuleEventDiscoveryCache(allocator, &event_discovery_cache);
     var transaction_object_change_cache = std.ArrayList(SuiRpcClient.MoveTransactionObjectChangeDiscoveryCacheEntry).empty;
     defer SuiRpcClient.deinitMoveTransactionObjectChangeDiscoveryCache(allocator, &transaction_object_change_cache);
     var object_summary_cache = std.ArrayList(SuiRpcClient.MoveObjectSummaryCacheEntry).empty;
@@ -21653,6 +21676,7 @@ test "discoverOwnedObjectCandidatesFromModuleEventsCachedBorrowed reuses cached 
     const borrowed_first = try client_instance.discoverOwnedObjectCandidatesFromModuleEventsCachedBorrowed(
         allocator,
         &event_cache,
+        &event_discovery_cache,
         &transaction_object_change_cache,
         &object_summary_cache,
         "0xowner",
@@ -21668,6 +21692,7 @@ test "discoverOwnedObjectCandidatesFromModuleEventsCachedBorrowed reuses cached 
     const cloned = try client_instance.discoverOwnedObjectCandidatesFromModuleEventsCached(
         allocator,
         &event_cache,
+        &event_discovery_cache,
         &transaction_object_change_cache,
         &object_summary_cache,
         "0xowner",
@@ -21686,6 +21711,7 @@ test "discoverOwnedObjectCandidatesFromModuleEventsCachedBorrowed reuses cached 
     const borrowed_second = try client_instance.discoverOwnedObjectCandidatesFromModuleEventsCachedBorrowed(
         allocator,
         &event_cache,
+        &event_discovery_cache,
         &transaction_object_change_cache,
         &object_summary_cache,
         "0xowner",
@@ -21754,6 +21780,8 @@ test "discoverOwnedObjectCandidatesFromModuleEvents falls back to event transact
 
     var event_cache = std.ArrayList(SuiRpcClient.OwnedModuleEventDiscoveryCacheEntry).empty;
     defer SuiRpcClient.deinitOwnedModuleEventDiscoveryCache(allocator, &event_cache);
+    var event_discovery_cache = std.ArrayList(SuiRpcClient.MoveModuleEventDiscoveryCacheEntry).empty;
+    defer SuiRpcClient.deinitMoveModuleEventDiscoveryCache(allocator, &event_discovery_cache);
     var transaction_object_change_cache = std.ArrayList(SuiRpcClient.MoveTransactionObjectChangeDiscoveryCacheEntry).empty;
     defer SuiRpcClient.deinitMoveTransactionObjectChangeDiscoveryCache(allocator, &transaction_object_change_cache);
     var object_summary_cache = std.ArrayList(SuiRpcClient.MoveObjectSummaryCacheEntry).empty;
@@ -21762,6 +21790,7 @@ test "discoverOwnedObjectCandidatesFromModuleEvents falls back to event transact
     const borrowed = try client_instance.discoverOwnedObjectCandidatesFromModuleEventsCachedBorrowed(
         allocator,
         &event_cache,
+        &event_discovery_cache,
         &transaction_object_change_cache,
         &object_summary_cache,
         "0xowner",
@@ -21833,6 +21862,8 @@ test "discoverOwnedObjectCandidatesFromModuleEvents merges parsedJson and event 
 
     var event_cache = std.ArrayList(SuiRpcClient.OwnedModuleEventDiscoveryCacheEntry).empty;
     defer SuiRpcClient.deinitOwnedModuleEventDiscoveryCache(allocator, &event_cache);
+    var event_discovery_cache = std.ArrayList(SuiRpcClient.MoveModuleEventDiscoveryCacheEntry).empty;
+    defer SuiRpcClient.deinitMoveModuleEventDiscoveryCache(allocator, &event_discovery_cache);
     var transaction_object_change_cache = std.ArrayList(SuiRpcClient.MoveTransactionObjectChangeDiscoveryCacheEntry).empty;
     defer SuiRpcClient.deinitMoveTransactionObjectChangeDiscoveryCache(allocator, &transaction_object_change_cache);
     var object_summary_cache = std.ArrayList(SuiRpcClient.MoveObjectSummaryCacheEntry).empty;
@@ -21841,6 +21872,7 @@ test "discoverOwnedObjectCandidatesFromModuleEvents merges parsedJson and event 
     const borrowed = try client_instance.discoverOwnedObjectCandidatesFromModuleEventsCachedBorrowed(
         allocator,
         &event_cache,
+        &event_discovery_cache,
         &transaction_object_change_cache,
         &object_summary_cache,
         "0xowner",
@@ -21854,6 +21886,97 @@ test "discoverOwnedObjectCandidatesFromModuleEvents merges parsedJson and event 
     try testing.expectEqual(@as(usize, 2), borrowed.len);
     try testing.expectEqualStrings("0xposition-from-event", borrowed[0].object_id);
     try testing.expectEqualStrings("0xposition-from-tx", borrowed[1].object_id);
+}
+
+test "module event discovered object ids are reused across shared and owned move discovery" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const State = struct {
+        event_requests: usize = 0,
+        object_requests: usize = 0,
+    };
+    var state = State{};
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const callback_state = @as(*State, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "suix_queryEvents")) {
+                callback_state.event_requests += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"parsedJson\":{\"pool_id\":\"0xpool1\",\"position_id\":\"0xposition1\"}}],\"hasNextPage\":false}}",
+                );
+            }
+            try testing.expectEqualStrings("sui_getObject", req.method);
+            callback_state.object_requests += 1;
+            if (std.mem.indexOf(u8, req.params_json, "\"0xpool1\"") != null) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":{\"objectId\":\"0xpool1\",\"version\":\"11\",\"digest\":\"pool-digest-1\",\"type\":\"0x2a::pool::Pool<0x2::sui::SUI>\",\"owner\":{\"Shared\":{\"initial_shared_version\":\"7\"}}}}}",
+                );
+            }
+            try testing.expect(std.mem.indexOf(u8, req.params_json, "\"0xposition1\"") != null);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":{\"objectId\":\"0xposition1\",\"version\":\"7\",\"digest\":\"position-digest-1\",\"type\":\"0x2a::position::Position\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &state,
+        .callback = callback,
+    };
+
+    var shared_event_cache = std.ArrayList(SuiRpcClient.SharedModuleEventDiscoveryCacheEntry).empty;
+    defer SuiRpcClient.deinitSharedModuleEventDiscoveryCache(allocator, &shared_event_cache);
+    var owned_event_cache = std.ArrayList(SuiRpcClient.OwnedModuleEventDiscoveryCacheEntry).empty;
+    defer SuiRpcClient.deinitOwnedModuleEventDiscoveryCache(allocator, &owned_event_cache);
+    var event_discovery_cache = std.ArrayList(SuiRpcClient.MoveModuleEventDiscoveryCacheEntry).empty;
+    defer SuiRpcClient.deinitMoveModuleEventDiscoveryCache(allocator, &event_discovery_cache);
+    var transaction_object_change_cache = std.ArrayList(SuiRpcClient.MoveTransactionObjectChangeDiscoveryCacheEntry).empty;
+    defer SuiRpcClient.deinitMoveTransactionObjectChangeDiscoveryCache(allocator, &transaction_object_change_cache);
+    var object_summary_cache = std.ArrayList(SuiRpcClient.MoveObjectSummaryCacheEntry).empty;
+    defer SuiRpcClient.deinitMoveObjectSummaryCache(allocator, &object_summary_cache);
+
+    const shared_candidates = try client_instance.discoverSharedObjectCandidatesFromModuleEventsCached(
+        allocator,
+        &shared_event_cache,
+        &event_discovery_cache,
+        &transaction_object_change_cache,
+        &object_summary_cache,
+        "0x2a",
+        "pool",
+        "&mut 0x2a::pool::Pool<0x2::sui::SUI>",
+    );
+    defer {
+        for (shared_candidates) |*candidate| candidate.deinit(allocator);
+        allocator.free(shared_candidates);
+    }
+
+    const owned_candidates = try client_instance.discoverOwnedObjectCandidatesFromModuleEventsCachedBorrowed(
+        allocator,
+        &owned_event_cache,
+        &event_discovery_cache,
+        &transaction_object_change_cache,
+        &object_summary_cache,
+        "0xowner",
+        "0x2a::position::Position",
+        "0x2a",
+        "pool",
+    );
+
+    try testing.expectEqual(@as(usize, 1), state.event_requests);
+    try testing.expectEqual(@as(usize, 2), state.object_requests);
+    try testing.expectEqual(@as(usize, 1), shared_candidates.len);
+    try testing.expectEqual(@as(usize, 1), owned_candidates.len);
+    try testing.expectEqualStrings("0xpool1", shared_candidates[0].object_id);
+    try testing.expectEqualStrings("0xposition1", owned_candidates[0].object_id);
 }
 
 test "runObjectQueryAndSummarize supports typed object-get queries" {
