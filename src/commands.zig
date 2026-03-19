@@ -4101,8 +4101,8 @@ test "runCommand move function with --summarize tie-breaks shared candidates by 
         parameters[0].object.get("auto_selected_arg_json").?.string,
     );
     const shared_candidates = parameters[0].object.get("shared_object_candidates").?.array.items;
-    try testing.expectEqual(@as(i64, 2), shared_candidates[0].object.get("selection_score").?.integer);
-    try testing.expectEqual(@as(i64, 2), shared_candidates[1].object.get("selection_score").?.integer);
+    try testing.expectEqual(@as(i64, 6), shared_candidates[0].object.get("selection_score").?.integer);
+    try testing.expectEqual(@as(i64, 6), shared_candidates[1].object.get("selection_score").?.integer);
     try testing.expectEqualStrings("0xpool1", shared_candidates[0].object.get("object_id").?.string);
     const preferred_resolution = parsed.value.object.get("call_template").?.object.get("preferred_resolution").?.object;
     try testing.expectEqualStrings(
@@ -4203,8 +4203,8 @@ test "runCommand move function with --summarize tie-breaks owned candidates by d
         parameters[1].object.get("auto_selected_arg_json").?.string,
     );
     const owned_candidates = parameters[1].object.get("owned_object_candidates").?.array.items;
-    try testing.expectEqual(@as(i64, 3), owned_candidates[0].object.get("selection_score").?.integer);
-    try testing.expectEqual(@as(i64, 3), owned_candidates[1].object.get("selection_score").?.integer);
+    try testing.expectEqual(@as(i64, 7), owned_candidates[0].object.get("selection_score").?.integer);
+    try testing.expectEqual(@as(i64, 7), owned_candidates[1].object.get("selection_score").?.integer);
     try testing.expectEqualStrings("0xposition-a", owned_candidates[0].object.get("object_id").?.string);
     const preferred_resolution = parsed.value.object.get("call_template").?.object.get("preferred_resolution").?.object;
     try testing.expectEqualStrings(

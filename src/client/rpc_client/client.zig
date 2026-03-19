@@ -5470,22 +5470,42 @@ pub const SuiRpcClient = struct {
         var component_sizes = try allocator.alloc(usize, nodes.items.len);
         defer allocator.free(component_sizes);
         @memset(component_sizes, 1);
+        var component_parameter_counts = try allocator.alloc(usize, nodes.items.len);
+        defer allocator.free(component_parameter_counts);
+        @memset(component_parameter_counts, 1);
 
         var stack = std.ArrayList(usize).empty;
         defer stack.deinit(allocator);
         var component_nodes = std.ArrayList(usize).empty;
         defer component_nodes.deinit(allocator);
+        var component_parameter_indices = std.ArrayList(usize).empty;
+        defer component_parameter_indices.deinit(allocator);
 
         for (nodes.items, 0..) |_, start_index| {
             if (visited[start_index]) continue;
 
             stack.clearRetainingCapacity();
             component_nodes.clearRetainingCapacity();
+            component_parameter_indices.clearRetainingCapacity();
             try stack.append(allocator, start_index);
             visited[start_index] = true;
 
             while (stack.pop()) |current_index| {
                 try component_nodes.append(allocator, current_index);
+
+                var seen_parameter = false;
+                for (component_parameter_indices.items) |parameter_index| {
+                    if (parameter_index == nodes.items[current_index].parameter_index) {
+                        seen_parameter = true;
+                        break;
+                    }
+                }
+                if (!seen_parameter) {
+                    try component_parameter_indices.append(
+                        allocator,
+                        nodes.items[current_index].parameter_index,
+                    );
+                }
 
                 for (nodes.items, 0..) |candidate, other_index| {
                     if (visited[other_index]) continue;
@@ -5501,13 +5521,19 @@ pub const SuiRpcClient = struct {
 
             for (component_nodes.items) |node_index| {
                 component_sizes[node_index] = component_nodes.items.len;
+                component_parameter_counts[node_index] = component_parameter_indices.items.len;
             }
         }
 
         for (nodes.items, 0..) |node, node_index| {
             if (!node.apply_component_bonus) continue;
             if (component_sizes[node_index] <= 1) continue;
-            moveCandidateGraphNodeSelectionScorePointer(parameters, node).* += component_sizes[node_index] - 1;
+            const parameter_bonus = if (component_parameter_counts[node_index] > 1)
+                (component_parameter_counts[node_index] - 1) * (parameters.len + 1)
+            else
+                0;
+            const size_bonus = component_sizes[node_index] - 1;
+            moveCandidateGraphNodeSelectionScorePointer(parameters, node).* += parameter_bonus + size_bonus;
         }
 
         for (parameters) |*parameter| {
