@@ -108,6 +108,36 @@ HASHI_HASHI_OBJECT_ID=0x... \
 bash scripts/hashi_request_withdrawal_smoke.sh /tmp/hashi_inspect/packages/hashi
 ```
 
+真实钱包的 testnet smoke 也已经单独收成脚本：
+
+```bash
+bash scripts/testnet_real_wallet_smoke.sh
+```
+
+它的默认行为是：
+- 只允许在 `sui client active-env == testnet` 下运行
+- 读取当前 active address 和默认 keystore
+- 先打印 gas / resources
+- 再跑一笔“split 一点 SUI 然后转回自己”的 `tx dry-run`
+- 默认不会真实广播
+
+常用开关：
+
+```bash
+# 地址没 gas 时，自动向 testnet faucet 申请
+AUTO_FAUCET=1 bash scripts/testnet_real_wallet_smoke.sh
+
+# keystore 里有多个 signer 时，显式指定 selector
+SIGNER_SELECTOR=main bash scripts/testnet_real_wallet_smoke.sh
+
+# 确认 dry-run 没问题后，才显式允许真实发送
+ALLOW_SEND=1 bash scripts/testnet_real_wallet_smoke.sh
+```
+
+说明：
+- `ALLOW_SEND=1` 会在 testnet 上真实发送一笔 self-transfer，虽然不会把币转给别人，但会改变钱包里的 coin object 形态
+- 如果你确实要在别的网络试跑，必须显式给 `ALLOW_NON_TESTNET=1`
+
 当前默认测试图覆盖：
 - `C3 PTBs Introduction`
 - `D4 Transaction submission, Balance Changes, and Gas Profiling`
