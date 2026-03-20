@@ -1028,6 +1028,8 @@ pub fn main() !void {
   - `--conflict-strategy <serialize_same_lane|fail_closed>`
 - `wallet intent dry-run`: 对 `wallet_intent` 或 request-shaped 输入直接执行 dry-run，底层继续复用现有本地 programmable builder。
 - `wallet intent send`: 对 `wallet_intent` 或 request-shaped 输入直接执行发送，底层继续复用现有 `request send` / local builder 主线。
+- `wallet sponsor request`: 钱包命令面的 sponsor alias；直接复用 `request sponsor`，适合在 wallet workflow 里继续生成 sponsor envelope。
+- `wallet schedule create`: 钱包命令面的 schedule alias；直接复用 `request schedule`，适合在 wallet workflow 里继续生成 scheduler job。
 - `request build`: 把 move-call / programmable 输入规范化成可复用 request artifact。
 - `request inspect`: 输出 request artifact 的结构化摘要，适合在 sponsor/sign/send 前做检查。
 - `request dry-run`: 直接对 request artifact 或 request-shaped 输入执行 dry-run，复用现有本地 programmable builder 路径。

@@ -379,7 +379,8 @@ Implemented wallet lifecycle commands:
 
 That means the broader wallet lifecycle now has a concrete first pass:
 wallet inventory, active wallet selection, delegated sessions, first-class
-wallet intents, and a convenience funding path all exist as CLI surfaces.
+wallet intents, wallet-facing sponsor/schedule aliases, and a convenience
+funding path all exist as CLI surfaces.
 
 ### `tempo request` Style Capabilities
 

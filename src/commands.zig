@@ -25242,6 +25242,38 @@ test "runCommand request_sponsor prints sponsor envelope artifact" {
     try testing.expectEqualStrings("fail_closed", parsed.value.object.get("sponsor").?.object.get("refusal_fallback").?.string);
 }
 
+test "runCommand wallet sponsor request alias prints sponsor envelope artifact" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "wallet",
+        "sponsor",
+        "request",
+        "--request",
+        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"typeArguments\":[],\"arguments\":[7]}],\"sender\":\"0xabc\",\"gasBudget\":1200}",
+        "--sponsor-mode",
+        "optional",
+    });
+    defer args.deinit(allocator);
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    try testing.expectEqualStrings("sponsor_envelope", parsed.value.object.get("artifact_kind").?.string);
+    try testing.expectEqualStrings("optional", parsed.value.object.get("sponsor").?.object.get("mode").?.string);
+}
+
 test "runCommand request_sign request artifact uses local programmable builder path" {
     const testing = std.testing;
 

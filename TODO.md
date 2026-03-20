@@ -390,5 +390,7 @@ what the generic path still needs to finish.
 - [x] Add `wallet policy inspect` for normalized session and inline policy review.
 - [x] Add a broader wallet lifecycle funding command:
   `wallet fund`.
+- [x] Add wallet-facing sponsor/schedule aliases:
+  `wallet sponsor request` and `wallet schedule create`.
 - [x] Add deterministic wallet smoke regressions for sponsored transfer,
   sponsored swap, session-limited swap, and scheduled self-transfer.

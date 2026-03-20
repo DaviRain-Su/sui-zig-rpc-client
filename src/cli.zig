@@ -3073,6 +3073,28 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
                     }
                     return error.InvalidCli;
                 }
+                if (std.mem.eql(u8, sub, "sponsor")) {
+                    if (i + 2 >= args.len) return error.InvalidCli;
+                    const sponsor_sub = args[i + 2];
+                    if (std.mem.eql(u8, sponsor_sub, "request")) {
+                        parsed.command = .request_sponsor;
+                        parsed.has_command = true;
+                        i += 3;
+                        continue;
+                    }
+                    return error.InvalidCli;
+                }
+                if (std.mem.eql(u8, sub, "schedule")) {
+                    if (i + 2 >= args.len) return error.InvalidCli;
+                    const schedule_sub = args[i + 2];
+                    if (std.mem.eql(u8, schedule_sub, "create")) {
+                        parsed.command = .request_schedule;
+                        parsed.has_command = true;
+                        i += 3;
+                        continue;
+                    }
+                    return error.InvalidCli;
+                }
                 if (std.mem.eql(u8, sub, "passkey")) {
                     if (i + 2 >= args.len) return error.InvalidCli;
                     const passkey_sub = args[i + 2];
@@ -6710,6 +6732,10 @@ pub fn printUsage(writer: anytype) !void {
         "  wallet intent send                  Send a wallet intent or request-shaped tx input\n" ++
         "    same input options as request send plus --intent/--network/--execution-mode/--policy\n" ++
         "      and the same policy helper flags as wallet intent build\n" ++
+        "  wallet sponsor request             Wallet-facing alias for request sponsor\n" ++
+        "    same input options as request sponsor\n" ++
+        "  wallet schedule create             Wallet-facing alias for request schedule\n" ++
+        "    same input options as request schedule\n" ++
         "  request build                       Build a normalized request artifact from programmatic tx input\n" ++
         "    --request <json|@file>             Normalize an existing request artifact\n" ++
         "    --package/--module/--function      Build from move-call input\n" ++
@@ -10153,6 +10179,28 @@ test "parseCliArgs parses request sponsor command" {
     try testing.expectEqualStrings("req-123", parsed.request_correlation_id.?);
 }
 
+test "parseCliArgs parses wallet sponsor request alias" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "wallet",
+        "sponsor",
+        "request",
+        "--request",
+        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"typeArguments\":[],\"arguments\":[7]}],\"sender\":\"0xabc\",\"gasBudget\":1200}",
+        "--sponsor-mode",
+        "optional",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.request_sponsor, parsed.command);
+    try testing.expectEqualStrings("optional", parsed.request_sponsor_mode.?);
+}
+
 test "parseCliArgs rejects incompatible sponsor fallback semantics" {
     const testing = std.testing;
 
@@ -10243,6 +10291,31 @@ test "parseCliArgs parses request schedule command" {
     try testing.expectEqualStrings("job-0", parsed.request_schedule_replace_id.?);
     try testing.expectEqual(@as(?u64, 500), parsed.request_schedule_at_ms);
     try testing.expectEqualStrings("optional", parsed.request_sponsor_mode.?);
+}
+
+test "parseCliArgs parses wallet schedule create alias" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "wallet",
+        "schedule",
+        "create",
+        "--request",
+        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"typeArguments\":[],\"arguments\":[7]}],\"sender\":\"0xabc\",\"gasBudget\":1200}",
+        "--schedule-id",
+        "job-1",
+        "--schedule-at-ms",
+        "500",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.request_schedule, parsed.command);
+    try testing.expectEqualStrings("job-1", parsed.request_schedule_id.?);
+    try testing.expectEqual(@as(?u64, 500), parsed.request_schedule_at_ms);
 }
 
 test "parseCliArgs parses request list command" {
