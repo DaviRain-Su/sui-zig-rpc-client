@@ -16,6 +16,12 @@
 - `zig build move-fixture-test`
 - `zig build test`，现在也会依赖并运行整组本地 Move fixture matrix
 
+外部协议分层：
+- `Cetus` 继续作为轻量 live smoke target，确认真实主网 ABI / discovery /
+  request artifact 没有回退
+- `Hashi` 作为重协议 target，优先用于本地 publish / testnet publish 后的
+  通用交互验证，而不是替代 `Cetus` 的公共链上 smoke
+
 ## 设计原则
 
 1. 每个 package 都要覆盖一类明确的 generic invocation 风险，而不是做协议特例。
@@ -211,3 +217,43 @@
 - 而是“对任意 Sui 合约调用已经具备足够泛化的覆盖面”
 
 换句话说，`Cetus` 是 smoke test，`Move contract matrix` 才是通用能力证明。
+
+## 外部重协议目标
+
+### `MystenLabs/hashi`
+
+用途：验证这个 CLI 在真实复杂协议上的泛化能力，而不是只在类 DeFi pool
+协议上工作。
+
+当前状态：
+- 已完成初步可行性验证：本地仓库 `packages/hashi` 的 Move tests 通过，`63/63`
+  passed
+- 仓库位置：`https://github.com/MystenLabs/hashi`
+- 适合当“本地发布后的重协议样本”，不适合直接替代 `Cetus` 做公共链上 smoke
+
+为什么值得测：
+- shared root object：`hashi::hashi::Hashi`
+- 包发布后初始化：`hashi::hashi::finish_publish`
+- coin 输入：`hashi::deposit::deposit`、`hashi::withdraw::request_withdrawal`
+- governance / proposal / reconfig：`proposal::*`、`reconfig::*`
+- 多步消息 / 证书 / `vector<u8>` / `Option<_>` / receipt-like flow
+
+第一批建议交互目标：
+1. `hashi::hashi::finish_publish`
+2. `hashi::deposit::deposit`
+3. `hashi::withdraw::request_withdrawal`
+4. `hashi::proposal::types::update_config::propose`
+5. `hashi::proposal::types::update_config::execute`
+
+主要验证：
+- shared object + owned/coin 输入混合
+- package publish/init 后的对象发现
+- `vector<u8>` / `Option<_>` / struct lowering
+- proposal / governance 多步对象流
+- 真实复杂协议上的 `move function --summarize` / preferred request 质量
+
+限制：
+- 很多完整业务流依赖 Bitcoin / MPC / committee certificate，不适合把端到端
+  成功与否直接当作 CLI 第一层 smoke 指标
+- 更适合“本地网络 publish 后验证通用交互能力”，不适合直接替代 `Cetus`
+  这类公开链上样本

@@ -56,6 +56,11 @@ zig build move-fixture-test
 - Zig 单元测试
 - `fixtures/move/*` 本地 Move 合约矩阵
 
+外部协议目标现在分两层：
+- `Cetus`：轻量 live smoke，确认真实公共链上 ABI / discovery / artifact 主链没回退
+- `MystenLabs/hashi`：已完成本地 Move 可行性验证，适合作为本地 publish /
+  testnet publish 后的重协议交互样本，不直接替代 `Cetus` 的公共链上 smoke
+
 当前默认测试图覆盖：
 - `C3 PTBs Introduction`
 - `D4 Transaction submission, Balance Changes, and Gas Profiling`

@@ -313,6 +313,9 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
   `Pool + Position + Coin + gas` coverage.
 - [x] Wire the local package matrix into deterministic regression docs/tests,
   not only live protocol smoke checks.
+- [x] Validate `MystenLabs/hashi` as a heavy external protocol target; local
+  Move tests pass and the package is suitable for post-publish CLI interaction
+  checks covering shared state, coins, governance, and multi-step flows.
 
 ## Cetus Readiness Gaps
 
