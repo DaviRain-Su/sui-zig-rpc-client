@@ -351,3 +351,21 @@ what the generic path still needs to finish.
   request editing.
 - [ ] The local builder path handles nearly all transaction construction
   without depending on unsafe RPC fallbacks.
+
+## Sui Wallet MPP Plan
+
+- [ ] Add a first-class wallet intent schema and artifact contract for web and
+  CLI.
+- [ ] Add explicit `wallet` CLI lifecycle commands:
+  create/import/use/address/balance/coins/objects.
+- [ ] Add explicit `request` CLI lifecycle commands:
+  build/inspect/dry-run/sponsor/sign/send/schedule/status.
+- [ ] Design embedded passkey account mode and external wallet mode as equal
+  first-class flows.
+- [ ] Add passkey credential registry / device management / revocation design.
+- [ ] Add policy fields for recurring limits, recipient scoping, and protocol
+  scoping.
+- [ ] Add scheduler semantics for cancel/replace/stale-object handling.
+- [ ] Add sponsor policy / gas preference / sponsor refusal fallback semantics.
+- [ ] Add payment reference and reconciliation metadata to the wallet plan.
+- [ ] Add concurrency-lane planning for parallel-safe Sui execution.

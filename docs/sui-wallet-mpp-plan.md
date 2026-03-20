@@ -128,6 +128,32 @@ The product should be one wallet, but with clearly separated layers.
 - `wallet-web`
 - `wallet-cli`
 
+### Account Modes
+
+The wallet must support two first-class user modes.
+
+- embedded account mode
+- external wallet mode
+
+Embedded account mode is for:
+
+- passkey-first onboarding
+- sponsor-friendly flows
+- session/access policy management
+- scheduled execution and background automation
+
+External wallet mode is for:
+
+- standard Sui wallet connection
+- power users who do not want embedded credentials
+- compatibility with the broader Sui wallet ecosystem
+
+The product must not force a false choice between them. It should allow:
+
+- starting with passkey and later exporting or linking
+- starting with external wallet and later enabling embedded/session features
+- explicit network/account switching without changing transaction semantics
+
 ### Shared Core
 
 - `wallet-intent`
@@ -145,6 +171,39 @@ The product should be one wallet, but with clearly separated layers.
 - `scheduler-service`
 - `passkey-auth-service`
 - optional `policy-service`
+
+## Account and Signer Model
+
+The signer model needs to be more explicit than a generic `passkey-auth-service`.
+
+### Embedded Passkey Account
+
+This mode needs:
+
+- credential registry
+- domain / relying-party binding
+- signer public key lookup
+- device enrollment metadata
+- recovery or secondary-access story
+
+At the wallet level, passkey support is not complete unless it covers:
+
+- registration
+- authentication
+- listing enrolled credentials
+- revocation
+- multi-device addition
+
+### External Wallet Mode
+
+This mode needs:
+
+- wallet-standard compatible connection
+- address discovery
+- chain/network handshake
+- capability detection
+- fallback when advanced features like sponsorship or session execution are not
+  available through the external signer
 
 ## Why This Repo Matters
 
@@ -299,6 +358,10 @@ CLI user journey. These should be added explicitly:
 - `wallet signer inspect`
 - `wallet passkey register`
 - `wallet passkey login`
+- `wallet connect`
+- `wallet disconnect`
+- `wallet accounts`
+- `wallet fund`
 - `wallet session revoke`
 
 That means the current design is directionally correct but not yet at
@@ -328,6 +391,10 @@ Recommended commands:
 - `request send`
 - `request schedule`
 - `request status`
+- `request list`
+- `request cancel`
+- `request resume`
+- `request rebroadcast`
 
 Recommended artifacts:
 
@@ -347,6 +414,40 @@ So the right answer is:
 
 The missing work is not a rethink. It is a documentation and implementation
 expansion around command groups and artifact contracts.
+
+## Request Lifecycle
+
+The request lifecycle needs to be explicit, not implied.
+
+### Request States
+
+At minimum, requests should be able to move through:
+
+- `built`
+- `resolved`
+- `sponsored`
+- `signed`
+- `submitted`
+- `confirmed`
+- `failed`
+- `scheduled`
+- `cancelled`
+
+### Request Operations
+
+The CLI and frontend should both support:
+
+- build a request from intent
+- inspect request metadata and object freshness assumptions
+- dry-run the request
+- attach sponsor data
+- attach signer/session approvals
+- send the request
+- poll and confirm the result
+- schedule or cancel future execution
+
+This is the piece that makes the wallet feel like a product instead of a thin
+transaction wrapper.
 
 ## Frontend Direction
 
@@ -378,11 +479,27 @@ Initial policy scope should support:
 
 - per-session allowed modules/functions
 - spending limits per coin type
+- recurring budget windows
 - expiry windows
 - optional recipient allowlists
+- optional protocol allowlists
+- optional object scope restrictions
 - optional sponsor-only execution
+- explicit revoke/update flows
 
 This policy can start off-chain and later move partially on-chain where useful.
+
+### Policy Features We Should Not Miss
+
+To match the practical usefulness of Tempo-style access keys, policy must be
+able to express:
+
+- one-time spend limits
+- daily / hourly recurring limits
+- route-specific or protocol-specific permissions
+- explicit destination restrictions
+- session-name / device-name labeling
+- emergency revocation
 
 ## Scheduling Model
 
@@ -398,6 +515,95 @@ This means scheduler correctness depends on:
 - reproducible artifact generation
 - object refresh before final execution
 - clear failure states when object versions or balances drift
+
+### Scheduling Features We Should Not Miss
+
+The scheduling design should also cover:
+
+- signed validity windows
+- cancellation
+- replacement / update of pending jobs
+- sponsor interaction at execution time
+- re-quote or re-resolve behavior for swaps
+- explicit stale-object failure reporting
+
+Scheduled execution in Sui is not just “send later”. It is “re-resolve safely
+under moving object state”.
+
+## Sponsorship and Fee Policy
+
+Sui does not need Tempo's exact fee-token model, but the wallet still needs a
+clear fee policy layer.
+
+It should support:
+
+- direct execution
+- optional sponsorship
+- sponsor-required execution
+- gas source preference
+- sponsor approval prompts
+- fallback behavior when sponsor declines
+
+The sponsor contract between CLI/web and service should include:
+
+- sender
+- requested action summary
+- estimated gas
+- sponsor policy metadata
+- validity window
+- replay protection / correlation id
+
+## Payments and Reconciliation
+
+Tempo documents put real weight on payment UX, not only transaction encoding.
+The Sui wallet plan should do the same.
+
+The wallet should eventually support:
+
+- transfer memo / payment reference
+- incoming payment watch
+- payment request or invoice references
+- simple reconciliation/export
+- merchant-friendly payment status tracking
+
+For Sui this likely means:
+
+- wallet-level memo/reference metadata
+- off-chain indexing
+- explorer/deeplink integration
+- optional on-chain companion objects for higher-assurance flows
+
+## Assets and Metadata
+
+The product needs an explicit metadata layer instead of relying on raw coin
+types everywhere.
+
+It should define:
+
+- trusted token metadata source(s)
+- symbol/decimals/icon resolution
+- verification status
+- protocol labels for route sources
+- wallet-safe display names for wrapped assets
+
+Without this, the frontend will degrade into explorer-style raw type strings.
+
+## Concurrency and Execution Lanes
+
+`Parallel nonces` in MPP should become `parallel-safe execution lanes` in Sui.
+
+The wallet should explicitly reason about:
+
+- gas coin lanes
+- object conflict sets
+- PTB-level concurrency safety
+- swap and payment queueing
+- user-visible “can run in parallel” hints
+
+This should become both:
+
+- a planner concern in the engine
+- a UX concept in the wallet
 
 ## MVP Phases
 
@@ -418,18 +624,21 @@ This means scheduler correctness depends on:
 - passkey signer integration
 - sponsor-ready request flow
 - sponsor service contract
+- explicit external-wallet coexistence model
 
 ### Phase 3: Session / Access Policies
 
 - session policy schema
 - delegated execution in CLI and web
 - auditable previews showing why an action is allowed
+- recurring limits / recipient and protocol scoping
 
 ### Phase 4: Scheduling
 
 - scheduler request schema
 - validity windows
 - replay protection and object-refresh logic
+- cancel / replace / stale-state reporting
 
 ### Phase 5: Wallet UX Polish
 
@@ -437,6 +646,8 @@ This means scheduler correctness depends on:
 - better transaction preview
 - clearer risk prompts
 - route-aware swap UX
+- payment references and reconciliation
+- asset metadata and execution-lane UX
 
 ## Immediate Work Items
 
@@ -449,12 +660,18 @@ These are the next concrete steps that fit this repo.
    - build/inspect/dry-run/sponsor/sign/send/schedule/status
 4. Make request artifacts explicitly sponsor-friendly.
 5. Add a passkey/session signer abstraction boundary.
-6. Add scheduler-friendly artifact metadata:
+6. Add an explicit embedded/external account-mode model to the design and CLI.
+7. Add policy schema fields for recurring limits, recipient scoping, and
+   protocol scoping.
+8. Add scheduler-friendly artifact metadata:
    - validity window
    - sender
    - sponsor mode
    - object freshness requirements
-7. Add wallet smoke scenarios that cover:
+9. Add payment reference and reconciliation metadata to the wallet artifact
+   plan.
+10. Add concurrency-lane metadata for parallel-safe execution planning.
+11. Add wallet smoke scenarios that cover:
    - sponsored transfer
    - sponsored swap
    - session-limited swap
@@ -489,12 +706,17 @@ This plan is succeeding when:
 - the same Sui engine lowers that intent into request artifacts/PTB
 - sponsor and non-sponsor paths share one execution core
 - passkey/session flows do not force a second transaction builder
+- embedded and external wallet modes can coexist cleanly
 - common wallet actions work with clear previews:
   - send
   - swap
   - sponsor
   - schedule
   - delegated session execution
+- request lifecycle is explicit enough that a user can inspect, sponsor, sign,
+  send, and resume work from artifacts instead of re-creating actions manually
+- payment and reconciliation metadata exist so the wallet can grow into real
+  payment UX rather than only developer tooling
 
 ## References
 
