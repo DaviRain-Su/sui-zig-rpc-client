@@ -350,6 +350,13 @@ a real CLI user journey. That gap is now partially closed.
 
 Implemented wallet lifecycle commands:
 
+- `wallet accounts`
+- `wallet connect`
+- `wallet disconnect`
+- `wallet passkey list`
+- `wallet passkey register`
+- `wallet passkey login`
+- `wallet passkey revoke`
 - `wallet address`
 - `wallet balance`
 - `wallet coins`
@@ -367,11 +374,6 @@ Implemented wallet lifecycle commands:
 
 Still missing from the broader wallet lifecycle:
 
-- `wallet passkey register`
-- `wallet passkey login`
-- `wallet connect`
-- `wallet disconnect`
-- `wallet accounts`
 - `wallet fund`
 - `wallet session revoke`
 

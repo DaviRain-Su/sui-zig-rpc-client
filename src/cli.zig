@@ -16,6 +16,13 @@ pub const Command = enum {
     wallet_create,
     wallet_import,
     wallet_use,
+    wallet_accounts,
+    wallet_connect,
+    wallet_disconnect,
+    wallet_passkey_list,
+    wallet_passkey_register,
+    wallet_passkey_login,
+    wallet_passkey_revoke,
     wallet_export_public,
     wallet_signer_inspect,
     wallet_address,
@@ -112,6 +119,13 @@ pub const ParsedArgs = struct {
     account_selector: ?[]const u8 = null,
     wallet_alias: ?[]const u8 = null,
     wallet_private_key: ?[]const u8 = null,
+    wallet_network: ?[]const u8 = null,
+    wallet_capabilities_json: ?[]const u8 = null,
+    wallet_credential_id: ?[]const u8 = null,
+    wallet_public_key_value: ?[]const u8 = null,
+    wallet_rp_id: ?[]const u8 = null,
+    wallet_device_name: ?[]const u8 = null,
+    wallet_user_name: ?[]const u8 = null,
     wallet_activate: bool = true,
     intent_network: ?[]const u8 = null,
     intent_execution_mode: ?[]const u8 = null,
@@ -210,6 +224,13 @@ pub const ParsedArgs = struct {
     owned_tx_provider_config: ?[]const u8 = null,
     owned_wallet_alias: ?[]const u8 = null,
     owned_wallet_private_key: ?[]const u8 = null,
+    owned_wallet_network: ?[]const u8 = null,
+    owned_wallet_capabilities_json: ?[]const u8 = null,
+    owned_wallet_credential_id: ?[]const u8 = null,
+    owned_wallet_public_key_value: ?[]const u8 = null,
+    owned_wallet_rp_id: ?[]const u8 = null,
+    owned_wallet_device_name: ?[]const u8 = null,
+    owned_wallet_user_name: ?[]const u8 = null,
     owned_intent_network: ?[]const u8 = null,
     owned_intent_execution_mode: ?[]const u8 = null,
     owned_intent_policy_json: ?[]const u8 = null,
@@ -267,6 +288,13 @@ pub const ParsedArgs = struct {
         if (self.owned_tx_provider_config) |value| allocator.free(value);
         if (self.owned_wallet_alias) |value| allocator.free(value);
         if (self.owned_wallet_private_key) |value| allocator.free(value);
+        if (self.owned_wallet_network) |value| allocator.free(value);
+        if (self.owned_wallet_capabilities_json) |value| allocator.free(value);
+        if (self.owned_wallet_credential_id) |value| allocator.free(value);
+        if (self.owned_wallet_public_key_value) |value| allocator.free(value);
+        if (self.owned_wallet_rp_id) |value| allocator.free(value);
+        if (self.owned_wallet_device_name) |value| allocator.free(value);
+        if (self.owned_wallet_user_name) |value| allocator.free(value);
         if (self.owned_intent_network) |value| allocator.free(value);
         if (self.owned_intent_execution_mode) |value| allocator.free(value);
         if (self.owned_intent_policy_json) |value| allocator.free(value);
@@ -2722,6 +2750,32 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
                     i += 2;
                     continue;
                 }
+                if (std.mem.eql(u8, sub, "accounts")) {
+                    parsed.command = .wallet_accounts;
+                    parsed.has_command = true;
+                    i += 2;
+                    continue;
+                }
+                if (std.mem.eql(u8, sub, "connect")) {
+                    parsed.command = .wallet_connect;
+                    parsed.has_command = true;
+                    i += 2;
+                    if (i < args.len and !std.mem.startsWith(u8, args[i], "--")) {
+                        parsed.account_selector = args[i];
+                        i += 1;
+                    }
+                    continue;
+                }
+                if (std.mem.eql(u8, sub, "disconnect")) {
+                    parsed.command = .wallet_disconnect;
+                    parsed.has_command = true;
+                    i += 2;
+                    if (i < args.len and !std.mem.startsWith(u8, args[i], "--")) {
+                        parsed.account_selector = args[i];
+                        i += 1;
+                    }
+                    continue;
+                }
                 if (std.mem.eql(u8, sub, "intent")) {
                     if (i + 2 >= args.len) return error.InvalidCli;
                     const intent_sub = args[i + 2];
@@ -2741,6 +2795,47 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
                         parsed.command = .wallet_intent_send;
                         parsed.has_command = true;
                         i += 3;
+                        continue;
+                    }
+                    return error.InvalidCli;
+                }
+                if (std.mem.eql(u8, sub, "passkey")) {
+                    if (i + 2 >= args.len) return error.InvalidCli;
+                    const passkey_sub = args[i + 2];
+                    if (std.mem.eql(u8, passkey_sub, "list")) {
+                        parsed.command = .wallet_passkey_list;
+                        parsed.has_command = true;
+                        i += 3;
+                        continue;
+                    }
+                    if (std.mem.eql(u8, passkey_sub, "register")) {
+                        parsed.command = .wallet_passkey_register;
+                        parsed.has_command = true;
+                        i += 3;
+                        if (i < args.len and !std.mem.startsWith(u8, args[i], "--")) {
+                            parsed.account_selector = args[i];
+                            i += 1;
+                        }
+                        continue;
+                    }
+                    if (std.mem.eql(u8, passkey_sub, "login")) {
+                        parsed.command = .wallet_passkey_login;
+                        parsed.has_command = true;
+                        i += 3;
+                        if (i < args.len and !std.mem.startsWith(u8, args[i], "--")) {
+                            parsed.account_selector = args[i];
+                            i += 1;
+                        }
+                        continue;
+                    }
+                    if (std.mem.eql(u8, passkey_sub, "revoke")) {
+                        parsed.command = .wallet_passkey_revoke;
+                        parsed.has_command = true;
+                        i += 3;
+                        if (i < args.len and !std.mem.startsWith(u8, args[i], "--")) {
+                            parsed.account_selector = args[i];
+                            i += 1;
+                        }
                         continue;
                     }
                     return error.InvalidCli;
@@ -4504,6 +4599,13 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
 
         if (parsed.command == .wallet_create or
             parsed.command == .wallet_import or
+            parsed.command == .wallet_accounts or
+            parsed.command == .wallet_connect or
+            parsed.command == .wallet_disconnect or
+            parsed.command == .wallet_passkey_list or
+            parsed.command == .wallet_passkey_register or
+            parsed.command == .wallet_passkey_login or
+            parsed.command == .wallet_passkey_revoke or
             parsed.command == .wallet_use or
             parsed.command == .wallet_export_public or
             parsed.command == .wallet_signer_inspect)
@@ -4513,7 +4615,12 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
                 i += 1;
                 continue;
             }
-            if ((parsed.command == .wallet_create or parsed.command == .wallet_import) and std.mem.eql(u8, token, "--alias")) {
+            if ((parsed.command == .wallet_create or
+                parsed.command == .wallet_import or
+                parsed.command == .wallet_connect or
+                parsed.command == .wallet_passkey_register) and
+                (std.mem.eql(u8, token, "--alias") or std.mem.eql(u8, token, "--label")))
+            {
                 if (i + 1 >= args.len) return error.InvalidCli;
                 try setOptionalStringArg(
                     allocator,
@@ -4539,6 +4646,94 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
             if ((parsed.command == .wallet_create or parsed.command == .wallet_import) and std.mem.eql(u8, token, "--no-activate")) {
                 parsed.wallet_activate = false;
                 i += 1;
+                continue;
+            }
+            if ((parsed.command == .wallet_connect or parsed.command == .wallet_passkey_register) and std.mem.eql(u8, token, "--no-activate")) {
+                parsed.wallet_activate = false;
+                i += 1;
+                continue;
+            }
+            if ((parsed.command == .wallet_connect or parsed.command == .wallet_passkey_register) and std.mem.eql(u8, token, "--network")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                try setOptionalStringArg(
+                    allocator,
+                    &parsed,
+                    args[i + 1],
+                    &parsed.owned_wallet_network,
+                    &parsed.wallet_network,
+                );
+                i += 2;
+                continue;
+            }
+            if (parsed.command == .wallet_connect and std.mem.eql(u8, token, "--capabilities")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                try setOptionalFileBackedArg(
+                    allocator,
+                    &parsed.owned_wallet_capabilities_json,
+                    &parsed.wallet_capabilities_json,
+                    args[i + 1],
+                );
+                i += 2;
+                continue;
+            }
+            if (parsed.command == .wallet_passkey_register and (std.mem.eql(u8, token, "--credential-id") or std.mem.eql(u8, token, "--credential"))) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                try setOptionalStringArg(
+                    allocator,
+                    &parsed,
+                    args[i + 1],
+                    &parsed.owned_wallet_credential_id,
+                    &parsed.wallet_credential_id,
+                );
+                i += 2;
+                continue;
+            }
+            if (parsed.command == .wallet_passkey_register and (std.mem.eql(u8, token, "--public-key") or std.mem.eql(u8, token, "--pubkey"))) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                try setOptionalStringArg(
+                    allocator,
+                    &parsed,
+                    args[i + 1],
+                    &parsed.owned_wallet_public_key_value,
+                    &parsed.wallet_public_key_value,
+                );
+                i += 2;
+                continue;
+            }
+            if (parsed.command == .wallet_passkey_register and (std.mem.eql(u8, token, "--rp-id") or std.mem.eql(u8, token, "--rp"))) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                try setOptionalStringArg(
+                    allocator,
+                    &parsed,
+                    args[i + 1],
+                    &parsed.owned_wallet_rp_id,
+                    &parsed.wallet_rp_id,
+                );
+                i += 2;
+                continue;
+            }
+            if (parsed.command == .wallet_passkey_register and std.mem.eql(u8, token, "--device-name")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                try setOptionalStringArg(
+                    allocator,
+                    &parsed,
+                    args[i + 1],
+                    &parsed.owned_wallet_device_name,
+                    &parsed.wallet_device_name,
+                );
+                i += 2;
+                continue;
+            }
+            if (parsed.command == .wallet_passkey_register and (std.mem.eql(u8, token, "--user-name") or std.mem.eql(u8, token, "--user"))) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                try setOptionalStringArg(
+                    allocator,
+                    &parsed,
+                    args[i + 1],
+                    &parsed.owned_wallet_user_name,
+                    &parsed.wallet_user_name,
+                );
+                i += 2;
                 continue;
             }
             return error.InvalidCli;
@@ -5391,6 +5586,23 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
         if (parsed.tx_provider_config != null and !parsed.tx_build_emit_tx_block) return error.InvalidCli;
     }
 
+    if (parsed.command == .wallet_connect) {
+        const address = parsed.account_selector orelse return error.InvalidCli;
+        if (!std.mem.startsWith(u8, address, "0x")) return error.InvalidCli;
+    }
+    if (parsed.command == .wallet_disconnect or
+        parsed.command == .wallet_passkey_login or
+        parsed.command == .wallet_passkey_revoke)
+    {
+        const selector = parsed.account_selector orelse return error.InvalidCli;
+        if (selector.len == 0) return error.InvalidCli;
+    }
+    if (parsed.command == .wallet_passkey_register) {
+        const address = parsed.account_selector orelse return error.InvalidCli;
+        if (!std.mem.startsWith(u8, address, "0x")) return error.InvalidCli;
+        if (parsed.wallet_credential_id == null or parsed.wallet_public_key_value == null) return error.InvalidCli;
+    }
+
     if (parsed.tx_session_response != null and parsed.tx_provider_config == null) return error.InvalidCli;
 
     if (parsed.command == .move_package and parsed.move_package == null) return error.InvalidCli;
@@ -5682,6 +5894,35 @@ pub fn printUsage(writer: anytype) !void {
         "    --private-key <value|@file>       Optional file-backed form of the same input\n" ++
         "    --alias <name>                    Optional alias stored with the entry\n" ++
         "    --no-activate                     Leave the current active wallet selector unchanged\n" ++
+        "    --json                            Emit machine-readable wallet metadata\n" ++
+        "  wallet accounts                     List combined keystore, external, and passkey wallet entries\n" ++
+        "    --json                            Emit machine-readable wallet account inventory\n" ++
+        "  wallet connect <0xaddress>          Register an external-wallet entry in the local wallet registry\n" ++
+        "    --label <name>                    Optional human-readable label\n" ++
+        "    --network <sui:...>               Optional wallet network label\n" ++
+        "    --capabilities <json|@file>       Optional external-wallet capability metadata\n" ++
+        "    --no-activate                     Leave the current active wallet selector unchanged\n" ++
+        "    --json                            Emit machine-readable wallet metadata\n" ++
+        "  wallet disconnect <selector|0xaddress>\n" ++
+        "                                       Mark an external-wallet registry entry as disconnected\n" ++
+        "    --json                            Emit machine-readable wallet metadata\n" ++
+        "  wallet passkey list                 List locally registered embedded passkey credentials\n" ++
+        "    --json                            Emit machine-readable passkey inventory\n" ++
+        "  wallet passkey register <0xaddress> Register an embedded passkey credential in the local wallet registry\n" ++
+        "    --label <name>                    Optional credential label\n" ++
+        "    --credential-id <id>              Required passkey credential id\n" ++
+        "    --public-key <key>                Required passkey public key\n" ++
+        "    --rp-id <id>                      Optional relying-party id\n" ++
+        "    --device-name <name>              Optional device label\n" ++
+        "    --user-name <name>                Optional user label\n" ++
+        "    --network <sui:...>               Optional wallet network label\n" ++
+        "    --no-activate                     Leave the current active wallet selector unchanged\n" ++
+        "    --json                            Emit machine-readable wallet metadata\n" ++
+        "  wallet passkey login <selector|credential-id|0xaddress>\n" ++
+        "                                       Activate an embedded passkey wallet selector for wallet commands\n" ++
+        "    --json                            Emit machine-readable wallet metadata\n" ++
+        "  wallet passkey revoke <selector|credential-id|0xaddress>\n" ++
+        "                                       Revoke a locally registered passkey credential\n" ++
         "    --json                            Emit machine-readable wallet metadata\n" ++
         "  wallet use <selector|0xaddress>     Set the active wallet selector for wallet commands\n" ++
         "    --json                            Emit machine-readable wallet metadata\n" ++
@@ -8422,6 +8663,155 @@ test "parseCliArgs parses wallet signer inspect command" {
 
     try testing.expectEqual(Command.wallet_signer_inspect, parsed.command);
     try testing.expectEqualStrings("main", parsed.account_selector.?);
+    try testing.expect(parsed.wallet_json);
+}
+
+test "parseCliArgs parses wallet accounts command" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "wallet",
+        "accounts",
+        "--json",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.wallet_accounts, parsed.command);
+    try testing.expect(parsed.wallet_json);
+}
+
+test "parseCliArgs parses wallet connect command" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "wallet",
+        "connect",
+        "0xabc",
+        "--label",
+        "browser",
+        "--network",
+        "sui:testnet",
+        "--capabilities",
+        "{\"sponsor\":true}",
+        "--json",
+        "--no-activate",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.wallet_connect, parsed.command);
+    try testing.expectEqualStrings("0xabc", parsed.account_selector.?);
+    try testing.expectEqualStrings("browser", parsed.wallet_alias.?);
+    try testing.expectEqualStrings("sui:testnet", parsed.wallet_network.?);
+    try testing.expectEqualStrings("{\"sponsor\":true}", parsed.wallet_capabilities_json.?);
+    try testing.expect(parsed.wallet_json);
+    try testing.expect(!parsed.wallet_activate);
+}
+
+test "parseCliArgs parses wallet disconnect command" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "wallet",
+        "disconnect",
+        "external:browser",
+        "--json",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.wallet_disconnect, parsed.command);
+    try testing.expectEqualStrings("external:browser", parsed.account_selector.?);
+    try testing.expect(parsed.wallet_json);
+}
+
+test "parseCliArgs parses wallet passkey register command" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "wallet",
+        "passkey",
+        "register",
+        "0xabc",
+        "--label",
+        "iphone",
+        "--credential-id",
+        "cred-1",
+        "--public-key",
+        "pub-1",
+        "--rp-id",
+        "wallet.example",
+        "--device-name",
+        "iPhone",
+        "--user-name",
+        "alice",
+        "--json",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.wallet_passkey_register, parsed.command);
+    try testing.expectEqualStrings("0xabc", parsed.account_selector.?);
+    try testing.expectEqualStrings("iphone", parsed.wallet_alias.?);
+    try testing.expectEqualStrings("cred-1", parsed.wallet_credential_id.?);
+    try testing.expectEqualStrings("pub-1", parsed.wallet_public_key_value.?);
+    try testing.expectEqualStrings("wallet.example", parsed.wallet_rp_id.?);
+    try testing.expectEqualStrings("iPhone", parsed.wallet_device_name.?);
+    try testing.expectEqualStrings("alice", parsed.wallet_user_name.?);
+}
+
+test "parseCliArgs parses wallet passkey login command" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "wallet",
+        "passkey",
+        "login",
+        "passkey:iphone",
+        "--json",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.wallet_passkey_login, parsed.command);
+    try testing.expectEqualStrings("passkey:iphone", parsed.account_selector.?);
+    try testing.expect(parsed.wallet_json);
+}
+
+test "parseCliArgs parses wallet passkey revoke command" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "wallet",
+        "passkey",
+        "revoke",
+        "passkey:iphone",
+        "--json",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.wallet_passkey_revoke, parsed.command);
+    try testing.expectEqualStrings("passkey:iphone", parsed.account_selector.?);
     try testing.expect(parsed.wallet_json);
 }
 

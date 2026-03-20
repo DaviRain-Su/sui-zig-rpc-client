@@ -989,6 +989,13 @@ pub fn main() !void {
 - `wallet create`: 生成新的本地 keystore 条目；支持 `--alias`、`--no-activate`、`--json`。默认会把新 wallet 写入 active selector state。
 - `wallet import <private-key>`: 导入 raw Sui private key 到本地 keystore；支持 `--private-key <value|@file>`、`--alias`、`--no-activate`、`--json`。
 - `wallet use <selector|0xaddress>`: 更新 active wallet selector；默认写入 `~/.sui/sui_config/wallet_state.json`，可用 `SUI_WALLET_STATE` 覆盖。
+- `wallet accounts`: 汇总本地 keystore、external wallet registry、passkey registry 三类钱包入口；输出 `mode/state/active_match/can_sign_locally`。
+- `wallet connect <0xaddress>`: 注册 external wallet 模式条目；支持 `--label`、`--network`、`--capabilities`、`--no-activate`、`--json`，默认写入 wallet registry 并激活。
+- `wallet disconnect <selector|label|0xaddress>`: 把 external wallet registry 条目标成 `disconnected`；命中 active selector 时会同步清空 active wallet state。
+- `wallet passkey list`: 列出本地 passkey credential registry 条目。
+- `wallet passkey register <0xaddress>`: 注册 embedded passkey 条目；支持 `--label`、`--credential-id`、`--public-key`、`--rp-id`、`--device-name`、`--user-name`、`--network`、`--no-activate`。
+- `wallet passkey login <selector|label|credential-id|0xaddress>`: 将 passkey 条目切成 active wallet selector，并把非 revoked 条目标回 `active`。
+- `wallet passkey revoke <selector|label|credential-id|0xaddress>`: 把 passkey 条目标成 `revoked`；命中 active selector 时会同步清空 active wallet state。
 - `wallet address [selector]`: 输出解析后的钱包地址；未给 selector 时优先读取 active wallet selector，再回退到默认 keystore 的首个地址。
 - `wallet balance [selector]`: 聚合钱包 coin 余额；支持 `--coin-type`、`--limit`、`--all`。默认只聚合单页并显式输出 `has_next_page/next_cursor`，`--all` 会扫描全部 coin page；未给 selector 时同样优先用 active wallet selector。
 - `wallet coins [selector]`: 直接查询钱包 coin page；支持 `--coin-type`、`--cursor`、`--limit`、`--all`、`--json`。
@@ -1031,6 +1038,8 @@ pub fn main() !void {
   - 支持 Sui 官方 `client.yaml` 风格：`active_env` + `envs` 列表
   - 非 JSON/YAML 结构时按纯文本按原样解析为 URL（会 trim 空白）
 - `SUI_WALLET_STATE`: 覆盖 `wallet create/use` 和无 selector `wallet *` 命令使用的 active wallet state 文件（默认 `~/.sui/sui_config/wallet_state.json`）。
+- `SUI_WALLET_REGISTRY`: 覆盖 `wallet accounts/connect/disconnect/passkey *` 命令使用的 wallet registry 文件（默认 `~/.sui/sui_config/wallet_registry.json`）。
+- `SUI_REQUEST_STATE`: 覆盖 `request schedule/list/cancel/resume/rebroadcast` 命令使用的本地 request 状态文件（默认 `~/.sui/sui_config/request_state.json`）。
 - `SUI_CONFIG` 示例：
   - `client.yaml` 示例：
     - `cat > ~/.sui/sui_config/client.yaml <<'EOF'`

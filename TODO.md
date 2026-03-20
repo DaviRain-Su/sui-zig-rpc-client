@@ -376,9 +376,9 @@ what the generic path still needs to finish.
   `send/status`.
 - [x] Add remaining `request` CLI lifecycle commands:
   sponsor/sign/schedule.
-- [ ] Design embedded passkey account mode and external wallet mode as equal
+- [x] Design embedded passkey account mode and external wallet mode as equal
   first-class flows.
-- [ ] Add passkey credential registry / device management / revocation design.
+- [x] Add passkey credential registry / device management / revocation design.
 - [ ] Add policy fields for recurring limits, recipient scoping, and protocol
   scoping.
 - [ ] Add scheduler semantics for cancel/replace/stale-object handling.

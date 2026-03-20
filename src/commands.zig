@@ -3,6 +3,7 @@ const client = @import("sui_client_zig");
 const cli = @import("./cli.zig");
 const request_state = @import("./request_state.zig");
 const wallet_intent = @import("./wallet_intent.zig");
+const wallet_registry = @import("./wallet_registry.zig");
 const wallet_state = @import("./wallet_state.zig");
 const tx_builder = client.tx_builder;
 const RpcRequest = @typeInfo(@typeInfo(@typeInfo(client.rpc_client.RequestSender).@"struct".fields[1].type).pointer.child).@"fn".params[2].type.?;
@@ -2930,6 +2931,77 @@ const OwnedWalletLifecycleSummary = struct {
     }
 };
 
+const OwnedWalletRegistryLifecycleSummary = struct {
+    action: []const u8,
+    source_kind: []const u8,
+    selector: []const u8,
+    address: []const u8,
+    label: ?[]const u8 = null,
+    network: ?[]const u8 = null,
+    credential_id: ?[]const u8 = null,
+    public_key: ?[]const u8 = null,
+    device_name: ?[]const u8 = null,
+    state: []const u8,
+    registry_path: ?[]const u8 = null,
+    wallet_state_path: ?[]const u8 = null,
+    activated: bool = false,
+
+    fn deinit(self: *OwnedWalletRegistryLifecycleSummary, allocator: std.mem.Allocator) void {
+        allocator.free(self.action);
+        allocator.free(self.source_kind);
+        allocator.free(self.selector);
+        allocator.free(self.address);
+        if (self.label) |value| allocator.free(value);
+        if (self.network) |value| allocator.free(value);
+        if (self.credential_id) |value| allocator.free(value);
+        if (self.public_key) |value| allocator.free(value);
+        if (self.device_name) |value| allocator.free(value);
+        allocator.free(self.state);
+        if (self.registry_path) |value| allocator.free(value);
+        if (self.wallet_state_path) |value| allocator.free(value);
+    }
+};
+
+const OwnedWalletAccountListEntry = struct {
+    source_kind: []u8,
+    mode: []u8,
+    selector: []u8,
+    label: ?[]u8 = null,
+    address: []u8,
+    public_key: ?[]u8 = null,
+    network: ?[]u8 = null,
+    state: []u8,
+    active_match: bool = false,
+    can_sign_locally: bool = false,
+
+    fn deinit(self: *OwnedWalletAccountListEntry, allocator: std.mem.Allocator) void {
+        allocator.free(self.source_kind);
+        allocator.free(self.mode);
+        allocator.free(self.selector);
+        if (self.label) |value| allocator.free(value);
+        allocator.free(self.address);
+        if (self.public_key) |value| allocator.free(value);
+        if (self.network) |value| allocator.free(value);
+        allocator.free(self.state);
+    }
+};
+
+const OwnedWalletAccountsSummary = struct {
+    artifact_kind: []const u8 = "wallet_accounts",
+    active_selector: ?[]u8 = null,
+    registry_path: ?[]const u8 = null,
+    keystore_path: ?[]const u8 = null,
+    entries: []OwnedWalletAccountListEntry,
+
+    fn deinit(self: *OwnedWalletAccountsSummary, allocator: std.mem.Allocator) void {
+        if (self.active_selector) |value| allocator.free(value);
+        if (self.registry_path) |value| allocator.free(value);
+        if (self.keystore_path) |value| allocator.free(value);
+        for (self.entries) |*entry| entry.deinit(allocator);
+        allocator.free(self.entries);
+    }
+};
+
 const OwnedResolvedWalletEntrySummary = struct {
     source_kind: []u8,
     selector: ?[]u8 = null,
@@ -2937,9 +3009,12 @@ const OwnedResolvedWalletEntrySummary = struct {
     name: ?[]u8 = null,
     address: ?[]u8 = null,
     public_key: ?[]u8 = null,
+    network: ?[]u8 = null,
+    state: ?[]u8 = null,
     active_selector: ?[]u8 = null,
     active_match: bool = false,
     can_sign_locally: bool = false,
+    registry_path: ?[]const u8 = null,
     keystore_path: ?[]const u8 = null,
     wallet_state_path: ?[]const u8 = null,
 
@@ -2950,7 +3025,10 @@ const OwnedResolvedWalletEntrySummary = struct {
         if (self.name) |value| allocator.free(value);
         if (self.address) |value| allocator.free(value);
         if (self.public_key) |value| allocator.free(value);
+        if (self.network) |value| allocator.free(value);
+        if (self.state) |value| allocator.free(value);
         if (self.active_selector) |value| allocator.free(value);
+        if (self.registry_path) |value| allocator.free(value);
         if (self.keystore_path) |value| allocator.free(value);
         if (self.wallet_state_path) |value| allocator.free(value);
     }
@@ -2964,6 +3042,8 @@ const OwnedWalletPublicExportSummary = struct {
     name: ?[]const u8 = null,
     address: ?[]const u8 = null,
     public_key: ?[]const u8 = null,
+    network: ?[]const u8 = null,
+    state: ?[]const u8 = null,
     active_selector: ?[]const u8 = null,
     active_match: bool,
 };
@@ -2976,10 +3056,13 @@ const OwnedWalletSignerInspectSummary = struct {
     name: ?[]const u8 = null,
     address: ?[]const u8 = null,
     public_key: ?[]const u8 = null,
+    network: ?[]const u8 = null,
+    state: ?[]const u8 = null,
     active_selector: ?[]const u8 = null,
     active_match: bool,
     can_sign_locally: bool,
     sender_resolution_kind: []const u8,
+    registry_path: ?[]const u8 = null,
     keystore_path: ?[]const u8 = null,
     wallet_state_path: ?[]const u8 = null,
 };
@@ -3133,6 +3216,128 @@ fn formatWalletLifecycleSummary(
     }
 }
 
+fn formatWalletRegistryLifecycleSummary(
+    writer: anytype,
+    summary: *const OwnedWalletRegistryLifecycleSummary,
+    json_output: bool,
+    pretty: bool,
+) !void {
+    if (json_output or pretty) {
+        try printStructuredJson(writer, summary.*, pretty);
+        return;
+    }
+
+    try writer.print("{s}: {s}\n", .{ summary.action, summary.address });
+    try writer.print("source: {s}\n", .{summary.source_kind});
+    try writer.print("selector: {s}\n", .{summary.selector});
+    try writer.print("state: {s}\n", .{summary.state});
+    if (summary.label) |value| try writer.print("label: {s}\n", .{value});
+    if (summary.network) |value| try writer.print("network: {s}\n", .{value});
+    if (summary.credential_id) |value| try writer.print("credential_id: {s}\n", .{value});
+    if (summary.public_key) |value| try writer.print("public_key: {s}\n", .{value});
+    if (summary.device_name) |value| try writer.print("device_name: {s}\n", .{value});
+    if (summary.registry_path) |value| try writer.print("wallet_registry: {s}\n", .{value});
+    if (summary.wallet_state_path) |value| try writer.print("wallet_state: {s}\n", .{value});
+}
+
+fn formatWalletAccountsSummary(
+    writer: anytype,
+    summary: *const OwnedWalletAccountsSummary,
+    pretty: bool,
+) !void {
+    try printStructuredJson(writer, summary.*, pretty);
+}
+
+fn duplicateOptionalOwned(allocator: std.mem.Allocator, value: ?[]const u8) !?[]u8 {
+    const slice = value orelse return null;
+    return try allocator.dupe(u8, slice);
+}
+
+fn duplicateRequired(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
+    return try allocator.dupe(u8, value);
+}
+
+fn walletRegistryStateMatchesSelectorOrAddress(
+    selector_or_address: []const u8,
+    selector: []const u8,
+    address: []const u8,
+) bool {
+    return std.mem.eql(u8, selector_or_address, selector) or std.mem.eql(u8, selector_or_address, address);
+}
+
+fn findConnectedExternalWalletIndex(
+    registry: *const wallet_registry.OwnedWalletRegistry,
+    selector_or_address: []const u8,
+) ?usize {
+    for (registry.external_wallets, 0..) |entry, index| {
+        if (!std.mem.eql(u8, entry.state, "connected")) continue;
+        if (walletRegistryStateMatchesSelectorOrAddress(selector_or_address, entry.selector, entry.address)) return index;
+        if (entry.label) |label| {
+            if (std.mem.eql(u8, selector_or_address, label)) return index;
+        }
+    }
+    return null;
+}
+
+fn findExternalWalletIndexAnyState(
+    registry: *const wallet_registry.OwnedWalletRegistry,
+    selector_or_address: []const u8,
+) ?usize {
+    for (registry.external_wallets, 0..) |entry, index| {
+        if (walletRegistryStateMatchesSelectorOrAddress(selector_or_address, entry.selector, entry.address)) return index;
+        if (entry.label) |label| {
+            if (std.mem.eql(u8, selector_or_address, label)) return index;
+        }
+    }
+    return null;
+}
+
+fn findActivePasskeyIndex(
+    registry: *const wallet_registry.OwnedWalletRegistry,
+    selector_or_address: []const u8,
+) ?usize {
+    for (registry.passkey_credentials, 0..) |entry, index| {
+        if (!std.mem.eql(u8, entry.state, "active")) continue;
+        if (walletRegistryStateMatchesSelectorOrAddress(selector_or_address, entry.selector, entry.address)) return index;
+        if (std.mem.eql(u8, selector_or_address, entry.credential_id)) return index;
+        if (entry.label) |label| {
+            if (std.mem.eql(u8, selector_or_address, label)) return index;
+        }
+    }
+    return null;
+}
+
+fn findPasskeyIndexAnyState(
+    registry: *const wallet_registry.OwnedWalletRegistry,
+    selector_or_address: []const u8,
+) ?usize {
+    for (registry.passkey_credentials, 0..) |entry, index| {
+        if (walletRegistryStateMatchesSelectorOrAddress(selector_or_address, entry.selector, entry.address)) return index;
+        if (std.mem.eql(u8, selector_or_address, entry.credential_id)) return index;
+        if (entry.label) |label| {
+            if (std.mem.eql(u8, selector_or_address, label)) return index;
+        }
+    }
+    return null;
+}
+
+fn clearActiveWalletSelectorIfMatches(
+    allocator: std.mem.Allocator,
+    selector: []const u8,
+    address: []const u8,
+) !?[]u8 {
+    const active_selector = try wallet_state.resolveActiveSelector(allocator);
+    if (active_selector == null) return null;
+    errdefer if (active_selector) |value| allocator.free(value);
+
+    if (!sameWalletSelectorOrAddress(active_selector, selector, address)) {
+        return active_selector;
+    }
+    allocator.free(active_selector.?);
+    try wallet_state.writeDefaultWalletState(allocator, null);
+    return null;
+}
+
 fn runWalletCreateOrImport(
     allocator: std.mem.Allocator,
     args: *const cli.ParsedArgs,
@@ -3212,9 +3417,477 @@ fn runWalletUse(
     try formatWalletLifecycleSummary(writer, &summary, args.wallet_json, args.pretty);
 }
 
+fn resolvedWalletNetwork(network: ?[]const u8) []const u8 {
+    return network orelse "sui:mainnet";
+}
+
+fn walletRegistryId(label: ?[]const u8, fallback: []const u8) []const u8 {
+    if (label) |value| {
+        if (value.len != 0) return value;
+    }
+    return fallback;
+}
+
 fn duplicateOptionalSlice(allocator: std.mem.Allocator, value: ?[]const u8) !?[]u8 {
     const slice = value orelse return null;
     return try allocator.dupe(u8, slice);
+}
+
+fn freeOwnedWalletAccountList(
+    allocator: std.mem.Allocator,
+    entries: *std.ArrayList(OwnedWalletAccountListEntry),
+) void {
+    for (entries.items) |*entry| entry.deinit(allocator);
+    entries.deinit(allocator);
+}
+
+fn appendExternalWalletRegistryEntry(
+    allocator: std.mem.Allocator,
+    registry: *wallet_registry.OwnedWalletRegistry,
+    entry: wallet_registry.OwnedExternalWalletEntry,
+) !void {
+    const old_entries = registry.external_wallets;
+    const new_entries = try allocator.alloc(wallet_registry.OwnedExternalWalletEntry, old_entries.len + 1);
+    for (old_entries, 0..) |old_entry, index| new_entries[index] = old_entry;
+    new_entries[old_entries.len] = entry;
+    allocator.free(old_entries);
+    registry.external_wallets = new_entries;
+}
+
+fn appendPasskeyRegistryEntry(
+    allocator: std.mem.Allocator,
+    registry: *wallet_registry.OwnedWalletRegistry,
+    entry: wallet_registry.OwnedPasskeyCredentialEntry,
+) !void {
+    const old_entries = registry.passkey_credentials;
+    const new_entries = try allocator.alloc(wallet_registry.OwnedPasskeyCredentialEntry, old_entries.len + 1);
+    for (old_entries, 0..) |old_entry, index| new_entries[index] = old_entry;
+    new_entries[old_entries.len] = entry;
+    allocator.free(old_entries);
+    registry.passkey_credentials = new_entries;
+}
+
+fn replaceExternalWalletRegistryEntryAt(
+    allocator: std.mem.Allocator,
+    registry: *wallet_registry.OwnedWalletRegistry,
+    index: usize,
+    entry: wallet_registry.OwnedExternalWalletEntry,
+) void {
+    registry.external_wallets[index].deinit(allocator);
+    registry.external_wallets[index] = entry;
+}
+
+fn replacePasskeyRegistryEntryAt(
+    allocator: std.mem.Allocator,
+    registry: *wallet_registry.OwnedWalletRegistry,
+    index: usize,
+    entry: wallet_registry.OwnedPasskeyCredentialEntry,
+) void {
+    registry.passkey_credentials[index].deinit(allocator);
+    registry.passkey_credentials[index] = entry;
+}
+
+fn buildWalletAccountsSummary(
+    allocator: std.mem.Allocator,
+    passkey_only: bool,
+) !OwnedWalletAccountsSummary {
+    const active_selector = try wallet_state.resolveActiveSelector(allocator);
+    errdefer if (active_selector) |value| allocator.free(value);
+
+    const registry_path = try wallet_registry.resolveDefaultWalletRegistryPath(allocator);
+    errdefer if (registry_path) |value| allocator.free(value);
+    var registry = try wallet_registry.loadDefaultWalletRegistry(allocator);
+    defer registry.deinit(allocator);
+
+    const keystore_path = if (passkey_only) null else try client.keystore.resolveDefaultSuiKeystorePath(allocator);
+    errdefer if (keystore_path) |value| allocator.free(value);
+
+    var entries = std.ArrayList(OwnedWalletAccountListEntry){};
+    errdefer freeOwnedWalletAccountList(allocator, &entries);
+
+    if (!passkey_only) {
+        if (keystore_path) |path| {
+            const contents = try readOptionalFileAtPathAlloc(allocator, path, 4 * 1024 * 1024);
+            defer if (contents) |value| allocator.free(value);
+            if (contents) |keystore_contents| {
+                var account_entries = try client.keystore.listAccountEntriesFromContents(allocator, keystore_contents);
+                defer account_entries.deinit(allocator);
+
+                for (account_entries.accounts) |entry| {
+                    const address_value = entry.address orelse entry.sui_address orelse continue;
+                    const public_selector = publicSelectorFromEntry(entry, null);
+                    const selector_owned = if (public_selector) |value|
+                        try allocator.dupe(u8, value)
+                    else
+                        try std.fmt.allocPrint(allocator, "{d}", .{entry.index});
+                    errdefer allocator.free(selector_owned);
+
+                    const address_owned = try allocator.dupe(u8, address_value);
+                    errdefer allocator.free(address_owned);
+                    const public_key_owned = try duplicateOptionalSlice(allocator, entry.public_key);
+                    errdefer if (public_key_owned) |value| allocator.free(value);
+
+                    const key = try client.keystore.parseKeyBySelector(allocator, keystore_contents, selector_owned);
+                    const can_sign_locally = if (key) |value| blk: {
+                        allocator.free(value);
+                        break :blk true;
+                    } else false;
+
+                    try entries.append(allocator, .{
+                        .source_kind = try allocator.dupe(u8, "keystore"),
+                        .mode = try allocator.dupe(u8, "local_keystore"),
+                        .selector = selector_owned,
+                        .label = try duplicateOptionalSlice(allocator, entry.alias orelse entry.name),
+                        .address = address_owned,
+                        .public_key = public_key_owned,
+                        .network = null,
+                        .state = try allocator.dupe(u8, "available"),
+                        .active_match = sameWalletSelectorOrAddress(active_selector, selector_owned, address_owned),
+                        .can_sign_locally = can_sign_locally,
+                    });
+                }
+            }
+        }
+    }
+
+    for (registry.passkey_credentials) |entry| {
+        try entries.append(allocator, .{
+            .source_kind = try allocator.dupe(u8, "wallet_registry"),
+            .mode = try allocator.dupe(u8, "embedded_passkey"),
+            .selector = try allocator.dupe(u8, entry.selector),
+            .label = try duplicateOptionalSlice(allocator, entry.label),
+            .address = try allocator.dupe(u8, entry.address),
+            .public_key = try allocator.dupe(u8, entry.public_key),
+            .network = try duplicateOptionalSlice(allocator, entry.network),
+            .state = try allocator.dupe(u8, entry.state),
+            .active_match = sameWalletSelectorOrAddress(active_selector, entry.selector, entry.address),
+            .can_sign_locally = false,
+        });
+    }
+
+    if (!passkey_only) {
+        for (registry.external_wallets) |entry| {
+            try entries.append(allocator, .{
+                .source_kind = try allocator.dupe(u8, "wallet_registry"),
+                .mode = try allocator.dupe(u8, "external_wallet"),
+                .selector = try allocator.dupe(u8, entry.selector),
+                .label = try duplicateOptionalSlice(allocator, entry.label),
+                .address = try allocator.dupe(u8, entry.address),
+                .public_key = null,
+                .network = try duplicateOptionalSlice(allocator, entry.network),
+                .state = try allocator.dupe(u8, entry.state),
+                .active_match = sameWalletSelectorOrAddress(active_selector, entry.selector, entry.address),
+                .can_sign_locally = false,
+            });
+        }
+    }
+
+    return .{
+        .artifact_kind = if (passkey_only) "wallet_passkey_list" else "wallet_accounts",
+        .active_selector = active_selector,
+        .registry_path = registry_path,
+        .keystore_path = keystore_path,
+        .entries = try entries.toOwnedSlice(allocator),
+    };
+}
+
+fn runWalletAccounts(
+    allocator: std.mem.Allocator,
+    args: *const cli.ParsedArgs,
+    writer: anytype,
+    passkey_only: bool,
+) !void {
+    var summary = try buildWalletAccountsSummary(allocator, passkey_only);
+    defer summary.deinit(allocator);
+    try formatWalletAccountsSummary(writer, &summary, args.pretty);
+}
+
+fn runWalletConnect(
+    allocator: std.mem.Allocator,
+    args: *const cli.ParsedArgs,
+    writer: anytype,
+) !void {
+    const address = args.account_selector orelse return error.InvalidCli;
+    const label = args.wallet_alias;
+
+    const registry_path = try wallet_registry.resolveDefaultWalletRegistryPath(allocator) orelse return error.InvalidCli;
+    defer allocator.free(registry_path);
+
+    var registry = try wallet_registry.loadDefaultWalletRegistry(allocator);
+    defer registry.deinit(allocator);
+
+    const selector_id = walletRegistryId(label, address);
+    const selector = try wallet_registry.externalSelectorForId(allocator, selector_id);
+    defer allocator.free(selector);
+
+    const now_ms = std.time.milliTimestamp();
+    const entry = wallet_registry.OwnedExternalWalletEntry{
+        .selector = try allocator.dupe(u8, selector),
+        .label = try duplicateOptionalSlice(allocator, label),
+        .address = try allocator.dupe(u8, address),
+        .network = try allocator.dupe(u8, resolvedWalletNetwork(args.wallet_network)),
+        .capabilities_json = try duplicateOptionalSlice(allocator, args.wallet_capabilities_json),
+        .state = try allocator.dupe(u8, "connected"),
+        .connected_at_ms = now_ms,
+        .updated_at_ms = now_ms,
+    };
+
+    var existing_index = findExternalWalletIndexAnyState(&registry, address);
+    if (existing_index == null and label != null) {
+        existing_index = findExternalWalletIndexAnyState(&registry, label.?);
+    }
+
+    if (existing_index) |index| {
+        replaceExternalWalletRegistryEntryAt(allocator, &registry, index, entry);
+    } else {
+        try appendExternalWalletRegistryEntry(allocator, &registry, entry);
+    }
+
+    try wallet_registry.writeDefaultWalletRegistry(allocator, &registry);
+
+    var wallet_state_path: ?[]const u8 = null;
+    if (args.wallet_activate) {
+        try wallet_state.writeDefaultWalletState(allocator, selector);
+        wallet_state_path = try wallet_state.resolveDefaultWalletStatePath(allocator);
+    }
+
+    var summary = OwnedWalletRegistryLifecycleSummary{
+        .action = try allocator.dupe(u8, "external_wallet_connected"),
+        .source_kind = try allocator.dupe(u8, "external_wallet"),
+        .selector = try allocator.dupe(u8, selector),
+        .address = try allocator.dupe(u8, address),
+        .label = try duplicateOptionalSlice(allocator, label),
+        .network = try allocator.dupe(u8, resolvedWalletNetwork(args.wallet_network)),
+        .state = try allocator.dupe(u8, "connected"),
+        .registry_path = try allocator.dupe(u8, registry_path),
+        .wallet_state_path = wallet_state_path,
+        .activated = args.wallet_activate,
+    };
+    defer summary.deinit(allocator);
+
+    try formatWalletRegistryLifecycleSummary(writer, &summary, args.wallet_json, args.pretty);
+}
+
+fn runWalletDisconnect(
+    allocator: std.mem.Allocator,
+    args: *const cli.ParsedArgs,
+    writer: anytype,
+) !void {
+    const selector_or_address = args.account_selector orelse return error.InvalidCli;
+
+    const registry_path = try wallet_registry.resolveDefaultWalletRegistryPath(allocator) orelse return error.InvalidCli;
+    defer allocator.free(registry_path);
+
+    var registry = try wallet_registry.loadDefaultWalletRegistry(allocator);
+    defer registry.deinit(allocator);
+
+    const index = findExternalWalletIndexAnyState(&registry, selector_or_address) orelse return error.InvalidCli;
+    const entry = &registry.external_wallets[index];
+
+    allocator.free(entry.state);
+    entry.state = try allocator.dupe(u8, "disconnected");
+    entry.updated_at_ms = std.time.milliTimestamp();
+
+    var wallet_state_path: ?[]const u8 = null;
+    const active_selector = try wallet_state.resolveActiveSelector(allocator);
+    if (active_selector) |value| {
+        defer allocator.free(value);
+        if (sameWalletSelectorOrAddress(active_selector, entry.selector, entry.address)) {
+            try wallet_state.writeDefaultWalletState(allocator, null);
+            wallet_state_path = try wallet_state.resolveDefaultWalletStatePath(allocator);
+        }
+    }
+
+    try wallet_registry.writeDefaultWalletRegistry(allocator, &registry);
+
+    var summary = OwnedWalletRegistryLifecycleSummary{
+        .action = try allocator.dupe(u8, "external_wallet_disconnected"),
+        .source_kind = try allocator.dupe(u8, "external_wallet"),
+        .selector = try allocator.dupe(u8, entry.selector),
+        .address = try allocator.dupe(u8, entry.address),
+        .label = try duplicateOptionalSlice(allocator, entry.label),
+        .network = try duplicateOptionalSlice(allocator, entry.network),
+        .state = try allocator.dupe(u8, entry.state),
+        .registry_path = try allocator.dupe(u8, registry_path),
+        .wallet_state_path = wallet_state_path,
+        .activated = false,
+    };
+    defer summary.deinit(allocator);
+
+    try formatWalletRegistryLifecycleSummary(writer, &summary, args.wallet_json, args.pretty);
+}
+
+fn runWalletPasskeyRegister(
+    allocator: std.mem.Allocator,
+    args: *const cli.ParsedArgs,
+    writer: anytype,
+) !void {
+    const address = args.account_selector orelse return error.InvalidCli;
+    const credential_id = args.wallet_credential_id orelse return error.InvalidCli;
+    const public_key = args.wallet_public_key_value orelse return error.InvalidCli;
+    const label = args.wallet_alias;
+
+    const registry_path = try wallet_registry.resolveDefaultWalletRegistryPath(allocator) orelse return error.InvalidCli;
+    defer allocator.free(registry_path);
+
+    var registry = try wallet_registry.loadDefaultWalletRegistry(allocator);
+    defer registry.deinit(allocator);
+
+    const selector_id = walletRegistryId(label, credential_id);
+    const selector = try wallet_registry.passkeySelectorForId(allocator, selector_id);
+    defer allocator.free(selector);
+
+    const now_ms = std.time.milliTimestamp();
+    const entry = wallet_registry.OwnedPasskeyCredentialEntry{
+        .selector = try allocator.dupe(u8, selector),
+        .label = try duplicateOptionalSlice(allocator, label),
+        .address = try allocator.dupe(u8, address),
+        .credential_id = try allocator.dupe(u8, credential_id),
+        .public_key = try allocator.dupe(u8, public_key),
+        .network = try allocator.dupe(u8, resolvedWalletNetwork(args.wallet_network)),
+        .rp_id = try duplicateOptionalSlice(allocator, args.wallet_rp_id),
+        .device_name = try duplicateOptionalSlice(allocator, args.wallet_device_name),
+        .user_name = try duplicateOptionalSlice(allocator, args.wallet_user_name),
+        .state = try allocator.dupe(u8, "active"),
+        .registered_at_ms = now_ms,
+        .updated_at_ms = now_ms,
+    };
+
+    var existing_index = findPasskeyIndexAnyState(&registry, credential_id);
+    if (existing_index == null) existing_index = findPasskeyIndexAnyState(&registry, address);
+    if (existing_index == null and label != null) {
+        existing_index = findPasskeyIndexAnyState(&registry, label.?);
+    }
+
+    if (existing_index) |index| {
+        replacePasskeyRegistryEntryAt(allocator, &registry, index, entry);
+    } else {
+        try appendPasskeyRegistryEntry(allocator, &registry, entry);
+    }
+
+    try wallet_registry.writeDefaultWalletRegistry(allocator, &registry);
+
+    var wallet_state_path: ?[]const u8 = null;
+    if (args.wallet_activate) {
+        try wallet_state.writeDefaultWalletState(allocator, selector);
+        wallet_state_path = try wallet_state.resolveDefaultWalletStatePath(allocator);
+    }
+
+    var summary = OwnedWalletRegistryLifecycleSummary{
+        .action = try allocator.dupe(u8, "passkey_registered"),
+        .source_kind = try allocator.dupe(u8, "embedded_passkey"),
+        .selector = try allocator.dupe(u8, selector),
+        .address = try allocator.dupe(u8, address),
+        .label = try duplicateOptionalSlice(allocator, label),
+        .network = try allocator.dupe(u8, resolvedWalletNetwork(args.wallet_network)),
+        .credential_id = try allocator.dupe(u8, credential_id),
+        .public_key = try allocator.dupe(u8, public_key),
+        .device_name = try duplicateOptionalSlice(allocator, args.wallet_device_name),
+        .state = try allocator.dupe(u8, "active"),
+        .registry_path = try allocator.dupe(u8, registry_path),
+        .wallet_state_path = wallet_state_path,
+        .activated = args.wallet_activate,
+    };
+    defer summary.deinit(allocator);
+
+    try formatWalletRegistryLifecycleSummary(writer, &summary, args.wallet_json, args.pretty);
+}
+
+fn runWalletPasskeyLogin(
+    allocator: std.mem.Allocator,
+    args: *const cli.ParsedArgs,
+    writer: anytype,
+) !void {
+    const selector_or_address = args.account_selector orelse return error.InvalidCli;
+
+    const registry_path = try wallet_registry.resolveDefaultWalletRegistryPath(allocator) orelse return error.InvalidCli;
+    defer allocator.free(registry_path);
+
+    var registry = try wallet_registry.loadDefaultWalletRegistry(allocator);
+    defer registry.deinit(allocator);
+
+    const index = findPasskeyIndexAnyState(&registry, selector_or_address) orelse return error.InvalidCli;
+    const entry = &registry.passkey_credentials[index];
+    if (std.mem.eql(u8, entry.state, "revoked")) return error.InvalidCli;
+
+    allocator.free(entry.state);
+    entry.state = try allocator.dupe(u8, "active");
+    entry.updated_at_ms = std.time.milliTimestamp();
+
+    try wallet_registry.writeDefaultWalletRegistry(allocator, &registry);
+    try wallet_state.writeDefaultWalletState(allocator, entry.selector);
+    const wallet_state_path = try wallet_state.resolveDefaultWalletStatePath(allocator);
+
+    var summary = OwnedWalletRegistryLifecycleSummary{
+        .action = try allocator.dupe(u8, "passkey_logged_in"),
+        .source_kind = try allocator.dupe(u8, "embedded_passkey"),
+        .selector = try allocator.dupe(u8, entry.selector),
+        .address = try allocator.dupe(u8, entry.address),
+        .label = try duplicateOptionalSlice(allocator, entry.label),
+        .network = try duplicateOptionalSlice(allocator, entry.network),
+        .credential_id = try allocator.dupe(u8, entry.credential_id),
+        .public_key = try allocator.dupe(u8, entry.public_key),
+        .device_name = try duplicateOptionalSlice(allocator, entry.device_name),
+        .state = try allocator.dupe(u8, entry.state),
+        .registry_path = try allocator.dupe(u8, registry_path),
+        .wallet_state_path = wallet_state_path,
+        .activated = true,
+    };
+    defer summary.deinit(allocator);
+
+    try formatWalletRegistryLifecycleSummary(writer, &summary, args.wallet_json, args.pretty);
+}
+
+fn runWalletPasskeyRevoke(
+    allocator: std.mem.Allocator,
+    args: *const cli.ParsedArgs,
+    writer: anytype,
+) !void {
+    const selector_or_address = args.account_selector orelse return error.InvalidCli;
+
+    const registry_path = try wallet_registry.resolveDefaultWalletRegistryPath(allocator) orelse return error.InvalidCli;
+    defer allocator.free(registry_path);
+
+    var registry = try wallet_registry.loadDefaultWalletRegistry(allocator);
+    defer registry.deinit(allocator);
+
+    const index = findPasskeyIndexAnyState(&registry, selector_or_address) orelse return error.InvalidCli;
+    const entry = &registry.passkey_credentials[index];
+
+    allocator.free(entry.state);
+    entry.state = try allocator.dupe(u8, "revoked");
+    entry.updated_at_ms = std.time.milliTimestamp();
+
+    var wallet_state_path: ?[]const u8 = null;
+    const active_selector = try wallet_state.resolveActiveSelector(allocator);
+    if (active_selector) |value| {
+        defer allocator.free(value);
+        if (sameWalletSelectorOrAddress(active_selector, entry.selector, entry.address)) {
+            try wallet_state.writeDefaultWalletState(allocator, null);
+            wallet_state_path = try wallet_state.resolveDefaultWalletStatePath(allocator);
+        }
+    }
+
+    try wallet_registry.writeDefaultWalletRegistry(allocator, &registry);
+
+    var summary = OwnedWalletRegistryLifecycleSummary{
+        .action = try allocator.dupe(u8, "passkey_revoked"),
+        .source_kind = try allocator.dupe(u8, "embedded_passkey"),
+        .selector = try allocator.dupe(u8, entry.selector),
+        .address = try allocator.dupe(u8, entry.address),
+        .label = try duplicateOptionalSlice(allocator, entry.label),
+        .network = try duplicateOptionalSlice(allocator, entry.network),
+        .credential_id = try allocator.dupe(u8, entry.credential_id),
+        .public_key = try allocator.dupe(u8, entry.public_key),
+        .device_name = try duplicateOptionalSlice(allocator, entry.device_name),
+        .state = try allocator.dupe(u8, entry.state),
+        .registry_path = try allocator.dupe(u8, registry_path),
+        .wallet_state_path = wallet_state_path,
+        .activated = false,
+    };
+    defer summary.deinit(allocator);
+
+    try formatWalletRegistryLifecycleSummary(writer, &summary, args.wallet_json, args.pretty);
 }
 
 fn sameWalletSelectorOrAddress(
@@ -3250,6 +3923,11 @@ fn resolveWalletEntrySummary(
     allocator: std.mem.Allocator,
     args: *const cli.ParsedArgs,
 ) !OwnedResolvedWalletEntrySummary {
+    const registry_path = try wallet_registry.resolveDefaultWalletRegistryPath(allocator);
+    errdefer if (registry_path) |value| allocator.free(value);
+    var registry = try wallet_registry.loadDefaultWalletRegistry(allocator);
+    defer registry.deinit(allocator);
+
     const keystore_path = try client.keystore.resolveDefaultSuiKeystorePath(allocator);
     errdefer if (keystore_path) |value| allocator.free(value);
     const keystore_contents = if (keystore_path) |path|
@@ -3270,9 +3948,27 @@ fn resolveWalletEntrySummary(
     var fallback_address: ?[]u8 = null;
     errdefer if (fallback_address) |value| allocator.free(value);
     var can_sign_locally = false;
+    var resolved_network: ?[]u8 = null;
+    errdefer if (resolved_network) |value| allocator.free(value);
+    var resolved_state: ?[]u8 = null;
+    errdefer if (resolved_state) |value| allocator.free(value);
+
+    const setFallbackSelector = struct {
+        fn call(allocator_inner: std.mem.Allocator, target: *?[]u8, value: []const u8) !void {
+            if (target.*) |existing| allocator_inner.free(existing);
+            target.* = try allocator_inner.dupe(u8, value);
+        }
+    }.call;
+
+    const setFallbackAddress = struct {
+        fn call(allocator_inner: std.mem.Allocator, target: *?[]u8, value: []const u8) !void {
+            if (target.*) |existing| allocator_inner.free(existing);
+            target.* = try allocator_inner.dupe(u8, value);
+        }
+    }.call;
 
     if (args.account_selector) |selector| {
-        fallback_selector = try allocator.dupe(u8, selector);
+        try setFallbackSelector(allocator, &fallback_selector, selector);
         if (std.mem.startsWith(u8, selector, "0x")) {
             source_kind = "explicit_address";
             if (keystore_contents) |contents| {
@@ -3284,22 +3980,68 @@ fn resolveWalletEntrySummary(
                 }
             }
             if (entry == null) {
-                fallback_address = try allocator.dupe(u8, selector);
+                if (findActivePasskeyIndex(&registry, selector)) |index| {
+                    const passkey = registry.passkey_credentials[index];
+                    source_kind = "embedded_passkey";
+                    try setFallbackSelector(allocator, &fallback_selector, passkey.selector);
+                    try setFallbackAddress(allocator, &fallback_address, passkey.address);
+                    resolved_network = try duplicateOptionalOwned(allocator, passkey.network);
+                    resolved_state = try allocator.dupe(u8, passkey.state);
+                } else if (findConnectedExternalWalletIndex(&registry, selector)) |index| {
+                    const external = registry.external_wallets[index];
+                    source_kind = "external_wallet";
+                    try setFallbackSelector(allocator, &fallback_selector, external.selector);
+                    try setFallbackAddress(allocator, &fallback_address, external.address);
+                    resolved_network = try duplicateOptionalOwned(allocator, external.network);
+                    resolved_state = try allocator.dupe(u8, external.state);
+                } else {
+                    try setFallbackAddress(allocator, &fallback_address, selector);
+                }
             }
         } else {
-            source_kind = "explicit_selector";
-            const contents = keystore_contents orelse return error.InvalidCli;
-            entry = try client.keystore.getAccountEntryFromContents(allocator, contents, selector) orelse return error.InvalidCli;
-            const local_key = try client.keystore.parseKeyBySelector(allocator, contents, selector);
-            if (local_key) |value| {
-                can_sign_locally = true;
-                allocator.free(value);
+            if (findActivePasskeyIndex(&registry, selector)) |index| {
+                const passkey = registry.passkey_credentials[index];
+                source_kind = "embedded_passkey";
+                try setFallbackSelector(allocator, &fallback_selector, passkey.selector);
+                try setFallbackAddress(allocator, &fallback_address, passkey.address);
+                resolved_network = try duplicateOptionalOwned(allocator, passkey.network);
+                resolved_state = try allocator.dupe(u8, passkey.state);
+            } else if (findConnectedExternalWalletIndex(&registry, selector)) |index| {
+                const external = registry.external_wallets[index];
+                source_kind = "external_wallet";
+                try setFallbackSelector(allocator, &fallback_selector, external.selector);
+                try setFallbackAddress(allocator, &fallback_address, external.address);
+                resolved_network = try duplicateOptionalOwned(allocator, external.network);
+                resolved_state = try allocator.dupe(u8, external.state);
+            } else {
+                source_kind = "explicit_selector";
+                const contents = keystore_contents orelse return error.InvalidCli;
+                entry = try client.keystore.getAccountEntryFromContents(allocator, contents, selector) orelse return error.InvalidCli;
+                const local_key = try client.keystore.parseKeyBySelector(allocator, contents, selector);
+                if (local_key) |value| {
+                    can_sign_locally = true;
+                    allocator.free(value);
+                }
             }
         }
     } else if (active_selector) |selector| {
-        fallback_selector = try allocator.dupe(u8, selector);
-        source_kind = "active_wallet";
-        if (std.mem.startsWith(u8, selector, "0x")) {
+        try setFallbackSelector(allocator, &fallback_selector, selector);
+        if (findActivePasskeyIndex(&registry, selector)) |index| {
+            const passkey = registry.passkey_credentials[index];
+            source_kind = "active_wallet";
+            try setFallbackSelector(allocator, &fallback_selector, passkey.selector);
+            try setFallbackAddress(allocator, &fallback_address, passkey.address);
+            resolved_network = try duplicateOptionalOwned(allocator, passkey.network);
+            resolved_state = try allocator.dupe(u8, passkey.state);
+        } else if (findConnectedExternalWalletIndex(&registry, selector)) |index| {
+            const external = registry.external_wallets[index];
+            source_kind = "active_wallet";
+            try setFallbackSelector(allocator, &fallback_selector, external.selector);
+            try setFallbackAddress(allocator, &fallback_address, external.address);
+            resolved_network = try duplicateOptionalOwned(allocator, external.network);
+            resolved_state = try allocator.dupe(u8, external.state);
+        } else if (std.mem.startsWith(u8, selector, "0x")) {
+            source_kind = "active_wallet";
             if (keystore_contents) |contents| {
                 entry = try client.keystore.getAccountEntryFromContents(allocator, contents, selector);
                 const local_key = try client.keystore.parseKeyBySelector(allocator, contents, selector);
@@ -3309,9 +4051,10 @@ fn resolveWalletEntrySummary(
                 }
             }
             if (entry == null) {
-                fallback_address = try allocator.dupe(u8, selector);
+                try setFallbackAddress(allocator, &fallback_address, selector);
             }
         } else {
+            source_kind = "active_wallet";
             const contents = keystore_contents orelse return error.InvalidCli;
             entry = try client.keystore.getAccountEntryFromContents(allocator, contents, selector) orelse return error.InvalidCli;
             const local_key = try client.keystore.parseKeyBySelector(allocator, contents, selector);
@@ -3376,9 +4119,12 @@ fn resolveWalletEntrySummary(
         .name = name,
         .address = address,
         .public_key = public_key,
+        .network = resolved_network,
+        .state = resolved_state,
         .active_selector = active_selector_owned,
         .active_match = sameWalletSelectorOrAddress(active_selector, selector, address),
         .can_sign_locally = can_sign_locally,
+        .registry_path = registry_path,
         .keystore_path = keystore_path,
         .wallet_state_path = wallet_state_path,
     };
@@ -3402,6 +4148,8 @@ fn formatWalletPublicExportSummary(
     if (summary.name) |value| try writer.print("name: {s}\n", .{value});
     if (summary.address) |value| try writer.print("address: {s}\n", .{value});
     if (summary.public_key) |value| try writer.print("public_key: {s}\n", .{value});
+    if (summary.network) |value| try writer.print("network: {s}\n", .{value});
+    if (summary.state) |value| try writer.print("state: {s}\n", .{value});
     if (summary.active_selector) |value| try writer.print("active_selector: {s}\n", .{value});
     try writer.print("active_match: {any}\n", .{summary.active_match});
 }
@@ -3424,10 +4172,13 @@ fn formatWalletSignerInspectSummary(
     if (summary.name) |value| try writer.print("name: {s}\n", .{value});
     if (summary.address) |value| try writer.print("address: {s}\n", .{value});
     if (summary.public_key) |value| try writer.print("public_key: {s}\n", .{value});
+    if (summary.network) |value| try writer.print("network: {s}\n", .{value});
+    if (summary.state) |value| try writer.print("state: {s}\n", .{value});
     if (summary.active_selector) |value| try writer.print("active_selector: {s}\n", .{value});
     try writer.print("active_match: {any}\n", .{summary.active_match});
     try writer.print("can_sign_locally: {any}\n", .{summary.can_sign_locally});
     try writer.print("sender_resolution_kind: {s}\n", .{summary.sender_resolution_kind});
+    if (summary.registry_path) |value| try writer.print("wallet_registry: {s}\n", .{value});
     if (summary.keystore_path) |value| try writer.print("keystore: {s}\n", .{value});
     if (summary.wallet_state_path) |value| try writer.print("wallet_state: {s}\n", .{value});
 }
@@ -3436,12 +4187,32 @@ fn resolveWalletOwner(
     allocator: std.mem.Allocator,
     args: *const cli.ParsedArgs,
 ) !struct { owner: []const u8, owned: ?[]const u8 } {
+    var registry = try wallet_registry.loadDefaultWalletRegistry(allocator);
+    defer registry.deinit(allocator);
+
     if (args.account_selector) |selector| {
         if (std.mem.startsWith(u8, selector, "0x")) {
+            if (findActivePasskeyIndex(&registry, selector)) |index| {
+                const resolved = try allocator.dupe(u8, registry.passkey_credentials[index].address);
+                return .{ .owner = resolved, .owned = resolved };
+            }
+            if (findConnectedExternalWalletIndex(&registry, selector)) |index| {
+                const resolved = try allocator.dupe(u8, registry.external_wallets[index].address);
+                return .{ .owner = resolved, .owned = resolved };
+            }
             return .{
                 .owner = selector,
                 .owned = null,
             };
+        }
+
+        if (findActivePasskeyIndex(&registry, selector)) |index| {
+            const resolved = try allocator.dupe(u8, registry.passkey_credentials[index].address);
+            return .{ .owner = resolved, .owned = resolved };
+        }
+        if (findConnectedExternalWalletIndex(&registry, selector)) |index| {
+            const resolved = try allocator.dupe(u8, registry.external_wallets[index].address);
+            return .{ .owner = resolved, .owned = resolved };
         }
 
         const resolved_explicit = try client.keystore.resolveAddressBySelector(allocator, selector) orelse return error.InvalidCli;
@@ -3452,6 +4223,16 @@ fn resolveWalletOwner(
     }
 
     if (try wallet_state.resolveActiveSelector(allocator)) |active_selector| {
+        if (findActivePasskeyIndex(&registry, active_selector)) |index| {
+            allocator.free(active_selector);
+            const resolved = try allocator.dupe(u8, registry.passkey_credentials[index].address);
+            return .{ .owner = resolved, .owned = resolved };
+        }
+        if (findConnectedExternalWalletIndex(&registry, active_selector)) |index| {
+            allocator.free(active_selector);
+            const resolved = try allocator.dupe(u8, registry.external_wallets[index].address);
+            return .{ .owner = resolved, .owned = resolved };
+        }
         if (std.mem.startsWith(u8, active_selector, "0x")) {
             return .{
                 .owner = active_selector,
@@ -4281,19 +5062,28 @@ pub fn runCommandWithProgrammaticProvider(
             try runWalletCreateOrImport(allocator, args, writer, "wallet_imported", raw_key);
         },
         .wallet_use => try runWalletUse(allocator, args, writer),
+        .wallet_accounts => try runWalletAccounts(allocator, args, writer, false),
+        .wallet_connect => try runWalletConnect(allocator, args, writer),
+        .wallet_disconnect => try runWalletDisconnect(allocator, args, writer),
+        .wallet_passkey_list => try runWalletAccounts(allocator, args, writer, true),
+        .wallet_passkey_register => try runWalletPasskeyRegister(allocator, args, writer),
+        .wallet_passkey_login => try runWalletPasskeyLogin(allocator, args, writer),
+        .wallet_passkey_revoke => try runWalletPasskeyRevoke(allocator, args, writer),
         .wallet_export_public => {
             var resolved = try resolveWalletEntrySummary(allocator, args);
             defer resolved.deinit(allocator);
             const summary = OwnedWalletPublicExportSummary{
                 .source_kind = resolved.source_kind,
                 .selector = resolved.selector,
-                .alias = resolved.alias,
-                .name = resolved.name,
-                .address = resolved.address,
-                .public_key = resolved.public_key,
-                .active_selector = resolved.active_selector,
-                .active_match = resolved.active_match,
-            };
+        .alias = resolved.alias,
+        .name = resolved.name,
+        .address = resolved.address,
+        .public_key = resolved.public_key,
+        .network = resolved.network,
+        .state = resolved.state,
+        .active_selector = resolved.active_selector,
+        .active_match = resolved.active_match,
+    };
             try formatWalletPublicExportSummary(writer, &summary, args.wallet_json, args.pretty);
         },
         .wallet_signer_inspect => {
@@ -4306,10 +5096,13 @@ pub fn runCommandWithProgrammaticProvider(
                 .name = resolved.name,
                 .address = resolved.address,
                 .public_key = resolved.public_key,
+                .network = resolved.network,
+                .state = resolved.state,
                 .active_selector = resolved.active_selector,
                 .active_match = resolved.active_match,
                 .can_sign_locally = resolved.can_sign_locally,
                 .sender_resolution_kind = if (resolved.address != null) "address" else "missing",
+                .registry_path = resolved.registry_path,
                 .keystore_path = resolved.keystore_path,
                 .wallet_state_path = resolved.wallet_state_path,
             };
@@ -21818,6 +22611,460 @@ test "runCommand wallet_signer_inspect reports address fallback without local si
     try testing.expectEqualStrings("0x999", parsed.value.object.get("address").?.string);
     try testing.expectEqualStrings("address", parsed.value.object.get("sender_resolution_kind").?.string);
     try testing.expect(!parsed.value.object.get("can_sign_locally").?.bool);
+}
+
+test "runCommand wallet_connect registers an external wallet and activates it" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const registry_path = try std.fmt.allocPrint(allocator, "tmp_commands_wallet_connect_registry_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(registry_path);
+    defer std.fs.cwd().deleteFile(registry_path) catch {};
+
+    const state_path = try std.fmt.allocPrint(allocator, "tmp_commands_wallet_connect_state_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(state_path);
+    defer std.fs.cwd().deleteFile(state_path) catch {};
+
+    const old_registry_override = wallet_registry.test_wallet_registry_path_override;
+    wallet_registry.test_wallet_registry_path_override = registry_path;
+    defer wallet_registry.test_wallet_registry_path_override = old_registry_override;
+
+    const old_state_override = wallet_state.test_wallet_state_path_override;
+    wallet_state.test_wallet_state_path_override = state_path;
+    defer wallet_state.test_wallet_state_path_override = old_state_override;
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "wallet",
+        "connect",
+        "0xaaa",
+        "--label",
+        "browser",
+        "--network",
+        "sui:mainnet",
+        "--capabilities",
+        "{\"sponsor\":true}",
+        "--json",
+    });
+    defer args.deinit(allocator);
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    try testing.expectEqualStrings("external_wallet_connected", parsed.value.object.get("action").?.string);
+    try testing.expectEqualStrings("external_wallet", parsed.value.object.get("source_kind").?.string);
+    try testing.expectEqualStrings("external:browser", parsed.value.object.get("selector").?.string);
+    try testing.expectEqualStrings("connected", parsed.value.object.get("state").?.string);
+    try testing.expect(parsed.value.object.get("activated").?.bool);
+
+    var registry = try wallet_registry.loadDefaultWalletRegistry(allocator);
+    defer registry.deinit(allocator);
+    try testing.expectEqual(@as(usize, 1), registry.external_wallets.len);
+    try testing.expectEqualStrings("external:browser", registry.external_wallets[0].selector);
+    try testing.expectEqualStrings("0xaaa", registry.external_wallets[0].address);
+    try testing.expectEqualStrings("browser", registry.external_wallets[0].label.?);
+    try testing.expectEqualStrings("sui:mainnet", registry.external_wallets[0].network.?);
+    try testing.expectEqualStrings("{\"sponsor\":true}", registry.external_wallets[0].capabilities_json.?);
+
+    const active_selector = try wallet_state.resolveActiveSelector(allocator);
+    try testing.expect(active_selector != null);
+    defer allocator.free(active_selector.?);
+    try testing.expectEqualStrings("external:browser", active_selector.?);
+}
+
+test "runCommand wallet_disconnect marks external wallets disconnected and clears active selector" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const registry_path = try std.fmt.allocPrint(allocator, "tmp_commands_wallet_disconnect_registry_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(registry_path);
+    defer std.fs.cwd().deleteFile(registry_path) catch {};
+
+    const state_path = try std.fmt.allocPrint(allocator, "tmp_commands_wallet_disconnect_state_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(state_path);
+    defer std.fs.cwd().deleteFile(state_path) catch {};
+
+    const old_registry_override = wallet_registry.test_wallet_registry_path_override;
+    wallet_registry.test_wallet_registry_path_override = registry_path;
+    defer wallet_registry.test_wallet_registry_path_override = old_registry_override;
+
+    const old_state_override = wallet_state.test_wallet_state_path_override;
+    wallet_state.test_wallet_state_path_override = state_path;
+    defer wallet_state.test_wallet_state_path_override = old_state_override;
+
+    var external_entries = try allocator.alloc(wallet_registry.OwnedExternalWalletEntry, 1);
+    external_entries[0] = .{
+        .selector = try allocator.dupe(u8, "external:browser"),
+        .label = try allocator.dupe(u8, "browser"),
+        .address = try allocator.dupe(u8, "0xaaa"),
+        .network = try allocator.dupe(u8, "sui:mainnet"),
+        .capabilities_json = null,
+        .state = try allocator.dupe(u8, "connected"),
+        .connected_at_ms = 100,
+        .updated_at_ms = 100,
+    };
+    var registry = wallet_registry.OwnedWalletRegistry{
+        .external_wallets = external_entries,
+        .passkey_credentials = try allocator.alloc(wallet_registry.OwnedPasskeyCredentialEntry, 0),
+    };
+    defer registry.deinit(allocator);
+    try wallet_registry.writeDefaultWalletRegistry(allocator, &registry);
+    try wallet_state.writeDefaultWalletState(allocator, "external:browser");
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "wallet",
+        "disconnect",
+        "browser",
+        "--json",
+    });
+    defer args.deinit(allocator);
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    try testing.expectEqualStrings("external_wallet_disconnected", parsed.value.object.get("action").?.string);
+    try testing.expectEqualStrings("disconnected", parsed.value.object.get("state").?.string);
+
+    var loaded = try wallet_registry.loadDefaultWalletRegistry(allocator);
+    defer loaded.deinit(allocator);
+    try testing.expectEqualStrings("disconnected", loaded.external_wallets[0].state);
+
+    const active_selector = try wallet_state.resolveActiveSelector(allocator);
+    try testing.expect(active_selector == null);
+}
+
+test "runCommand wallet_passkey_register stores metadata and activates it" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const registry_path = try std.fmt.allocPrint(allocator, "tmp_commands_wallet_passkey_register_registry_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(registry_path);
+    defer std.fs.cwd().deleteFile(registry_path) catch {};
+
+    const state_path = try std.fmt.allocPrint(allocator, "tmp_commands_wallet_passkey_register_state_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(state_path);
+    defer std.fs.cwd().deleteFile(state_path) catch {};
+
+    const old_registry_override = wallet_registry.test_wallet_registry_path_override;
+    wallet_registry.test_wallet_registry_path_override = registry_path;
+    defer wallet_registry.test_wallet_registry_path_override = old_registry_override;
+
+    const old_state_override = wallet_state.test_wallet_state_path_override;
+    wallet_state.test_wallet_state_path_override = state_path;
+    defer wallet_state.test_wallet_state_path_override = old_state_override;
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "wallet",
+        "passkey",
+        "register",
+        "0xabc",
+        "--label",
+        "iphone",
+        "--credential-id",
+        "cred-1",
+        "--public-key",
+        "pub-1",
+        "--rp-id",
+        "wallet.example",
+        "--device-name",
+        "iPhone",
+        "--user-name",
+        "alice",
+        "--network",
+        "sui:mainnet",
+        "--json",
+    });
+    defer args.deinit(allocator);
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    try testing.expectEqualStrings("passkey_registered", parsed.value.object.get("action").?.string);
+    try testing.expectEqualStrings("passkey:iphone", parsed.value.object.get("selector").?.string);
+    try testing.expect(parsed.value.object.get("activated").?.bool);
+
+    var registry = try wallet_registry.loadDefaultWalletRegistry(allocator);
+    defer registry.deinit(allocator);
+    try testing.expectEqual(@as(usize, 1), registry.passkey_credentials.len);
+    try testing.expectEqualStrings("passkey:iphone", registry.passkey_credentials[0].selector);
+    try testing.expectEqualStrings("0xabc", registry.passkey_credentials[0].address);
+    try testing.expectEqualStrings("cred-1", registry.passkey_credentials[0].credential_id);
+    try testing.expectEqualStrings("pub-1", registry.passkey_credentials[0].public_key);
+    try testing.expectEqualStrings("sui:mainnet", registry.passkey_credentials[0].network.?);
+    try testing.expectEqualStrings("active", registry.passkey_credentials[0].state);
+
+    const active_selector = try wallet_state.resolveActiveSelector(allocator);
+    try testing.expect(active_selector != null);
+    defer allocator.free(active_selector.?);
+    try testing.expectEqualStrings("passkey:iphone", active_selector.?);
+}
+
+test "runCommand wallet_passkey_login updates the active selector used by wallet_address" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const registry_path = try std.fmt.allocPrint(allocator, "tmp_commands_wallet_passkey_login_registry_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(registry_path);
+    defer std.fs.cwd().deleteFile(registry_path) catch {};
+
+    const state_path = try std.fmt.allocPrint(allocator, "tmp_commands_wallet_passkey_login_state_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(state_path);
+    defer std.fs.cwd().deleteFile(state_path) catch {};
+
+    const old_registry_override = wallet_registry.test_wallet_registry_path_override;
+    wallet_registry.test_wallet_registry_path_override = registry_path;
+    defer wallet_registry.test_wallet_registry_path_override = old_registry_override;
+
+    const old_state_override = wallet_state.test_wallet_state_path_override;
+    wallet_state.test_wallet_state_path_override = state_path;
+    defer wallet_state.test_wallet_state_path_override = old_state_override;
+
+    var passkey_entries = try allocator.alloc(wallet_registry.OwnedPasskeyCredentialEntry, 1);
+    passkey_entries[0] = .{
+        .selector = try allocator.dupe(u8, "passkey:iphone"),
+        .label = try allocator.dupe(u8, "iphone"),
+        .address = try allocator.dupe(u8, "0xabc"),
+        .credential_id = try allocator.dupe(u8, "cred-1"),
+        .public_key = try allocator.dupe(u8, "pub-1"),
+        .network = try allocator.dupe(u8, "sui:mainnet"),
+        .rp_id = try allocator.dupe(u8, "wallet.example"),
+        .device_name = try allocator.dupe(u8, "iPhone"),
+        .user_name = try allocator.dupe(u8, "alice"),
+        .state = try allocator.dupe(u8, "inactive"),
+        .registered_at_ms = 100,
+        .updated_at_ms = 100,
+    };
+    var registry = wallet_registry.OwnedWalletRegistry{
+        .external_wallets = try allocator.alloc(wallet_registry.OwnedExternalWalletEntry, 0),
+        .passkey_credentials = passkey_entries,
+    };
+    defer registry.deinit(allocator);
+    try wallet_registry.writeDefaultWalletRegistry(allocator, &registry);
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    var login_args = try cli.parseCliArgs(allocator, &.{
+        "wallet",
+        "passkey",
+        "login",
+        "cred-1",
+        "--json",
+    });
+    defer login_args.deinit(allocator);
+
+    var login_output = std.ArrayList(u8){};
+    defer login_output.deinit(allocator);
+    try runCommand(allocator, &rpc, &login_args, login_output.writer(allocator));
+
+    const active_selector = try wallet_state.resolveActiveSelector(allocator);
+    try testing.expect(active_selector != null);
+    defer allocator.free(active_selector.?);
+    try testing.expectEqualStrings("passkey:iphone", active_selector.?);
+
+    var address_args = cli.ParsedArgs{
+        .command = .wallet_address,
+        .has_command = true,
+    };
+
+    var address_output = std.ArrayList(u8){};
+    defer address_output.deinit(allocator);
+    try runCommand(allocator, &rpc, &address_args, address_output.writer(allocator));
+    try testing.expectEqualStrings("0xabc\n", address_output.items);
+}
+
+test "runCommand wallet_passkey_revoke marks credentials revoked and clears active selector" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const registry_path = try std.fmt.allocPrint(allocator, "tmp_commands_wallet_passkey_revoke_registry_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(registry_path);
+    defer std.fs.cwd().deleteFile(registry_path) catch {};
+
+    const state_path = try std.fmt.allocPrint(allocator, "tmp_commands_wallet_passkey_revoke_state_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(state_path);
+    defer std.fs.cwd().deleteFile(state_path) catch {};
+
+    const old_registry_override = wallet_registry.test_wallet_registry_path_override;
+    wallet_registry.test_wallet_registry_path_override = registry_path;
+    defer wallet_registry.test_wallet_registry_path_override = old_registry_override;
+
+    const old_state_override = wallet_state.test_wallet_state_path_override;
+    wallet_state.test_wallet_state_path_override = state_path;
+    defer wallet_state.test_wallet_state_path_override = old_state_override;
+
+    var passkey_entries = try allocator.alloc(wallet_registry.OwnedPasskeyCredentialEntry, 1);
+    passkey_entries[0] = .{
+        .selector = try allocator.dupe(u8, "passkey:iphone"),
+        .label = try allocator.dupe(u8, "iphone"),
+        .address = try allocator.dupe(u8, "0xabc"),
+        .credential_id = try allocator.dupe(u8, "cred-1"),
+        .public_key = try allocator.dupe(u8, "pub-1"),
+        .network = try allocator.dupe(u8, "sui:mainnet"),
+        .rp_id = try allocator.dupe(u8, "wallet.example"),
+        .device_name = try allocator.dupe(u8, "iPhone"),
+        .user_name = try allocator.dupe(u8, "alice"),
+        .state = try allocator.dupe(u8, "active"),
+        .registered_at_ms = 100,
+        .updated_at_ms = 100,
+    };
+    var registry = wallet_registry.OwnedWalletRegistry{
+        .external_wallets = try allocator.alloc(wallet_registry.OwnedExternalWalletEntry, 0),
+        .passkey_credentials = passkey_entries,
+    };
+    defer registry.deinit(allocator);
+    try wallet_registry.writeDefaultWalletRegistry(allocator, &registry);
+    try wallet_state.writeDefaultWalletState(allocator, "passkey:iphone");
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "wallet",
+        "passkey",
+        "revoke",
+        "cred-1",
+        "--json",
+    });
+    defer args.deinit(allocator);
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    var loaded = try wallet_registry.loadDefaultWalletRegistry(allocator);
+    defer loaded.deinit(allocator);
+    try testing.expectEqualStrings("revoked", loaded.passkey_credentials[0].state);
+
+    const active_selector = try wallet_state.resolveActiveSelector(allocator);
+    try testing.expect(active_selector == null);
+}
+
+test "runCommand wallet_accounts combines keystore and wallet registry entries" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const keystore_path = try std.fmt.allocPrint(allocator, "tmp_commands_wallet_accounts_keystore_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(keystore_path);
+    defer std.fs.cwd().deleteFile(keystore_path) catch {};
+
+    const registry_path = try std.fmt.allocPrint(allocator, "tmp_commands_wallet_accounts_registry_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(registry_path);
+    defer std.fs.cwd().deleteFile(registry_path) catch {};
+
+    const state_path = try std.fmt.allocPrint(allocator, "tmp_commands_wallet_accounts_state_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(state_path);
+    defer std.fs.cwd().deleteFile(state_path) catch {};
+
+    var keystore_file = try std.fs.cwd().createFile(keystore_path, .{ .truncate = true });
+    defer keystore_file.close();
+    try keystore_file.writeAll(
+        "[{\"alias\":\"main\",\"privateKey\":\"sk-main\",\"address\":\"0x111\",\"publicKey\":\"pub-main\"}]",
+    );
+
+    const old_keystore_override = client.keystore.test_keystore_path_override;
+    client.keystore.test_keystore_path_override = keystore_path;
+    defer client.keystore.test_keystore_path_override = old_keystore_override;
+
+    const old_registry_override = wallet_registry.test_wallet_registry_path_override;
+    wallet_registry.test_wallet_registry_path_override = registry_path;
+    defer wallet_registry.test_wallet_registry_path_override = old_registry_override;
+
+    const old_state_override = wallet_state.test_wallet_state_path_override;
+    wallet_state.test_wallet_state_path_override = state_path;
+    defer wallet_state.test_wallet_state_path_override = old_state_override;
+
+    var external_entries = try allocator.alloc(wallet_registry.OwnedExternalWalletEntry, 1);
+    external_entries[0] = .{
+        .selector = try allocator.dupe(u8, "external:browser"),
+        .label = try allocator.dupe(u8, "browser"),
+        .address = try allocator.dupe(u8, "0xaaa"),
+        .network = try allocator.dupe(u8, "sui:mainnet"),
+        .capabilities_json = null,
+        .state = try allocator.dupe(u8, "connected"),
+        .connected_at_ms = 100,
+        .updated_at_ms = 100,
+    };
+    var passkey_entries = try allocator.alloc(wallet_registry.OwnedPasskeyCredentialEntry, 1);
+    passkey_entries[0] = .{
+        .selector = try allocator.dupe(u8, "passkey:iphone"),
+        .label = try allocator.dupe(u8, "iphone"),
+        .address = try allocator.dupe(u8, "0xabc"),
+        .credential_id = try allocator.dupe(u8, "cred-1"),
+        .public_key = try allocator.dupe(u8, "pub-1"),
+        .network = try allocator.dupe(u8, "sui:mainnet"),
+        .rp_id = try allocator.dupe(u8, "wallet.example"),
+        .device_name = try allocator.dupe(u8, "iPhone"),
+        .user_name = try allocator.dupe(u8, "alice"),
+        .state = try allocator.dupe(u8, "active"),
+        .registered_at_ms = 100,
+        .updated_at_ms = 100,
+    };
+    var registry = wallet_registry.OwnedWalletRegistry{
+        .external_wallets = external_entries,
+        .passkey_credentials = passkey_entries,
+    };
+    defer registry.deinit(allocator);
+    try wallet_registry.writeDefaultWalletRegistry(allocator, &registry);
+    try wallet_state.writeDefaultWalletState(allocator, "passkey:iphone");
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "wallet",
+        "accounts",
+        "--json",
+    });
+    defer args.deinit(allocator);
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    try testing.expectEqualStrings("wallet_accounts", parsed.value.object.get("artifact_kind").?.string);
+    try testing.expectEqualStrings("passkey:iphone", parsed.value.object.get("active_selector").?.string);
+    try testing.expectEqual(@as(usize, 3), parsed.value.object.get("entries").?.array.items.len);
 }
 
 test "runCommand wallet_intent_build prints first-class wallet intent artifacts" {
