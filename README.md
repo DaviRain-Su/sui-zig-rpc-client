@@ -792,6 +792,7 @@ pub fn main() !void {
 更底层的 `buildMoveCallTxBytes` / `buildBatchTransactionTxBytes` 在 `gas_object_id` 已知且输入本地可 lowering 时，也会优先走同一条 local programmable builder 主线，避免旧 helper 绕开这层收口。
 同样，当这些 tx-bytes helper 已知 `sender + gasBudget` 但没有显式 `gas_object_id` 时，也会先在本地自动选 gas coin 并继续走 local programmable builder，而不是直接把这类情况整体退回 `unsafe_*`。
 对带显式 `sender` 的 direct-signature / provider programmable `tx payload` / `tx send` 路径，CLI 现在也优先留在标准 programmatic local builder 主线，不再因为历史上的 `unsafe` dispatch 规则先绕一次旧 command-source helper。
+如果 command source 本身已经是本地 programmable builder 支持的形状，CLI 现在也不会再因为 default-keystore / provider 的 signer-resolution 需求，把 `tx payload` / `tx send` 硬路由回 legacy unsafe dispatcher；这类路径会继续留在统一的 programmatic local builder 主线。
 - `tx build programmable`: 提供 `--commands` JSON 数组直接构建任意 PTB `ProgrammableTransaction`。
 - `tx build --signer`: 可复用 keystore 选择器（alias/address/key）；未提供 `--sender` 时优先使用首个可解析出地址的 signer。
 - `account list`: 列出 keystore 条目。

@@ -550,7 +550,11 @@ fn runSelectedProgrammaticAction(
     action: client.rpc_client.ProgrammaticClientAction,
 ) !client.rpc_client.ProgrammaticClientActionResult {
     const options = programmaticRequestOptionsFromArgs(args, signatures);
-    const resolved_sender = try resolvedTxBuildSenderFromArgs(allocator, args);
+    const resolved_sender = try resolvedTxBuildSenderFromArgsOrProgrammaticProvider(
+        allocator,
+        args,
+        provider,
+    );
     defer if (resolved_sender) |value| allocator.free(value);
     const sender = resolved_sender;
     const config = commandRequestConfigFromOptions(options, sender);
@@ -601,9 +605,14 @@ fn shouldUseUnsafeTransactionBuilderPath(
     if (!hasRealBuilderSignerSource(args)) return false;
     if (!cli.supportsProgrammableInput(args)) return false;
     if (args.tx_build_gas_budget == null) return false;
+    const source = commandSourceFromArgs(args);
+    if (try client.SuiRpcClient.commandSourceSupportsLocalProgrammableTransactionBuilder(
+        allocator,
+        source,
+    )) return false;
     const supports_real_builder = try client.SuiRpcClient.commandSourceSupportsUnsafeTransactionBuilder(
         allocator,
-        commandSourceFromArgs(args),
+        source,
     );
     if (!supports_real_builder) return false;
 
@@ -741,6 +750,22 @@ fn resolvedUnsafeMoveCallSender(
         allocator,
         programmaticRequestOptionsFromArgs(args, &.{}),
     );
+}
+
+fn resolvedTxBuildSenderFromArgsOrProgrammaticProvider(
+    allocator: std.mem.Allocator,
+    args: *const cli.ParsedArgs,
+    provider: ?client.tx_request_builder.AccountProvider,
+) !?[]const u8 {
+    if (try resolvedTxBuildSenderFromArgs(allocator, args)) |sender| {
+        return sender;
+    }
+    if (provider) |value| {
+        if (defaultSenderFromProgrammaticProvider(value)) |sender| {
+            return try allocator.dupe(u8, sender);
+        }
+    }
+    return null;
 }
 
 fn defaultSenderFromProgrammaticProvider(
@@ -1520,10 +1545,15 @@ fn shouldUseUnsafeTransactionBuilderPathWithProvider(
     if (!provider_available) return false;
     if (!cli.supportsProgrammableInput(args)) return false;
     if (args.tx_build_gas_budget == null) return false;
+    const source = commandSourceFromArgs(args);
+    if (try client.SuiRpcClient.commandSourceSupportsLocalProgrammableTransactionBuilder(
+        allocator,
+        source,
+    )) return false;
 
     const supports_real_builder = try client.SuiRpcClient.commandSourceSupportsUnsafeTransactionBuilder(
         allocator,
-        commandSourceFromArgs(args),
+        source,
     );
     if (!supports_real_builder) return false;
 
@@ -1670,7 +1700,11 @@ fn runProgrammaticActionMaybeAutoGasPaymentOrChallengePrompt(
 
     if (has_selected_requests) {
         const options = programmaticRequestOptionsFromArgs(args, signatures);
-        const resolved_sender = try resolvedTxBuildSenderFromArgs(allocator, args);
+        const resolved_sender = try resolvedTxBuildSenderFromArgsOrProgrammaticProvider(
+            allocator,
+            args,
+            effective_provider,
+        );
         defer if (resolved_sender) |value| allocator.free(value);
         const config = commandRequestConfigFromOptions(options, resolved_sender);
 
@@ -13036,6 +13070,46 @@ test "runCommand tx_payload move-call resolves ownerless selected tokens from de
     const signature = payload.value.array.items[1].array.items[0].string;
     const decoded_len = try std.base64.standard.Decoder.calcSizeForSlice(signature);
     try testing.expect(decoded_len > 0);
+}
+
+test "shouldUseUnsafeTransactionBuilderPath skips local-capable default-keystore command sources" {
+    const testing = std.testing;
+
+    var args = cli.ParsedArgs{
+        .command = .tx_payload,
+        .has_command = true,
+        .tx_build_package = "0x2",
+        .tx_build_module = "counter",
+        .tx_build_function = "increment",
+        .tx_build_type_args = "[]",
+        .tx_build_args = "[\"0xabc\",7]",
+        .tx_build_gas_budget = 1200,
+        .from_keystore = true,
+    };
+
+    try testing.expect(!(try shouldUseUnsafeTransactionBuilderPath(testing.allocator, &args)));
+}
+
+test "shouldUseUnsafeTransactionBuilderPathWithProvider skips local-capable provider command sources" {
+    const testing = std.testing;
+
+    var args = cli.ParsedArgs{
+        .command = .tx_send,
+        .has_command = true,
+        .tx_build_package = "0x2",
+        .tx_build_module = "counter",
+        .tx_build_function = "increment",
+        .tx_build_type_args = "[]",
+        .tx_build_args = "[\"select:{\\\"kind\\\":\\\"owned_object_struct_type\\\",\\\"structType\\\":\\\"0x2::example::Thing\\\"}\",7]",
+        .tx_build_gas_budget = 1200,
+        .tx_build_auto_gas_payment = true,
+    };
+
+    try testing.expect(!(try shouldUseUnsafeTransactionBuilderPathWithProvider(
+        testing.allocator,
+        &args,
+        true,
+    )));
 }
 
 test "runCommand tx_payload move-call with from-keystore uses local programmable builder path" {

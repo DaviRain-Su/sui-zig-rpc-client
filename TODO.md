@@ -272,6 +272,10 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
 - [x] Keep explicit-sender direct-signature and provider command-source
   payload/send flows on the standard programmatic local builder path instead
   of routing them through the legacy unsafe dispatcher first.
+- [x] Skip the legacy unsafe dispatcher entirely when a command source already
+  supports the local programmable builder, even if default-keystore or
+  provider-backed signer resolution would previously have forced the unsafe
+  path.
 - [ ] Continue shrinking `unsafe_moveCall` usage.
 - [ ] Continue shrinking `unsafe_batchTransaction` usage.
 - [ ] Keep construction, simulation, and execution aligned to the same local
