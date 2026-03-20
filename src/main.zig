@@ -532,6 +532,7 @@ pub fn main() !void {
 
     const status = run(allocator, &rpc, &parsed) catch |err| switch (err) {
         error.InvalidCli => printCliError("error: invalid arguments\n"),
+        error.UnresolvedMoveFunctionExecutionTemplate => printLastError(&rpc),
         error.Timeout => printCliError("error: timeout\n"),
         client.ClientError.HttpError => printLastError(&rpc),
         client.ClientError.RpcError => printLastError(&rpc),

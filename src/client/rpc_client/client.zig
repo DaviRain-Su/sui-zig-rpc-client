@@ -5509,6 +5509,42 @@ pub const SuiRpcClient = struct {
         cache.deinit(allocator);
     }
 
+    fn extractUnsignedMoveObjectContentFieldFromResponse(
+        allocator: std.mem.Allocator,
+        response_json: []const u8,
+        field_name: []const u8,
+    ) !?u64 {
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, response_json, .{});
+        defer parsed.deinit();
+
+        const result = parsed.value.object.get("result") orelse return null;
+        if (result != .object) return null;
+        const data = result.object.get("data") orelse return null;
+        if (data != .object) return null;
+        const content = data.object.get("content") orelse return null;
+        if (content != .object) return null;
+        const fields = content.object.get("fields") orelse return null;
+        if (fields != .object) return null;
+        const value = fields.object.get(field_name) orelse return null;
+        return parseUnsignedJsonValue(value) catch null;
+    }
+
+    fn getMoveObjectContentUnsignedFieldCached(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        cache: *std.ArrayList(MoveObjectContentResponseCacheEntry),
+        object_id: []const u8,
+        field_name: []const u8,
+    ) !?u64 {
+        const response = try self.getMoveObjectContentResponseCached(
+            allocator,
+            cache,
+            object_id,
+        );
+        defer allocator.free(response);
+        return try extractUnsignedMoveObjectContentFieldFromResponse(allocator, response, field_name);
+    }
+
     fn getMoveObjectContentResponseCached(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
@@ -8594,6 +8630,95 @@ pub const SuiRpcClient = struct {
         return count;
     }
 
+    fn applyOwnedCandidateLiquiditySelectionHints(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        object_content_cache: *std.ArrayList(MoveObjectContentResponseCacheEntry),
+        candidates: []move_result.OwnedMoveObjectCandidate,
+    ) !void {
+        if (candidates.len < 2) return;
+
+        var top_score = candidates[0].selection_score;
+        for (candidates[1..]) |candidate| {
+            if (candidate.selection_score > top_score) top_score = candidate.selection_score;
+        }
+        if (top_score == 0) return;
+
+        const LiquidityHint = struct {
+            candidate_index: usize,
+            liquidity: u64,
+            discovery_rank: usize,
+            object_id: []const u8,
+        };
+
+        var hints = std.ArrayList(LiquidityHint).empty;
+        defer hints.deinit(allocator);
+
+        for (candidates, 0..) |candidate, candidate_index| {
+            if (candidate.selection_score != top_score) continue;
+            const liquidity = (self.getMoveObjectContentUnsignedFieldCached(
+                allocator,
+                object_content_cache,
+                candidate.object_id,
+                "liquidity",
+            ) catch |err| switch (err) {
+                error.OutOfMemory => return err,
+                else => null,
+            }) orelse continue;
+            try hints.append(allocator, .{
+                .candidate_index = candidate_index,
+                .liquidity = liquidity,
+                .discovery_rank = candidate.discovery_rank,
+                .object_id = candidate.object_id,
+            });
+        }
+
+        if (hints.items.len < 2) return;
+
+        var all_equal = true;
+        for (hints.items[1..]) |hint| {
+            if (hint.liquidity != hints.items[0].liquidity) {
+                all_equal = false;
+                break;
+            }
+        }
+        if (all_equal) return;
+
+        var index: usize = 1;
+        while (index < hints.items.len) : (index += 1) {
+            var scan = index;
+            while (scan > 0) : (scan -= 1) {
+                const current = hints.items[scan];
+                const previous = hints.items[scan - 1];
+                if (current.liquidity != previous.liquidity) {
+                    if (current.liquidity > previous.liquidity) {
+                        std.mem.swap(LiquidityHint, &hints.items[scan], &hints.items[scan - 1]);
+                        continue;
+                    }
+                    break;
+                }
+                if (current.discovery_rank != previous.discovery_rank) {
+                    if (current.discovery_rank < previous.discovery_rank) {
+                        std.mem.swap(LiquidityHint, &hints.items[scan], &hints.items[scan - 1]);
+                        continue;
+                    }
+                    break;
+                }
+                if (std.mem.order(u8, current.object_id, previous.object_id) == .lt) {
+                    std.mem.swap(LiquidityHint, &hints.items[scan], &hints.items[scan - 1]);
+                    continue;
+                }
+                break;
+            }
+        }
+
+        var bonus = hints.items.len;
+        for (hints.items) |hint| {
+            candidates[hint.candidate_index].selection_score += bonus;
+            bonus -= 1;
+        }
+    }
+
     fn applyJointCandidateComponentSelectionHints(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
@@ -8909,6 +9034,11 @@ pub const SuiRpcClient = struct {
             }
 
             if (parameter.owned_object_candidates) |candidates| {
+                try self.applyOwnedCandidateLiquiditySelectionHints(
+                    allocator,
+                    object_content_cache,
+                    candidates,
+                );
                 sortOwnedObjectCandidatesByScoreAndComponentRank(
                     parameter_index,
                     .owned,
@@ -9119,6 +9249,8 @@ pub const SuiRpcClient = struct {
                 &arg_json_cache,
                 &selected_object_ids_cache,
             );
+            try applyCrossParameterBusinessCoinSelectionHints(allocator, parameters);
+            try applyCrossParameterOwnedObjectSelectionHints(allocator, parameters);
 
             const after = moveParameterSelectionStateFingerprint(parameters);
             if (before == after) break;
@@ -9493,6 +9625,504 @@ pub const SuiRpcClient = struct {
         return false;
     }
 
+    fn appendUniqueBorrowedObjectId(
+        allocator: std.mem.Allocator,
+        object_ids: *std.ArrayList([]const u8),
+        object_id: []const u8,
+    ) !void {
+        for (object_ids.items) |existing| {
+            if (std.mem.eql(u8, existing, object_id)) return;
+        }
+        try object_ids.append(allocator, object_id);
+    }
+
+    fn moveParameterUsesSuiCoin(
+        parameter: move_result.OwnedMoveParameterSummary,
+    ) bool {
+        if (coinTypeFromMoveSignature(parameter.signature)) |coin_type| {
+            return std.mem.eql(u8, coin_type, default_sui_coin_type);
+        }
+        if (vectorElementTypeSignature(parameter.signature)) |element_signature| {
+            if (coinTypeFromCoinStructType(element_signature)) |coin_type| {
+                return std.mem.eql(u8, coin_type, default_sui_coin_type);
+            }
+        }
+        return false;
+    }
+
+    const PlannedCoinParameterSelection = struct {
+        scalar: ?SelectedCoinCandidate = null,
+        vector: ?[]SelectedCoinCandidate = null,
+    };
+
+    fn deinitPlannedCoinParameterSelections(
+        allocator: std.mem.Allocator,
+        selections: []PlannedCoinParameterSelection,
+    ) void {
+        for (selections) |*selection| {
+            if (selection.vector) |values| allocator.free(values);
+            selection.* = .{};
+        }
+    }
+
+    fn businessCoinSelectionPlanExistsExcluding(
+        allocator: std.mem.Allocator,
+        parameters: []move_result.OwnedMoveParameterSummary,
+        amount_hints: []const ?u64,
+        excluded_object_ids: []const []const u8,
+    ) !bool {
+        const planned_selections = try allocator.alloc(PlannedCoinParameterSelection, parameters.len);
+        defer allocator.free(planned_selections);
+        defer deinitPlannedCoinParameterSelections(allocator, planned_selections);
+
+        return try selectBusinessCoinPlanExcluding(
+            allocator,
+            parameters,
+            amount_hints,
+            excluded_object_ids,
+            planned_selections,
+        );
+    }
+
+    fn scalarBusinessCoinCandidateShouldSortBefore(
+        left: move_result.OwnedMoveObjectCandidate,
+        right: move_result.OwnedMoveObjectCandidate,
+        min_balance: ?u64,
+    ) bool {
+        const left_balance = left.balance orelse 0;
+        const right_balance = right.balance orelse 0;
+        if (min_balance != null) {
+            if (left_balance != right_balance) return left_balance < right_balance;
+        } else {
+            if (left_balance != right_balance) return left_balance > right_balance;
+        }
+        return std.mem.order(u8, left.object_id, right.object_id) == .lt;
+    }
+
+    fn collectScalarBusinessCoinCandidateIndicesExcluding(
+        allocator: std.mem.Allocator,
+        candidates: []const move_result.OwnedMoveObjectCandidate,
+        min_balance: ?u64,
+        excluded_object_ids: []const []const u8,
+    ) ![]usize {
+        var indices = std.ArrayList(usize).empty;
+        defer indices.deinit(allocator);
+
+        for (candidates, 0..) |candidate, candidate_index| {
+            if (moveObjectIdIsExcluded(excluded_object_ids, candidate.object_id)) continue;
+            const balance = candidate.balance orelse continue;
+            if (min_balance) |required_balance| {
+                if (balance < required_balance) continue;
+            }
+            try indices.append(allocator, candidate_index);
+        }
+
+        var index: usize = 1;
+        while (index < indices.items.len) : (index += 1) {
+            var scan = index;
+            while (scan > 0 and scalarBusinessCoinCandidateShouldSortBefore(
+                candidates[indices.items[scan]],
+                candidates[indices.items[scan - 1]],
+                min_balance,
+            )) : (scan -= 1) {
+                std.mem.swap(usize, &indices.items[scan], &indices.items[scan - 1]);
+            }
+        }
+
+        return try indices.toOwnedSlice(allocator);
+    }
+
+    fn selectBusinessCoinPlanRecursive(
+        allocator: std.mem.Allocator,
+        parameters: []move_result.OwnedMoveParameterSummary,
+        amount_hints: []const ?u64,
+        parameter_index: usize,
+        reserved_object_ids: *std.ArrayList([]const u8),
+        planned_selections: []PlannedCoinParameterSelection,
+    ) anyerror!bool {
+        if (parameter_index >= parameters.len) return true;
+
+        const parameter = parameters[parameter_index];
+        if (parameter.omitted_from_explicit_args or parameter.explicit_arg_json != null) {
+            return try selectBusinessCoinPlanRecursive(
+                allocator,
+                parameters,
+                amount_hints,
+                parameter_index + 1,
+                reserved_object_ids,
+                planned_selections,
+            );
+        }
+
+        if (coinTypeFromMoveSignature(parameter.signature) != null) {
+            const candidates = parameter.owned_object_candidates orelse return false;
+            const candidate_indices = try collectScalarBusinessCoinCandidateIndicesExcluding(
+                allocator,
+                candidates,
+                amount_hints[parameter_index],
+                reserved_object_ids.items,
+            );
+            defer allocator.free(candidate_indices);
+
+            for (candidate_indices) |candidate_index| {
+                const candidate = candidates[candidate_index];
+                try reserved_object_ids.append(allocator, candidate.object_id);
+                planned_selections[parameter_index].scalar = .{
+                    .object_id = candidate.object_id,
+                    .token = candidate.object_input_select_token,
+                };
+
+                if (try selectBusinessCoinPlanRecursive(
+                    allocator,
+                    parameters,
+                    amount_hints,
+                    parameter_index + 1,
+                    reserved_object_ids,
+                    planned_selections,
+                )) {
+                    return true;
+                }
+
+                _ = reserved_object_ids.pop();
+                planned_selections[parameter_index].scalar = null;
+            }
+            return false;
+        }
+
+        if (vectorElementTypeSignature(parameter.signature)) |element_signature| {
+            if (coinTypeFromCoinStructType(element_signature) != null) {
+                const candidates = parameter.vector_item_owned_object_candidates orelse return false;
+                var selected_candidates = std.ArrayList(SelectedCoinCandidate).empty;
+                defer selected_candidates.deinit(allocator);
+                const found = if (amount_hints[parameter_index]) |min_balance|
+                    try appendCoveringCoinCandidatesExcluding(
+                        allocator,
+                        &selected_candidates,
+                        candidates,
+                        min_balance,
+                        reserved_object_ids.items,
+                    )
+                else
+                    try appendAllCoinCandidatesExcluding(
+                        allocator,
+                        &selected_candidates,
+                        candidates,
+                        reserved_object_ids.items,
+                    );
+                if (!found) return false;
+
+                planned_selections[parameter_index].vector = try allocator.dupe(
+                    SelectedCoinCandidate,
+                    selected_candidates.items,
+                );
+                errdefer {
+                    allocator.free(planned_selections[parameter_index].vector.?);
+                    planned_selections[parameter_index].vector = null;
+                }
+
+                for (selected_candidates.items) |selected| {
+                    try reserved_object_ids.append(allocator, selected.object_id);
+                }
+
+                if (try selectBusinessCoinPlanRecursive(
+                    allocator,
+                    parameters,
+                    amount_hints,
+                    parameter_index + 1,
+                    reserved_object_ids,
+                    planned_selections,
+                )) {
+                    return true;
+                }
+
+                var remaining = selected_candidates.items.len;
+                while (remaining > 0) : (remaining -= 1) {
+                    _ = reserved_object_ids.pop();
+                }
+                allocator.free(planned_selections[parameter_index].vector.?);
+                planned_selections[parameter_index].vector = null;
+                return false;
+            }
+        }
+
+        return try selectBusinessCoinPlanRecursive(
+            allocator,
+            parameters,
+            amount_hints,
+            parameter_index + 1,
+            reserved_object_ids,
+            planned_selections,
+        );
+    }
+
+    fn selectBusinessCoinPlanExcluding(
+        allocator: std.mem.Allocator,
+        parameters: []move_result.OwnedMoveParameterSummary,
+        amount_hints: []const ?u64,
+        excluded_object_ids: []const []const u8,
+        planned_selections: []PlannedCoinParameterSelection,
+    ) !bool {
+        for (planned_selections) |*selection| selection.* = .{};
+
+        var reserved_object_ids = std.ArrayList([]const u8).empty;
+        defer reserved_object_ids.deinit(allocator);
+        try reserved_object_ids.appendSlice(allocator, excluded_object_ids);
+
+        return try selectBusinessCoinPlanRecursive(
+            allocator,
+            parameters,
+            amount_hints,
+            0,
+            &reserved_object_ids,
+            planned_selections,
+        );
+    }
+
+    fn selectedCoinCandidateBalanceForParameter(
+        parameter: move_result.OwnedMoveParameterSummary,
+        selected: SelectedCoinCandidate,
+    ) u64 {
+        if (parameter.owned_object_candidates) |candidates| {
+            for (candidates) |candidate| {
+                if (std.mem.eql(u8, candidate.object_id, selected.object_id)) {
+                    return candidate.balance orelse 0;
+                }
+            }
+        }
+        if (parameter.vector_item_owned_object_candidates) |candidates| {
+            for (candidates) |candidate| {
+                if (std.mem.eql(u8, candidate.object_id, selected.object_id)) {
+                    return candidate.balance orelse 0;
+                }
+            }
+        }
+        return 0;
+    }
+
+    fn buildPlannedCoinSelectionScoreKey(
+        allocator: std.mem.Allocator,
+        parameters: []move_result.OwnedMoveParameterSummary,
+        amount_hints: []const ?u64,
+        planned_selections: []const PlannedCoinParameterSelection,
+        reserved_gas_candidate: SuiGasReserveCandidate,
+    ) ![]u8 {
+        var output = std.ArrayList(u8).empty;
+        defer output.deinit(allocator);
+        const writer = output.writer(allocator);
+
+        for (parameters, 0..) |parameter, index| {
+            if (parameter.omitted_from_explicit_args or parameter.explicit_arg_json != null) continue;
+
+            if (planned_selections[index].scalar) |selected| {
+                try writer.writeByte(0x01);
+                const balance = selectedCoinCandidateBalanceForParameter(parameter, selected);
+                const sort_balance = if (amount_hints[index] != null)
+                    balance
+                else
+                    std.math.maxInt(u64) - balance;
+                try writer.writeInt(u64, sort_balance, .big);
+                try writer.writeAll(selected.object_id);
+                try writer.writeByte(0);
+                continue;
+            }
+
+            if (planned_selections[index].vector) |selected_values| {
+                try writer.writeByte(0x02);
+                const source_count: u64 = @intCast(selected_values.len);
+                var total_balance: u64 = 0;
+                for (selected_values) |selected| {
+                    total_balance +|= selectedCoinCandidateBalanceForParameter(parameter, selected);
+                }
+                const sort_total_balance = if (amount_hints[index] != null)
+                    total_balance
+                else
+                    std.math.maxInt(u64) - total_balance;
+                try writer.writeInt(u64, source_count, .big);
+                try writer.writeInt(u64, sort_total_balance, .big);
+                for (selected_values) |selected| {
+                    try writer.writeAll(selected.object_id);
+                    try writer.writeByte(0);
+                }
+                continue;
+            }
+
+            try writer.writeByte(0x00);
+        }
+
+        try writer.writeByte(0xff);
+        try writer.writeInt(u64, std.math.maxInt(u64) - reserved_gas_candidate.balance, .big);
+        try writer.writeAll(reserved_gas_candidate.object_id);
+        try writer.writeByte(0);
+        return try output.toOwnedSlice(allocator);
+    }
+
+    const SuiGasReserveCandidate = struct {
+        object_id: []const u8,
+        balance: u64,
+    };
+
+    fn reserveCandidateShouldSortBefore(
+        left: SuiGasReserveCandidate,
+        right: SuiGasReserveCandidate,
+    ) bool {
+        if (left.balance != right.balance) return left.balance > right.balance;
+        return std.mem.order(u8, left.object_id, right.object_id) == .lt;
+    }
+
+    fn selectReservedGasSuiCoinObjectId(
+        allocator: std.mem.Allocator,
+        parameters: []move_result.OwnedMoveParameterSummary,
+        amount_hints: []const ?u64,
+        reserved_coin_object_ids: []const []const u8,
+    ) !?[]const u8 {
+        var reserve_candidates = std.ArrayList(SuiGasReserveCandidate).empty;
+        defer reserve_candidates.deinit(allocator);
+
+        for (parameters) |parameter| {
+            if (parameter.omitted_from_explicit_args) continue;
+            if (parameter.explicit_arg_json != null) continue;
+            if (!moveParameterUsesSuiCoin(parameter)) continue;
+
+            if (parameter.owned_object_candidates) |candidates| {
+                for (candidates) |candidate| {
+                    if (moveObjectIdIsExcluded(reserved_coin_object_ids, candidate.object_id)) continue;
+                    const balance = candidate.balance orelse continue;
+
+                    var duplicate = false;
+                    for (reserve_candidates.items) |existing| {
+                        if (std.mem.eql(u8, existing.object_id, candidate.object_id)) {
+                            duplicate = true;
+                            break;
+                        }
+                    }
+                    if (duplicate) continue;
+                    try reserve_candidates.append(allocator, .{
+                        .object_id = candidate.object_id,
+                        .balance = balance,
+                    });
+                }
+            }
+
+            if (parameter.vector_item_owned_object_candidates) |candidates| {
+                for (candidates) |candidate| {
+                    if (moveObjectIdIsExcluded(reserved_coin_object_ids, candidate.object_id)) continue;
+                    const balance = candidate.balance orelse continue;
+
+                    var duplicate = false;
+                    for (reserve_candidates.items) |existing| {
+                        if (std.mem.eql(u8, existing.object_id, candidate.object_id)) {
+                            duplicate = true;
+                            break;
+                        }
+                    }
+                    if (duplicate) continue;
+                    try reserve_candidates.append(allocator, .{
+                        .object_id = candidate.object_id,
+                        .balance = balance,
+                    });
+                }
+            }
+        }
+
+        if (reserve_candidates.items.len <= 1) return null;
+
+        var index: usize = 1;
+        while (index < reserve_candidates.items.len) : (index += 1) {
+            var scan = index;
+            while (scan > 0 and reserveCandidateShouldSortBefore(
+                reserve_candidates.items[scan],
+                reserve_candidates.items[scan - 1],
+            )) : (scan -= 1) {
+                std.mem.swap(
+                    SuiGasReserveCandidate,
+                    &reserve_candidates.items[scan],
+                    &reserve_candidates.items[scan - 1],
+                );
+            }
+        }
+
+        var excluded_with_reserve = std.ArrayList([]const u8).empty;
+        defer excluded_with_reserve.deinit(allocator);
+        try excluded_with_reserve.appendSlice(allocator, reserved_coin_object_ids);
+
+        var has_amount_hints = false;
+        for (amount_hints) |value| {
+            if (value != null) {
+                has_amount_hints = true;
+                break;
+            }
+        }
+
+        if (!has_amount_hints) {
+            for (reserve_candidates.items) |candidate| {
+                try appendUniqueBorrowedObjectId(
+                    allocator,
+                    &excluded_with_reserve,
+                    candidate.object_id,
+                );
+                if (try businessCoinSelectionPlanExistsExcluding(
+                    allocator,
+                    parameters,
+                    amount_hints,
+                    excluded_with_reserve.items,
+                )) {
+                    return candidate.object_id;
+                }
+                _ = excluded_with_reserve.pop();
+            }
+            return null;
+        }
+
+        const planned_selections = try allocator.alloc(PlannedCoinParameterSelection, parameters.len);
+        defer allocator.free(planned_selections);
+        for (planned_selections) |*selection| selection.* = .{};
+        errdefer deinitPlannedCoinParameterSelections(allocator, planned_selections);
+
+        var best_candidate: ?[]const u8 = null;
+        var best_score_key: ?[]u8 = null;
+        defer if (best_score_key) |value| allocator.free(value);
+
+        for (reserve_candidates.items) |candidate| {
+            try appendUniqueBorrowedObjectId(
+                allocator,
+                &excluded_with_reserve,
+                candidate.object_id,
+            );
+            const has_plan = try selectBusinessCoinPlanExcluding(
+                allocator,
+                parameters,
+                amount_hints,
+                excluded_with_reserve.items,
+                planned_selections,
+            );
+            if (has_plan) {
+                const score_key = try buildPlannedCoinSelectionScoreKey(
+                    allocator,
+                    parameters,
+                    amount_hints,
+                    planned_selections,
+                    candidate,
+                );
+                errdefer allocator.free(score_key);
+                const should_replace = if (best_score_key) |best_value|
+                    std.mem.order(u8, score_key, best_value) == .lt
+                else
+                    true;
+                if (should_replace) {
+                    if (best_score_key) |value| allocator.free(value);
+                    best_score_key = score_key;
+                    best_candidate = candidate.object_id;
+                } else {
+                    allocator.free(score_key);
+                }
+            }
+            deinitPlannedCoinParameterSelections(allocator, planned_selections);
+            _ = excluded_with_reserve.pop();
+        }
+
+        return best_candidate;
+    }
+
     fn selectSmallestSufficientCoinCandidateExcluding(
         candidates: []const move_result.OwnedMoveObjectCandidate,
         min_balance: u64,
@@ -9784,6 +10414,10 @@ pub const SuiRpcClient = struct {
         const amount_hints = try computeMoveCoinAmountHints(allocator, parameters);
         defer allocator.free(amount_hints);
 
+        const planned_selections = try allocator.alloc(PlannedCoinParameterSelection, parameters.len);
+        defer allocator.free(planned_selections);
+        defer deinitPlannedCoinParameterSelections(allocator, planned_selections);
+
         var reserved_coin_object_ids = std.ArrayList([]u8).empty;
         defer {
             for (reserved_coin_object_ids.items) |value| allocator.free(value);
@@ -9814,6 +10448,26 @@ pub const SuiRpcClient = struct {
             }
         }
 
+        if (try selectReservedGasSuiCoinObjectId(
+            allocator,
+            parameters,
+            amount_hints,
+            reserved_coin_object_ids.items,
+        )) |reserved_gas_object_id| {
+            try reserved_coin_object_ids.append(
+                allocator,
+                try allocator.dupe(u8, reserved_gas_object_id),
+            );
+        }
+
+        const has_plan = try selectBusinessCoinPlanExcluding(
+            allocator,
+            parameters,
+            amount_hints,
+            reserved_coin_object_ids.items,
+            planned_selections,
+        );
+
         for (parameters, 0..) |*parameter, index| {
             if (parameter.omitted_from_explicit_args) continue;
 
@@ -9822,6 +10476,19 @@ pub const SuiRpcClient = struct {
             }
 
             if (coinTypeFromMoveSignature(parameter.signature) != null) {
+                if (has_plan) {
+                    const selected = planned_selections[index].scalar;
+                    const selected_value = if (selected) |value| blk: {
+                        try reserved_coin_object_ids.append(
+                            allocator,
+                            try allocator.dupe(u8, value.object_id),
+                        );
+                        break :blk try buildAutoSelectedScalarArgJson(allocator, value.token);
+                    } else null;
+                    replaceMoveParameterAutoSelectedArgJson(allocator, parameter, selected_value);
+                    continue;
+                }
+
                 if (parameter.owned_object_candidates) |candidates| {
                     const selected = if (amount_hints[index]) |min_balance|
                         selectSmallestSufficientCoinCandidateExcluding(
@@ -9848,6 +10515,27 @@ pub const SuiRpcClient = struct {
 
             if (vectorElementTypeSignature(parameter.signature)) |element_signature| {
                 if (coinTypeFromCoinStructType(element_signature) != null) {
+                    if (has_plan) {
+                        const selected = planned_selections[index].vector;
+                        const selected_value = if (selected) |values| blk: {
+                            var selected_tokens = std.ArrayList([]const u8).empty;
+                            defer selected_tokens.deinit(allocator);
+                            for (values) |value| {
+                                try reserved_coin_object_ids.append(
+                                    allocator,
+                                    try allocator.dupe(u8, value.object_id),
+                                );
+                                try selected_tokens.append(allocator, value.token);
+                            }
+                            break :blk try buildAutoSelectedVectorArgJsonFromTokens(
+                                allocator,
+                                selected_tokens.items,
+                            );
+                        } else null;
+                        replaceMoveParameterAutoSelectedArgJson(allocator, parameter, selected_value);
+                        continue;
+                    }
+
                     if (parameter.vector_item_owned_object_candidates) |candidates| {
                         var selected_candidates = std.ArrayList(SelectedCoinCandidate).empty;
                         defer selected_candidates.deinit(allocator);
@@ -10227,6 +10915,260 @@ pub const SuiRpcClient = struct {
         return try std.fmt.allocPrint(allocator, "[{s}]", .{move_call_command_json});
     }
 
+    const PlannedSplitCoinParameterSelection = struct {
+        sources: ?[]SelectedCoinCandidate = null,
+    };
+
+    fn deinitPlannedSplitCoinParameterSelections(
+        allocator: std.mem.Allocator,
+        selections: []PlannedSplitCoinParameterSelection,
+    ) void {
+        for (selections) |*selection| {
+            if (selection.sources) |values| allocator.free(values);
+            selection.* = .{};
+        }
+    }
+
+    fn splitCoinCandidateShouldSortBefore(
+        left: move_result.OwnedMoveObjectCandidate,
+        right: move_result.OwnedMoveObjectCandidate,
+    ) bool {
+        const left_balance = left.balance orelse 0;
+        const right_balance = right.balance orelse 0;
+        if (left_balance != right_balance) return left_balance > right_balance;
+        return std.mem.order(u8, left.object_id, right.object_id) == .lt;
+    }
+
+    fn collectSplitCoinCandidateIndicesExcluding(
+        allocator: std.mem.Allocator,
+        candidates: []const move_result.OwnedMoveObjectCandidate,
+        excluded_object_ids: []const []const u8,
+    ) ![]usize {
+        var indices = std.ArrayList(usize).empty;
+        defer indices.deinit(allocator);
+
+        for (candidates, 0..) |candidate, candidate_index| {
+            if (moveObjectIdIsExcluded(excluded_object_ids, candidate.object_id)) continue;
+            if (candidate.balance == null) continue;
+            try indices.append(allocator, candidate_index);
+        }
+
+        var index: usize = 1;
+        while (index < indices.items.len) : (index += 1) {
+            var scan = index;
+            while (scan > 0 and splitCoinCandidateShouldSortBefore(
+                candidates[indices.items[scan]],
+                candidates[indices.items[scan - 1]],
+            )) : (scan -= 1) {
+                std.mem.swap(usize, &indices.items[scan], &indices.items[scan - 1]);
+            }
+        }
+
+        return try indices.toOwnedSlice(allocator);
+    }
+
+    fn selectSplitCoinSourcesForParameterRecursive(
+        allocator: std.mem.Allocator,
+        parameters: []move_result.OwnedMoveParameterSummary,
+        split_amount_values: []const ?u64,
+        parameter_index: usize,
+        candidates: []const move_result.OwnedMoveObjectCandidate,
+        candidate_indices: []const usize,
+        next_candidate_offset: usize,
+        current_total: u64,
+        min_balance: u64,
+        current_sources: *std.ArrayList(SelectedCoinCandidate),
+        reserved_object_ids: *std.ArrayList([]const u8),
+        planned_selections: []PlannedSplitCoinParameterSelection,
+    ) anyerror!bool {
+        if (current_total >= min_balance) {
+            planned_selections[parameter_index].sources = try allocator.dupe(
+                SelectedCoinCandidate,
+                current_sources.items,
+            );
+
+            for (current_sources.items) |selected| {
+                try reserved_object_ids.append(allocator, selected.object_id);
+            }
+
+            if (try selectSplitCoinPlanRecursive(
+                allocator,
+                parameters,
+                split_amount_values,
+                parameter_index + 1,
+                reserved_object_ids,
+                planned_selections,
+            )) {
+                return true;
+            }
+
+            var remaining = current_sources.items.len;
+            while (remaining > 0) : (remaining -= 1) {
+                _ = reserved_object_ids.pop();
+            }
+            allocator.free(planned_selections[parameter_index].sources.?);
+            planned_selections[parameter_index].sources = null;
+        }
+
+        var offset = next_candidate_offset;
+        while (offset < candidate_indices.len) : (offset += 1) {
+            const candidate = candidates[candidate_indices[offset]];
+            try current_sources.append(allocator, .{
+                .object_id = candidate.object_id,
+                .token = candidate.object_input_select_token,
+            });
+            defer _ = current_sources.pop();
+
+            const next_total = current_total +| (candidate.balance orelse 0);
+            if (try selectSplitCoinSourcesForParameterRecursive(
+                allocator,
+                parameters,
+                split_amount_values,
+                parameter_index,
+                candidates,
+                candidate_indices,
+                offset + 1,
+                next_total,
+                min_balance,
+                current_sources,
+                reserved_object_ids,
+                planned_selections,
+            )) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    fn selectSplitCoinPlanRecursive(
+        allocator: std.mem.Allocator,
+        parameters: []move_result.OwnedMoveParameterSummary,
+        split_amount_values: []const ?u64,
+        parameter_index: usize,
+        reserved_object_ids: *std.ArrayList([]const u8),
+        planned_selections: []PlannedSplitCoinParameterSelection,
+    ) !bool {
+        if (parameter_index >= parameters.len) return true;
+
+        const parameter = parameters[parameter_index];
+        const min_balance = split_amount_values[parameter_index] orelse return try selectSplitCoinPlanRecursive(
+            allocator,
+            parameters,
+            split_amount_values,
+            parameter_index + 1,
+            reserved_object_ids,
+            planned_selections,
+        );
+        if (parameter.omitted_from_explicit_args or parameter.explicit_arg_json != null) {
+            return try selectSplitCoinPlanRecursive(
+                allocator,
+                parameters,
+                split_amount_values,
+                parameter_index + 1,
+                reserved_object_ids,
+                planned_selections,
+            );
+        }
+
+        const candidates = if (parameter.owned_object_candidates) |values|
+            values
+        else if (parameter.vector_item_owned_object_candidates) |values|
+            values
+        else
+            return false;
+        const candidate_indices = try collectSplitCoinCandidateIndicesExcluding(
+            allocator,
+            candidates,
+            reserved_object_ids.items,
+        );
+        defer allocator.free(candidate_indices);
+
+        var single_candidate_indices = std.ArrayList(usize).empty;
+        defer single_candidate_indices.deinit(allocator);
+        for (candidate_indices) |candidate_index| {
+            const candidate = candidates[candidate_index];
+            const balance = candidate.balance orelse continue;
+            if (balance < min_balance) continue;
+            try single_candidate_indices.append(allocator, candidate_index);
+        }
+        var single_index: usize = 1;
+        while (single_index < single_candidate_indices.items.len) : (single_index += 1) {
+            var scan = single_index;
+            while (scan > 0 and scalarBusinessCoinCandidateShouldSortBefore(
+                candidates[single_candidate_indices.items[scan]],
+                candidates[single_candidate_indices.items[scan - 1]],
+                min_balance,
+            )) : (scan -= 1) {
+                std.mem.swap(usize, &single_candidate_indices.items[scan], &single_candidate_indices.items[scan - 1]);
+            }
+        }
+        for (single_candidate_indices.items) |candidate_index| {
+            const candidate = candidates[candidate_index];
+            planned_selections[parameter_index].sources = try allocator.dupe(
+                SelectedCoinCandidate,
+                &.{.{
+                    .object_id = candidate.object_id,
+                    .token = candidate.object_input_select_token,
+                }},
+            );
+            try reserved_object_ids.append(allocator, candidate.object_id);
+            if (try selectSplitCoinPlanRecursive(
+                allocator,
+                parameters,
+                split_amount_values,
+                parameter_index + 1,
+                reserved_object_ids,
+                planned_selections,
+            )) {
+                return true;
+            }
+            _ = reserved_object_ids.pop();
+            allocator.free(planned_selections[parameter_index].sources.?);
+            planned_selections[parameter_index].sources = null;
+        }
+
+        var current_sources = std.ArrayList(SelectedCoinCandidate).empty;
+        defer current_sources.deinit(allocator);
+        return try selectSplitCoinSourcesForParameterRecursive(
+            allocator,
+            parameters,
+            split_amount_values,
+            parameter_index,
+            candidates,
+            candidate_indices,
+            0,
+            0,
+            min_balance,
+            &current_sources,
+            reserved_object_ids,
+            planned_selections,
+        );
+    }
+
+    fn selectSplitCoinPlanExcluding(
+        allocator: std.mem.Allocator,
+        parameters: []move_result.OwnedMoveParameterSummary,
+        split_amount_values: []const ?u64,
+        excluded_object_ids: []const []const u8,
+        planned_selections: []PlannedSplitCoinParameterSelection,
+    ) anyerror!bool {
+        for (planned_selections) |*selection| selection.* = .{};
+
+        var reserved_object_ids = std.ArrayList([]const u8).empty;
+        defer reserved_object_ids.deinit(allocator);
+        try reserved_object_ids.appendSlice(allocator, excluded_object_ids);
+
+        return try selectSplitCoinPlanRecursive(
+            allocator,
+            parameters,
+            split_amount_values,
+            0,
+            &reserved_object_ids,
+            planned_selections,
+        );
+    }
+
     fn buildMoveFunctionSplitCoinPreferredCommandsJson(
         allocator: std.mem.Allocator,
         summary: move_result.OwnedMoveFunctionSummary,
@@ -10311,6 +11253,31 @@ pub const SuiRpcClient = struct {
 
         if (!needs_split) return null;
 
+        const amount_hints = try computeMoveCoinAmountHints(allocator, summary.parameters);
+        defer allocator.free(amount_hints);
+        if (try selectReservedGasSuiCoinObjectId(
+            allocator,
+            summary.parameters,
+            amount_hints,
+            reserved_coin_object_ids.items,
+        )) |reserved_gas_object_id| {
+            try reserved_coin_object_ids.append(
+                allocator,
+                try allocator.dupe(u8, reserved_gas_object_id),
+            );
+        }
+
+        const planned_selections = try allocator.alloc(PlannedSplitCoinParameterSelection, summary.parameters.len);
+        defer allocator.free(planned_selections);
+        defer deinitPlannedSplitCoinParameterSelections(allocator, planned_selections);
+        const has_plan = try selectSplitCoinPlanExcluding(
+            allocator,
+            summary.parameters,
+            split_amount_values,
+            reserved_coin_object_ids.items,
+            planned_selections,
+        );
+
         var builder = tx_request_builder.ProgrammaticDslBuilder.init(allocator);
         defer builder.deinit();
 
@@ -10340,6 +11307,36 @@ pub const SuiRpcClient = struct {
                     }
 
                     if (parameter.explicit_arg_json == null) {
+                        if (has_plan) {
+                            if (planned_selections[index].sources) |selected_values| {
+                                for (selected_values) |selected| {
+                                    try owned_source_jsons.append(
+                                        allocator,
+                                        try buildAutoSelectedScalarArgJson(allocator, selected.token),
+                                    );
+                                    try reserved_coin_object_ids.append(
+                                        allocator,
+                                        try allocator.dupe(u8, selected.object_id),
+                                    );
+                                }
+                            }
+                            if (owned_source_jsons.items.len != 0) {
+                                const destination_json = owned_source_jsons.items[0];
+                                if (owned_source_jsons.items.len > 1) {
+                                    var merge_sources = std.ArrayList(tx_request_builder.ArgumentValue).empty;
+                                    defer merge_sources.deinit(allocator);
+                                    for (owned_source_jsons.items[1..]) |source_value| {
+                                        try merge_sources.append(allocator, .{ .raw_json = source_value });
+                                    }
+                                    try builder.appendMergeCoinsFromValues(
+                                        .{ .raw_json = destination_json },
+                                        merge_sources.items,
+                                    );
+                                }
+                                break :blk destination_json;
+                            }
+                        }
+
                         if (parameter.owned_object_candidates) |candidates| {
                             var selected_candidates = std.ArrayList(SelectedCoinCandidate).empty;
                             defer selected_candidates.deinit(allocator);
@@ -10356,7 +11353,10 @@ pub const SuiRpcClient = struct {
                                         allocator,
                                         try buildAutoSelectedScalarArgJson(allocator, selected.token),
                                     );
-                                    try reserved_coin_object_ids.append(allocator, try allocator.dupe(u8, selected.object_id));
+                                    try reserved_coin_object_ids.append(
+                                        allocator,
+                                        try allocator.dupe(u8, selected.object_id),
+                                    );
                                 }
                                 const destination_json = owned_source_jsons.items[0];
                                 if (owned_source_jsons.items.len > 1) {
@@ -10391,7 +11391,10 @@ pub const SuiRpcClient = struct {
                                                 allocator,
                                                 try buildAutoSelectedScalarArgJson(allocator, selected.token),
                                             );
-                                            try reserved_coin_object_ids.append(allocator, try allocator.dupe(u8, selected.object_id));
+                                            try reserved_coin_object_ids.append(
+                                                allocator,
+                                                try allocator.dupe(u8, selected.object_id),
+                                            );
                                         }
                                         const destination_json = owned_source_jsons.items[0];
                                         if (owned_source_jsons.items.len > 1) {
@@ -14411,9 +15414,19 @@ pub const SuiRpcClient = struct {
         gas_object_id: ?[]const u8,
         gas_budget: u64,
     ) !?[]u8 {
-        if (!(try commandSourceSupportsLocalProgrammableTransactionBuilder(
+        var resolved_source = self.resolveCommandSourceForRealBuilderWithDefaultOwner(
             allocator,
             source,
+            sender,
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => return null,
+        };
+        defer resolved_source.deinit(allocator);
+
+        if (!(try commandSourceSupportsLocalProgrammableTransactionBuilder(
+            allocator,
+            resolved_source.source,
         ))) return null;
 
         const gas_payment_json = blk: {
@@ -14429,7 +15442,7 @@ pub const SuiRpcClient = struct {
 
             var excluded_object_ids = self.ownReferencedObjectIdsFromCommandSource(
                 allocator,
-                source,
+                resolved_source.source,
             ) catch |err| switch (err) {
                 error.OutOfMemory => return err,
                 else => return null,
@@ -14453,7 +15466,7 @@ pub const SuiRpcClient = struct {
 
         return self.buildLocalProgrammableTransactionTxBytesFromCommandSource(
             allocator,
-            source,
+            resolved_source.source,
             sender,
             gas_payment_json,
             gas_price,
@@ -14465,7 +15478,7 @@ pub const SuiRpcClient = struct {
         };
     }
 
-    fn tryBuildLocalCommandSourceExecutePayloadWithKnownGasObject(
+    fn tryBuildLocalCommandSourceExecutePayload(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
         sender: []const u8,
@@ -14475,18 +15488,48 @@ pub const SuiRpcClient = struct {
         payload_signer: RealBuilderPayloadSigner,
         options_json: ?[]const u8,
     ) !?[]u8 {
-        const resolved_gas_object_id = gas_object_id orelse return null;
-        if (!(try self.commandSourceSupportsLocalProgrammableTransactionBuilder(
+        var resolved_source = self.resolveCommandSourceForRealBuilderWithDefaultOwner(
             allocator,
             source,
-        ))) return null;
-
-        const gas_payment_json = self.buildGasPaymentJsonFromGasObjectId(
-            allocator,
-            resolved_gas_object_id,
+            sender,
         ) catch |err| switch (err) {
             error.OutOfMemory => return err,
             else => return null,
+        };
+        defer resolved_source.deinit(allocator);
+
+        if (!(try self.commandSourceSupportsLocalProgrammableTransactionBuilder(
+            allocator,
+            resolved_source.source,
+        ))) return null;
+
+        const gas_payment_json = blk: {
+            if (gas_object_id) |resolved_gas_object_id| {
+                break :blk self.buildGasPaymentJsonFromGasObjectId(
+                    allocator,
+                    resolved_gas_object_id,
+                ) catch |err| switch (err) {
+                    error.OutOfMemory => return err,
+                    else => return null,
+                };
+            }
+
+            var excluded_object_ids = self.ownReferencedObjectIdsFromCommandSource(
+                allocator,
+                resolved_source.source,
+            ) catch |err| switch (err) {
+                error.OutOfMemory => return err,
+                else => return null,
+            };
+            defer excluded_object_ids.deinit(allocator);
+
+            break :blk (try self.ownResolvedGasPaymentJsonWithDefaultOwnerAndExclusions(
+                allocator,
+                null,
+                sender,
+                if (gas_budget == 0) 1 else gas_budget,
+                excluded_object_ids.items.items,
+            )) orelse return null;
         };
         defer allocator.free(gas_payment_json);
 
@@ -14498,7 +15541,7 @@ pub const SuiRpcClient = struct {
         return switch (payload_signer) {
             .direct_signatures => |signatures| try self.buildLocalProgrammableTransactionExecutePayloadFromCommandSourceWithSignatures(
                 allocator,
-                source,
+                resolved_source.source,
                 sender,
                 gas_payment_json,
                 gas_price,
@@ -14509,7 +15552,7 @@ pub const SuiRpcClient = struct {
             ),
             .default_keystore => |preparation| try self.buildLocalProgrammableTransactionExecutePayloadFromCommandSourceFromDefaultKeystore(
                 allocator,
-                source,
+                resolved_source.source,
                 sender,
                 gas_payment_json,
                 gas_price,
@@ -14531,7 +15574,7 @@ pub const SuiRpcClient = struct {
         signatures: []const []const u8,
         options_json: ?[]const u8,
     ) ![]u8 {
-        if (try self.tryBuildLocalCommandSourceExecutePayloadWithKnownGasObject(
+        if (try self.tryBuildLocalCommandSourceExecutePayload(
             allocator,
             signer,
             source,
@@ -14569,7 +15612,7 @@ pub const SuiRpcClient = struct {
         options_json: ?[]const u8,
         preparation: keystore.SignerPreparation,
     ) ![]u8 {
-        if (try self.tryBuildLocalCommandSourceExecutePayloadWithKnownGasObject(
+        if (try self.tryBuildLocalCommandSourceExecutePayload(
             allocator,
             signer,
             source,
@@ -14702,121 +15745,6 @@ pub const SuiRpcClient = struct {
         }
 
         return .{ .source = source };
-    }
-
-    fn buildCommandSourceExecutePayloadWithRealBuilderInternal(
-        self: *SuiRpcClient,
-        allocator: std.mem.Allocator,
-        source: tx_builder.CommandSource,
-        config: tx_request_builder.CommandRequestConfig,
-        payload_signer: RealBuilderPayloadSigner,
-        auto_gas_min_balance_override: ?u64,
-        resolve_selected_tokens: bool,
-    ) ![]u8 {
-        const base_options = tx_request_builder.optionsFromCommandSource(source, config);
-        const inferred_sender = if (config.sender == null)
-            try inferSelectedRequestOwnerFromOptions(allocator, base_options)
-        else
-            null;
-        defer if (inferred_sender) |value| allocator.free(value);
-
-        const sender = config.sender orelse inferred_sender orelse return error.InvalidCli;
-        const gas_budget = config.gas_budget orelse return error.InvalidCli;
-
-        var resolved_source: OwnedRealBuilderCommandSource = .{ .source = source };
-        if (resolve_selected_tokens or auto_gas_min_balance_override != null) {
-            resolved_source = try self.resolveCommandSourceForRealBuilderWithDefaultOwner(
-                allocator,
-                source,
-                sender,
-            );
-        }
-        defer resolved_source.deinit(allocator);
-
-        var excluded_object_ids = try self.ownReferencedObjectIdsFromCommandSource(
-            allocator,
-            resolved_source.source,
-        );
-        defer excluded_object_ids.deinit(allocator);
-
-        const owned_gas_payment_json = if (auto_gas_min_balance_override) |override|
-            try self.selectGasPaymentJsonExcluding(
-                allocator,
-                sender,
-                override,
-                excluded_object_ids.items.items,
-            ) orelse return error.SelectionNotFound
-        else
-            try self.resolveSelectedGasPaymentJsonWithDefaultOwner(
-                allocator,
-                config.gas_payment_json,
-                sender,
-            );
-        defer if (owned_gas_payment_json) |value| allocator.free(value);
-
-        const effective_gas_payment_json = owned_gas_payment_json orelse config.gas_payment_json;
-        const gas_object_id = if (effective_gas_payment_json) |value|
-            try extractGasObjectIdFromGasPaymentJson(allocator, value)
-        else
-            null;
-        defer if (gas_object_id) |value| allocator.free(value);
-
-        return switch (payload_signer) {
-            .direct_signatures => |signatures| try self.buildCommandSourceExecutePayloadWithSignatures(
-                allocator,
-                sender,
-                resolved_source.source,
-                gas_object_id,
-                gas_budget,
-                signatures,
-                config.options_json,
-            ),
-            .default_keystore => |preparation| try self.buildCommandSourceExecutePayloadFromDefaultKeystore(
-                allocator,
-                sender,
-                resolved_source.source,
-                gas_object_id,
-                gas_budget,
-                config.options_json,
-                preparation,
-            ),
-        };
-    }
-
-    fn buildRealBuilderExecutePayloadFromOwnedOptions(
-        self: *SuiRpcClient,
-        allocator: std.mem.Allocator,
-        options: tx_request_builder.OwnedProgrammaticRequestOptions,
-        payload_signer: RealBuilderPayloadSigner,
-    ) ![]u8 {
-        const sender = options.options.sender orelse return error.InvalidCli;
-        const gas_budget = options.options.gas_budget orelse return error.InvalidCli;
-        const gas_object_id = if (options.options.gas_payment_json) |value|
-            try extractGasObjectIdFromGasPaymentJson(allocator, value)
-        else
-            null;
-        defer if (gas_object_id) |value| allocator.free(value);
-
-        return switch (payload_signer) {
-            .direct_signatures => |signatures| try self.buildCommandSourceExecutePayloadWithSignatures(
-                allocator,
-                sender,
-                options.options.source,
-                gas_object_id,
-                gas_budget,
-                signatures,
-                options.options.options_json,
-            ),
-            .default_keystore => |preparation| try self.buildCommandSourceExecutePayloadFromDefaultKeystore(
-                allocator,
-                sender,
-                options.options.source,
-                gas_object_id,
-                gas_budget,
-                options.options.options_json,
-                preparation,
-            ),
-        };
     }
 
     fn buildRealBuilderExecutePayloadFromOwnedOptionsWithAccountProvider(
@@ -24181,6 +25109,530 @@ test "collectObjectDiscoverySeedObjectIdsFromMoveParameters skips candidate seed
     try testing.expectEqualStrings("0xtiebreak-b", seeds[2]);
 }
 
+test "applyCrossParameterBusinessCoinSelectionHints keeps a separate sui coin available for gas" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const candidates = try allocator.alloc(move_result.OwnedMoveObjectCandidate, 2);
+    errdefer allocator.free(candidates);
+    candidates[0] = .{
+        .object_id = try allocator.dupe(u8, "0xcoin-big"),
+        .version = 1,
+        .digest = try allocator.dupe(u8, "digest-big"),
+        .balance = 100,
+        .object_input_select_token = try allocator.dupe(u8, "select:coin-big"),
+    };
+    candidates[1] = .{
+        .object_id = try allocator.dupe(u8, "0xcoin-small"),
+        .version = 2,
+        .digest = try allocator.dupe(u8, "digest-small"),
+        .balance = 25,
+        .object_input_select_token = try allocator.dupe(u8, "select:coin-small"),
+    };
+    errdefer {
+        for (candidates) |*candidate| candidate.deinit(allocator);
+    }
+
+    const parameters = try allocator.alloc(move_result.OwnedMoveParameterSummary, 1);
+    defer {
+        for (parameters) |*parameter| parameter.deinit(allocator);
+        allocator.free(parameters);
+    }
+    parameters[0] = .{
+        .signature = try allocator.dupe(u8, "0x2::coin::Coin<0x2::sui::SUI>"),
+        .owned_object_candidates = candidates,
+    };
+
+    try SuiRpcClient.applyCrossParameterBusinessCoinSelectionHints(allocator, parameters);
+
+    try testing.expectEqualStrings(
+        "\"select:coin-small\"",
+        parameters[0].auto_selected_arg_json.?,
+    );
+}
+
+test "applyCrossParameterBusinessCoinSelectionHints keeps the only sufficient sui coin for business use" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const candidates = try allocator.alloc(move_result.OwnedMoveObjectCandidate, 2);
+    errdefer allocator.free(candidates);
+    candidates[0] = .{
+        .object_id = try allocator.dupe(u8, "0xcoin-big"),
+        .version = 1,
+        .digest = try allocator.dupe(u8, "digest-big"),
+        .balance = 100,
+        .object_input_select_token = try allocator.dupe(u8, "select:coin-big"),
+    };
+    candidates[1] = .{
+        .object_id = try allocator.dupe(u8, "0xcoin-small"),
+        .version = 2,
+        .digest = try allocator.dupe(u8, "digest-small"),
+        .balance = 25,
+        .object_input_select_token = try allocator.dupe(u8, "select:coin-small"),
+    };
+    errdefer {
+        for (candidates) |*candidate| candidate.deinit(allocator);
+    }
+
+    const parameters = try allocator.alloc(move_result.OwnedMoveParameterSummary, 2);
+    defer {
+        for (parameters) |*parameter| parameter.deinit(allocator);
+        allocator.free(parameters);
+    }
+    parameters[0] = .{
+        .signature = try allocator.dupe(u8, "0x2::coin::Coin<0x2::sui::SUI>"),
+        .owned_object_candidates = candidates,
+    };
+    parameters[1] = .{
+        .signature = try allocator.dupe(u8, "u64"),
+        .lowering_kind = "u64",
+        .explicit_arg_json = try allocator.dupe(u8, "80"),
+    };
+
+    try SuiRpcClient.applyCrossParameterBusinessCoinSelectionHints(allocator, parameters);
+
+    try testing.expectEqualStrings(
+        "\"select:coin-big\"",
+        parameters[0].auto_selected_arg_json.?,
+    );
+}
+
+test "applyCrossParameterBusinessCoinSelectionHints backtracks across scalar sui coin parameters" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const first_candidates = try allocator.alloc(move_result.OwnedMoveObjectCandidate, 2);
+    errdefer allocator.free(first_candidates);
+    first_candidates[0] = .{
+        .object_id = try allocator.dupe(u8, "0xcoin-mid"),
+        .version = 1,
+        .digest = try allocator.dupe(u8, "digest-mid-a"),
+        .balance = 60,
+        .object_input_select_token = try allocator.dupe(u8, "select:coin-mid"),
+    };
+    first_candidates[1] = .{
+        .object_id = try allocator.dupe(u8, "0xcoin-big"),
+        .version = 2,
+        .digest = try allocator.dupe(u8, "digest-big"),
+        .balance = 100,
+        .object_input_select_token = try allocator.dupe(u8, "select:coin-big"),
+    };
+    errdefer {
+        for (first_candidates) |*candidate| candidate.deinit(allocator);
+    }
+
+    const second_candidates = try allocator.alloc(move_result.OwnedMoveObjectCandidate, 2);
+    errdefer allocator.free(second_candidates);
+    second_candidates[0] = .{
+        .object_id = try allocator.dupe(u8, "0xcoin-mid"),
+        .version = 1,
+        .digest = try allocator.dupe(u8, "digest-mid-b"),
+        .balance = 60,
+        .object_input_select_token = try allocator.dupe(u8, "select:coin-mid"),
+    };
+    second_candidates[1] = .{
+        .object_id = try allocator.dupe(u8, "0xcoin-small"),
+        .version = 3,
+        .digest = try allocator.dupe(u8, "digest-small"),
+        .balance = 50,
+        .object_input_select_token = try allocator.dupe(u8, "select:coin-small"),
+    };
+    errdefer {
+        for (second_candidates) |*candidate| candidate.deinit(allocator);
+    }
+
+    const parameters = try allocator.alloc(move_result.OwnedMoveParameterSummary, 4);
+    defer {
+        for (parameters) |*parameter| parameter.deinit(allocator);
+        allocator.free(parameters);
+    }
+    parameters[0] = .{
+        .signature = try allocator.dupe(u8, "0x2::coin::Coin<0x2::sui::SUI>"),
+        .owned_object_candidates = first_candidates,
+    };
+    parameters[1] = .{
+        .signature = try allocator.dupe(u8, "0x2::coin::Coin<0x2::sui::SUI>"),
+        .owned_object_candidates = second_candidates,
+    };
+    parameters[2] = .{
+        .signature = try allocator.dupe(u8, "u64"),
+        .lowering_kind = "u64",
+        .explicit_arg_json = try allocator.dupe(u8, "50"),
+    };
+    parameters[3] = .{
+        .signature = try allocator.dupe(u8, "u64"),
+        .lowering_kind = "u64",
+        .explicit_arg_json = try allocator.dupe(u8, "60"),
+    };
+
+    try SuiRpcClient.applyCrossParameterBusinessCoinSelectionHints(allocator, parameters);
+
+    try testing.expectEqualStrings(
+        "\"select:coin-big\"",
+        parameters[0].auto_selected_arg_json.?,
+    );
+    try testing.expectEqualStrings(
+        "\"select:coin-mid\"",
+        parameters[1].auto_selected_arg_json.?,
+    );
+}
+
+test "applyCrossParameterBusinessCoinSelectionHints backtracks scalar selection to preserve vector sui coin coverage" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const scalar_candidates = try allocator.alloc(move_result.OwnedMoveObjectCandidate, 2);
+    errdefer allocator.free(scalar_candidates);
+    scalar_candidates[0] = .{
+        .object_id = try allocator.dupe(u8, "0xcoin-mid"),
+        .version = 1,
+        .digest = try allocator.dupe(u8, "digest-mid-scalar"),
+        .balance = 60,
+        .object_input_select_token = try allocator.dupe(u8, "select:coin-mid"),
+    };
+    scalar_candidates[1] = .{
+        .object_id = try allocator.dupe(u8, "0xcoin-big"),
+        .version = 2,
+        .digest = try allocator.dupe(u8, "digest-big"),
+        .balance = 100,
+        .object_input_select_token = try allocator.dupe(u8, "select:coin-big"),
+    };
+    errdefer {
+        for (scalar_candidates) |*candidate| candidate.deinit(allocator);
+    }
+
+    const vector_candidates = try allocator.alloc(move_result.OwnedMoveObjectCandidate, 3);
+    errdefer allocator.free(vector_candidates);
+    vector_candidates[0] = .{
+        .object_id = try allocator.dupe(u8, "0xcoin-mid"),
+        .version = 1,
+        .digest = try allocator.dupe(u8, "digest-mid-vector"),
+        .balance = 60,
+        .object_input_select_token = try allocator.dupe(u8, "select:coin-mid"),
+    };
+    vector_candidates[1] = .{
+        .object_id = try allocator.dupe(u8, "0xcoin-small"),
+        .version = 3,
+        .digest = try allocator.dupe(u8, "digest-small"),
+        .balance = 40,
+        .object_input_select_token = try allocator.dupe(u8, "select:coin-small"),
+    };
+    vector_candidates[2] = .{
+        .object_id = try allocator.dupe(u8, "0xcoin-dust"),
+        .version = 4,
+        .digest = try allocator.dupe(u8, "digest-dust"),
+        .balance = 10,
+        .object_input_select_token = try allocator.dupe(u8, "select:coin-dust"),
+    };
+    errdefer {
+        for (vector_candidates) |*candidate| candidate.deinit(allocator);
+    }
+
+    const parameters = try allocator.alloc(move_result.OwnedMoveParameterSummary, 4);
+    defer {
+        for (parameters) |*parameter| parameter.deinit(allocator);
+        allocator.free(parameters);
+    }
+    parameters[0] = .{
+        .signature = try allocator.dupe(u8, "0x2::coin::Coin<0x2::sui::SUI>"),
+        .owned_object_candidates = scalar_candidates,
+    };
+    parameters[1] = .{
+        .signature = try allocator.dupe(u8, "vector<0x2::coin::Coin<0x2::sui::SUI>>"),
+        .vector_item_owned_object_candidates = vector_candidates,
+    };
+    parameters[2] = .{
+        .signature = try allocator.dupe(u8, "u64"),
+        .lowering_kind = "u64",
+        .explicit_arg_json = try allocator.dupe(u8, "50"),
+    };
+    parameters[3] = .{
+        .signature = try allocator.dupe(u8, "u64"),
+        .lowering_kind = "u64",
+        .explicit_arg_json = try allocator.dupe(u8, "100"),
+    };
+
+    try SuiRpcClient.applyCrossParameterBusinessCoinSelectionHints(allocator, parameters);
+
+    try testing.expectEqualStrings(
+        "\"select:coin-big\"",
+        parameters[0].auto_selected_arg_json.?,
+    );
+    try testing.expectEqualStrings(
+        "[\"select:coin-mid\",\"select:coin-small\"]",
+        parameters[1].auto_selected_arg_json.?,
+    );
+}
+
+test "applyCrossParameterBusinessCoinSelectionHints picks the gas reserve that preserves a cleaner business coin plan" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const scalar_candidates = try allocator.alloc(move_result.OwnedMoveObjectCandidate, 5);
+    errdefer allocator.free(scalar_candidates);
+    scalar_candidates[0] = .{ .object_id = try allocator.dupe(u8, "0xcoin-gas-huge"), .version = 1, .digest = try allocator.dupe(u8, "digest-gas-huge-scalar"), .balance = 300, .object_input_select_token = try allocator.dupe(u8, "select:coin-gas-huge") };
+    scalar_candidates[1] = .{ .object_id = try allocator.dupe(u8, "0xcoin-gas-mid"), .version = 2, .digest = try allocator.dupe(u8, "digest-gas-mid-scalar"), .balance = 140, .object_input_select_token = try allocator.dupe(u8, "select:coin-gas-mid") };
+    scalar_candidates[2] = .{ .object_id = try allocator.dupe(u8, "0xcoin-vec-a"), .version = 3, .digest = try allocator.dupe(u8, "digest-vec-a-scalar"), .balance = 80, .object_input_select_token = try allocator.dupe(u8, "select:coin-vec-a") };
+    scalar_candidates[3] = .{ .object_id = try allocator.dupe(u8, "0xcoin-vec-b"), .version = 4, .digest = try allocator.dupe(u8, "digest-vec-b-scalar"), .balance = 70, .object_input_select_token = try allocator.dupe(u8, "select:coin-vec-b") };
+    scalar_candidates[4] = .{ .object_id = try allocator.dupe(u8, "0xcoin-fit"), .version = 5, .digest = try allocator.dupe(u8, "digest-fit-scalar"), .balance = 50, .object_input_select_token = try allocator.dupe(u8, "select:coin-fit") };
+    errdefer {
+        for (scalar_candidates) |*candidate| candidate.deinit(allocator);
+    }
+
+    const vector_candidates = try allocator.alloc(move_result.OwnedMoveObjectCandidate, 5);
+    errdefer allocator.free(vector_candidates);
+    vector_candidates[0] = .{ .object_id = try allocator.dupe(u8, "0xcoin-gas-huge"), .version = 1, .digest = try allocator.dupe(u8, "digest-gas-huge-vector"), .balance = 300, .object_input_select_token = try allocator.dupe(u8, "select:coin-gas-huge") };
+    vector_candidates[1] = .{ .object_id = try allocator.dupe(u8, "0xcoin-gas-mid"), .version = 2, .digest = try allocator.dupe(u8, "digest-gas-mid-vector"), .balance = 140, .object_input_select_token = try allocator.dupe(u8, "select:coin-gas-mid") };
+    vector_candidates[2] = .{ .object_id = try allocator.dupe(u8, "0xcoin-vec-a"), .version = 3, .digest = try allocator.dupe(u8, "digest-vec-a-vector"), .balance = 80, .object_input_select_token = try allocator.dupe(u8, "select:coin-vec-a") };
+    vector_candidates[3] = .{ .object_id = try allocator.dupe(u8, "0xcoin-vec-b"), .version = 4, .digest = try allocator.dupe(u8, "digest-vec-b-vector"), .balance = 70, .object_input_select_token = try allocator.dupe(u8, "select:coin-vec-b") };
+    vector_candidates[4] = .{ .object_id = try allocator.dupe(u8, "0xcoin-fit"), .version = 5, .digest = try allocator.dupe(u8, "digest-fit-vector"), .balance = 50, .object_input_select_token = try allocator.dupe(u8, "select:coin-fit") };
+    errdefer {
+        for (vector_candidates) |*candidate| candidate.deinit(allocator);
+    }
+
+    const parameters = try allocator.alloc(move_result.OwnedMoveParameterSummary, 4);
+    defer {
+        for (parameters) |*parameter| parameter.deinit(allocator);
+        allocator.free(parameters);
+    }
+    parameters[0] = .{ .signature = try allocator.dupe(u8, "0x2::coin::Coin<0x2::sui::SUI>"), .owned_object_candidates = scalar_candidates };
+    parameters[1] = .{ .signature = try allocator.dupe(u8, "vector<0x2::coin::Coin<0x2::sui::SUI>>"), .vector_item_owned_object_candidates = vector_candidates };
+    parameters[2] = .{ .signature = try allocator.dupe(u8, "u64"), .lowering_kind = "u64", .explicit_arg_json = try allocator.dupe(u8, "50") };
+    parameters[3] = .{ .signature = try allocator.dupe(u8, "u64"), .lowering_kind = "u64", .explicit_arg_json = try allocator.dupe(u8, "150") };
+
+    try SuiRpcClient.applyCrossParameterBusinessCoinSelectionHints(allocator, parameters);
+
+    try testing.expectEqualStrings(
+        "\"select:coin-fit\"",
+        parameters[0].auto_selected_arg_json.?,
+    );
+    try testing.expectEqualStrings(
+        "[\"select:coin-gas-huge\"]",
+        parameters[1].auto_selected_arg_json.?,
+    );
+}
+
+test "buildMoveFunctionSplitCoinPreferredCommandsJson excludes the reserved gas coin from business commands" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const scalar_candidates = try allocator.alloc(move_result.OwnedMoveObjectCandidate, 5);
+    errdefer allocator.free(scalar_candidates);
+    scalar_candidates[0] = .{ .object_id = try allocator.dupe(u8, "0xcoin-gas-huge"), .version = 1, .digest = try allocator.dupe(u8, "digest-gas-huge-scalar"), .balance = 300, .object_input_select_token = try allocator.dupe(u8, "select:coin-gas-huge") };
+    scalar_candidates[1] = .{ .object_id = try allocator.dupe(u8, "0xcoin-gas-mid"), .version = 2, .digest = try allocator.dupe(u8, "digest-gas-mid-scalar"), .balance = 140, .object_input_select_token = try allocator.dupe(u8, "select:coin-gas-mid") };
+    scalar_candidates[2] = .{ .object_id = try allocator.dupe(u8, "0xcoin-vec-a"), .version = 3, .digest = try allocator.dupe(u8, "digest-vec-a-scalar"), .balance = 80, .object_input_select_token = try allocator.dupe(u8, "select:coin-vec-a") };
+    scalar_candidates[3] = .{ .object_id = try allocator.dupe(u8, "0xcoin-vec-b"), .version = 4, .digest = try allocator.dupe(u8, "digest-vec-b-scalar"), .balance = 70, .object_input_select_token = try allocator.dupe(u8, "select:coin-vec-b") };
+    scalar_candidates[4] = .{ .object_id = try allocator.dupe(u8, "0xcoin-fit"), .version = 5, .digest = try allocator.dupe(u8, "digest-fit-scalar"), .balance = 50, .object_input_select_token = try allocator.dupe(u8, "select:coin-fit") };
+    errdefer {
+        for (scalar_candidates) |*candidate| candidate.deinit(allocator);
+    }
+
+    const vector_candidates = try allocator.alloc(move_result.OwnedMoveObjectCandidate, 5);
+    errdefer allocator.free(vector_candidates);
+    vector_candidates[0] = .{ .object_id = try allocator.dupe(u8, "0xcoin-gas-huge"), .version = 1, .digest = try allocator.dupe(u8, "digest-gas-huge-vector"), .balance = 300, .object_input_select_token = try allocator.dupe(u8, "select:coin-gas-huge") };
+    vector_candidates[1] = .{ .object_id = try allocator.dupe(u8, "0xcoin-gas-mid"), .version = 2, .digest = try allocator.dupe(u8, "digest-gas-mid-vector"), .balance = 140, .object_input_select_token = try allocator.dupe(u8, "select:coin-gas-mid") };
+    vector_candidates[2] = .{ .object_id = try allocator.dupe(u8, "0xcoin-vec-a"), .version = 3, .digest = try allocator.dupe(u8, "digest-vec-a-vector"), .balance = 80, .object_input_select_token = try allocator.dupe(u8, "select:coin-vec-a") };
+    vector_candidates[3] = .{ .object_id = try allocator.dupe(u8, "0xcoin-vec-b"), .version = 4, .digest = try allocator.dupe(u8, "digest-vec-b-vector"), .balance = 70, .object_input_select_token = try allocator.dupe(u8, "select:coin-vec-b") };
+    vector_candidates[4] = .{ .object_id = try allocator.dupe(u8, "0xcoin-fit"), .version = 5, .digest = try allocator.dupe(u8, "digest-fit-vector"), .balance = 50, .object_input_select_token = try allocator.dupe(u8, "select:coin-fit") };
+    errdefer {
+        for (vector_candidates) |*candidate| candidate.deinit(allocator);
+    }
+
+    const parameters = try allocator.alloc(move_result.OwnedMoveParameterSummary, 5);
+    errdefer allocator.free(parameters);
+    parameters[0] = .{ .signature = try allocator.dupe(u8, "0x2::coin::Coin<0x2::sui::SUI>"), .owned_object_candidates = scalar_candidates };
+    parameters[1] = .{ .signature = try allocator.dupe(u8, "vector<0x2::coin::Coin<0x2::sui::SUI>>"), .vector_item_owned_object_candidates = vector_candidates };
+    parameters[2] = .{ .signature = try allocator.dupe(u8, "u64"), .lowering_kind = "u64", .explicit_arg_json = try allocator.dupe(u8, "50") };
+    parameters[3] = .{ .signature = try allocator.dupe(u8, "u64"), .lowering_kind = "u64", .explicit_arg_json = try allocator.dupe(u8, "150") };
+    parameters[4] = .{ .signature = try allocator.dupe(u8, "&mut 0x2::tx_context::TxContext"), .omitted_from_explicit_args = true };
+    errdefer {
+        for (parameters) |*parameter| parameter.deinit(allocator);
+    }
+
+    const type_parameters = try allocator.alloc(move_result.OwnedMoveTypeParameter, 0);
+    errdefer allocator.free(type_parameters);
+    const returns = try allocator.alloc(move_result.OwnedMoveParameterSummary, 0);
+    errdefer allocator.free(returns);
+
+    var summary = move_result.OwnedMoveFunctionSummary{
+        .package_id = try allocator.dupe(u8, "0x2"),
+        .module_name = try allocator.dupe(u8, "router"),
+        .function_name = try allocator.dupe(u8, "deposit_scalar_and_many_exact"),
+        .visibility = try allocator.dupe(u8, "Public"),
+        .is_entry = true,
+        .type_parameters = type_parameters,
+        .parameters = parameters,
+        .returns = returns,
+    };
+    defer summary.deinit(allocator);
+
+    const commands_json = (try SuiRpcClient.buildMoveFunctionSplitCoinPreferredCommandsJson(
+        allocator,
+        summary,
+        "[]",
+    )).?;
+    defer allocator.free(commands_json);
+
+    try testing.expect(std.mem.indexOf(u8, commands_json, "select:coin-gas-mid") == null);
+    try testing.expect(std.mem.indexOf(u8, commands_json, "select:coin-gas-huge") != null);
+}
+
+test "buildMoveFunctionSplitCoinPreferredCommandsJson uses the global coin plan for scalar and vector amounts" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const scalar_candidates = try allocator.alloc(move_result.OwnedMoveObjectCandidate, 2);
+    errdefer allocator.free(scalar_candidates);
+    scalar_candidates[0] = .{
+        .object_id = try allocator.dupe(u8, "0xcoin-mid"),
+        .version = 10,
+        .digest = try allocator.dupe(u8, "coin-digest-mid"),
+        .balance = 60,
+        .object_input_select_token = try allocator.dupe(u8, "select:{\"kind\":\"object_input\",\"objectId\":\"0xcoin-mid\",\"inputKind\":\"imm_or_owned\",\"version\":10,\"digest\":\"coin-digest-mid\"}"),
+    };
+    scalar_candidates[1] = .{
+        .object_id = try allocator.dupe(u8, "0xcoin-big"),
+        .version = 11,
+        .digest = try allocator.dupe(u8, "coin-digest-big"),
+        .balance = 100,
+        .object_input_select_token = try allocator.dupe(u8, "select:{\"kind\":\"object_input\",\"objectId\":\"0xcoin-big\",\"inputKind\":\"imm_or_owned\",\"version\":11,\"digest\":\"coin-digest-big\"}"),
+    };
+    errdefer {
+        for (scalar_candidates) |*candidate| candidate.deinit(allocator);
+    }
+
+    const vector_candidates = try allocator.alloc(move_result.OwnedMoveObjectCandidate, 3);
+    errdefer allocator.free(vector_candidates);
+    vector_candidates[0] = .{
+        .object_id = try allocator.dupe(u8, "0xcoin-mid"),
+        .version = 10,
+        .digest = try allocator.dupe(u8, "coin-digest-mid-vector"),
+        .balance = 60,
+        .object_input_select_token = try allocator.dupe(u8, "select:{\"kind\":\"object_input\",\"objectId\":\"0xcoin-mid\",\"inputKind\":\"imm_or_owned\",\"version\":10,\"digest\":\"coin-digest-mid\"}"),
+    };
+    vector_candidates[1] = .{
+        .object_id = try allocator.dupe(u8, "0xcoin-small"),
+        .version = 12,
+        .digest = try allocator.dupe(u8, "coin-digest-small"),
+        .balance = 40,
+        .object_input_select_token = try allocator.dupe(u8, "select:{\"kind\":\"object_input\",\"objectId\":\"0xcoin-small\",\"inputKind\":\"imm_or_owned\",\"version\":12,\"digest\":\"coin-digest-small\"}"),
+    };
+    vector_candidates[2] = .{
+        .object_id = try allocator.dupe(u8, "0xcoin-dust"),
+        .version = 13,
+        .digest = try allocator.dupe(u8, "coin-digest-dust"),
+        .balance = 10,
+        .object_input_select_token = try allocator.dupe(u8, "select:{\"kind\":\"object_input\",\"objectId\":\"0xcoin-dust\",\"inputKind\":\"imm_or_owned\",\"version\":13,\"digest\":\"coin-digest-dust\"}"),
+    };
+    errdefer {
+        for (vector_candidates) |*candidate| candidate.deinit(allocator);
+    }
+
+    const parameters = try allocator.alloc(move_result.OwnedMoveParameterSummary, 5);
+    errdefer allocator.free(parameters);
+    parameters[0] = .{
+        .signature = try allocator.dupe(u8, "0x2::coin::Coin<0x2::sui::SUI>"),
+        .owned_object_candidates = scalar_candidates,
+    };
+    parameters[1] = .{
+        .signature = try allocator.dupe(u8, "vector<0x2::coin::Coin<0x2::sui::SUI>>"),
+        .vector_item_owned_object_candidates = vector_candidates,
+    };
+    parameters[2] = .{
+        .signature = try allocator.dupe(u8, "u64"),
+        .lowering_kind = "u64",
+        .explicit_arg_json = try allocator.dupe(u8, "50"),
+    };
+    parameters[3] = .{
+        .signature = try allocator.dupe(u8, "u64"),
+        .lowering_kind = "u64",
+        .explicit_arg_json = try allocator.dupe(u8, "100"),
+    };
+    parameters[4] = .{
+        .signature = try allocator.dupe(u8, "&mut 0x2::tx_context::TxContext"),
+        .omitted_from_explicit_args = true,
+    };
+    errdefer {
+        for (parameters) |*parameter| parameter.deinit(allocator);
+    }
+
+    const type_parameters = try allocator.alloc(move_result.OwnedMoveTypeParameter, 0);
+    errdefer allocator.free(type_parameters);
+    const returns = try allocator.alloc(move_result.OwnedMoveParameterSummary, 0);
+    errdefer allocator.free(returns);
+
+    var summary = move_result.OwnedMoveFunctionSummary{
+        .package_id = try allocator.dupe(u8, "0x2"),
+        .module_name = try allocator.dupe(u8, "router"),
+        .function_name = try allocator.dupe(u8, "deposit_scalar_and_many_exact"),
+        .visibility = try allocator.dupe(u8, "Public"),
+        .is_entry = true,
+        .type_parameters = type_parameters,
+        .parameters = parameters,
+        .returns = returns,
+    };
+    defer summary.deinit(allocator);
+
+    const commands_json = (try SuiRpcClient.buildMoveFunctionSplitCoinPreferredCommandsJson(
+        allocator,
+        summary,
+        "[]",
+    )).?;
+    defer allocator.free(commands_json);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, commands_json, .{});
+    defer parsed.deinit();
+
+    try testing.expectEqual(@as(usize, 5), parsed.value.array.items.len);
+    try testing.expectEqualStrings("SplitCoins", parsed.value.array.items[0].object.get("kind").?.string);
+    try testing.expectEqualStrings("MergeCoins", parsed.value.array.items[1].object.get("kind").?.string);
+    try testing.expectEqualStrings("SplitCoins", parsed.value.array.items[2].object.get("kind").?.string);
+    try testing.expectEqualStrings("MakeMoveVec", parsed.value.array.items[3].object.get("kind").?.string);
+    try testing.expectEqualStrings("MoveCall", parsed.value.array.items[4].object.get("kind").?.string);
+
+    try testing.expectEqualStrings(
+        "select:{\"kind\":\"object_input\",\"objectId\":\"0xcoin-big\",\"inputKind\":\"imm_or_owned\",\"version\":11,\"digest\":\"coin-digest-big\"}",
+        parsed.value.array.items[0].object.get("coin").?.string,
+    );
+    try testing.expectEqualStrings(
+        "select:{\"kind\":\"object_input\",\"objectId\":\"0xcoin-mid\",\"inputKind\":\"imm_or_owned\",\"version\":10,\"digest\":\"coin-digest-mid\"}",
+        parsed.value.array.items[1].object.get("coin").?.string,
+    );
+    const merge_sources = parsed.value.array.items[1].object.get("sources").?.array.items;
+    try testing.expectEqual(@as(usize, 1), merge_sources.len);
+    try testing.expectEqualStrings(
+        "select:{\"kind\":\"object_input\",\"objectId\":\"0xcoin-small\",\"inputKind\":\"imm_or_owned\",\"version\":12,\"digest\":\"coin-digest-small\"}",
+        merge_sources[0].string,
+    );
+
+    const make_move_vec_elements = parsed.value.array.items[3].object.get("elements").?.array.items;
+    try testing.expectEqual(@as(usize, 1), make_move_vec_elements.len);
+    try testing.expectEqual(@as(i64, 2), make_move_vec_elements[0].object.get("NestedResult").?.array.items[0].integer);
+    try testing.expectEqual(@as(i64, 0), make_move_vec_elements[0].object.get("NestedResult").?.array.items[1].integer);
+
+    const move_call_args = parsed.value.array.items[4].object.get("arguments").?.array.items;
+    try testing.expectEqual(@as(i64, 0), move_call_args[0].object.get("NestedResult").?.array.items[0].integer);
+    try testing.expectEqual(@as(i64, 0), move_call_args[0].object.get("NestedResult").?.array.items[1].integer);
+    try testing.expectEqual(@as(i64, 3), move_call_args[1].object.get("Result").?.integer);
+    try testing.expectEqual(@as(i64, 50), move_call_args[2].integer);
+    try testing.expectEqual(@as(i64, 100), move_call_args[3].integer);
+}
+
 test "getMoveDynamicFieldDiscoveredObjectIdsCachedBorrowed reuses cached discoveries" {
     const testing = std.testing;
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -27515,6 +28967,330 @@ test "buildBatchTransactionTxBytes prefers local builder when gas object is know
     try testing.expectEqual(@as(usize, 0), state.unsafe);
 }
 
+test "buildMoveCallTxBytes auto-selects gas locally when gas object is omitted" {
+    const testing = std.testing;
+    const State = struct {
+        normalized: usize = 0,
+        gas_price: usize = 0,
+        coins: usize = 0,
+        object: usize = 0,
+        unsafe: usize = 0,
+    };
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var state = State{};
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const st = @as(*State, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                st.normalized += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"parameters\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"pool\",\"name\":\"Pool\",\"typeParams\":[]}},\"U64\",\"Address\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[],\"typeParameters\":[],\"visibility\":\"Public\",\"isEntry\":true}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "suix_getReferenceGasPrice")) {
+                st.gas_price += 1;
+                return alloc.dupe(u8, "{\"result\":\"23\"}");
+            }
+            if (std.mem.eql(u8, req.method, "suix_getCoins")) {
+                st.coins += 1;
+                try testing.expect(std.mem.indexOf(u8, req.params_json, "0xowner") != null);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xgasauto\",\"version\":\"21\",\"digest\":\"gas-auto-digest\",\"balance\":\"500\"}],\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getObject")) {
+                st.object += 1;
+                if (std.mem.indexOf(u8, req.params_json, "0xpool") != null) {
+                    return alloc.dupe(
+                        u8,
+                        "{\"result\":{\"data\":{\"objectId\":\"0xpool\",\"version\":\"7\",\"digest\":\"pool-digest\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}}",
+                    );
+                }
+                return error.TestUnexpectedResult;
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall") or std.mem.eql(u8, req.method, "unsafe_batchTransaction")) {
+                st.unsafe += 1;
+                return error.TestUnexpectedResult;
+            }
+            return error.TestUnexpectedResult;
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &state,
+        .callback = callback,
+    };
+
+    const tx_bytes = try client_instance.buildMoveCallTxBytes(
+        allocator,
+        "0xowner",
+        "0x2",
+        "pool",
+        "swap",
+        "[]",
+        "[\"0xpool\",7,\"0xreceiver\"]",
+        null,
+        100,
+    );
+    defer allocator.free(tx_bytes);
+
+    try testing.expect(tx_bytes.len != 0);
+    try testing.expectEqual(@as(usize, 1), state.normalized);
+    try testing.expectEqual(@as(usize, 1), state.gas_price);
+    try testing.expectEqual(@as(usize, 1), state.coins);
+    try testing.expectEqual(@as(usize, 1), state.object);
+    try testing.expectEqual(@as(usize, 0), state.unsafe);
+}
+
+test "buildBatchTransactionTxBytes auto-selects gas locally when gas object is omitted" {
+    const testing = std.testing;
+    const State = struct {
+        gas_price: usize = 0,
+        coins: usize = 0,
+        object: usize = 0,
+        unsafe: usize = 0,
+    };
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var state = State{};
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const st = @as(*State, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "suix_getReferenceGasPrice")) {
+                st.gas_price += 1;
+                return alloc.dupe(u8, "{\"result\":\"29\"}");
+            }
+            if (std.mem.eql(u8, req.method, "suix_getCoins")) {
+                st.coins += 1;
+                try testing.expect(std.mem.indexOf(u8, req.params_json, "0xowner") != null);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xgasauto-batch\",\"version\":\"31\",\"digest\":\"gas-auto-batch-digest\",\"balance\":\"500\"}],\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getObject")) {
+                st.object += 1;
+                if (std.mem.indexOf(u8, req.params_json, "0xcoin") != null) {
+                    return alloc.dupe(
+                        u8,
+                        "{\"result\":{\"data\":{\"objectId\":\"0xcoin\",\"version\":\"10\",\"digest\":\"coin-digest-4\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}}",
+                    );
+                }
+                return error.TestUnexpectedResult;
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall") or std.mem.eql(u8, req.method, "unsafe_batchTransaction")) {
+                st.unsafe += 1;
+                return error.TestUnexpectedResult;
+            }
+            return error.TestUnexpectedResult;
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &state,
+        .callback = callback,
+    };
+
+    const tx_bytes = try client_instance.buildBatchTransactionTxBytes(
+        allocator,
+        "0xowner",
+        "[{\"kind\":\"TransferObjects\",\"objects\":[\"0xcoin\"],\"address\":\"0xreceiver\"}]",
+        null,
+        100,
+    );
+    defer allocator.free(tx_bytes);
+
+    try testing.expect(tx_bytes.len != 0);
+    try testing.expectEqual(@as(usize, 1), state.gas_price);
+    try testing.expectEqual(@as(usize, 1), state.coins);
+    try testing.expectEqual(@as(usize, 1), state.object);
+    try testing.expectEqual(@as(usize, 0), state.unsafe);
+}
+
+test "buildMoveCallTxBytes resolves ownerless selected tokens locally when gas object is omitted" {
+    const testing = std.testing;
+    const State = struct {
+        owned: usize = 0,
+        normalized: usize = 0,
+        gas_price: usize = 0,
+        coins: usize = 0,
+        object: usize = 0,
+        unsafe: usize = 0,
+    };
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var state = State{};
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const st = @as(*State, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "suix_getOwnedObjects")) {
+                st.owned += 1;
+                try testing.expect(std.mem.indexOf(u8, req.params_json, "0xowner") != null);
+                try testing.expect(std.mem.indexOf(u8, req.params_json, "0x2::example::Thing") != null);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xselobj\",\"type\":\"0x2::example::Thing\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                st.normalized += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"parameters\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"example\",\"name\":\"Thing\",\"typeParams\":[]}},\"U64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[],\"typeParameters\":[],\"visibility\":\"Public\",\"isEntry\":true}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "suix_getReferenceGasPrice")) {
+                st.gas_price += 1;
+                return alloc.dupe(u8, "{\"result\":\"23\"}");
+            }
+            if (std.mem.eql(u8, req.method, "suix_getCoins")) {
+                st.coins += 1;
+                try testing.expect(std.mem.indexOf(u8, req.params_json, "0xowner") != null);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xgas-local-select\",\"version\":\"33\",\"digest\":\"gas-local-select-digest\",\"balance\":\"500\"}],\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getObject")) {
+                st.object += 1;
+                try testing.expect(std.mem.indexOf(u8, req.params_json, "0xselobj") != null);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":{\"objectId\":\"0xselobj\",\"version\":\"19\",\"digest\":\"selobj-digest\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall") or std.mem.eql(u8, req.method, "unsafe_batchTransaction")) {
+                st.unsafe += 1;
+                return error.TestUnexpectedResult;
+            }
+            return error.TestUnexpectedResult;
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &state,
+        .callback = callback,
+    };
+
+    const tx_bytes = try client_instance.buildMoveCallTxBytes(
+        allocator,
+        "0xowner",
+        "0x2",
+        "counter",
+        "increment",
+        "[]",
+        "[\"select:{\\\"kind\\\":\\\"owned_object_struct_type\\\",\\\"structType\\\":\\\"0x2::example::Thing\\\"}\",7]",
+        null,
+        100,
+    );
+    defer allocator.free(tx_bytes);
+
+    try testing.expect(tx_bytes.len != 0);
+    try testing.expectEqual(@as(usize, 1), state.owned);
+    try testing.expectEqual(@as(usize, 1), state.normalized);
+    try testing.expectEqual(@as(usize, 1), state.gas_price);
+    try testing.expectEqual(@as(usize, 1), state.coins);
+    try testing.expectEqual(@as(usize, 1), state.object);
+    try testing.expectEqual(@as(usize, 0), state.unsafe);
+}
+
+test "buildCommandSourceTxBytes resolves ownerless selected command tokens locally" {
+    const testing = std.testing;
+    const State = struct {
+        owned: usize = 0,
+        gas_price: usize = 0,
+        coins: usize = 0,
+        object: usize = 0,
+        unsafe: usize = 0,
+    };
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var state = State{};
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const st = @as(*State, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "suix_getOwnedObjects")) {
+                st.owned += 1;
+                try testing.expect(std.mem.indexOf(u8, req.params_json, "0xowner") != null);
+                try testing.expect(std.mem.indexOf(u8, req.params_json, "0x2::example::Thing") != null);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xcmdsel\",\"type\":\"0x2::example::Thing\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "suix_getReferenceGasPrice")) {
+                st.gas_price += 1;
+                return alloc.dupe(u8, "{\"result\":\"31\"}");
+            }
+            if (std.mem.eql(u8, req.method, "suix_getCoins")) {
+                st.coins += 1;
+                try testing.expect(std.mem.indexOf(u8, req.params_json, "0xowner") != null);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xgas-command-select\",\"version\":\"52\",\"digest\":\"gas-command-select-digest\",\"balance\":\"700\"}],\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getObject")) {
+                st.object += 1;
+                try testing.expect(std.mem.indexOf(u8, req.params_json, "0xcmdsel") != null);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":{\"objectId\":\"0xcmdsel\",\"version\":\"44\",\"digest\":\"cmdsel-digest\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall") or std.mem.eql(u8, req.method, "unsafe_batchTransaction")) {
+                st.unsafe += 1;
+                return error.TestUnexpectedResult;
+            }
+            return error.TestUnexpectedResult;
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &state,
+        .callback = callback,
+    };
+
+    const tx_bytes = try client_instance.buildCommandSourceTxBytes(
+        allocator,
+        "0xowner",
+        .{ .commands_json = "[{\"kind\":\"TransferObjects\",\"objects\":[\"select:{\\\"kind\\\":\\\"owned_object_struct_type\\\",\\\"structType\\\":\\\"0x2::example::Thing\\\"}\"],\"address\":\"0xreceiver\"}]" },
+        null,
+        100,
+    );
+    defer allocator.free(tx_bytes);
+
+    try testing.expect(tx_bytes.len != 0);
+    try testing.expectEqual(@as(usize, 1), state.owned);
+    try testing.expectEqual(@as(usize, 1), state.gas_price);
+    try testing.expectEqual(@as(usize, 1), state.coins);
+    try testing.expectEqual(@as(usize, 1), state.object);
+    try testing.expectEqual(@as(usize, 0), state.unsafe);
+}
+
 test "buildCommandSourceTxBytes auto-selects gas locally when gas object is omitted" {
     const testing = std.testing;
     const State = struct {
@@ -27579,6 +29355,442 @@ test "buildCommandSourceTxBytes auto-selects gas locally when gas object is omit
     defer allocator.free(tx_bytes);
 
     try testing.expect(tx_bytes.len != 0);
+    try testing.expectEqual(@as(usize, 1), state.gas_price);
+    try testing.expectEqual(@as(usize, 1), state.coins);
+    try testing.expectEqual(@as(usize, 1), state.object);
+    try testing.expectEqual(@as(usize, 0), state.unsafe);
+}
+
+test "buildCommandSourceExecutePayloadWithSignatures resolves ownerless selected tokens locally" {
+    const testing = std.testing;
+    const State = struct {
+        owned: usize = 0,
+        normalized: usize = 0,
+        gas_price: usize = 0,
+        coins: usize = 0,
+        object: usize = 0,
+        unsafe: usize = 0,
+    };
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var state = State{};
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const st = @as(*State, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "suix_getOwnedObjects")) {
+                st.owned += 1;
+                try testing.expect(std.mem.indexOf(u8, req.params_json, "0xowner") != null);
+                try testing.expect(std.mem.indexOf(u8, req.params_json, "0x2::example::Thing") != null);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xselobj-payload\",\"type\":\"0x2::example::Thing\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                st.normalized += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"parameters\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"example\",\"name\":\"Thing\",\"typeParams\":[]}},\"U64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[],\"typeParameters\":[],\"visibility\":\"Public\",\"isEntry\":true}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "suix_getReferenceGasPrice")) {
+                st.gas_price += 1;
+                return alloc.dupe(u8, "{\"result\":\"29\"}");
+            }
+            if (std.mem.eql(u8, req.method, "suix_getCoins")) {
+                st.coins += 1;
+                try testing.expect(std.mem.indexOf(u8, req.params_json, "0xowner") != null);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xgas-payload-select\",\"version\":\"41\",\"digest\":\"gas-payload-select-digest\",\"balance\":\"800\"}],\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getObject")) {
+                st.object += 1;
+                try testing.expect(std.mem.indexOf(u8, req.params_json, "0xselobj-payload") != null);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":{\"objectId\":\"0xselobj-payload\",\"version\":\"25\",\"digest\":\"selobj-payload-digest\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall") or std.mem.eql(u8, req.method, "unsafe_batchTransaction")) {
+                st.unsafe += 1;
+                return error.TestUnexpectedResult;
+            }
+            return error.TestUnexpectedResult;
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &state,
+        .callback = callback,
+    };
+
+    const payload = try client_instance.buildCommandSourceExecutePayloadWithSignatures(
+        allocator,
+        "0xowner",
+        .{
+            .move_call = .{
+                .package_id = "0x2",
+                .module = "counter",
+                .function_name = "increment",
+                .type_args = "[]",
+                .arguments = "[\"select:{\\\"kind\\\":\\\"owned_object_struct_type\\\",\\\"structType\\\":\\\"0x2::example::Thing\\\"}\",7]",
+            },
+        },
+        null,
+        100,
+        &.{"sig-select-local"},
+        null,
+    );
+    defer allocator.free(payload);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
+    defer parsed.deinit();
+    try testing.expect(parsed.value == .array);
+    try testing.expectEqualStrings("sig-select-local", parsed.value.array.items[1].array.items[0].string);
+
+    const tx_block = try std.json.parseFromSlice(std.json.Value, allocator, parsed.value.array.items[0].string, .{});
+    defer tx_block.deinit();
+    try testing.expectEqualStrings("0xowner", tx_block.value.object.get("sender").?.string);
+    try testing.expectEqual(@as(i64, 100), tx_block.value.object.get("gasBudget").?.integer);
+    try testing.expectEqual(@as(i64, 29), tx_block.value.object.get("gasPrice").?.integer);
+    try testing.expectEqualStrings("0xgas-payload-select", tx_block.value.object.get("gasPayment").?.array.items[0].object.get("objectId").?.string);
+
+    try testing.expectEqual(@as(usize, 1), state.owned);
+    try testing.expectEqual(@as(usize, 1), state.normalized);
+    try testing.expectEqual(@as(usize, 1), state.gas_price);
+    try testing.expectEqual(@as(usize, 1), state.coins);
+    try testing.expectEqual(@as(usize, 1), state.object);
+    try testing.expectEqual(@as(usize, 0), state.unsafe);
+}
+
+test "buildCommandSourceExecutePayloadWithSignatures auto-selects gas locally when gas object is omitted" {
+    const testing = std.testing;
+    const State = struct {
+        gas_price: usize = 0,
+        coins: usize = 0,
+        object: usize = 0,
+        unsafe: usize = 0,
+    };
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var state = State{};
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const st = @as(*State, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "suix_getReferenceGasPrice")) {
+                st.gas_price += 1;
+                return alloc.dupe(u8, "{\"result\":\"11\"}");
+            }
+            if (std.mem.eql(u8, req.method, "suix_getCoins")) {
+                st.coins += 1;
+                try testing.expect(std.mem.indexOf(u8, req.params_json, "0xowner") != null);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xgasauto-payload\",\"version\":\"13\",\"digest\":\"gas-auto-payload-digest\",\"balance\":\"500\"}],\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getObject")) {
+                st.object += 1;
+                if (std.mem.indexOf(u8, req.params_json, "0xcoin") != null) {
+                    return alloc.dupe(
+                        u8,
+                        "{\"result\":{\"data\":{\"objectId\":\"0xcoin\",\"version\":\"9\",\"digest\":\"coin-digest\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}}",
+                    );
+                }
+                return error.TestUnexpectedResult;
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall") or std.mem.eql(u8, req.method, "unsafe_batchTransaction")) {
+                st.unsafe += 1;
+                return error.TestUnexpectedResult;
+            }
+            return error.TestUnexpectedResult;
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &state,
+        .callback = callback,
+    };
+
+    const payload = try client_instance.buildCommandSourceExecutePayloadWithSignatures(
+        allocator,
+        "0xowner",
+        .{ .commands_json = "[{\"kind\":\"TransferObjects\",\"objects\":[\"0xcoin\"],\"address\":\"0xreceiver\"}]" },
+        null,
+        100,
+        &.{"sig-local-auto-gas"},
+        null,
+    );
+    defer allocator.free(payload);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
+    defer parsed.deinit();
+    try testing.expect(parsed.value == .array);
+    try testing.expectEqualStrings("sig-local-auto-gas", parsed.value.array.items[1].array.items[0].string);
+
+    const tx_block = try std.json.parseFromSlice(std.json.Value, allocator, parsed.value.array.items[0].string, .{});
+    defer tx_block.deinit();
+    try testing.expectEqualStrings("0xowner", tx_block.value.object.get("sender").?.string);
+    try testing.expectEqual(@as(i64, 100), tx_block.value.object.get("gasBudget").?.integer);
+    try testing.expectEqual(@as(i64, 11), tx_block.value.object.get("gasPrice").?.integer);
+    try testing.expectEqualStrings("0xgasauto-payload", tx_block.value.object.get("gasPayment").?.array.items[0].object.get("objectId").?.string);
+
+    try testing.expectEqual(@as(usize, 1), state.gas_price);
+    try testing.expectEqual(@as(usize, 1), state.coins);
+    try testing.expectEqual(@as(usize, 1), state.object);
+    try testing.expectEqual(@as(usize, 0), state.unsafe);
+}
+
+test "buildCommandSourceExecutePayloadFromDefaultKeystore resolves ownerless selected tokens locally" {
+    const testing = std.testing;
+    const State = struct {
+        owned: usize = 0,
+        normalized: usize = 0,
+        gas_price: usize = 0,
+        coins: usize = 0,
+        object: usize = 0,
+        unsafe: usize = 0,
+    };
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const keystore_path = try std.fmt.allocPrint(allocator, "tmp_client_build_payload_default_selected_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(keystore_path);
+
+    const seed = [_]u8{0x73} ** 32;
+    var encoded_key_bytes: [33]u8 = undefined;
+    encoded_key_bytes[0] = 0;
+    encoded_key_bytes[1..].* = seed;
+    const encoded_len = std.base64.standard.Encoder.calcSize(encoded_key_bytes.len);
+    const encoded_key = try allocator.alloc(u8, encoded_len);
+    defer allocator.free(encoded_key);
+    _ = std.base64.standard.Encoder.encode(encoded_key, &encoded_key_bytes);
+
+    const keystore_contents = try std.fmt.allocPrint(allocator, "[\"{s}\"]", .{encoded_key});
+    defer allocator.free(keystore_contents);
+
+    const cwd = std.fs.cwd();
+    try cwd.writeFile(.{
+        .sub_path = keystore_path,
+        .data = keystore_contents,
+    });
+    defer cwd.deleteFile(keystore_path) catch {};
+
+    const old_override = keystore.test_keystore_path_override;
+    keystore.test_keystore_path_override = keystore_path;
+    defer keystore.test_keystore_path_override = old_override;
+
+    var state = State{};
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const st = @as(*State, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "suix_getOwnedObjects")) {
+                st.owned += 1;
+                try testing.expect(std.mem.indexOf(u8, req.params_json, "0xowner") != null);
+                try testing.expect(std.mem.indexOf(u8, req.params_json, "0x2::example::Thing") != null);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xselobj-default\",\"type\":\"0x2::example::Thing\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}],\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                st.normalized += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"parameters\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"example\",\"name\":\"Thing\",\"typeParams\":[]}},\"U64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[],\"typeParameters\":[],\"visibility\":\"Public\",\"isEntry\":true}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "suix_getReferenceGasPrice")) {
+                st.gas_price += 1;
+                return alloc.dupe(u8, "{\"result\":\"37\"}");
+            }
+            if (std.mem.eql(u8, req.method, "suix_getCoins")) {
+                st.coins += 1;
+                try testing.expect(std.mem.indexOf(u8, req.params_json, "0xowner") != null);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xgas-default-select\",\"version\":\"61\",\"digest\":\"gas-default-select-digest\",\"balance\":\"900\"}],\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getObject")) {
+                st.object += 1;
+                try testing.expect(std.mem.indexOf(u8, req.params_json, "0xselobj-default") != null);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":{\"objectId\":\"0xselobj-default\",\"version\":\"45\",\"digest\":\"selobj-default-digest\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall") or std.mem.eql(u8, req.method, "unsafe_batchTransaction")) {
+                st.unsafe += 1;
+                return error.TestUnexpectedResult;
+            }
+            return error.TestUnexpectedResult;
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &state,
+        .callback = callback,
+    };
+
+    const payload = try client_instance.buildCommandSourceExecutePayloadFromDefaultKeystore(
+        allocator,
+        "0xowner",
+        .{
+            .move_call = .{
+                .package_id = "0x2",
+                .module = "counter",
+                .function_name = "increment",
+                .type_args = "[]",
+                .arguments = "[\"select:{\\\"kind\\\":\\\"owned_object_struct_type\\\",\\\"structType\\\":\\\"0x2::example::Thing\\\"}\",7]",
+            },
+        },
+        null,
+        100,
+        null,
+        .{ .from_keystore = true },
+    );
+    defer allocator.free(payload);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
+    defer parsed.deinit();
+    try testing.expect(parsed.value == .array);
+    try testing.expectEqual(@as(usize, 1), parsed.value.array.items[1].array.items.len);
+
+    const tx_block = try std.json.parseFromSlice(std.json.Value, allocator, parsed.value.array.items[0].string, .{});
+    defer tx_block.deinit();
+    try testing.expectEqualStrings("0xowner", tx_block.value.object.get("sender").?.string);
+    try testing.expectEqual(@as(i64, 100), tx_block.value.object.get("gasBudget").?.integer);
+    try testing.expectEqual(@as(i64, 37), tx_block.value.object.get("gasPrice").?.integer);
+    try testing.expectEqualStrings("0xgas-default-select", tx_block.value.object.get("gasPayment").?.array.items[0].object.get("objectId").?.string);
+
+    try testing.expectEqual(@as(usize, 1), state.owned);
+    try testing.expectEqual(@as(usize, 1), state.normalized);
+    try testing.expectEqual(@as(usize, 1), state.gas_price);
+    try testing.expectEqual(@as(usize, 1), state.coins);
+    try testing.expectEqual(@as(usize, 1), state.object);
+    try testing.expectEqual(@as(usize, 0), state.unsafe);
+}
+
+test "buildCommandSourceExecutePayloadFromDefaultKeystore auto-selects gas locally when gas object is omitted" {
+    const testing = std.testing;
+    const State = struct {
+        gas_price: usize = 0,
+        coins: usize = 0,
+        object: usize = 0,
+        unsafe: usize = 0,
+    };
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const keystore_path = try std.fmt.allocPrint(allocator, "tmp_client_build_payload_default_auto_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(keystore_path);
+
+    const seed = [_]u8{0x72} ** 32;
+    var encoded_key_bytes: [33]u8 = undefined;
+    encoded_key_bytes[0] = 0;
+    encoded_key_bytes[1..].* = seed;
+    const encoded_len = std.base64.standard.Encoder.calcSize(encoded_key_bytes.len);
+    const encoded_key = try allocator.alloc(u8, encoded_len);
+    defer allocator.free(encoded_key);
+    _ = std.base64.standard.Encoder.encode(encoded_key, &encoded_key_bytes);
+
+    const keystore_contents = try std.fmt.allocPrint(allocator, "[\"{s}\"]", .{encoded_key});
+    defer allocator.free(keystore_contents);
+
+    const cwd = std.fs.cwd();
+    try cwd.writeFile(.{
+        .sub_path = keystore_path,
+        .data = keystore_contents,
+    });
+    defer cwd.deleteFile(keystore_path) catch {};
+
+    const old_override = keystore.test_keystore_path_override;
+    keystore.test_keystore_path_override = keystore_path;
+    defer keystore.test_keystore_path_override = old_override;
+
+    var state = State{};
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const st = @as(*State, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "suix_getReferenceGasPrice")) {
+                st.gas_price += 1;
+                return alloc.dupe(u8, "{\"result\":\"15\"}");
+            }
+            if (std.mem.eql(u8, req.method, "suix_getCoins")) {
+                st.coins += 1;
+                try testing.expect(std.mem.indexOf(u8, req.params_json, "0xowner") != null);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xgasauto-default\",\"version\":\"16\",\"digest\":\"gas-auto-default-digest\",\"balance\":\"500\"}],\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getObject")) {
+                st.object += 1;
+                if (std.mem.indexOf(u8, req.params_json, "0xcoin") != null) {
+                    return alloc.dupe(
+                        u8,
+                        "{\"result\":{\"data\":{\"objectId\":\"0xcoin\",\"version\":\"5\",\"digest\":\"coin-digest-2\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}}",
+                    );
+                }
+                return error.TestUnexpectedResult;
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall") or std.mem.eql(u8, req.method, "unsafe_batchTransaction")) {
+                st.unsafe += 1;
+                return error.TestUnexpectedResult;
+            }
+            return error.TestUnexpectedResult;
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &state,
+        .callback = callback,
+    };
+
+    const payload = try client_instance.buildCommandSourceExecutePayloadFromDefaultKeystore(
+        allocator,
+        "0xowner",
+        .{ .commands_json = "[{\"kind\":\"TransferObjects\",\"objects\":[\"0xcoin\"],\"address\":\"0xreceiver\"}]" },
+        null,
+        100,
+        null,
+        .{ .from_keystore = true },
+    );
+    defer allocator.free(payload);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
+    defer parsed.deinit();
+    try testing.expect(parsed.value == .array);
+    try testing.expectEqual(@as(usize, 1), parsed.value.array.items[1].array.items.len);
+
+    const tx_block = try std.json.parseFromSlice(std.json.Value, allocator, parsed.value.array.items[0].string, .{});
+    defer tx_block.deinit();
+    try testing.expectEqualStrings("0xowner", tx_block.value.object.get("sender").?.string);
+    try testing.expectEqual(@as(i64, 100), tx_block.value.object.get("gasBudget").?.integer);
+    try testing.expectEqual(@as(i64, 15), tx_block.value.object.get("gasPrice").?.integer);
+    try testing.expectEqualStrings("0xgasauto-default", tx_block.value.object.get("gasPayment").?.array.items[0].object.get("objectId").?.string);
+
     try testing.expectEqual(@as(usize, 1), state.gas_price);
     try testing.expectEqual(@as(usize, 1), state.coins);
     try testing.expectEqual(@as(usize, 1), state.object);

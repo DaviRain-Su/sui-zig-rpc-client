@@ -87,11 +87,21 @@ pub const OwnedSignatureList = struct {
 
 const sui_transaction_intent = [_]u8{ 0, 0, 0 };
 const ed25519_flag: u8 = 0x00;
+const secp256k1_flag: u8 = 0x01;
+const secp256r1_flag: u8 = 0x02;
+
+const SignatureScheme = enum {
+    ed25519,
+    secp256k1,
+    secp256r1,
+};
 
 const RawKeyMaterial = struct {
+    scheme: SignatureScheme,
     scheme_flag: u8,
-    seed: [32]u8,
-    public_key: [32]u8,
+    secret_key: [32]u8,
+    public_key: [33]u8,
+    public_key_len: usize,
 };
 
 fn expandTildePath(allocator: std.mem.Allocator, path: []const u8) !?[]const u8 {
@@ -146,25 +156,137 @@ fn encodeBase64Owned(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
     return encoded;
 }
 
-fn parseRawKeyMaterial(raw_key: []const u8) !RawKeyMaterial {
-    const trimmed = std.mem.trim(u8, raw_key, " \n\r\t");
-    if (trimmed.len == 0) return error.InvalidCli;
+const bech32_charset = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+const bech32m_constant: u32 = 0x2bc830a3;
 
+fn bech32Polymod(values: []const u8) u32 {
+    var chk: u32 = 1;
+    for (values) |value| {
+        const top: u8 = @intCast(chk >> 25);
+        chk = ((chk & 0x1ffffff) << 5) ^ value;
+        if ((top & 0x01) != 0) chk ^= 0x3b6a57b2;
+        if ((top & 0x02) != 0) chk ^= 0x26508e6d;
+        if ((top & 0x04) != 0) chk ^= 0x1ea119fa;
+        if ((top & 0x08) != 0) chk ^= 0x3d4233dd;
+        if ((top & 0x10) != 0) chk ^= 0x2a1462b3;
+    }
+    return chk;
+}
+
+fn decodeBech32SuiPrivateKey(text: []const u8) !?[33]u8 {
+    const trimmed = std.mem.trim(u8, text, " \n\r\t");
+    if (!std.mem.startsWith(u8, trimmed, "suiprivkey1")) return null;
+    if (trimmed.len <= "suiprivkey1".len + 6) return error.InvalidCli;
+
+    var values = std.ArrayList(u8).empty;
+    defer values.deinit(std.heap.page_allocator);
+
+    try values.ensureTotalCapacity(std.heap.page_allocator, trimmed.len);
+    for ("suiprivkey") |char| {
+        try values.append(std.heap.page_allocator, char >> 5);
+    }
+    try values.append(std.heap.page_allocator, 0);
+    for ("suiprivkey") |char| {
+        try values.append(std.heap.page_allocator, char & 31);
+    }
+
+    var data = std.ArrayList(u8).empty;
+    defer data.deinit(std.heap.page_allocator);
+
+    for (trimmed["suiprivkey1".len..]) |char| {
+        const lower = std.ascii.toLower(char);
+        const value = std.mem.indexOfScalar(u8, bech32_charset, lower) orelse return error.InvalidCli;
+        const word: u8 = @intCast(value);
+        try values.append(std.heap.page_allocator, word);
+        try data.append(std.heap.page_allocator, word);
+    }
+
+    const checksum = bech32Polymod(values.items);
+    if (checksum != 1 and checksum != bech32m_constant) return error.InvalidCli;
+    if (data.items.len < 6) return error.InvalidCli;
+
+    var decoded: [33]u8 = undefined;
+    var out_index: usize = 0;
+    var accumulator: u32 = 0;
+    var bits: u8 = 0;
+    for (data.items[0 .. data.items.len - 6]) |value| {
+        accumulator = (accumulator << 5) | value;
+        bits += 5;
+        while (bits >= 8) {
+            bits -= 8;
+            if (out_index >= decoded.len) return error.InvalidCli;
+            decoded[out_index] = @intCast((accumulator >> @as(u5, @intCast(bits))) & 0xff);
+            out_index += 1;
+        }
+    }
+    if (bits >= 5 or ((accumulator << @as(u5, @intCast(8 - bits))) & 0xff) != 0) return error.InvalidCli;
+    if (out_index != decoded.len) return error.InvalidCli;
+
+    return decoded;
+}
+
+fn decodeRawKeyBytes(raw_key: []const u8) ![33]u8 {
+    if (try decodeBech32SuiPrivateKey(raw_key)) |decoded| return decoded;
+
+    const trimmed = std.mem.trim(u8, raw_key, " \n\r\t");
     const decoded_len = std.base64.standard.Decoder.calcSizeForSlice(trimmed) catch return error.InvalidCli;
     if (decoded_len != 33) return error.InvalidCli;
 
     var decoded: [33]u8 = undefined;
     try std.base64.standard.Decoder.decode(&decoded, trimmed);
+    return decoded;
+}
+
+fn parseRawKeyMaterial(raw_key: []const u8) !RawKeyMaterial {
+    const trimmed = std.mem.trim(u8, raw_key, " \n\r\t");
+    if (trimmed.len == 0) return error.InvalidCli;
+
+    const decoded = try decodeRawKeyBytes(trimmed);
 
     const scheme_flag = decoded[0];
-    if (scheme_flag != ed25519_flag) return error.UnsupportedSignatureScheme;
 
-    const seed: [32]u8 = decoded[1..].*;
-    const keypair = try std.crypto.sign.Ed25519.KeyPair.generateDeterministic(seed);
-    return .{
-        .scheme_flag = scheme_flag,
-        .seed = seed,
-        .public_key = keypair.public_key.toBytes(),
+    const secret_key: [32]u8 = decoded[1..].*;
+
+    return switch (scheme_flag) {
+        ed25519_flag => blk: {
+            const keypair = try std.crypto.sign.Ed25519.KeyPair.generateDeterministic(secret_key);
+            var public_key: [33]u8 = undefined;
+            public_key[0..32].* = keypair.public_key.toBytes();
+            break :blk .{
+                .scheme = .ed25519,
+                .scheme_flag = scheme_flag,
+                .secret_key = secret_key,
+                .public_key = public_key,
+                .public_key_len = 32,
+            };
+        },
+        secp256k1_flag => blk: {
+            const secret = try std.crypto.sign.ecdsa.EcdsaSecp256k1Sha256.SecretKey.fromBytes(secret_key);
+            const keypair = try std.crypto.sign.ecdsa.EcdsaSecp256k1Sha256.KeyPair.fromSecretKey(secret);
+            const compressed = keypair.public_key.toCompressedSec1();
+            const public_key: [33]u8 = compressed;
+            break :blk .{
+                .scheme = .secp256k1,
+                .scheme_flag = scheme_flag,
+                .secret_key = secret_key,
+                .public_key = public_key,
+                .public_key_len = 33,
+            };
+        },
+        secp256r1_flag => blk: {
+            const secret = try std.crypto.sign.ecdsa.EcdsaP256Sha256.SecretKey.fromBytes(secret_key);
+            const keypair = try std.crypto.sign.ecdsa.EcdsaP256Sha256.KeyPair.fromSecretKey(secret);
+            const compressed = keypair.public_key.toCompressedSec1();
+            const public_key: [33]u8 = compressed;
+            break :blk .{
+                .scheme = .secp256r1,
+                .scheme_flag = scheme_flag,
+                .secret_key = secret_key,
+                .public_key = public_key,
+                .public_key_len = 33,
+            };
+        },
+        else => return error.UnsupportedSignatureScheme,
     };
 }
 
@@ -173,7 +295,7 @@ fn deriveAddressFromRawKeyString(allocator: std.mem.Allocator, raw_key: []const 
 
     var hasher = std.crypto.hash.blake2.Blake2b256.init(.{});
     hasher.update(&.{material.scheme_flag});
-    hasher.update(&material.public_key);
+    hasher.update(material.public_key[0..material.public_key_len]);
 
     var digest: [32]u8 = undefined;
     hasher.final(&digest);
@@ -201,10 +323,12 @@ fn maybeDerivePublicKeyFromRawKeyString(
         else => return err,
     };
 
-    var full_public_key: [33]u8 = undefined;
+    const full_public_key = try allocator.alloc(u8, 1 + material.public_key_len);
+    errdefer allocator.free(full_public_key);
     full_public_key[0] = material.scheme_flag;
-    full_public_key[1..].* = material.public_key;
-    return try encodeBase64Owned(allocator, &full_public_key);
+    @memcpy(full_public_key[1..], material.public_key[0..material.public_key_len]);
+    defer allocator.free(full_public_key);
+    return try encodeBase64Owned(allocator, full_public_key);
 }
 
 pub fn generateRawKeyString(allocator: std.mem.Allocator) ![]u8 {
@@ -244,16 +368,50 @@ fn signTransactionBytesWithRawKey(
     var digest: [32]u8 = undefined;
     digest_hasher.final(&digest);
 
-    const keypair = try std.crypto.sign.Ed25519.KeyPair.generateDeterministic(material.seed);
-    const signature = try keypair.sign(&digest, null);
-    const signature_bytes = signature.toBytes();
+    return switch (material.scheme) {
+        .ed25519 => blk: {
+            const keypair = try std.crypto.sign.Ed25519.KeyPair.generateDeterministic(material.secret_key);
+            const signature = try keypair.sign(&digest, null);
+            const signature_bytes = signature.toBytes();
 
-    var sui_signature: [97]u8 = undefined;
-    sui_signature[0] = material.scheme_flag;
-    sui_signature[1 .. 1 + signature_bytes.len].* = signature_bytes;
-    sui_signature[1 + signature_bytes.len ..].* = material.public_key;
+            var sui_signature: [97]u8 = undefined;
+            sui_signature[0] = material.scheme_flag;
+            sui_signature[1 .. 1 + signature_bytes.len].* = signature_bytes;
+            sui_signature[1 + signature_bytes.len ..].* = material.public_key[0..32].*;
+            break :blk try encodeBase64Owned(allocator, &sui_signature);
+        },
+        .secp256k1 => blk: {
+            const secret = try std.crypto.sign.ecdsa.EcdsaSecp256k1Sha256.SecretKey.fromBytes(material.secret_key);
+            const keypair = try std.crypto.sign.ecdsa.EcdsaSecp256k1Sha256.KeyPair.fromSecretKey(secret);
+            const signature = try keypair.signPrehashed(digest, null);
+            const signature_bytes = signature.toBytes();
 
-    return try encodeBase64Owned(allocator, &sui_signature);
+            var sui_signature: [98]u8 = undefined;
+            sui_signature[0] = material.scheme_flag;
+            sui_signature[1 .. 1 + signature_bytes.len].* = signature_bytes;
+            sui_signature[1 + signature_bytes.len ..].* = material.public_key[0..33].*;
+            break :blk try encodeBase64Owned(allocator, &sui_signature);
+        },
+        .secp256r1 => blk: {
+            const secret = try std.crypto.sign.ecdsa.EcdsaP256Sha256.SecretKey.fromBytes(material.secret_key);
+            const keypair = try std.crypto.sign.ecdsa.EcdsaP256Sha256.KeyPair.fromSecretKey(secret);
+            const signature = try keypair.signPrehashed(digest, null);
+            const signature_bytes = signature.toBytes();
+
+            var sui_signature: [98]u8 = undefined;
+            sui_signature[0] = material.scheme_flag;
+            sui_signature[1 .. 1 + signature_bytes.len].* = signature_bytes;
+            sui_signature[1 + signature_bytes.len ..].* = material.public_key[0..33].*;
+            break :blk try encodeBase64Owned(allocator, &sui_signature);
+        },
+    };
+}
+
+fn encodeRawKeyForTesting(allocator: std.mem.Allocator, scheme_flag: u8, secret_key: [32]u8) ![]u8 {
+    var raw_bytes: [33]u8 = undefined;
+    raw_bytes[0] = scheme_flag;
+    raw_bytes[1..].* = secret_key;
+    return try encodeBase64Owned(allocator, &raw_bytes);
 }
 
 fn parseKeyFromArray(
@@ -1138,7 +1296,7 @@ test "resolveAddressFromKeystoreContents derives addresses from raw key entries"
     var address_bytes: [32]u8 = undefined;
     hasher.final(&address_bytes);
 
-    const expected_address = try std.fmt.allocPrint(testing.allocator, "0x{s}", .{std.fmt.fmtSliceHexLower(&address_bytes)});
+    const expected_address = try std.fmt.allocPrint(testing.allocator, "0x{s}", .{std.fmt.bytesToHex(address_bytes, .lower)});
     defer testing.allocator.free(expected_address);
 
     const contents = try std.fmt.allocPrint(testing.allocator, "[\"{s}\"]", .{encoded_key});
@@ -1201,7 +1359,142 @@ test "signTransactionBytesFromContents signs transaction bytes from raw key entr
     const public_key = try std.crypto.sign.Ed25519.PublicKey.fromBytes(signature_bytes[65..97].*);
     try signature.verify(&digest, public_key);
 
-    try testing.expectEqualSlices(u8, &keypair.public_key.toBytes(), &signature_bytes[65..97]);
+    const ed25519_public_key = keypair.public_key.toBytes();
+    try testing.expectEqualSlices(u8, ed25519_public_key[0..], signature_bytes[65..97]);
+}
+
+test "resolveAddressFromKeystoreContents matches sui keytool vectors for secp256k1 and secp256r1 raw keys" {
+    const testing = std.testing;
+
+    const secret_key = [_]u8{
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+        0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+        0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
+        0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20,
+    };
+
+    const k1_raw = try encodeRawKeyForTesting(testing.allocator, secp256k1_flag, secret_key);
+    defer testing.allocator.free(k1_raw);
+    const r1_raw = try encodeRawKeyForTesting(testing.allocator, secp256r1_flag, secret_key);
+    defer testing.allocator.free(r1_raw);
+
+    const k1_address = try deriveAddressFromRawKeyString(testing.allocator, k1_raw);
+    defer testing.allocator.free(k1_address);
+    try testing.expectEqualStrings("0x888ccd887822e692bceebbd29743917e77932d72c7bd5da6a2a502ddef4f5837", k1_address);
+
+    const r1_address = try deriveAddressFromRawKeyString(testing.allocator, r1_raw);
+    defer testing.allocator.free(r1_address);
+    try testing.expectEqualStrings("0xae4618a47eb09f9015de8028a5775f4349eb387f2081c596b14b7bbf7e5a7551", r1_address);
+
+    const k1_public_key = (try maybeDerivePublicKeyFromRawKeyString(testing.allocator, k1_raw)).?;
+    defer testing.allocator.free(k1_public_key);
+    try testing.expectEqualStrings("AQKEv3ViJiu9aUAIV0jzvmr6Uq4xcVUYHs4xtmNRzP+ksA==", k1_public_key);
+
+    const r1_public_key = (try maybeDerivePublicKeyFromRawKeyString(testing.allocator, r1_raw)).?;
+    defer testing.allocator.free(r1_public_key);
+    try testing.expectEqualStrings("AgJRXD1uueOWuQTT/sp/VP3NDMHpl783XcpRWtCmw7QDXw==", r1_public_key);
+}
+
+test "resolveAddressFromKeystoreContents accepts suiprivkey bech32 vectors" {
+    const testing = std.testing;
+
+    const ed25519_bech32 = "suiprivkey1qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jqa4ffsr";
+    const secp256k1_bech32 = "suiprivkey1qyqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq82ukn5";
+    const secp256r1_bech32 = "suiprivkey1qgqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jqqz27ky";
+
+    const ed25519_address = try deriveAddressFromRawKeyString(testing.allocator, ed25519_bech32);
+    defer testing.allocator.free(ed25519_address);
+    try testing.expectEqualStrings("0x7573c697fa68450f04fa0dee2d39dcdc8a5ccf5db547f3e47638a6f8eeeec110", ed25519_address);
+
+    const k1_address = try deriveAddressFromRawKeyString(testing.allocator, secp256k1_bech32);
+    defer testing.allocator.free(k1_address);
+    try testing.expectEqualStrings("0x888ccd887822e692bceebbd29743917e77932d72c7bd5da6a2a502ddef4f5837", k1_address);
+
+    const r1_address = try deriveAddressFromRawKeyString(testing.allocator, secp256r1_bech32);
+    defer testing.allocator.free(r1_address);
+    try testing.expectEqualStrings("0xae4618a47eb09f9015de8028a5775f4349eb387f2081c596b14b7bbf7e5a7551", r1_address);
+}
+
+test "signTransactionBytesFromContents accepts suiprivkey bech32 entries" {
+    const testing = std.testing;
+
+    const ed25519_bech32 = "suiprivkey1qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jqa4ffsr";
+    const secp256k1_bech32 = "suiprivkey1qyqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq82ukn5";
+    const tx_bytes = try encodeBase64Owned(testing.allocator, &[_]u8{ 1, 2, 3, 4 });
+    defer testing.allocator.free(tx_bytes);
+
+    const raw_keys = [_][]const u8{ ed25519_bech32, secp256k1_bech32 };
+    for (raw_keys) |raw_key| {
+        const contents = try std.fmt.allocPrint(testing.allocator, "[\"{s}\"]", .{raw_key});
+        defer testing.allocator.free(contents);
+
+        var signed = try signTransactionBytesFromContents(
+            testing.allocator,
+            tx_bytes,
+            contents,
+            .{ .signer_selectors = &.{raw_key} },
+        );
+        defer signed.deinit(testing.allocator);
+
+        try testing.expectEqual(@as(usize, 1), signed.items.len);
+    }
+}
+
+test "signTransactionBytesFromContents signs secp256k1 and secp256r1 raw key entries" {
+    const testing = std.testing;
+
+    const secret_key = [_]u8{0x37} ** 32;
+    const tx_bytes = try encodeBase64Owned(testing.allocator, &[_]u8{ 1, 2, 3, 4 });
+    defer testing.allocator.free(tx_bytes);
+
+    const schemes = [_]struct { flag: u8 }{
+        .{ .flag = secp256k1_flag },
+        .{ .flag = secp256r1_flag },
+    };
+
+    for (schemes) |scheme| {
+        const raw_key = try encodeRawKeyForTesting(testing.allocator, scheme.flag, secret_key);
+        defer testing.allocator.free(raw_key);
+        const contents = try std.fmt.allocPrint(testing.allocator, "[\"{s}\"]", .{raw_key});
+        defer testing.allocator.free(contents);
+
+        var signed = try signTransactionBytesFromContents(
+            testing.allocator,
+            tx_bytes,
+            contents,
+            .{ .signer_selectors = &.{raw_key} },
+        );
+        defer signed.deinit(testing.allocator);
+
+        try testing.expectEqual(@as(usize, 1), signed.items.len);
+
+        const signature_len = try std.base64.standard.Decoder.calcSizeForSlice(signed.items[0]);
+        try testing.expectEqual(@as(usize, 98), signature_len);
+
+        var signature_bytes: [98]u8 = undefined;
+        try std.base64.standard.Decoder.decode(&signature_bytes, signed.items[0]);
+        try testing.expectEqual(scheme.flag, signature_bytes[0]);
+
+        var tx_decoded: [4]u8 = undefined;
+        try std.base64.standard.Decoder.decode(&tx_decoded, tx_bytes);
+
+        var digest_hasher = std.crypto.hash.blake2.Blake2b256.init(.{});
+        digest_hasher.update(&sui_transaction_intent);
+        digest_hasher.update(&tx_decoded);
+        var digest: [32]u8 = undefined;
+        digest_hasher.final(&digest);
+
+        const signature = std.crypto.sign.ecdsa.EcdsaP256Sha256.Signature.fromBytes(signature_bytes[1..65].*);
+        const public_key_bytes = signature_bytes[65..98];
+        if (scheme.flag == secp256k1_flag) {
+            const public_key = try std.crypto.sign.ecdsa.EcdsaSecp256k1Sha256.PublicKey.fromSec1(public_key_bytes);
+            const k1_signature = std.crypto.sign.ecdsa.EcdsaSecp256k1Sha256.Signature.fromBytes(signature_bytes[1..65].*);
+            try k1_signature.verifyPrehashed(digest, public_key);
+        } else {
+            const public_key = try std.crypto.sign.ecdsa.EcdsaP256Sha256.PublicKey.fromSec1(public_key_bytes);
+            try signature.verifyPrehashed(digest, public_key);
+        }
+    }
 }
 
 test "listAccountEntriesFromContents summarizes mixed keystore entries" {
