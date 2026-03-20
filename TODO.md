@@ -411,7 +411,7 @@ what the generic path still needs to finish.
 
 ## Wallet Core V1 Follow-Up
 
-- [ ] Wire `request sign/send` challenge-prompt states into the same request
+- [x] Wire `request sign/send` challenge-prompt states into the same request
   lifecycle store instead of leaving them outside the tracked state machine.
 - [ ] Keep shrinking `unsafe_moveCall` / `unsafe_batchTransaction` usage in the
   remaining generic Sui execution paths.

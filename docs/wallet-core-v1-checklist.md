@@ -71,10 +71,11 @@ These items should be true before calling the current core "v1 ok".
   - `built`
   - `resolved`
   - `sponsored`
-  - `signed`
-  - `submitted`
-  - `confirmed`
-  - `failed`
+- `signed`
+- `challenge_required`
+- `submitted`
+- `confirmed`
+- `failed`
   - `cancelled`
   - `replaced`
 

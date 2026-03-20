@@ -7002,22 +7002,20 @@ pub fn runCommandWithProgrammaticProvider(
             );
             var summary = try summarizeRequestLifecycleOutput(allocator, output.items, .sign);
             defer summary.deinit(allocator);
-            if (!summary.is_challenge_prompt) {
-                const entry_id = try resolvedRequestLifecycleEntryId(allocator, args, "request-signed");
-                defer allocator.free(entry_id);
-                try upsertRequestLifecycleEntry(
-                    allocator,
-                    entry_id,
-                    "execute_payload",
-                    summary.next_state.?,
-                    request_json,
-                    output.items,
-                    summary.digest,
-                    args.request_correlation_id,
-                    0,
-                    null,
-                );
-            }
+            const entry_id = try resolvedRequestLifecycleEntryId(allocator, args, "request-signed");
+            defer allocator.free(entry_id);
+            try upsertRequestLifecycleEntry(
+                allocator,
+                entry_id,
+                "execute_payload",
+                if (summary.is_challenge_prompt) "challenge_required" else summary.next_state.?,
+                request_json,
+                output.items,
+                summary.digest,
+                args.request_correlation_id,
+                0,
+                null,
+            );
             try writer.writeAll(output.items);
         },
         .request_send => {
@@ -7036,22 +7034,20 @@ pub fn runCommandWithProgrammaticProvider(
             );
             var summary = try summarizeRequestLifecycleOutput(allocator, output.items, .send);
             defer summary.deinit(allocator);
-            if (!summary.is_challenge_prompt) {
-                const entry_id = try resolvedRequestLifecycleEntryId(allocator, args, "request-send");
-                defer allocator.free(entry_id);
-                try upsertRequestLifecycleEntry(
-                    allocator,
-                    entry_id,
-                    "request_execution",
-                    summary.next_state.?,
-                    request_json,
-                    output.items,
-                    summary.digest,
-                    args.request_correlation_id,
-                    1,
-                    null,
-                );
-            }
+            const entry_id = try resolvedRequestLifecycleEntryId(allocator, args, "request-send");
+            defer allocator.free(entry_id);
+            try upsertRequestLifecycleEntry(
+                allocator,
+                entry_id,
+                "request_execution",
+                if (summary.is_challenge_prompt) "challenge_required" else summary.next_state.?,
+                request_json,
+                output.items,
+                summary.digest,
+                args.request_correlation_id,
+                if (summary.is_challenge_prompt) 0 else 1,
+                null,
+            );
             try writer.writeAll(output.items);
         },
         .request_schedule => {
@@ -26655,6 +26651,222 @@ test "runCommand request_sponsor tracks sponsored request lifecycle state" {
     try testing.expect(state.entries[0].request_json != null);
     try testing.expect(state.entries[0].artifact_json != null);
     try testing.expectEqualStrings("req-sponsored-1", state.entries[0].correlation_id.?);
+}
+
+test "runCommandWithProgrammaticProvider request_sign tracks challenge prompts in request lifecycle state" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const state_path = try std.fmt.allocPrint(allocator, "tmp_request_sign_challenge_state_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(state_path);
+    defer std.fs.cwd().deleteFile(state_path) catch {};
+
+    const old_override = request_state.test_request_state_path_override;
+    request_state.test_request_state_path_override = state_path;
+    defer request_state.test_request_state_path_override = old_override;
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "request",
+        "sign",
+        "--request",
+        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"typeArguments\":[],\"arguments\":[7]}],\"sender\":\"0xprovider\",\"gasBudget\":1200,\"gasPrice\":8,\"gasPayment\":[{\"objectId\":\"0x999\",\"version\":\"1\",\"digest\":\"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}]}",
+        "--correlation-id",
+        "req-sign-challenge-1",
+    });
+    defer args.deinit(allocator);
+
+    const State = struct {
+        execute_calls: usize = 0,
+        unsafe_calls: usize = 0,
+    };
+    var state = State{};
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const ctx = @as(*State, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "sui_executeTransactionBlock")) {
+                ctx.execute_calls += 1;
+                return alloc.dupe(u8, "{\"result\":{\"digest\":\"0xshouldnotexecute\"}}");
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall") or std.mem.eql(u8, req.method, "unsafe_batchTransaction")) {
+                ctx.unsafe_calls += 1;
+                return alloc.dupe(u8, "{\"result\":{\"txBytes\":\"AQIDBA==\"}}");
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = &state,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    var authorizer_called = false;
+    try runCommandWithProgrammaticProvider(
+        allocator,
+        &rpc,
+        &args,
+        output.writer(allocator),
+        .{
+            .passkey = .{
+                .address = "0xprovider",
+                .session = .{ .kind = .passkey, .session_id = "request-sign-session" },
+                .authorizer = .{
+                    .context = &authorizer_called,
+                    .callback = struct {
+                        fn call(context: *anyopaque, _: std.mem.Allocator, _: client.tx_request_builder.RemoteAuthorizationRequest) !client.tx_request_builder.RemoteAuthorizationResult {
+                            const seen = @as(*bool, @ptrCast(@alignCast(context)));
+                            seen.* = true;
+                            return .{};
+                        }
+                    }.call,
+                },
+                .session_challenge = .{
+                    .passkey = .{
+                        .rp_id = "wallet.example",
+                        .challenge_b64url = "challenge-request-sign",
+                    },
+                },
+                .session_action = .execute,
+                .session_supports_execute = false,
+            },
+        },
+    );
+
+    try testing.expect(!authorizer_called);
+    try testing.expectEqual(@as(usize, 0), state.execute_calls);
+    try testing.expectEqual(@as(usize, 0), state.unsafe_calls);
+    try testing.expect(std.mem.indexOf(u8, output.items, "\"challenge\"") != null);
+
+    var loaded = try request_state.loadDefaultRequestState(allocator);
+    defer loaded.deinit(allocator);
+
+    try testing.expectEqual(@as(usize, 1), loaded.entries.len);
+    try testing.expectEqualStrings("req-sign-challenge-1", loaded.entries[0].id);
+    try testing.expectEqualStrings("execute_payload", loaded.entries[0].kind);
+    try testing.expectEqualStrings("challenge_required", loaded.entries[0].state);
+    try testing.expect(loaded.entries[0].request_json != null);
+    try testing.expect(loaded.entries[0].artifact_json != null);
+    try testing.expect(std.mem.indexOf(u8, loaded.entries[0].artifact_json.?, "\"challenge\"") != null);
+    try testing.expectEqual(@as(u64, 0), loaded.entries[0].submit_count);
+    try testing.expect(loaded.entries[0].digest == null);
+    try testing.expectEqualStrings("req-sign-challenge-1", loaded.entries[0].correlation_id.?);
+}
+
+test "runCommandWithProgrammaticProvider request_send tracks challenge prompts in request lifecycle state" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const state_path = try std.fmt.allocPrint(allocator, "tmp_request_send_challenge_state_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(state_path);
+    defer std.fs.cwd().deleteFile(state_path) catch {};
+
+    const old_override = request_state.test_request_state_path_override;
+    request_state.test_request_state_path_override = state_path;
+    defer request_state.test_request_state_path_override = old_override;
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "request",
+        "send",
+        "--request",
+        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"typeArguments\":[],\"arguments\":[7]}],\"sender\":\"0xprovider\",\"gasBudget\":1200,\"gasPrice\":8,\"gasPayment\":[{\"objectId\":\"0x999\",\"version\":\"1\",\"digest\":\"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}]}",
+        "--correlation-id",
+        "req-send-challenge-1",
+        "--provider",
+        "{\"kind\":\"passkey\",\"address\":\"0xprovider\",\"session\":{\"kind\":\"passkey\",\"sessionId\":\"request-send-session\"},\"challenge\":{\"passkey\":{\"rpId\":\"wallet.example\",\"challengeB64url\":\"challenge-request-send\"}},\"authorizer\":{\"exec\":[\"wallet-helper\",\"authorize\"]}}",
+    });
+    defer args.deinit(allocator);
+
+    const State = struct {
+        execute_calls: usize = 0,
+        unsafe_calls: usize = 0,
+    };
+    var state = State{};
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const ctx = @as(*State, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "sui_executeTransactionBlock")) {
+                ctx.execute_calls += 1;
+                return alloc.dupe(u8, "{\"result\":{\"digest\":\"0xshouldnotexecute\"}}");
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall") or std.mem.eql(u8, req.method, "unsafe_batchTransaction")) {
+                ctx.unsafe_calls += 1;
+                return alloc.dupe(u8, "{\"result\":{\"txBytes\":\"AQIDBA==\"}}");
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = &state,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    var authorizer_called = false;
+    try runCommandWithProgrammaticProvider(
+        allocator,
+        &rpc,
+        &args,
+        output.writer(allocator),
+        .{
+            .passkey = .{
+                .address = "0xprovider",
+                .session = .{ .kind = .passkey, .session_id = "request-send-session" },
+                .authorizer = .{
+                    .context = &authorizer_called,
+                    .callback = struct {
+                        fn call(context: *anyopaque, _: std.mem.Allocator, _: client.tx_request_builder.RemoteAuthorizationRequest) !client.tx_request_builder.RemoteAuthorizationResult {
+                            const seen = @as(*bool, @ptrCast(@alignCast(context)));
+                            seen.* = true;
+                            return .{};
+                        }
+                    }.call,
+                },
+                .session_challenge = .{
+                    .passkey = .{
+                        .rp_id = "wallet.example",
+                        .challenge_b64url = "challenge-request-send",
+                    },
+                },
+                .session_action = .execute,
+                .session_supports_execute = false,
+            },
+        },
+    );
+
+    try testing.expect(!authorizer_called);
+    try testing.expectEqual(@as(usize, 0), state.execute_calls);
+    try testing.expectEqual(@as(usize, 0), state.unsafe_calls);
+    try testing.expect(std.mem.indexOf(u8, output.items, "\"challenge\"") != null);
+
+    var loaded = try request_state.loadDefaultRequestState(allocator);
+    defer loaded.deinit(allocator);
+
+    try testing.expectEqual(@as(usize, 1), loaded.entries.len);
+    try testing.expectEqualStrings("req-send-challenge-1", loaded.entries[0].id);
+    try testing.expectEqualStrings("request_execution", loaded.entries[0].kind);
+    try testing.expectEqualStrings("challenge_required", loaded.entries[0].state);
+    try testing.expect(loaded.entries[0].request_json != null);
+    try testing.expect(loaded.entries[0].artifact_json != null);
+    try testing.expect(std.mem.indexOf(u8, loaded.entries[0].artifact_json.?, "\"challenge\"") != null);
+    try testing.expectEqual(@as(u64, 0), loaded.entries[0].submit_count);
+    try testing.expect(loaded.entries[0].digest == null);
+    try testing.expectEqualStrings("req-send-challenge-1", loaded.entries[0].correlation_id.?);
 }
 
 test "runCommand wallet sponsor request alias prints sponsor envelope artifact" {

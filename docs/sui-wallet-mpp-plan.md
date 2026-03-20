@@ -480,6 +480,7 @@ At minimum, requests should be able to move through:
 - `resolved`
 - `sponsored`
 - `signed`
+- `challenge_required`
 - `submitted`
 - `confirmed`
 - `failed`
@@ -493,6 +494,7 @@ The local CLI now persists a concrete first pass of that state machine in
 - `request dry-run` -> `resolved`
 - `request sponsor` -> `sponsored`
 - `request sign` -> `signed`
+- `request sign` / `request send` challenge prompt -> `challenge_required`
 - `request send` -> `submitted` / `confirmed` / `failed`
 - `request schedule` / `request cancel` / `request resume` keep driving the
   scheduler-specific states on the same store
