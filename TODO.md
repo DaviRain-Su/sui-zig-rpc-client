@@ -358,8 +358,10 @@ what the generic path still needs to finish.
   CLI.
 - [x] Add initial `wallet` CLI lifecycle commands:
   `address/balance`.
-- [ ] Add remaining `wallet` CLI lifecycle commands:
+- [x] Add remaining core `wallet` CLI lifecycle commands:
   create/import/use.
+- [x] Add active wallet selector state for `wallet use` and selector-less
+  `wallet *` commands.
 - [x] Add initial `request` CLI lifecycle commands:
   build/inspect/dry-run.
 - [x] Extend initial `wallet` CLI lifecycle commands with direct resource views:

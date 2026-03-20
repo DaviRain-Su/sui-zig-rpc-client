@@ -12,6 +12,9 @@ pub const Command = enum {
     help,
     version,
     rpc,
+    wallet_create,
+    wallet_import,
+    wallet_use,
     wallet_address,
     wallet_balance,
     wallet_coins,
@@ -91,8 +94,12 @@ pub const ParsedArgs = struct {
     account_coins_json: bool = false,
     account_objects_json: bool = false,
     account_resources_json: bool = false,
+    wallet_json: bool = false,
     events_json: bool = false,
     account_selector: ?[]const u8 = null,
+    wallet_alias: ?[]const u8 = null,
+    wallet_private_key: ?[]const u8 = null,
+    wallet_activate: bool = true,
     account_coin_type: ?[]const u8 = null,
     account_coins_cursor: ?[]const u8 = null,
     account_coins_limit: ?u64 = null,
@@ -176,6 +183,8 @@ pub const ParsedArgs = struct {
     owned_tx_build_gas_payment: ?[]const u8 = null,
     owned_tx_session_response: ?[]const u8 = null,
     owned_tx_provider_config: ?[]const u8 = null,
+    owned_wallet_alias: ?[]const u8 = null,
+    owned_wallet_private_key: ?[]const u8 = null,
     owned_account_objects_filter: ?[]const u8 = null,
     owned_account_objects_package: ?[]const u8 = null,
     owned_event_filter: ?[]const u8 = null,
@@ -222,6 +231,8 @@ pub const ParsedArgs = struct {
         if (self.owned_tx_build_gas_payment) |value| allocator.free(value);
         if (self.owned_tx_session_response) |value| allocator.free(value);
         if (self.owned_tx_provider_config) |value| allocator.free(value);
+        if (self.owned_wallet_alias) |value| allocator.free(value);
+        if (self.owned_wallet_private_key) |value| allocator.free(value);
         if (self.owned_account_objects_filter) |value| allocator.free(value);
         if (self.owned_account_objects_package) |value| allocator.free(value);
         if (self.owned_event_filter) |value| allocator.free(value);
@@ -2546,6 +2557,38 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
             if (std.mem.eql(u8, token, "wallet")) {
                 if (i + 1 >= args.len) return error.InvalidCli;
                 const sub = args[i + 1];
+                if (std.mem.eql(u8, sub, "create")) {
+                    parsed.command = .wallet_create;
+                    parsed.has_command = true;
+                    i += 2;
+                    continue;
+                }
+                if (std.mem.eql(u8, sub, "import")) {
+                    parsed.command = .wallet_import;
+                    parsed.has_command = true;
+                    i += 2;
+                    if (i < args.len and !std.mem.startsWith(u8, args[i], "--")) {
+                        try setOptionalStringArg(
+                            allocator,
+                            &parsed,
+                            args[i],
+                            &parsed.owned_wallet_private_key,
+                            &parsed.wallet_private_key,
+                        );
+                        i += 1;
+                    }
+                    continue;
+                }
+                if (std.mem.eql(u8, sub, "use")) {
+                    parsed.command = .wallet_use;
+                    parsed.has_command = true;
+                    i += 2;
+                    if (i < args.len and !std.mem.startsWith(u8, args[i], "--")) {
+                        parsed.account_selector = args[i];
+                        i += 1;
+                    }
+                    continue;
+                }
                 if (std.mem.eql(u8, sub, "address")) {
                     parsed.command = .wallet_address;
                     parsed.has_command = true;
@@ -3999,6 +4042,43 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
             return error.InvalidCli;
         }
 
+        if (parsed.command == .wallet_create or parsed.command == .wallet_import or parsed.command == .wallet_use) {
+            if (std.mem.eql(u8, token, "--json")) {
+                parsed.wallet_json = true;
+                i += 1;
+                continue;
+            }
+            if ((parsed.command == .wallet_create or parsed.command == .wallet_import) and std.mem.eql(u8, token, "--alias")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                try setOptionalStringArg(
+                    allocator,
+                    &parsed,
+                    args[i + 1],
+                    &parsed.owned_wallet_alias,
+                    &parsed.wallet_alias,
+                );
+                i += 2;
+                continue;
+            }
+            if (parsed.command == .wallet_import and (std.mem.eql(u8, token, "--private-key") or std.mem.eql(u8, token, "--key"))) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                try setOptionalFileBackedArg(
+                    allocator,
+                    &parsed.owned_wallet_private_key,
+                    &parsed.wallet_private_key,
+                    args[i + 1],
+                );
+                i += 2;
+                continue;
+            }
+            if ((parsed.command == .wallet_create or parsed.command == .wallet_import) and std.mem.eql(u8, token, "--no-activate")) {
+                parsed.wallet_activate = false;
+                i += 1;
+                continue;
+            }
+            return error.InvalidCli;
+        }
+
         if (parsed.command == .wallet_balance) {
             if (std.mem.eql(u8, token, "--coin-type")) {
                 if (i + 1 >= args.len) return error.InvalidCli;
@@ -4880,6 +4960,19 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
             if (selector.len == 0) return error.InvalidCli;
         }
     }
+    if (parsed.command == .wallet_create or parsed.command == .wallet_import) {
+        if (parsed.wallet_alias) |alias| {
+            if (alias.len == 0) return error.InvalidCli;
+        }
+    }
+    if (parsed.command == .wallet_import) {
+        const raw_key = parsed.wallet_private_key orelse return error.InvalidCli;
+        if (std.mem.trim(u8, raw_key, " \n\r\t").len == 0) return error.InvalidCli;
+    }
+    if (parsed.command == .wallet_use) {
+        const selector = parsed.account_selector orelse return error.InvalidCli;
+        if (selector.len == 0) return error.InvalidCli;
+    }
     if (parsed.command == .wallet_balance) {
         if (parsed.account_selector) |selector| {
             if (selector.len == 0) return error.InvalidCli;
@@ -5035,6 +5128,17 @@ pub fn printUsage(writer: anytype) !void {
         "                      <alias>[.<idx>] vec:[...] vector[...] option:some:<json> some(...) option:none\n" ++
         "    selected request tokens: select:{{\"kind\":\"owned_object_struct_type\",...}} select:{{\"kind\":\"coin_with_min_balance\",...}} select:{{\"kind\":\"object_preset\",\"name\":\"clock\"}} select:{{\"kind\":\"object_input\",\"objectId\":\"0x...\",\"inputKind\":\"shared\",\"mutable\":true,\"initialSharedVersion\":1}}\n" ++
         "                      bare values still fall back to string/JSON parsing\n" ++
+        "  wallet create                       Generate a new local keystore wallet entry\n" ++
+        "    --alias <name>                    Optional alias stored with the entry\n" ++
+        "    --no-activate                     Leave the current active wallet selector unchanged\n" ++
+        "    --json                            Emit machine-readable wallet metadata\n" ++
+        "  wallet import <private-key>         Import a raw Sui private key into the local keystore\n" ++
+        "    --private-key <value|@file>       Optional file-backed form of the same input\n" ++
+        "    --alias <name>                    Optional alias stored with the entry\n" ++
+        "    --no-activate                     Leave the current active wallet selector unchanged\n" ++
+        "    --json                            Emit machine-readable wallet metadata\n" ++
+        "  wallet use <selector|0xaddress>     Set the active wallet selector for wallet commands\n" ++
+        "    --json                            Emit machine-readable wallet metadata\n" ++
         "  wallet address [selector]           Print the resolved wallet address\n" ++
         "  wallet balance [selector]           Print aggregated coin balances for a wallet\n" ++
         "    --coin-type <type>                 Optional coin type filter\n" ++
@@ -7636,6 +7740,73 @@ test "parseCliArgs parses wallet objects command options" {
     try testing.expectEqualStrings("pool", parsed.account_objects_module.?);
     try testing.expectEqual(@as(?u64, 10), parsed.account_objects_limit);
     try testing.expect(parsed.account_objects_json);
+}
+
+test "parseCliArgs parses wallet create command options" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "wallet",
+        "create",
+        "--alias",
+        "main",
+        "--json",
+        "--no-activate",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.wallet_create, parsed.command);
+    try testing.expectEqualStrings("main", parsed.wallet_alias.?);
+    try testing.expect(parsed.wallet_json);
+    try testing.expect(!parsed.wallet_activate);
+}
+
+test "parseCliArgs parses wallet import command options" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "wallet",
+        "import",
+        "raw-private-key",
+        "--alias",
+        "imported",
+        "--json",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.wallet_import, parsed.command);
+    try testing.expectEqualStrings("raw-private-key", parsed.wallet_private_key.?);
+    try testing.expectEqualStrings("imported", parsed.wallet_alias.?);
+    try testing.expect(parsed.wallet_json);
+    try testing.expect(parsed.wallet_activate);
+}
+
+test "parseCliArgs parses wallet use command" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "wallet",
+        "use",
+        "main",
+        "--json",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.wallet_use, parsed.command);
+    try testing.expectEqualStrings("main", parsed.account_selector.?);
+    try testing.expect(parsed.wallet_json);
 }
 
 test "parseCliArgs parses request build move-call input" {

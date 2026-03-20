@@ -348,17 +348,20 @@ The design already includes or strongly implies:
 The design does not yet spell out enough operational wallet commands for a real
 CLI user journey. These should be added explicitly:
 
-The first two implementation batches are now in place:
+The first three implementation batches are now in place:
 
 - `wallet address`
 - `wallet balance`
 - `wallet coins`
 - `wallet objects`
-
 - `wallet create`
 - `wallet import`
-- `wallet export-public`
 - `wallet use`
+
+- local active wallet selector state
+- selector-less wallet queries resolve through active state first
+
+- `wallet export-public`
 - `wallet signer inspect`
 - `wallet passkey register`
 - `wallet passkey login`
@@ -368,8 +371,8 @@ The first two implementation batches are now in place:
 - `wallet fund`
 - `wallet session revoke`
 
-That means the current design is directionally correct but not yet at
-Tempo-style CLI completeness for wallet lifecycle management.
+That means the current design is directionally correct but still not yet at
+Tempo-style CLI completeness for the broader wallet lifecycle.
 
 ### `tempo request` Style Capabilities
 

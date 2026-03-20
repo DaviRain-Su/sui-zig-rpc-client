@@ -207,6 +207,24 @@ fn maybeDerivePublicKeyFromRawKeyString(
     return try encodeBase64Owned(allocator, &full_public_key);
 }
 
+pub fn generateRawKeyString(allocator: std.mem.Allocator) ![]u8 {
+    var seed: [32]u8 = undefined;
+    std.crypto.random.bytes(&seed);
+
+    var encoded_key_bytes: [33]u8 = undefined;
+    encoded_key_bytes[0] = ed25519_flag;
+    encoded_key_bytes[1..].* = seed;
+    return try encodeBase64Owned(allocator, &encoded_key_bytes);
+}
+
+pub fn deriveAddressFromRawKey(allocator: std.mem.Allocator, raw_key: []const u8) ![]u8 {
+    return try deriveAddressFromRawKeyString(allocator, raw_key);
+}
+
+pub fn derivePublicKeyFromRawKey(allocator: std.mem.Allocator, raw_key: []const u8) ![]u8 {
+    return try maybeDerivePublicKeyFromRawKeyString(allocator, raw_key) orelse error.InvalidCli;
+}
+
 fn signTransactionBytesWithRawKey(
     allocator: std.mem.Allocator,
     raw_key: []const u8,

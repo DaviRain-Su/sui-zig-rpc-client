@@ -986,8 +986,11 @@ pub fn main() !void {
 如果 command source 本身已经是本地 programmable builder 支持的形状，CLI 现在也不会再因为 default-keystore / provider 的 signer-resolution 需求，把 `tx payload` / `tx send` 硬路由回 legacy unsafe dispatcher；这类路径会继续留在统一的 programmatic local builder 主线。
 - `tx build programmable`: 提供 `--commands` JSON 数组直接构建任意 PTB `ProgrammableTransaction`。
 - `tx build --signer`: 可复用 keystore 选择器（alias/address/key）；未提供 `--sender` 时优先使用首个可解析出地址的 signer。
-- `wallet address [selector]`: 输出解析后的钱包地址；未给 selector 时默认读取默认 keystore 的首个地址。
-- `wallet balance [selector]`: 聚合钱包 coin 余额；支持 `--coin-type`、`--limit`、`--all`。默认只聚合单页并显式输出 `has_next_page/next_cursor`，`--all` 会扫描全部 coin page。
+- `wallet create`: 生成新的本地 keystore 条目；支持 `--alias`、`--no-activate`、`--json`。默认会把新 wallet 写入 active selector state。
+- `wallet import <private-key>`: 导入 raw Sui private key 到本地 keystore；支持 `--private-key <value|@file>`、`--alias`、`--no-activate`、`--json`。
+- `wallet use <selector|0xaddress>`: 更新 active wallet selector；默认写入 `~/.sui/sui_config/wallet_state.json`，可用 `SUI_WALLET_STATE` 覆盖。
+- `wallet address [selector]`: 输出解析后的钱包地址；未给 selector 时优先读取 active wallet selector，再回退到默认 keystore 的首个地址。
+- `wallet balance [selector]`: 聚合钱包 coin 余额；支持 `--coin-type`、`--limit`、`--all`。默认只聚合单页并显式输出 `has_next_page/next_cursor`，`--all` 会扫描全部 coin page；未给 selector 时同样优先用 active wallet selector。
 - `wallet coins [selector]`: 直接查询钱包 coin page；支持 `--coin-type`、`--cursor`、`--limit`、`--all`、`--json`。
 - `wallet objects [selector]`: 直接查询钱包 owned objects；支持 `--struct-type`、`--object-id`、`--package`、`--module`、`--cursor`、`--limit`、`--all`、`--json`。
 - `request build`: 把 move-call / programmable 输入规范化成可复用 request artifact。
@@ -1015,6 +1018,7 @@ pub fn main() !void {
   - 支持 JSON 对象：`{ "rpc_url": "...", "json_rpc_url": "..." }`
   - 支持 Sui 官方 `client.yaml` 风格：`active_env` + `envs` 列表
   - 非 JSON/YAML 结构时按纯文本按原样解析为 URL（会 trim 空白）
+- `SUI_WALLET_STATE`: 覆盖 `wallet create/use` 和无 selector `wallet *` 命令使用的 active wallet state 文件（默认 `~/.sui/sui_config/wallet_state.json`）。
 - `SUI_CONFIG` 示例：
   - `client.yaml` 示例：
     - `cat > ~/.sui/sui_config/client.yaml <<'EOF'`

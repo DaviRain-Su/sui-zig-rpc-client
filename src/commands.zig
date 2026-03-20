@@ -1,6 +1,7 @@
 const std = @import("std");
 const client = @import("sui_client_zig");
 const cli = @import("./cli.zig");
+const wallet_state = @import("./wallet_state.zig");
 const tx_builder = client.tx_builder;
 const RpcRequest = @typeInfo(@typeInfo(@typeInfo(client.rpc_client.RequestSender).@"struct".fields[1].type).pointer.child).@"fn".params[2].type.?;
 
@@ -2908,24 +2909,286 @@ const OwnedWalletBalanceSummary = struct {
     }
 };
 
+const OwnedWalletLifecycleSummary = struct {
+    action: []const u8,
+    selector: []const u8,
+    address: []const u8,
+    public_key: ?[]const u8 = null,
+    keystore_path: ?[]const u8 = null,
+    wallet_state_path: ?[]const u8 = null,
+    activated: bool = false,
+
+    fn deinit(self: *OwnedWalletLifecycleSummary, allocator: std.mem.Allocator) void {
+        allocator.free(self.action);
+        allocator.free(self.selector);
+        allocator.free(self.address);
+        if (self.public_key) |value| allocator.free(value);
+        if (self.keystore_path) |value| allocator.free(value);
+        if (self.wallet_state_path) |value| allocator.free(value);
+    }
+};
+
+fn readOptionalFileAtPathAlloc(
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    max_bytes: usize,
+) !?[]u8 {
+    if (std.fs.path.isAbsolute(path)) {
+        var file = std.fs.openFileAbsolute(path, .{}) catch |err| switch (err) {
+            error.FileNotFound => return null,
+            else => return err,
+        };
+        defer file.close();
+        return try file.readToEndAlloc(allocator, max_bytes);
+    }
+    return std.fs.cwd().readFileAlloc(allocator, path, max_bytes) catch |err| switch (err) {
+        error.FileNotFound => null,
+        else => return err,
+    };
+}
+
+fn ensureParentPath(path: []const u8) !void {
+    const parent = std.fs.path.dirname(path) orelse return;
+    if (parent.len == 0) return;
+    if (std.fs.path.isAbsolute(parent)) {
+        var root = try std.fs.openDirAbsolute("/", .{});
+        defer root.close();
+        try root.makePath(std.mem.trimLeft(u8, parent, "/"));
+        return;
+    }
+    try std.fs.cwd().makePath(parent);
+}
+
+fn writeFileAtPath(path: []const u8, data: []const u8) !void {
+    try ensureParentPath(path);
+    if (std.fs.path.isAbsolute(path)) {
+        var file = try std.fs.createFileAbsolute(path, .{ .truncate = true });
+        defer file.close();
+        try file.writeAll(data);
+        return;
+    }
+    var file = try std.fs.cwd().createFile(path, .{ .truncate = true });
+    defer file.close();
+    try file.writeAll(data);
+}
+
+fn buildWalletStoredEntryJson(
+    allocator: std.mem.Allocator,
+    raw_key: []const u8,
+    alias: ?[]const u8,
+) !struct { json: []u8, address: []u8, public_key: []u8 } {
+    const address = try client.keystore.deriveAddressFromRawKey(allocator, raw_key);
+    errdefer allocator.free(address);
+    const public_key = try client.keystore.derivePublicKeyFromRawKey(allocator, raw_key);
+    errdefer allocator.free(public_key);
+
+    var encoded = std.ArrayList(u8){};
+    defer encoded.deinit(allocator);
+    try encoded.writer(allocator).print(
+        "{f}",
+        .{std.json.fmt(.{
+            .alias = alias,
+            .privateKey = raw_key,
+            .address = address,
+            .publicKey = public_key,
+        }, .{})},
+    );
+
+    return .{
+        .json = try encoded.toOwnedSlice(allocator),
+        .address = address,
+        .public_key = public_key,
+    };
+}
+
+fn appendEntryJsonToKeystoreContents(
+    allocator: std.mem.Allocator,
+    existing_contents: ?[]const u8,
+    entry_json: []const u8,
+) ![]u8 {
+    const existing = existing_contents orelse "";
+    const trimmed = std.mem.trim(u8, existing, " \n\r\t");
+    if (trimmed.len == 0) {
+        return try std.fmt.allocPrint(allocator, "[{s}]", .{entry_json});
+    }
+
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, trimmed, .{}) catch return error.InvalidCli;
+    defer parsed.deinit();
+    if (parsed.value != .array) return error.InvalidCli;
+
+    if (trimmed[trimmed.len - 1] != ']') return error.InvalidCli;
+    if (parsed.value.array.items.len == 0) {
+        return try std.fmt.allocPrint(allocator, "[{s}]", .{entry_json});
+    }
+
+    return try std.fmt.allocPrint(
+        allocator,
+        "{s},{s}]",
+        .{ trimmed[0 .. trimmed.len - 1], entry_json },
+    );
+}
+
+fn validateWalletEntryUniqueness(
+    allocator: std.mem.Allocator,
+    contents: ?[]const u8,
+    alias: ?[]const u8,
+    address: []const u8,
+    public_key: []const u8,
+) !void {
+    const trimmed = std.mem.trim(u8, contents orelse "", " \n\r\t");
+    if (trimmed.len == 0) return;
+
+    var entries = try client.keystore.listAccountEntriesFromContents(allocator, trimmed);
+    defer entries.deinit(allocator);
+
+    for (entries.accounts) |entry| {
+        if (alias) |candidate_alias| {
+            if (entry.alias) |existing_alias| {
+                if (std.mem.eql(u8, existing_alias, candidate_alias)) return error.InvalidCli;
+            }
+        }
+        if (entry.address) |existing_address| {
+            if (std.mem.eql(u8, existing_address, address)) return error.InvalidCli;
+        }
+        if (entry.public_key) |existing_public_key| {
+            if (std.mem.eql(u8, existing_public_key, public_key)) return error.InvalidCli;
+        }
+    }
+}
+
+fn formatWalletLifecycleSummary(
+    writer: anytype,
+    summary: *const OwnedWalletLifecycleSummary,
+    json_output: bool,
+    pretty: bool,
+) !void {
+    if (json_output or pretty) {
+        try printStructuredJson(writer, summary.*, pretty);
+        return;
+    }
+
+    try writer.print("{s}: {s}\n", .{ summary.action, summary.address });
+    try writer.print("selector: {s}\n", .{summary.selector});
+    if (summary.keystore_path) |keystore_path| {
+        try writer.print("keystore: {s}\n", .{keystore_path});
+    }
+    if (summary.wallet_state_path) |state_path| {
+        try writer.print("wallet_state: {s}\n", .{state_path});
+    }
+}
+
+fn runWalletCreateOrImport(
+    allocator: std.mem.Allocator,
+    args: *const cli.ParsedArgs,
+    writer: anytype,
+    action: []const u8,
+    raw_key: []const u8,
+) !void {
+    const trimmed_raw_key = std.mem.trim(u8, raw_key, " \n\r\t");
+    if (trimmed_raw_key.len == 0) return error.InvalidCli;
+
+    const keystore_path = try client.keystore.resolveDefaultSuiKeystorePath(allocator) orelse return error.InvalidCli;
+    defer allocator.free(keystore_path);
+
+    const existing_contents = try readOptionalFileAtPathAlloc(allocator, keystore_path, 4 * 1024 * 1024);
+    defer if (existing_contents) |value| allocator.free(value);
+
+    const entry = try buildWalletStoredEntryJson(allocator, trimmed_raw_key, args.wallet_alias);
+    defer allocator.free(entry.json);
+
+    try validateWalletEntryUniqueness(
+        allocator,
+        existing_contents,
+        args.wallet_alias,
+        entry.address,
+        entry.public_key,
+    );
+
+    const updated_contents = try appendEntryJsonToKeystoreContents(allocator, existing_contents, entry.json);
+    defer allocator.free(updated_contents);
+    try writeFileAtPath(keystore_path, updated_contents);
+
+    const selector_source = args.wallet_alias orelse entry.address;
+    var state_path: ?[]const u8 = null;
+    if (args.wallet_activate) {
+        try wallet_state.writeDefaultWalletState(allocator, selector_source);
+        state_path = try wallet_state.resolveDefaultWalletStatePath(allocator);
+    }
+
+    var summary = OwnedWalletLifecycleSummary{
+        .action = try allocator.dupe(u8, action),
+        .selector = try allocator.dupe(u8, selector_source),
+        .address = entry.address,
+        .public_key = entry.public_key,
+        .keystore_path = try allocator.dupe(u8, keystore_path),
+        .wallet_state_path = state_path,
+        .activated = args.wallet_activate,
+    };
+    defer summary.deinit(allocator);
+
+    try formatWalletLifecycleSummary(writer, &summary, args.wallet_json, args.pretty);
+}
+
+fn runWalletUse(
+    allocator: std.mem.Allocator,
+    args: *const cli.ParsedArgs,
+    writer: anytype,
+) !void {
+    const selector = args.account_selector orelse return error.InvalidCli;
+    const address = if (std.mem.startsWith(u8, selector, "0x"))
+        try allocator.dupe(u8, selector)
+    else
+        try client.keystore.resolveAddressBySelector(allocator, selector) orelse return error.InvalidCli;
+    errdefer allocator.free(address);
+
+    try wallet_state.writeDefaultWalletState(allocator, selector);
+    const state_path = try wallet_state.resolveDefaultWalletStatePath(allocator);
+
+    var summary = OwnedWalletLifecycleSummary{
+        .action = try allocator.dupe(u8, "active_wallet_updated"),
+        .selector = try allocator.dupe(u8, selector),
+        .address = address,
+        .wallet_state_path = state_path,
+        .activated = true,
+    };
+    defer summary.deinit(allocator);
+
+    try formatWalletLifecycleSummary(writer, &summary, args.wallet_json, args.pretty);
+}
+
 fn resolveWalletOwner(
     allocator: std.mem.Allocator,
     args: *const cli.ParsedArgs,
 ) !struct { owner: []const u8, owned: ?[]const u8 } {
-    const selector = args.account_selector orelse blk: {
-        const resolved = try client.keystore.resolveFirstAddressFromDefaultKeystore(allocator) orelse return error.InvalidCli;
-        break :blk resolved;
-    };
+    if (args.account_selector) |selector| {
+        if (std.mem.startsWith(u8, selector, "0x")) {
+            return .{
+                .owner = selector,
+                .owned = null,
+            };
+        }
 
-    if (std.mem.startsWith(u8, selector, "0x")) {
+        const resolved_explicit = try client.keystore.resolveAddressBySelector(allocator, selector) orelse return error.InvalidCli;
         return .{
-            .owner = selector,
-            .owned = if (args.account_selector == null) selector else null,
+            .owner = resolved_explicit,
+            .owned = resolved_explicit,
         };
     }
 
-    const resolved = try client.keystore.resolveAddressBySelector(allocator, selector) orelse return error.InvalidCli;
-    return .{ .owner = resolved, .owned = resolved };
+    if (try wallet_state.resolveActiveSelector(allocator)) |active_selector| {
+        if (std.mem.startsWith(u8, active_selector, "0x")) {
+            return .{
+                .owner = active_selector,
+                .owned = active_selector,
+            };
+        }
+        defer allocator.free(active_selector);
+        const resolved_active = try client.keystore.resolveAddressBySelector(allocator, active_selector) orelse return error.InvalidCli;
+        return .{ .owner = resolved_active, .owned = resolved_active };
+    }
+
+    const resolved_default = try client.keystore.resolveFirstAddressFromDefaultKeystore(allocator) orelse return error.InvalidCli;
+    return .{ .owner = resolved_default, .owned = resolved_default };
 }
 
 fn summarizeWalletCoinBalances(
@@ -3268,6 +3531,16 @@ pub fn runCommandWithProgrammaticProvider(
             const version = @import("sui_client_zig").version;
             try writer.print("sui-zig-rpc-client {d}.{d}.{d}\n", .{ version.major, version.minor, version.patch });
         },
+        .wallet_create => {
+            const raw_key = try client.keystore.generateRawKeyString(allocator);
+            defer allocator.free(raw_key);
+            try runWalletCreateOrImport(allocator, args, writer, "wallet_created", raw_key);
+        },
+        .wallet_import => {
+            const raw_key = args.wallet_private_key orelse return error.InvalidCli;
+            try runWalletCreateOrImport(allocator, args, writer, "wallet_imported", raw_key);
+        },
+        .wallet_use => try runWalletUse(allocator, args, writer),
         .wallet_address => {
             const resolved = try resolveWalletOwner(allocator, args);
             defer if (resolved.owned) |value| allocator.free(value);
@@ -20310,6 +20583,200 @@ test "runCommand wallet_objects resolves the default wallet owner" {
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
     defer parsed.deinit();
     try testing.expectEqualStrings("0xowned-1", parsed.value.object.get("entries").?.array.items[0].object.get("object_id").?.string);
+}
+
+test "runCommand wallet_create writes a keystore entry and activates it" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const keystore_path = try std.fmt.allocPrint(allocator, "tmp_commands_wallet_create_keystore_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(keystore_path);
+    defer std.fs.cwd().deleteFile(keystore_path) catch {};
+
+    const state_path = try std.fmt.allocPrint(allocator, "tmp_commands_wallet_create_state_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(state_path);
+    defer std.fs.cwd().deleteFile(state_path) catch {};
+
+    const old_keystore_override = client.keystore.test_keystore_path_override;
+    client.keystore.test_keystore_path_override = keystore_path;
+    defer client.keystore.test_keystore_path_override = old_keystore_override;
+
+    const old_state_override = wallet_state.test_wallet_state_path_override;
+    wallet_state.test_wallet_state_path_override = state_path;
+    defer wallet_state.test_wallet_state_path_override = old_state_override;
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "wallet",
+        "create",
+        "--alias",
+        "main",
+        "--json",
+    });
+    defer args.deinit(allocator);
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed_output = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed_output.deinit();
+    try testing.expectEqualStrings("wallet_created", parsed_output.value.object.get("action").?.string);
+    try testing.expectEqualStrings("main", parsed_output.value.object.get("selector").?.string);
+    try testing.expect(parsed_output.value.object.get("activated").?.bool);
+
+    const keystore_contents = try std.fs.cwd().readFileAlloc(allocator, keystore_path, 1024 * 1024);
+    defer allocator.free(keystore_contents);
+    var entries = try client.keystore.listAccountEntriesFromContents(allocator, keystore_contents);
+    defer entries.deinit(allocator);
+    try testing.expectEqual(@as(usize, 1), entries.accounts.len);
+    try testing.expectEqualStrings("main", entries.accounts[0].alias.?);
+    try testing.expect(entries.accounts[0].address != null);
+    try testing.expect(entries.accounts[0].public_key != null);
+
+    const active_selector = try wallet_state.resolveActiveSelector(allocator);
+    try testing.expect(active_selector != null);
+    defer allocator.free(active_selector.?);
+    try testing.expectEqualStrings("main", active_selector.?);
+}
+
+test "runCommand wallet_import appends a keystore entry without activating when requested" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const keystore_path = try std.fmt.allocPrint(allocator, "tmp_commands_wallet_import_keystore_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(keystore_path);
+    defer std.fs.cwd().deleteFile(keystore_path) catch {};
+
+    const state_path = try std.fmt.allocPrint(allocator, "tmp_commands_wallet_import_state_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(state_path);
+    defer std.fs.cwd().deleteFile(state_path) catch {};
+
+    var keystore_file = try std.fs.cwd().createFile(keystore_path, .{ .truncate = true });
+    defer keystore_file.close();
+    try keystore_file.writeAll("[{\"alias\":\"existing\",\"privateKey\":\"sk-existing\",\"address\":\"0x123\"}]");
+
+    const old_keystore_override = client.keystore.test_keystore_path_override;
+    client.keystore.test_keystore_path_override = keystore_path;
+    defer client.keystore.test_keystore_path_override = old_keystore_override;
+
+    const old_state_override = wallet_state.test_wallet_state_path_override;
+    wallet_state.test_wallet_state_path_override = state_path;
+    defer wallet_state.test_wallet_state_path_override = old_state_override;
+
+    const seed = [_]u8{0x44} ** 32;
+    var encoded_key_bytes: [33]u8 = undefined;
+    encoded_key_bytes[0] = 0;
+    encoded_key_bytes[1..].* = seed;
+    const encoded_len = std.base64.standard.Encoder.calcSize(encoded_key_bytes.len);
+    const encoded_key = try allocator.alloc(u8, encoded_len);
+    defer allocator.free(encoded_key);
+    _ = std.base64.standard.Encoder.encode(encoded_key, &encoded_key_bytes);
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "wallet",
+        "import",
+        encoded_key,
+        "--alias",
+        "imported",
+        "--no-activate",
+        "--json",
+    });
+    defer args.deinit(allocator);
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed_output = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed_output.deinit();
+    try testing.expectEqualStrings("wallet_imported", parsed_output.value.object.get("action").?.string);
+    try testing.expectEqualStrings("imported", parsed_output.value.object.get("selector").?.string);
+    try testing.expect(!parsed_output.value.object.get("activated").?.bool);
+
+    const keystore_contents = try std.fs.cwd().readFileAlloc(allocator, keystore_path, 1024 * 1024);
+    defer allocator.free(keystore_contents);
+    var entries = try client.keystore.listAccountEntriesFromContents(allocator, keystore_contents);
+    defer entries.deinit(allocator);
+    try testing.expectEqual(@as(usize, 2), entries.accounts.len);
+    try testing.expectEqualStrings("existing", entries.accounts[0].alias.?);
+    try testing.expectEqualStrings("imported", entries.accounts[1].alias.?);
+
+    const active_selector = try wallet_state.resolveActiveSelector(allocator);
+    try testing.expect(active_selector == null);
+}
+
+test "runCommand wallet_use updates the active selector used by wallet_address" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const keystore_path = try std.fmt.allocPrint(allocator, "tmp_commands_wallet_use_keystore_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(keystore_path);
+    defer std.fs.cwd().deleteFile(keystore_path) catch {};
+
+    const state_path = try std.fmt.allocPrint(allocator, "tmp_commands_wallet_use_state_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(state_path);
+    defer std.fs.cwd().deleteFile(state_path) catch {};
+
+    var keystore_file = try std.fs.cwd().createFile(keystore_path, .{ .truncate = true });
+    defer keystore_file.close();
+    try keystore_file.writeAll(
+        "[{\"alias\":\"primary\",\"privateKey\":\"sk-primary\",\"address\":\"0x111\"},{\"alias\":\"secondary\",\"privateKey\":\"sk-secondary\",\"address\":\"0x222\"}]",
+    );
+
+    const old_keystore_override = client.keystore.test_keystore_path_override;
+    client.keystore.test_keystore_path_override = keystore_path;
+    defer client.keystore.test_keystore_path_override = old_keystore_override;
+
+    const old_state_override = wallet_state.test_wallet_state_path_override;
+    wallet_state.test_wallet_state_path_override = state_path;
+    defer wallet_state.test_wallet_state_path_override = old_state_override;
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    var use_args = try cli.parseCliArgs(allocator, &.{
+        "wallet",
+        "use",
+        "secondary",
+        "--json",
+    });
+    defer use_args.deinit(allocator);
+
+    var use_output = std.ArrayList(u8){};
+    defer use_output.deinit(allocator);
+    try runCommand(allocator, &rpc, &use_args, use_output.writer(allocator));
+
+    const active_selector = try wallet_state.resolveActiveSelector(allocator);
+    try testing.expect(active_selector != null);
+    defer allocator.free(active_selector.?);
+    try testing.expectEqualStrings("secondary", active_selector.?);
+
+    var address_args = cli.ParsedArgs{
+        .command = .wallet_address,
+        .has_command = true,
+    };
+
+    var address_output = std.ArrayList(u8){};
+    defer address_output.deinit(allocator);
+    try runCommand(allocator, &rpc, &address_args, address_output.writer(allocator));
+    try testing.expectEqualStrings("0x222\n", address_output.items);
 }
 
 test "runCommand request_build move-call prints normalized request artifacts" {
