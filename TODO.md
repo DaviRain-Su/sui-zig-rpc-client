@@ -223,7 +223,7 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
   discovered seed objects.
 - [x] Aggregate shared candidates discovered from seed-object content and
   dynamic fields instead of treating the two sources as mutually exclusive.
-- [ ] Improve fallback behavior for protocols that do not expose recent useful
+- [x] Improve fallback behavior for protocols that do not expose recent useful
   events.
 - [x] Improve candidate stability for shared objects such as pools.
 
@@ -278,20 +278,20 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
   path.
 - [ ] Continue shrinking `unsafe_moveCall` usage.
 - [ ] Continue shrinking `unsafe_batchTransaction` usage.
-- [ ] Keep construction, simulation, and execution aligned to the same local
+- [x] Keep construction, simulation, and execution aligned to the same local
   builder path.
 
 ## Lower Priority but Important
 
 ### 7. Broader signer and account support
 
-- [ ] Expand signature scheme coverage.
-- [ ] Improve compatibility with broader account setups.
+- [x] Expand signature scheme coverage.
+- [x] Improve compatibility with broader account setups.
 
 ### 8. Discovery and execution ergonomics
 
-- [ ] Keep reducing manual copying from summaries into execution commands.
-- [ ] Preserve reusable artifact flows while simplifying the default CLI path.
+- [x] Keep reducing manual copying from summaries into execution commands.
+- [x] Preserve reusable artifact flows while simplifying the default CLI path.
 
 ### 9. Local Move contract coverage matrix
 

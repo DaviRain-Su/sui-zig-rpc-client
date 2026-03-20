@@ -326,8 +326,10 @@ zig build run -- account resources main \
 本地 keystore 现在已经支持两类常见 entry：
 - raw string entry
   - 例如 `["<base64-private-key>"]`
+  - 也支持 `["suiprivkey..."]`
 - object entry
   - 例如 `{"alias":"main","privateKey":"<base64-private-key>"}`
+  - 也支持 `{"alias":"main","privateKey":"suiprivkey..."}`
   - 也支持这些 raw-key 字段别名：
     - `privateKey`
     - `private_key`
@@ -336,6 +338,16 @@ zig build run -- account resources main \
     - `secret`
     - `key`
     - `value`
+
+对 raw key entry，本地 signer / sender 推断 / address derivation 现在支持：
+- `ed25519`（flag `0x00`）
+- `secp256k1`（flag `0x01`）
+- `secp256r1`（flag `0x02`）
+
+也就是说，只要 keystore 里的条目是标准 Sui `flag || private_key` Base64 形态，
+`account list/info`、`--signer`、`--from-keystore`、本地 tx bytes 签名都会按对应 scheme 正常工作。
+
+同样兼容 Sui 新版常见的 bech32 私钥导出格式：`suiprivkey...`。
 
 如果 object entry 里没有显式：
 - `address`
@@ -1149,7 +1161,7 @@ zig build run -- events \
 - `call_template.tx_send_from_keystore_argv`: 直接可改的 `tx send --from-keystore` argv 模板
 - `call_template.preferred_tx_send_from_keystore_argv`: 如果存在 auto-selected candidate，则给一条更接近可执行的 `tx send --from-keystore` argv 模板
 
-当存在 preferred request artifact 时，CLI 现在也会把同一份结构化结果嵌进 request JSON 的 `preferredResolution` 字段。这样你即使只消费 `--emit-template preferred-dry-run-request` / `preferred-send-request`，也能直接看到当前自动选中的参数组合和剩余 unresolved 参数位。
+当存在 preferred request artifact 时，CLI 现在也会把同一份结构化结果嵌进 request JSON 的 `preferredResolution` 字段。这样你即使只消费 `--emit-template preferred-dry-run-request` / `preferred-send-request`，也能直接看到当前自动选中的参数组合和剩余 unresolved 参数位。现在如果你只想直接复用命令行模板，而不想再从 summary JSON 里手工抽 `call_template.*_argv`，也可以直接用 `--emit-template preferred-dry-run-argv` / `preferred-send-argv`。
 
 如果 shared object 候选来自模块事件发现、但当前没有更强的引用分数，CLI 现在也会按 discovery 顺序做一个低置信度 `auto_selected_tiebreak`。这不会伪装成普通 `auto_selected`，但能把一部分“只差多候选打平”的调用继续往可执行方向推进。
 
@@ -1228,8 +1240,16 @@ zig build run -- move function cetus_clmm_mainnet pool add_liquidity \
 - `preferred-commands`
 - `dry-run-request`
 - `preferred-dry-run-request`
+- `dry-run-argv`
+- `preferred-dry-run-argv`
+- `dry-run-command`
+- `preferred-dry-run-command`
 - `send-request`
 - `preferred-send-request`
+- `send-argv`
+- `preferred-send-argv`
+- `send-command`
+- `preferred-send-command`
 
 其中 `preferred-*` 会在存在 auto-selected candidate 时优先输出 preferred 版本；如果当前还没有唯一候选，就会自动回退到基础模板，不会输出空值。
 
@@ -1238,6 +1258,18 @@ zig build run -- move function cetus_clmm_mainnet pool add_liquidity \
 同一份 owner 上下文现在也会继续作用到纯 `address` / `signer` 参数位。也就是说，如果目标函数签名本身显式要求传 `address` 或 `signer`，`move function --summarize` / `--dry-run` / `--send` 会优先把已解析的 sender 地址直接落成 `auto_selected_arg_json`，而不是继续保留 `0x<argN-address>` / `0x<argN-signer>` 这类 placeholder。
 
 真正执行时，你仍然需要自己补 gas 和具体 object id / select token；如果 summary 阶段没有给 sender / signer，上述模板里仍然会保留占位符。
+
+如果你不想再手工中转 `request artifact`，除了直接执行，也可以直接导出 argv 模板：
+
+```bash
+zig build run -- move function cetus_clmm_mainnet pool swap \
+  --emit-template preferred-dry-run-argv
+
+zig build run -- move function cetus_clmm_mainnet pool swap \
+  --emit-template preferred-send-argv
+```
+
+`argv` 模板会直接输出 `tx dry-run` / `tx send --from-keystore` 的 JSON argv 数组，适合给脚本或上层工具继续消费；`command` 模板会输出一行 shell-escaped 命令，适合直接复制执行；`request` 模板则继续保留稳定的 request-artifact 流。
 
 如果你不想再手工中转 `request artifact`，`move function` 现在还支持直接执行：
 

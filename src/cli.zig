@@ -43,8 +43,16 @@ pub const MoveFunctionTemplateOutput = enum {
     preferred_commands,
     tx_dry_run_request,
     preferred_tx_dry_run_request,
+    tx_dry_run_argv,
+    preferred_tx_dry_run_argv,
+    tx_dry_run_command,
+    preferred_tx_dry_run_command,
     tx_send_from_keystore_request,
     preferred_tx_send_from_keystore_request,
+    tx_send_from_keystore_argv,
+    preferred_tx_send_from_keystore_argv,
+    tx_send_from_keystore_command,
+    preferred_tx_send_from_keystore_command,
 };
 
 pub const ParsedArgs = struct {
@@ -265,8 +273,16 @@ fn parseMoveFunctionTemplateOutput(value: []const u8) !MoveFunctionTemplateOutpu
     if (std.mem.eql(u8, value, "preferred-commands")) return .preferred_commands;
     if (std.mem.eql(u8, value, "dry-run-request")) return .tx_dry_run_request;
     if (std.mem.eql(u8, value, "preferred-dry-run-request")) return .preferred_tx_dry_run_request;
+    if (std.mem.eql(u8, value, "dry-run-argv")) return .tx_dry_run_argv;
+    if (std.mem.eql(u8, value, "preferred-dry-run-argv")) return .preferred_tx_dry_run_argv;
+    if (std.mem.eql(u8, value, "dry-run-command")) return .tx_dry_run_command;
+    if (std.mem.eql(u8, value, "preferred-dry-run-command")) return .preferred_tx_dry_run_command;
     if (std.mem.eql(u8, value, "send-request")) return .tx_send_from_keystore_request;
     if (std.mem.eql(u8, value, "preferred-send-request")) return .preferred_tx_send_from_keystore_request;
+    if (std.mem.eql(u8, value, "send-argv")) return .tx_send_from_keystore_argv;
+    if (std.mem.eql(u8, value, "preferred-send-argv")) return .preferred_tx_send_from_keystore_argv;
+    if (std.mem.eql(u8, value, "send-command")) return .tx_send_from_keystore_command;
+    if (std.mem.eql(u8, value, "preferred-send-command")) return .preferred_tx_send_from_keystore_command;
     return error.InvalidCli;
 }
 
@@ -4470,7 +4486,7 @@ pub fn printUsage(writer: anytype) !void {
         "    --arg <json|bare|@file>             Repeatable explicit argument shorthand for --args\n" ++
         "    --arg-at <index> <json|bare|@file>  Repeatable explicit argument override by parameter index\n" ++
         "    --object-arg-at <index> <object>    Repeatable object-id-or-alias or JSON string array override by parameter index\n" ++
-        "    --emit-template <kind>              Print one generated template directly: commands|preferred-commands|dry-run-request|preferred-dry-run-request|send-request|preferred-send-request\n" ++
+        "    --emit-template <kind>              Print one generated template directly: commands|preferred-commands|dry-run-request|preferred-dry-run-request|dry-run-argv|preferred-dry-run-argv|dry-run-command|preferred-dry-run-command|send-request|preferred-send-request|send-argv|preferred-send-argv|send-command|preferred-send-command\n" ++
         "    --dry-run                           Resolve the preferred dry-run request artifact and execute it immediately\n" ++
         "    --send                              Resolve the preferred send request artifact and execute it immediately\n" ++
         "    --sender <address|selector>         Optional owner context for discovery hints and tx templates\n" ++
@@ -7690,12 +7706,35 @@ test "parseCliArgs parses move function command with emitted template output" {
         "pool",
         "swap",
         "--emit-template",
-        "preferred-dry-run-request",
+        "preferred-dry-run-argv",
     });
     defer parsed.deinit(allocator);
 
     try testing.expectEqual(Command.move_function, parsed.command);
-    try testing.expectEqual(MoveFunctionTemplateOutput.preferred_tx_dry_run_request, parsed.move_function_template_output.?);
+    try testing.expectEqual(MoveFunctionTemplateOutput.preferred_tx_dry_run_argv, parsed.move_function_template_output.?);
+    try testing.expect(parsed.tx_send_summarize);
+}
+
+test "parseCliArgs parses move function command with emitted command output" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "move",
+        "function",
+        "0x2",
+        "pool",
+        "swap",
+        "--emit-template",
+        "preferred-dry-run-command",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.move_function, parsed.command);
+    try testing.expectEqual(MoveFunctionTemplateOutput.preferred_tx_dry_run_command, parsed.move_function_template_output.?);
     try testing.expect(parsed.tx_send_summarize);
 }
 
