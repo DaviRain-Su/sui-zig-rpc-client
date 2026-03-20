@@ -14279,6 +14279,81 @@ pub const SuiRpcClient = struct {
         };
     }
 
+    fn buildGasPaymentJsonFromGasObjectId(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        gas_object_id: []const u8,
+    ) ![]u8 {
+        var resolved = try self.resolveLocalObjectReference(allocator, gas_object_id);
+        defer resolved.deinit(allocator);
+        if (resolved.shared_initial_version != null) return error.InvalidCli;
+        return try std.fmt.allocPrint(
+            allocator,
+            "[{{\"objectId\":{f},\"version\":{},\"digest\":{f}}}]",
+            .{
+                std.json.fmt(resolved.object_id, .{}),
+                resolved.version,
+                std.json.fmt(resolved.digest, .{}),
+            },
+        );
+    }
+
+    fn tryBuildLocalCommandSourceExecutePayloadWithKnownGasObject(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        sender: []const u8,
+        source: tx_builder.CommandSource,
+        gas_object_id: ?[]const u8,
+        gas_budget: u64,
+        payload_signer: RealBuilderPayloadSigner,
+        options_json: ?[]const u8,
+    ) !?[]u8 {
+        const resolved_gas_object_id = gas_object_id orelse return null;
+        if (!(try self.commandSourceSupportsLocalProgrammableTransactionBuilder(
+            allocator,
+            source,
+        ))) return null;
+
+        const gas_payment_json = self.buildGasPaymentJsonFromGasObjectId(
+            allocator,
+            resolved_gas_object_id,
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => return null,
+        };
+        defer allocator.free(gas_payment_json);
+
+        const gas_price = self.getReferenceGasPrice() catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => return null,
+        };
+
+        return switch (payload_signer) {
+            .direct_signatures => |signatures| try self.buildLocalProgrammableTransactionExecutePayloadFromCommandSourceWithSignatures(
+                allocator,
+                source,
+                sender,
+                gas_payment_json,
+                gas_price,
+                gas_budget,
+                null,
+                signatures,
+                options_json,
+            ),
+            .default_keystore => |preparation| try self.buildLocalProgrammableTransactionExecutePayloadFromCommandSourceFromDefaultKeystore(
+                allocator,
+                source,
+                sender,
+                gas_payment_json,
+                gas_price,
+                gas_budget,
+                null,
+                options_json,
+                preparation,
+            ),
+        };
+    }
+
     pub fn buildCommandSourceExecutePayloadWithSignatures(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
@@ -14289,6 +14364,18 @@ pub const SuiRpcClient = struct {
         signatures: []const []const u8,
         options_json: ?[]const u8,
     ) ![]u8 {
+        if (try self.tryBuildLocalCommandSourceExecutePayloadWithKnownGasObject(
+            allocator,
+            signer,
+            source,
+            gas_object_id,
+            gas_budget,
+            .{ .direct_signatures = signatures },
+            options_json,
+        )) |payload| {
+            return payload;
+        }
+
         const tx_bytes = try self.buildCommandSourceTxBytes(
             allocator,
             signer,
@@ -14315,6 +14402,18 @@ pub const SuiRpcClient = struct {
         options_json: ?[]const u8,
         preparation: keystore.SignerPreparation,
     ) ![]u8 {
+        if (try self.tryBuildLocalCommandSourceExecutePayloadWithKnownGasObject(
+            allocator,
+            signer,
+            source,
+            gas_object_id,
+            gas_budget,
+            .{ .default_keystore = preparation },
+            options_json,
+        )) |payload| {
+            return payload;
+        }
+
         const tx_bytes = try self.buildCommandSourceTxBytes(
             allocator,
             signer,
@@ -26956,6 +27055,190 @@ test "executeCommandSourceWithAutoGasPaymentAndObserveFromDefaultKeystore tracks
     try testing.expectEqual(tx_result.ExecutionStatus.success, observed.insights.status);
     try testing.expectEqualStrings(expected_sender, observed.insights.balance_changes[0].owner.?);
     try testing.expectEqual(@as(usize, 3), state.request_count);
+}
+
+test "buildCommandSourceExecutePayloadWithSignatures prefers local builder when gas object is known" {
+    const testing = std.testing;
+    const State = struct {
+        gas_price: usize = 0,
+        object: usize = 0,
+        unsafe: usize = 0,
+    };
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var state = State{};
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const st = @as(*State, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "suix_getReferenceGasPrice")) {
+                st.gas_price += 1;
+                return alloc.dupe(u8, "{\"result\":\"7\"}");
+            }
+            if (std.mem.eql(u8, req.method, "sui_getObject")) {
+                st.object += 1;
+                if (std.mem.indexOf(u8, req.params_json, "0xcoin") != null) {
+                    return alloc.dupe(
+                        u8,
+                        "{\"result\":{\"data\":{\"objectId\":\"0xcoin\",\"version\":\"9\",\"digest\":\"coin-digest\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}}",
+                    );
+                }
+                if (std.mem.indexOf(u8, req.params_json, "0xgas") != null) {
+                    return alloc.dupe(
+                        u8,
+                        "{\"result\":{\"data\":{\"objectId\":\"0xgas\",\"version\":\"11\",\"digest\":\"gas-digest\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}}",
+                    );
+                }
+                return error.TestUnexpectedResult;
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall") or std.mem.eql(u8, req.method, "unsafe_batchTransaction")) {
+                st.unsafe += 1;
+                return error.TestUnexpectedResult;
+            }
+            return error.TestUnexpectedResult;
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &state,
+        .callback = callback,
+    };
+
+    const payload = try client_instance.buildCommandSourceExecutePayloadWithSignatures(
+        allocator,
+        "0xowner",
+        .{ .commands_json = "[{\"kind\":\"TransferObjects\",\"objects\":[\"0xcoin\"],\"address\":\"0xreceiver\"}]" },
+        "0xgas",
+        100,
+        &.{"sig-local-known-gas"},
+        null,
+    );
+    defer allocator.free(payload);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
+    defer parsed.deinit();
+    try testing.expect(parsed.value == .array);
+    try testing.expectEqualStrings("sig-local-known-gas", parsed.value.array.items[1].array.items[0].string);
+
+    const tx_block = try std.json.parseFromSlice(std.json.Value, allocator, parsed.value.array.items[0].string, .{});
+    defer tx_block.deinit();
+    try testing.expectEqualStrings("0xowner", tx_block.value.object.get("sender").?.string);
+    try testing.expectEqual(@as(i64, 100), tx_block.value.object.get("gasBudget").?.integer);
+    try testing.expectEqual(@as(i64, 7), tx_block.value.object.get("gasPrice").?.integer);
+    try testing.expectEqualStrings("0xgas", tx_block.value.object.get("gasPayment").?.array.items[0].object.get("objectId").?.string);
+
+    try testing.expectEqual(@as(usize, 1), state.gas_price);
+    try testing.expectEqual(@as(usize, 2), state.object);
+    try testing.expectEqual(@as(usize, 0), state.unsafe);
+}
+
+test "buildCommandSourceExecutePayloadFromDefaultKeystore prefers local builder when gas object is known" {
+    const testing = std.testing;
+    const State = struct {
+        gas_price: usize = 0,
+        object: usize = 0,
+        unsafe: usize = 0,
+    };
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const keystore_path = try std.fmt.allocPrint(allocator, "tmp_client_build_payload_default_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(keystore_path);
+
+    const seed = [_]u8{0x71} ** 32;
+    var encoded_key_bytes: [33]u8 = undefined;
+    encoded_key_bytes[0] = 0;
+    encoded_key_bytes[1..].* = seed;
+    const encoded_len = std.base64.standard.Encoder.calcSize(encoded_key_bytes.len);
+    const encoded_key = try allocator.alloc(u8, encoded_len);
+    defer allocator.free(encoded_key);
+    _ = std.base64.standard.Encoder.encode(encoded_key, &encoded_key_bytes);
+
+    const keystore_contents = try std.fmt.allocPrint(allocator, "[\"{s}\"]", .{encoded_key});
+    defer allocator.free(keystore_contents);
+
+    const cwd = std.fs.cwd();
+    try cwd.writeFile(.{
+        .sub_path = keystore_path,
+        .data = keystore_contents,
+    });
+    defer cwd.deleteFile(keystore_path) catch {};
+
+    const old_override = keystore.test_keystore_path_override;
+    keystore.test_keystore_path_override = keystore_path;
+    defer keystore.test_keystore_path_override = old_override;
+
+    var state = State{};
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const st = @as(*State, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "suix_getReferenceGasPrice")) {
+                st.gas_price += 1;
+                return alloc.dupe(u8, "{\"result\":\"9\"}");
+            }
+            if (std.mem.eql(u8, req.method, "sui_getObject")) {
+                st.object += 1;
+                if (std.mem.indexOf(u8, req.params_json, "0xcoin") != null) {
+                    return alloc.dupe(
+                        u8,
+                        "{\"result\":{\"data\":{\"objectId\":\"0xcoin\",\"version\":\"5\",\"digest\":\"coin-digest-2\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}}",
+                    );
+                }
+                if (std.mem.indexOf(u8, req.params_json, "0xgas") != null) {
+                    return alloc.dupe(
+                        u8,
+                        "{\"result\":{\"data\":{\"objectId\":\"0xgas\",\"version\":\"6\",\"digest\":\"gas-digest-2\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}}",
+                    );
+                }
+                return error.TestUnexpectedResult;
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall") or std.mem.eql(u8, req.method, "unsafe_batchTransaction")) {
+                st.unsafe += 1;
+                return error.TestUnexpectedResult;
+            }
+            return error.TestUnexpectedResult;
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &state,
+        .callback = callback,
+    };
+
+    const payload = try client_instance.buildCommandSourceExecutePayloadFromDefaultKeystore(
+        allocator,
+        "0xowner",
+        .{ .commands_json = "[{\"kind\":\"TransferObjects\",\"objects\":[\"0xcoin\"],\"address\":\"0xreceiver\"}]" },
+        "0xgas",
+        100,
+        null,
+        .{ .from_keystore = true },
+    );
+    defer allocator.free(payload);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
+    defer parsed.deinit();
+    try testing.expect(parsed.value == .array);
+    try testing.expectEqual(@as(usize, 1), parsed.value.array.items[1].array.items.len);
+
+    const tx_block = try std.json.parseFromSlice(std.json.Value, allocator, parsed.value.array.items[0].string, .{});
+    defer tx_block.deinit();
+    try testing.expectEqualStrings("0xowner", tx_block.value.object.get("sender").?.string);
+    try testing.expectEqual(@as(i64, 100), tx_block.value.object.get("gasBudget").?.integer);
+    try testing.expectEqual(@as(i64, 9), tx_block.value.object.get("gasPrice").?.integer);
+    try testing.expectEqualStrings("0xgas", tx_block.value.object.get("gasPayment").?.array.items[0].object.get("objectId").?.string);
+
+    try testing.expectEqual(@as(usize, 1), state.gas_price);
+    try testing.expectEqual(@as(usize, 2), state.object);
+    try testing.expectEqual(@as(usize, 0), state.unsafe);
 }
 
 test "runCommandSourceResolvingSelectedArgumentTokensWithAccountProvider keeps direct signature providers local" {
