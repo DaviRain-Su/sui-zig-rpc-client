@@ -801,6 +801,8 @@ separate web wallet.
 
 - `wallet-core v1` closure checklist:
   [`docs/wallet-core-v1-checklist.md`](/Users/davirian/dev/zig/sui-zig-rpc-client/docs/wallet-core-v1-checklist.md)
+- unified `wallet-core v1` release gate:
+  [`scripts/wallet_core_v1_release_gate.sh`](/Users/davirian/dev/zig/sui-zig-rpc-client/scripts/wallet_core_v1_release_gate.sh)
 - future `wallet-web` architecture:
   [`docs/wallet-web-architecture.md`](/Users/davirian/dev/zig/sui-zig-rpc-client/docs/wallet-web-architecture.md)
 

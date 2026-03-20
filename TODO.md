@@ -417,6 +417,6 @@ what the generic path still needs to finish.
   remaining generic Sui execution paths.
 - [ ] Finish transaction-level joint selection for
   `Pool + Position + Coin + gas`.
-- [ ] Keep the live protocol release gate lightweight but repeatable:
+- [x] Keep the live protocol release gate lightweight but repeatable:
   Cetus mainnet sanity plus local Hashi publish/deposit smoke before calling
   the current core `wallet-core v1`.

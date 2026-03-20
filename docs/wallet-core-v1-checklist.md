@@ -71,11 +71,11 @@ These items should be true before calling the current core "v1 ok".
   - `built`
   - `resolved`
   - `sponsored`
-- `signed`
-- `challenge_required`
-- `submitted`
-- `confirmed`
-- `failed`
+  - `signed`
+  - `challenge_required`
+  - `submitted`
+  - `confirmed`
+  - `failed`
   - `cancelled`
   - `replaced`
 
@@ -124,21 +124,30 @@ commands were added.
 
 ## Verification Gate
 
-Before tagging the current core as `wallet-core v1`, run at least:
+Before tagging the current core as `wallet-core v1`, run the unified release
+gate:
 
 ```bash
-zig build test --summary all
-zig build move-fixture-test
-bash scripts/hashi_publish_smoke.sh /tmp/hashi_inspect/packages/hashi
-bash scripts/hashi_finish_publish_smoke.sh /tmp/hashi_inspect/packages/hashi
-bash scripts/hashi_deposit_smoke.sh /tmp/hashi_inspect/packages/hashi
+WALLET_CORE_V1_CETUS_RPC_URL=https://... \
+bash scripts/wallet_core_v1_release_gate.sh /tmp/hashi_inspect/packages/hashi
 ```
 
-For live protocol sanity, keep a lightweight Cetus mainnet check in the release
-notes:
+If the environment does not have a usable mainnet RPC, you can still run the
+local half:
 
-- `sui_getNormalizedMoveFunction` against a real Cetus entrypoint
-- at least one real artifact or dry-run path that still resolves correctly
+```bash
+WALLET_CORE_V1_SKIP_CETUS_LIVE=1 \
+bash scripts/wallet_core_v1_release_gate.sh /tmp/hashi_inspect/packages/hashi
+```
+
+The gate script covers:
+
+- `zig build test --summary all`
+- `zig build move-fixture-test`
+- local Hashi publish / finish_publish / deposit smoke
+- lightweight Cetus mainnet sanity:
+  - `sui_getNormalizedMoveFunction` against a real entrypoint
+  - `object get cetus_clmm_global_config_mainnet --summarize`
 
 ## Exit Condition
 
