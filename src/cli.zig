@@ -365,23 +365,23 @@ fn maybeLoadFileValue(allocator: std.mem.Allocator, value: []const u8) !LoadedAr
         }
         const path = value[1..];
         if (std.mem.eql(u8, path, "-")) {
-            const stdin_value = if (test_stdin_value_override) |override|
-                override
+            const owned_value = if (test_stdin_value_override) |override|
+                try allocator.dupe(u8, override)
             else blk: {
                 var file = std.fs.File.stdin();
                 const loaded = try file.readToEndAlloc(allocator, 10 * 1024 * 1024);
-                defer allocator.free(loaded);
-                break :blk std.mem.trim(u8, loaded, " \n\r\t");
+                break :blk try trimOwnedLoadedValue(allocator, loaded);
             };
             return .{
-                .value = try allocator.dupe(u8, stdin_value),
+                .value = owned_value,
                 .owned = true,
             };
         }
-        const loaded = try std.fs.cwd().readFileAlloc(allocator, path, 10 * 1024 * 1024);
-        const trimmed = std.mem.trim(u8, loaded, " \n\r\t");
-        const owned_value = try allocator.dupe(u8, trimmed);
-        allocator.free(loaded);
+        const loaded = if (std.fs.path.isAbsolute(path))
+            try readAbsoluteFileAlloc(allocator, path)
+        else
+            try std.fs.cwd().readFileAlloc(allocator, path, 10 * 1024 * 1024);
+        const owned_value = try trimOwnedLoadedValue(allocator, loaded);
         return .{
             .value = owned_value,
             .owned = true,
@@ -389,6 +389,21 @@ fn maybeLoadFileValue(allocator: std.mem.Allocator, value: []const u8) !LoadedAr
     }
 
     return .{ .value = value, .owned = false };
+}
+
+fn readAbsoluteFileAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    var file = try std.fs.openFileAbsolute(path, .{});
+    defer file.close();
+    return file.readToEndAlloc(allocator, 10 * 1024 * 1024);
+}
+
+fn trimOwnedLoadedValue(allocator: std.mem.Allocator, loaded: []u8) ![]u8 {
+    const trimmed = std.mem.trim(u8, loaded, " \n\r\t");
+    if (trimmed.ptr == loaded.ptr and trimmed.len == loaded.len) return loaded;
+
+    const owned_value = try allocator.dupe(u8, trimmed);
+    allocator.free(loaded);
+    return owned_value;
 }
 
 fn maybeLoadPackageValue(allocator: std.mem.Allocator, raw: []const u8) !LoadedArg {
@@ -5930,6 +5945,37 @@ test "parseCliArgs parses tx_dry_run request artifact with auto gas budget" {
     try testing.expectEqual(@as(?u64, 1200), parsed.tx_build_gas_budget);
 }
 
+test "parseCliArgs parses tx_dry_run request artifact from stdin" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const old_override = test_stdin_value_override;
+    defer test_stdin_value_override = old_override;
+    test_stdin_value_override =
+        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"typeArguments\":[],\"arguments\":[7]}],\"sender\":\"0xstdin\",\"gasBudget\":1200,\"gasPrice\":8,\"summarize\":true}";
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "tx",
+        "dry-run",
+        "--request",
+        "@-",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.tx_dry_run, parsed.command);
+    try testing.expectEqualStrings(
+        "[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"typeArguments\":[],\"arguments\":[7]}]",
+        parsed.tx_build_commands.?,
+    );
+    try testing.expectEqualStrings("0xstdin", parsed.tx_build_sender.?);
+    try testing.expectEqual(@as(?u64, 1200), parsed.tx_build_gas_budget);
+    try testing.expectEqual(@as(?u64, 8), parsed.tx_build_gas_price);
+    try testing.expect(parsed.tx_send_summarize);
+}
+
 test "parseCliArgs rejects tx_dry_run tx-bytes mixed with move-call args" {
     const testing = std.testing;
 
@@ -6679,6 +6725,63 @@ test "parseCliArgs parses tx_send request artifact from stdin" {
     try testing.expect(parsed.tx_build_auto_gas_budget);
     try testing.expectEqual(@as(usize, 1), parsed.signers.items.len);
     try testing.expectEqualStrings("stdin", parsed.signers.items[0]);
+}
+
+test "parseCliArgs parses tx_send request artifact from absolute file path" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const request_file = "tmp_cli_tx_send_request_absolute.json";
+    try std.fs.cwd().writeFile(.{
+        .sub_path = request_file,
+        .data = "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"typeArguments\":[],\"arguments\":[7]}],\"fromKeystore\":true,\"signer\":\"absolute\",\"gasBudget\":2200,\"autoGasPayment\":true,\"autoGasBudget\":true,\"wait\":true,\"summarize\":true}",
+    });
+    defer std.fs.cwd().deleteFile(request_file) catch {};
+
+    const request_path = try std.fs.cwd().realpathAlloc(allocator, request_file);
+    defer allocator.free(request_path);
+
+    const request_arg = try std.mem.concat(allocator, u8, &.{ "@", request_path });
+    defer allocator.free(request_arg);
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "tx",
+        "send",
+        "--request",
+        request_arg,
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.tx_send, parsed.command);
+    try testing.expectEqualStrings(
+        "[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"typeArguments\":[],\"arguments\":[7]}]",
+        parsed.tx_build_commands.?,
+    );
+    try testing.expect(parsed.from_keystore);
+    try testing.expect(parsed.tx_build_auto_gas_payment);
+    try testing.expect(parsed.tx_build_auto_gas_budget);
+    try testing.expect(parsed.tx_send_wait);
+    try testing.expect(parsed.tx_send_summarize);
+    try testing.expectEqual(@as(?u64, 2200), parsed.tx_build_gas_budget);
+    try testing.expectEqual(@as(usize, 1), parsed.signers.items.len);
+    try testing.expectEqualStrings("absolute", parsed.signers.items[0]);
+}
+
+test "trimOwnedLoadedValue keeps a stable trimmed copy" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const loaded = try allocator.dupe(u8, " \ntrimmed value\t");
+    const trimmed = try trimOwnedLoadedValue(allocator, loaded);
+    defer allocator.free(trimmed);
+
+    try testing.expectEqualStrings("trimmed value", trimmed);
 }
 
 test "parseCliArgs rejects tx_send request artifact mixed with tx-bytes" {

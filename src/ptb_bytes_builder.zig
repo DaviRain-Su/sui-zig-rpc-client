@@ -236,6 +236,8 @@ fn appendDigest(
     allocator: std.mem.Allocator,
     value: ObjectDigest,
 ) !void {
+    // Sui keeps Digest BCS-compatible with a historical length prefix.
+    try appendVariantIndex(out, allocator, 32);
     try out.appendSlice(allocator, &value);
 }
 
@@ -659,11 +661,62 @@ fn parseDigest32JsonValue(
     }
 
     const decoded_len = std.base64.standard.Decoder.calcSizeForSlice(raw) catch return error.InvalidCli;
+    if (decoded_len == 32) {
+        var decoded: ObjectDigest = undefined;
+        std.base64.standard.Decoder.decode(&decoded, raw) catch return error.InvalidCli;
+        return decoded;
+    }
+
+    return try parseBase58Digest32(raw);
+}
+
+fn parseBase58Digit(ch: u8) ?u8 {
+    return switch (ch) {
+        '1'...'9' => ch - '1',
+        'A'...'H' => ch - 'A' + 9,
+        'J'...'N' => ch - 'J' + 17,
+        'P'...'Z' => ch - 'P' + 22,
+        'a'...'k' => ch - 'a' + 33,
+        'm'...'z' => ch - 'm' + 44,
+        else => null,
+    };
+}
+
+fn parseBase58Digest32(raw: []const u8) !ObjectDigest {
+    if (raw.len == 0) return error.InvalidCli;
+
+    var leading_zeroes: usize = 0;
+    while (leading_zeroes < raw.len and raw[leading_zeroes] == '1') : (leading_zeroes += 1) {}
+
+    var scratch = [_]u8{0} ** 64;
+    var used: usize = 0;
+
+    for (raw[leading_zeroes..]) |ch| {
+        var carry: u32 = parseBase58Digit(ch) orelse return error.InvalidCli;
+        var consumed: usize = 0;
+        var index: usize = scratch.len;
+        while (index > 0 and (carry != 0 or consumed < used)) {
+            index -= 1;
+            carry += @as(u32, scratch[index]) * 58;
+            scratch[index] = @intCast(carry & 0xff);
+            carry >>= 8;
+            consumed += 1;
+        }
+        if (carry != 0) return error.InvalidCli;
+        used = consumed;
+    }
+
+    var first_nonzero: usize = scratch.len - used;
+    while (first_nonzero < scratch.len and scratch[first_nonzero] == 0) : (first_nonzero += 1) {}
+
+    const decoded_len = leading_zeroes + (scratch.len - first_nonzero);
     if (decoded_len != 32) return error.InvalidCli;
 
-    var decoded: ObjectDigest = undefined;
-    std.base64.standard.Decoder.decode(&decoded, raw) catch return error.InvalidCli;
-    return decoded;
+    var digest = [_]u8{0} ** 32;
+    if (first_nonzero < scratch.len) {
+        @memcpy(digest[leading_zeroes..], scratch[first_nonzero..]);
+    }
+    return digest;
 }
 
 pub fn encodeSimplifiedTypeTagFromString(
@@ -1443,6 +1496,17 @@ test "parseHexAddress32 left pads short object ids" {
     try testing.expectEqualSlices(u8, &odd_expected, &odd);
 }
 
+test "parseDigest32JsonValue accepts base58 Sui digests" {
+    const testing = std.testing;
+
+    const zero_digest = try parseDigest32JsonValue(.{ .string = "11111111111111111111111111111111" });
+    try testing.expectEqualSlices(u8, &([_]u8{0} ** 32), &zero_digest);
+
+    const real_digest = try parseDigest32JsonValue(.{ .string = "FHL9d5iUQqHpWXH4mPbHBekKHhMKAAQNwF8Vxad4meoh" });
+    const expected = try parseHexAddress32("0x20d4328fb5e6b7e14018d56d7591abef99ca042c41ee048067601ba76aa702db");
+    try testing.expectEqualSlices(u8, &expected, &real_digest);
+}
+
 test "buildTransactionDataV1Bytes encodes struct type tags with nested vectors" {
     const testing = std.testing;
 
@@ -1540,6 +1604,7 @@ test "buildTransactionDataV1Bytes encodes a minimal programmable move call exact
     try expected.appendSlice(allocator, &.{0x01});
     try expected.appendSlice(allocator, &repeatedByteAddress(0x33));
     try expected.appendSlice(allocator, &.{ 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 });
+    try expected.appendSlice(allocator, &.{0x20});
     try expected.appendSlice(allocator, &repeatedByteDigest(0x44));
     try expected.appendSlice(allocator, &repeatedByteAddress(0x55));
     try expected.appendSlice(allocator, &.{ 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 });
@@ -1772,6 +1837,80 @@ test "buildTransactionDataV1BytesFromJson lowers lowerable PTB json into the sam
 
     try testing.expectEqualSlices(u8, typed_bytes, json_bytes);
     try testing.expectEqualStrings(typed_base64, json_base64);
+}
+
+test "buildTransactionDataV1BytesFromJson accepts real base58 digests in object refs" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const sender = try parseHexAddress32("0xae4469ed51da68ccde6642e22b6d44dfbb4ee56836d6b0ea2066db2cdb273bcf");
+    const object_id = try parseHexAddress32("0xcdc3da0627feca81dc6a099a615522ae4cea565f3f6ebf868d22e28ef332cef8");
+    const gas_id = try parseHexAddress32("0x0d3fe7d4a650b0d12577a847b046b7e4ae2febb201f58021c024bf3c7ed0d5b9");
+    const digest = try parseHexAddress32("0x20d4328fb5e6b7e14018d56d7591abef99ca042c41ee048067601ba76aa702db");
+
+    const typed_transaction = TransactionDataV1{
+        .programmable_transaction = .{
+            .inputs = &.{
+                .{ .object = .{ .imm_or_owned_object = .{
+                    .object_id = object_id,
+                    .version = 2,
+                    .digest = digest,
+                } } },
+                .{ .pure = &sender },
+            },
+            .commands = &.{.{
+                .transfer_objects = .{
+                    .objects = &.{.{ .input = 0 }},
+                    .address = .{ .input = 1 },
+                },
+            }},
+        },
+        .sender = sender,
+        .gas_data = .{
+            .payment = &.{.{
+                .object_id = gas_id,
+                .version = 2,
+                .digest = digest,
+            }},
+            .owner = sender,
+            .price = 1000,
+            .budget = 100000000,
+        },
+    };
+
+    const typed_base64 = try buildTransactionDataV1Base64(allocator, typed_transaction);
+    defer allocator.free(typed_base64);
+
+    const json_transaction =
+        \\{
+        \\  "inputs":[
+        \\    {"Object":{"ImmOrOwnedObject":{"objectId":"0xcdc3da0627feca81dc6a099a615522ae4cea565f3f6ebf868d22e28ef332cef8","version":2,"digest":"FHL9d5iUQqHpWXH4mPbHBekKHhMKAAQNwF8Vxad4meoh"}}},
+        \\    {"Pure":"rkRp7VHaaMzeZkLiK21E37tO5Wg21rDqIGbbLNsnO88="}
+        \\  ],
+        \\  "commands":[
+        \\    {"kind":"TransferObjects","objects":[{"Input":0}],"address":{"Input":1}}
+        \\  ],
+        \\  "sender":"0xae4469ed51da68ccde6642e22b6d44dfbb4ee56836d6b0ea2066db2cdb273bcf",
+        \\  "gasData":{
+        \\    "payment":[{"objectId":"0x0d3fe7d4a650b0d12577a847b046b7e4ae2febb201f58021c024bf3c7ed0d5b9","version":"2","digest":"FHL9d5iUQqHpWXH4mPbHBekKHhMKAAQNwF8Vxad4meoh"}],
+        \\    "owner":"0xae4469ed51da68ccde6642e22b6d44dfbb4ee56836d6b0ea2066db2cdb273bcf",
+        \\    "price":1000,
+        \\    "budget":100000000
+        \\  }
+        \\}
+    ;
+
+    const json_base64 = try buildTransactionDataV1Base64FromJson(allocator, json_transaction);
+    defer allocator.free(json_base64);
+
+    try testing.expectEqualStrings(typed_base64, json_base64);
+    try testing.expectEqualStrings(
+        "AAACAQDNw9oGJ/7KgdxqCZphVSKuTOpWXz9uv4aNIuKO8zLO+AIAAAAAAAAAINQyj7Xmt+FAGNVtdZGr75nKBCxB7gSAZ2Abp2qnAtsYACCuRGntUdpozN5mQuIrbUTfu07laDbWsOogZtss2yc7zwEBAQEAAAEBAK5Eae1R2mjM3mZC4ittRN+7TuVoNtaw6iBm2yzbJzvPAQ0/59SmULDRJXeoR7BGt+SuL+uyAfWAIcAkvzx+0NW5AgAAAAAAAAAgOdPVQ2ByIZFHX9p7jJNlpd5UZy1I5mxdieQ9pmwcxLquRGntUdpozN5mQuIrbUTfu07laDbWsOogZtss2yc7z+gDAAAAAAAAAOH1BQAAAAAA",
+        typed_base64,
+    );
 }
 
 test "buildTransactionDataV1BytesFromJson supports make-move-vec publish and upgrade commands" {

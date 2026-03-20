@@ -17368,6 +17368,61 @@ test "runCommand tx_dry_run request artifact from stdin uses local programmable 
     try testing.expectEqual(@as(usize, 0), counts.unsafe);
 }
 
+test "runCommand tx_dry_run request artifact accepts base58 digests in local object refs" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const Counts = struct {
+        dry_run: usize = 0,
+        unsafe: usize = 0,
+    };
+    var counts = Counts{};
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const state = @as(*Counts, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "sui_dryRunTransactionBlock")) {
+                state.dry_run += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"effects\":{\"status\":{\"status\":\"success\"}},\"balanceChanges\":[]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall") or std.mem.eql(u8, req.method, "unsafe_batchTransaction")) {
+                state.unsafe += 1;
+                return alloc.dupe(u8, "{\"result\":{\"txBytes\":\"AQIDBA==\"}}");
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "tx",
+        "dry-run",
+        "--request",
+        "{\"commands\":[{\"kind\":\"TransferObjects\",\"objects\":[\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0x1111111111111111111111111111111111111111111111111111111111111111\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":7,\\\"digest\\\":\\\"11111111111111111111111111111111\\\"}\"],\"address\":\"0x2222222222222222222222222222222222222222222222222222222222222222\"}],\"sender\":\"0x3333333333333333333333333333333333333333333333333333333333333333\",\"gasBudget\":1200,\"gasPrice\":8,\"gasPayment\":[{\"objectId\":\"0x4444444444444444444444444444444444444444444444444444444444444444\",\"version\":\"3\",\"digest\":\"11111111111111111111111111111111\"}],\"summarize\":true}",
+    });
+    defer args.deinit(allocator);
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = &counts,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    try testing.expectEqual(@as(usize, 1), counts.dry_run);
+    try testing.expectEqual(@as(usize, 0), counts.unsafe);
+}
+
 test "runCommand tx_dry_run auto-lowers vector object args without unsafe fallback" {
     const testing = std.testing;
 
