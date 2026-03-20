@@ -1027,7 +1027,7 @@ pub fn main() !void {
   - `--conflict-keys <json|@file>`
   - `--conflict-strategy <serialize_same_lane|fail_closed>`
 - `wallet intent dry-run`: 对 `wallet_intent` 或 request-shaped 输入直接执行 dry-run，底层继续复用现有本地 programmable builder。
-- `wallet intent send`: 对 `wallet_intent` 或 request-shaped 输入直接执行发送，底层继续复用现有 `request send` / local builder 主线。
+- `wallet intent send`: 对 `wallet_intent` 或 request-shaped 输入直接执行发送，底层继续复用现有 `request send` / local builder 主线。现在也支持 `--session <selector|label|session-id|0xaddress>`：命中本地 delegated session 时，会把 session metadata 注入执行侧 signer/provider。`local_signer` session 可以直接合成 default-keystore provider；`passkey` / `external_wallet` / `zklogin` / `multisig` session 则要求命中兼容的 provider 路径。
 - `wallet sponsor request`: 钱包命令面的 sponsor alias；直接复用 `request sponsor`，适合在 wallet workflow 里继续生成 sponsor envelope。
 - `wallet schedule create`: 钱包命令面的 schedule alias；直接复用 `request schedule`，适合在 wallet workflow 里继续生成 scheduler job。
 - `request build`: 把 move-call / programmable 输入规范化成可复用 request artifact。
@@ -1036,8 +1036,8 @@ pub fn main() !void {
 - `request sponsor`: 把 request artifact 包成 `sponsor-envelope`；支持 `--session`、`--policy*`、`--sponsor-mode`、`--sponsor-policy`、`--sponsor-gas-source`、`--sponsor-refusal-fallback`、`--valid-after-ms`、`--valid-before-ms`、`--correlation-id`，适合交给后续 sponsor service 或 web 流程。命中 `--session` 时会把 delegated session metadata 写进 artifact 顶层 `delegated_session`，并把 session stored policy 合并进顶层 `policy`。artifact 也会显式写出 `gas_source_preference` 和 `refusal_fallback`，不再让 sponsor service 自己猜默认值。
 - `request sponsor` / `request schedule` / `wallet intent *` 现在也支持 payment metadata：`--payment-reference`、`--payment-memo`、`--invoice-reference`、`--reconciliation-group`。这些字段会进入 artifact 顶层 `payment` object，供后续 reconciliation/export 使用，而不会混进底层 Sui request body。
 - `request sponsor` / `request schedule` / `wallet intent *` 现在也支持并发 lane metadata：`--execution-lane`、`--gas-lane`、`--conflict-keys`、`--conflict-strategy`。这些字段会进入 artifact 顶层 `concurrency` object，并带出 `planner_ready` / `parallel_safe_hint`，用于后续 queue/scheduler/web UX；同样不会混进底层 Sui request body。
-- `request sign`: 直接对 request artifact 或 request-shaped 输入附加 signer/provider 审批，并输出 execute payload；复用现有本地 programmable builder 和 `tx payload` 路径。
-- `request send`: 直接对 request artifact 或 request-shaped 输入执行发送，复用现有本地 programmable builder 和 signer/provider 路径。
+- `request sign`: 直接对 request artifact 或 request-shaped 输入附加 signer/provider 审批，并输出 execute payload；复用现有本地 programmable builder 和 `tx payload` 路径。现在也支持 `--session <selector|label|session-id|0xaddress>`，并会把 delegated session 注入 authorizer/local signer 执行路径，而不只停在 artifact metadata。
+- `request send`: 直接对 request artifact 或 request-shaped 输入执行发送，复用现有本地 programmable builder 和 signer/provider 路径。现在也支持 `--session <selector|label|session-id|0xaddress>`，命中 `local_signer` session 时即使没有显式 `--from-keystore/--signer/--provider` 也能直接合成执行侧 signer。
 - `request schedule`: 把 request artifact 包成 `schedule-job`；支持 `--session`、`--policy*`、`--schedule-at-ms`、`--schedule-id`、`--replace-schedule-id`，并显式带上 sponsor mode / validity window / object freshness 要求。命中 `--session` 时同样会把 delegated session metadata 写进 artifact 顶层 `delegated_session`，并把 session stored policy 合并进顶层 `policy`。artifact 现在也会写出 `replacement_behavior` 和 `stale_object_policy = fail_closed`；本地 state 在 replace 时会保留旧 job，并把它标成 `replaced`。
 - `request list`: 列出本地 `request_state.json` 里跟踪的 request / schedule 条目摘要。
 - `request cancel <id>`: 把本地调度条目标成 `cancelled`，不再保留在“待执行”状态。

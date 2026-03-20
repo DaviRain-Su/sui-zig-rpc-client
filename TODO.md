@@ -394,5 +394,7 @@ what the generic path still needs to finish.
   `wallet sponsor request` and `wallet schedule create`.
 - [x] Let `wallet intent` / `request sponsor` / `request schedule` inherit
   delegated session metadata and base policy through `--session`.
+- [x] Let delegated sessions flow into execution-side `request sign/send` and
+  `wallet intent send`, not only artifact metadata.
 - [x] Add deterministic wallet smoke regressions for sponsored transfer,
   sponsored swap, session-limited swap, and scheduled self-transfer.

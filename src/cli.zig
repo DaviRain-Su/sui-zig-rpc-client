@@ -457,6 +457,21 @@ fn usesDelegatedSessionArtifactContract(command: Command) bool {
         command == .request_schedule;
 }
 
+fn usesDelegatedSessionExecutionContract(command: Command) bool {
+    return command == .wallet_intent_send or
+        command == .request_sign or
+        command == .request_send;
+}
+
+fn usesDelegatedSessionContract(command: Command) bool {
+    return usesDelegatedSessionArtifactContract(command) or
+        usesDelegatedSessionExecutionContract(command);
+}
+
+fn hasDelegatedSessionExecutionInput(parsed: *const ParsedArgs) bool {
+    return parsed.request_session_selector != null or parsed.request_delegated_session_json != null;
+}
+
 fn usesWalletPolicyContract(command: Command) bool {
     return isWalletIntentLifecycleCommand(command) or
         command == .request_sponsor or
@@ -4762,7 +4777,7 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
                     i += 2;
                     continue;
                 }
-                if (usesDelegatedSessionArtifactContract(parsed.command) and std.mem.eql(u8, token, "--session")) {
+                if (usesDelegatedSessionContract(parsed.command) and std.mem.eql(u8, token, "--session")) {
                     if (i + 1 >= args.len) return error.InvalidCli;
                     try setOptionalStringArg(
                         allocator,
@@ -6187,7 +6202,12 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
     if (parsed.command == .request_send) {
         if (parsed.tx_build_auto_gas_payment and parsed.tx_build_gas_payment != null) return error.InvalidCli;
         if (parsed.tx_build_gas_payment_min_balance != null and !parsed.tx_build_auto_gas_payment) return error.InvalidCli;
-        if (parsed.signatures.items.len == 0 and !parsed.from_keystore and parsed.signers.items.len == 0 and parsed.tx_provider_config == null) {
+        if (parsed.signatures.items.len == 0 and
+            !parsed.from_keystore and
+            parsed.signers.items.len == 0 and
+            parsed.tx_provider_config == null and
+            !hasDelegatedSessionExecutionInput(&parsed))
+        {
             return error.InvalidCli;
         }
         if (!hasProgrammaticTxInput(&parsed)) {
@@ -6204,7 +6224,12 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
         if (parsed.intent_execution_mode) |value| try wallet_intent.validateExecutionMode(value);
         if (parsed.tx_build_auto_gas_payment and parsed.tx_build_gas_payment != null) return error.InvalidCli;
         if (parsed.tx_build_gas_payment_min_balance != null and !parsed.tx_build_auto_gas_payment) return error.InvalidCli;
-        if (parsed.signatures.items.len == 0 and !parsed.from_keystore and parsed.signers.items.len == 0 and parsed.tx_provider_config == null) {
+        if (parsed.signatures.items.len == 0 and
+            !parsed.from_keystore and
+            parsed.signers.items.len == 0 and
+            parsed.tx_provider_config == null and
+            !hasDelegatedSessionExecutionInput(&parsed))
+        {
             return error.InvalidCli;
         }
         if (!hasProgrammaticTxInput(&parsed)) {
@@ -9982,12 +10007,15 @@ test "parseCliArgs parses wallet intent send command" {
         "send",
         "--intent",
         "{\"artifact_kind\":\"wallet_intent\",\"network\":\"sui:mainnet\",\"request\":{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"typeArguments\":[],\"arguments\":[7]}],\"fromKeystore\":true,\"signer\":\"0\",\"gasBudget\":1200}}",
+        "--session",
+        "session-1",
         "--observe",
     });
     defer parsed.deinit(allocator);
 
     try testing.expectEqual(Command.wallet_intent_send, parsed.command);
     try testing.expectEqualStrings("sui:mainnet", parsed.intent_network.?);
+    try testing.expectEqualStrings("session-1", parsed.request_session_selector.?);
     try testing.expect(parsed.from_keystore);
     try testing.expectEqualStrings("0", parsed.signers.items[0]);
     try testing.expect(parsed.tx_send_observe);
@@ -10111,6 +10139,8 @@ test "parseCliArgs parses request send request artifact" {
         "send",
         "--request",
         "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"typeArguments\":[],\"arguments\":[7]}],\"sender\":\"0xabc\",\"gasBudget\":1200}",
+        "--session",
+        "session-1",
         "--from-keystore",
         "--wait",
         "--observe",
@@ -10122,6 +10152,7 @@ test "parseCliArgs parses request send request artifact" {
     try testing.expectEqual(Command.request_send, parsed.command);
     try testing.expectEqualStrings("0xabc", parsed.tx_build_sender.?);
     try testing.expectEqual(@as(?u64, 1200), parsed.tx_build_gas_budget);
+    try testing.expectEqualStrings("session-1", parsed.request_session_selector.?);
     try testing.expect(parsed.from_keystore);
     try testing.expect(parsed.tx_send_wait);
     try testing.expect(parsed.tx_send_observe);
@@ -10295,6 +10326,8 @@ test "parseCliArgs parses request sign command" {
         "sign",
         "--request",
         "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"typeArguments\":[],\"arguments\":[7]}],\"sender\":\"0xabc\",\"gasBudget\":1200}",
+        "--session",
+        "session-1",
         "--provider",
         "{\"kind\":\"remote_signer\"}",
         "--session-response",
@@ -10304,9 +10337,33 @@ test "parseCliArgs parses request sign command" {
     defer parsed.deinit(allocator);
 
     try testing.expectEqual(Command.request_sign, parsed.command);
+    try testing.expectEqualStrings("session-1", parsed.request_session_selector.?);
     try testing.expectEqualStrings("{\"kind\":\"remote_signer\"}", parsed.tx_provider_config.?);
     try testing.expectEqualStrings("{\"supportsExecute\":true}", parsed.tx_session_response.?);
     try testing.expect(parsed.tx_send_summarize);
+}
+
+test "parseCliArgs allows request send session without explicit signer flags" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "request",
+        "send",
+        "--request",
+        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"typeArguments\":[],\"arguments\":[7]}],\"sender\":\"0xabc\",\"gasBudget\":1200}",
+        "--session",
+        "session-1",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.request_send, parsed.command);
+    try testing.expectEqualStrings("session-1", parsed.request_session_selector.?);
+    try testing.expect(parsed.tx_provider_config == null);
+    try testing.expect(!parsed.from_keystore);
 }
 
 test "parseCliArgs parses request schedule command" {

@@ -392,6 +392,18 @@ Those commands resolve the local delegated session registry entry, emit a
 top-level `delegated_session` object, and treat the stored session policy as
 the base policy contract before applying inline `--policy*` overrides.
 
+Delegated sessions now also reach execution paths:
+
+- `wallet intent send --session <...>`
+- `request sign --session <...>`
+- `request send --session <...>`
+
+Those commands no longer treat delegated sessions as passive artifact metadata.
+`local_signer` sessions can synthesize a compatible default-keystore execution
+provider, while `passkey`, `external_wallet`, `zklogin`, and `multisig`
+sessions require a matching provider flow so the execution-side authorizer sees
+the same session contract.
+
 ### `tempo request` Style Capabilities
 
 The design already includes or strongly implies:

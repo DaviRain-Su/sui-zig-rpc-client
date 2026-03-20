@@ -1165,11 +1165,84 @@ fn resolvedTxBuildSenderFromArgsOrProgrammaticProvider(
         return sender;
     }
     if (provider) |value| {
-        if (defaultSenderFromProgrammaticProvider(value)) |sender| {
-            return try allocator.dupe(u8, sender);
-        }
+        return try resolveSenderFromProgrammaticProvider(allocator, value);
     }
     return null;
+}
+
+fn resolveSenderFromKeystoreContentsAccount(
+    allocator: std.mem.Allocator,
+    account: client.tx_request_builder.KeystoreContentsAccount,
+) !?[]const u8 {
+    if (account.preparation.signer_selectors.len > 0) {
+        var had_resolver_input = false;
+        for (account.preparation.signer_selectors) |selector| {
+            if (selector.len == 0) continue;
+            had_resolver_input = true;
+            if (try client.keystore.resolveAddressFromKeystoreContents(allocator, account.contents, selector)) |value| {
+                return value;
+            }
+        }
+        if (had_resolver_input) return error.InvalidCli;
+        return null;
+    }
+    if (account.preparation.from_keystore) {
+        return try client.keystore.resolveFirstAddressFromKeystoreContents(allocator, account.contents);
+    }
+    return null;
+}
+
+fn resolveSenderFromDefaultKeystoreAccount(
+    allocator: std.mem.Allocator,
+    account: client.tx_request_builder.DefaultKeystoreAccount,
+) !?[]const u8 {
+    if (account.preparation.signer_selectors.len > 0) {
+        var had_resolver_input = false;
+        for (account.preparation.signer_selectors) |selector| {
+            if (selector.len == 0) continue;
+            had_resolver_input = true;
+            if (try client.keystore.resolveAddressBySelector(allocator, selector)) |value| {
+                return value;
+            }
+        }
+        if (had_resolver_input) return error.InvalidCli;
+        return null;
+    }
+    if (account.preparation.from_keystore) {
+        return try client.keystore.resolveFirstAddressFromDefaultKeystore(allocator);
+    }
+    return null;
+}
+
+fn resolveSenderFromProgrammaticProvider(
+    allocator: std.mem.Allocator,
+    provider: client.tx_request_builder.AccountProvider,
+) !?[]const u8 {
+    return switch (provider) {
+        .none => null,
+        .direct_signatures => |account| if (account.sender) |sender|
+            try allocator.dupe(u8, sender)
+        else
+            null,
+        .keystore_contents => |account| try resolveSenderFromKeystoreContentsAccount(allocator, account),
+        .default_keystore => |account| try resolveSenderFromDefaultKeystoreAccount(allocator, account),
+        .remote_signer => |account| if (account.address) |sender|
+            try allocator.dupe(u8, sender)
+        else
+            null,
+        .zklogin => |account| if (account.address) |sender|
+            try allocator.dupe(u8, sender)
+        else
+            null,
+        .passkey => |account| if (account.address) |sender|
+            try allocator.dupe(u8, sender)
+        else
+            null,
+        .multisig => |account| if (account.address) |sender|
+            try allocator.dupe(u8, sender)
+        else
+            null,
+    };
 }
 
 fn defaultSenderFromProgrammaticProvider(
@@ -1594,8 +1667,8 @@ fn ownLocalCommandSourceBuildContext(
     const sender = blk: {
         if (try resolvedUnsafeMoveCallSender(allocator, rpc, args)) |value| break :blk value;
         if (provider) |value| {
-            if (defaultSenderFromProgrammaticProvider(value)) |account_sender| {
-                break :blk try allocator.dupe(u8, account_sender);
+            if (try resolveSenderFromProgrammaticProvider(allocator, value)) |account_sender| {
+                break :blk account_sender;
             }
         }
         return null;
@@ -1840,8 +1913,8 @@ fn runUnsafeCommandSourceAction(
     const sender = blk: {
         if (try resolvedUnsafeMoveCallSender(allocator, rpc, args)) |value| break :blk value;
         if (provider) |value| {
-            if (defaultSenderFromProgrammaticProvider(value)) |account_sender| {
-                break :blk try allocator.dupe(u8, account_sender);
+            if (try resolveSenderFromProgrammaticProvider(allocator, value)) |account_sender| {
+                break :blk account_sender;
             }
         }
         return error.InvalidCli;
@@ -3132,6 +3205,17 @@ const OwnedDelegatedSessionArtifactSummary = struct {
     }
 };
 
+const OwnedProgrammaticProviderWithDelegatedSession = struct {
+    provider: ?client.tx_request_builder.AccountProvider = null,
+    delegated_session: ?OwnedDelegatedSessionArtifactSummary = null,
+    local_signer_selectors: ?[]const []const u8 = null,
+
+    fn deinit(self: *OwnedProgrammaticProviderWithDelegatedSession, allocator: std.mem.Allocator) void {
+        if (self.delegated_session) |*value| value.deinit(allocator);
+        if (self.local_signer_selectors) |value| allocator.free(value);
+    }
+};
+
 const OwnedResolvedWalletEntrySummary = struct {
     source_kind: []u8,
     selector: ?[]u8 = null,
@@ -3579,12 +3663,10 @@ fn validateDelegatedSessionEntryUsable(
     }
 }
 
-fn resolveDelegatedSessionArtifactSummary(
+fn loadDelegatedSessionArtifactSummaryFromRegistry(
     allocator: std.mem.Allocator,
-    args: *const cli.ParsedArgs,
-) !?OwnedDelegatedSessionArtifactSummary {
-    const selector_or_address = args.request_session_selector orelse return null;
-
+    selector_or_address: []const u8,
+) !OwnedDelegatedSessionArtifactSummary {
     const registry_path = try wallet_session_registry.resolveDefaultWalletSessionRegistryPath(allocator) orelse return error.InvalidCli;
     defer allocator.free(registry_path);
 
@@ -3612,6 +3694,267 @@ fn resolveDelegatedSessionArtifactSummary(
         .registry_path = try allocator.dupe(u8, registry_path),
         .policy_json = try duplicateOptionalSlice(allocator, entry.policy_json),
     };
+}
+
+fn parseEmbeddedDelegatedSessionArtifactSummary(
+    allocator: std.mem.Allocator,
+    raw: []const u8,
+) !OwnedDelegatedSessionArtifactSummary {
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, raw, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidCli;
+
+    const source_kind = if (try parseOptionalJsonString(allocator, parsed.value.object, &.{ "source_kind", "sourceKind" })) |value|
+        @constCast(value)
+    else
+        try allocator.dupe(u8, "embedded");
+    errdefer allocator.free(source_kind);
+    const selector = if (try parseOptionalJsonString(allocator, parsed.value.object, &.{"selector"})) |value|
+        @constCast(value)
+    else
+        try allocator.alloc(u8, 0);
+    errdefer allocator.free(selector);
+    const label = if (try parseOptionalJsonString(allocator, parsed.value.object, &.{"label"})) |value|
+        @constCast(value)
+    else
+        null;
+    errdefer if (label) |value| allocator.free(value);
+    const wallet_selector = if (try parseOptionalJsonString(allocator, parsed.value.object, &.{ "wallet_selector", "walletSelector" })) |value|
+        @constCast(value)
+    else
+        null;
+    errdefer if (wallet_selector) |value| allocator.free(value);
+    const address = if (try parseOptionalJsonString(allocator, parsed.value.object, &.{"address"})) |value|
+        @constCast(value)
+    else
+        null;
+    errdefer if (address) |value| allocator.free(value);
+    const session_id = if (try parseOptionalJsonString(allocator, parsed.value.object, &.{ "session_id", "sessionId" })) |value|
+        @constCast(value)
+    else
+        return error.InvalidCli;
+    errdefer allocator.free(session_id);
+    const session_kind = if (try parseOptionalJsonString(allocator, parsed.value.object, &.{ "session_kind", "sessionKind" })) |value|
+        @constCast(value)
+    else
+        null;
+    errdefer if (session_kind) |value| allocator.free(value);
+    const state = if (try parseOptionalJsonString(allocator, parsed.value.object, &.{"state"})) |value|
+        @constCast(value)
+    else
+        try allocator.dupe(u8, "active");
+    errdefer allocator.free(state);
+    const expires_at_ms = if (try parseOptionalJsonU64(parsed.value.object, &.{ "expires_at_ms", "expiresAtMs" })) |value|
+        @as(i64, @intCast(value))
+    else
+        null;
+    const active_wallet_match = (try parseOptionalJsonBool(parsed.value.object, &.{ "active_wallet_match", "activeWalletMatch" })) orelse false;
+    const registry_path = if (try parseOptionalJsonString(allocator, parsed.value.object, &.{ "registry_path", "registryPath" })) |value|
+        @constCast(value)
+    else
+        null;
+    errdefer if (registry_path) |value| allocator.free(value);
+
+    return .{
+        .source_kind = source_kind,
+        .selector = selector,
+        .label = label,
+        .wallet_selector = wallet_selector,
+        .address = address,
+        .session_id = session_id,
+        .session_kind = session_kind,
+        .state = state,
+        .expires_at_ms = expires_at_ms,
+        .active_wallet_match = active_wallet_match,
+        .registry_path = registry_path,
+        .policy_json = null,
+    };
+}
+
+fn resolveDelegatedSessionArtifactSummary(
+    allocator: std.mem.Allocator,
+    args: *const cli.ParsedArgs,
+) !?OwnedDelegatedSessionArtifactSummary {
+    if (args.request_session_selector) |selector_or_address| {
+        return try loadDelegatedSessionArtifactSummaryFromRegistry(allocator, selector_or_address);
+    }
+
+    const embedded_json = args.request_delegated_session_json orelse return null;
+    var embedded = try parseEmbeddedDelegatedSessionArtifactSummary(allocator, embedded_json);
+    var owns_embedded = true;
+    errdefer if (owns_embedded) embedded.deinit(allocator);
+
+    if (std.mem.eql(u8, embedded.source_kind, "session_registry") and embedded.selector.len != 0) {
+        const selector = try allocator.dupe(u8, embedded.selector);
+        defer allocator.free(selector);
+        const reloaded = loadDelegatedSessionArtifactSummaryFromRegistry(allocator, selector) catch |err| switch (err) {
+            error.InvalidCli => null,
+            else => return err,
+        };
+        if (reloaded) |value| {
+            embedded.deinit(allocator);
+            owns_embedded = false;
+            return value;
+        }
+    }
+
+    return embedded;
+}
+
+fn delegatedSessionAccountKind(
+    summary: *const OwnedDelegatedSessionArtifactSummary,
+) !client.tx_request_builder.AccountSessionKind {
+    if (summary.session_kind) |session_kind| {
+        if (std.mem.eql(u8, session_kind, "local_signer") or std.mem.eql(u8, session_kind, "local_keystore")) {
+            return .local_keystore;
+        }
+        if (std.mem.eql(u8, session_kind, "passkey")) return .passkey;
+        if (std.mem.eql(u8, session_kind, "external_wallet") or std.mem.eql(u8, session_kind, "remote_signer")) {
+            return .remote_signer;
+        }
+        if (std.mem.eql(u8, session_kind, "zklogin")) return .zklogin;
+        if (std.mem.eql(u8, session_kind, "multisig")) return .multisig;
+        return error.InvalidCli;
+    }
+
+    if (summary.wallet_selector) |wallet_selector| {
+        if (std.mem.startsWith(u8, wallet_selector, "passkey:")) return .passkey;
+        if (std.mem.startsWith(u8, wallet_selector, "external:")) return .remote_signer;
+    }
+    if (std.mem.startsWith(u8, summary.selector, "passkey:")) return .passkey;
+    if (std.mem.startsWith(u8, summary.selector, "external:")) return .remote_signer;
+    return .local_keystore;
+}
+
+fn delegatedSessionAccountSession(
+    summary: *const OwnedDelegatedSessionArtifactSummary,
+) !client.tx_request_builder.AccountSession {
+    return .{
+        .kind = try delegatedSessionAccountKind(summary),
+        .session_id = summary.session_id,
+        .expires_at_ms = if (summary.expires_at_ms) |value| @as(u64, @intCast(value)) else null,
+    };
+}
+
+fn delegatedSessionLocalSignerSelectors(
+    allocator: std.mem.Allocator,
+    summary: *const OwnedDelegatedSessionArtifactSummary,
+) ![]const []const u8 {
+    const signer_selector = if (summary.wallet_selector) |wallet_selector|
+        if (!std.mem.startsWith(u8, wallet_selector, "passkey:") and !std.mem.startsWith(u8, wallet_selector, "external:"))
+            wallet_selector
+        else
+            (summary.address orelse return error.InvalidCli)
+    else
+        (summary.address orelse return error.InvalidCli);
+
+    const selectors = try allocator.alloc([]const u8, 1);
+    selectors[0] = signer_selector;
+    return selectors;
+}
+
+fn validateDelegatedSessionProviderAddress(
+    expected_address: ?[]const u8,
+    provider_address: ?[]const u8,
+) !?[]const u8 {
+    if (expected_address == null) return provider_address;
+    if (provider_address == null) return expected_address;
+    if (!std.mem.eql(u8, expected_address.?, provider_address.?)) return error.InvalidCli;
+    return provider_address;
+}
+
+fn applyDelegatedSessionToProgrammaticProvider(
+    summary: *const OwnedDelegatedSessionArtifactSummary,
+    provider: client.tx_request_builder.AccountProvider,
+) !client.tx_request_builder.AccountProvider {
+    const session = try delegatedSessionAccountSession(summary);
+    return switch (provider) {
+        .none => error.InvalidCli,
+        .direct_signatures => error.InvalidCli,
+        .keystore_contents => |account| blk: {
+            if (session.kind != .local_keystore) return error.InvalidCli;
+            var updated = account;
+            updated.session = session;
+            break :blk .{ .keystore_contents = updated };
+        },
+        .default_keystore => |account| blk: {
+            if (session.kind != .local_keystore) return error.InvalidCli;
+            var updated = account;
+            updated.session = session;
+            break :blk .{ .default_keystore = updated };
+        },
+        .remote_signer => |account| blk: {
+            if (session.kind != .remote_signer) return error.InvalidCli;
+            var updated = account;
+            updated.address = try validateDelegatedSessionProviderAddress(summary.address, account.address);
+            updated.session = session;
+            break :blk .{ .remote_signer = updated };
+        },
+        .passkey => |account| blk: {
+            if (session.kind != .passkey) return error.InvalidCli;
+            var updated = account;
+            updated.address = try validateDelegatedSessionProviderAddress(summary.address, account.address);
+            updated.session = session;
+            break :blk .{ .passkey = updated };
+        },
+        .zklogin => |account| blk: {
+            if (session.kind != .zklogin) return error.InvalidCli;
+            var updated = account;
+            updated.address = try validateDelegatedSessionProviderAddress(summary.address, account.address);
+            updated.session = session;
+            break :blk .{ .zklogin = updated };
+        },
+        .multisig => |account| blk: {
+            if (session.kind != .multisig) return error.InvalidCli;
+            var updated = account;
+            updated.address = try validateDelegatedSessionProviderAddress(summary.address, account.address);
+            updated.session = session;
+            break :blk .{ .multisig = updated };
+        },
+    };
+}
+
+fn usesDelegatedSessionExecutionFlow(command: cli.Command) bool {
+    return command == .wallet_intent_send or
+        command == .request_sign or
+        command == .request_send;
+}
+
+fn ownProgrammaticProviderWithDelegatedSession(
+    allocator: std.mem.Allocator,
+    args: *const cli.ParsedArgs,
+    provider: ?client.tx_request_builder.AccountProvider,
+) !OwnedProgrammaticProviderWithDelegatedSession {
+    var resolved: OwnedProgrammaticProviderWithDelegatedSession = .{
+        .provider = provider,
+    };
+    errdefer resolved.deinit(allocator);
+
+    if (!usesDelegatedSessionExecutionFlow(args.command)) return resolved;
+
+    resolved.delegated_session = try resolveDelegatedSessionArtifactSummary(allocator, args);
+    if (resolved.delegated_session == null) return resolved;
+
+    if (provider) |value| {
+        resolved.provider = try applyDelegatedSessionToProgrammaticProvider(&resolved.delegated_session.?, value);
+        return resolved;
+    }
+
+    const session = try delegatedSessionAccountSession(&resolved.delegated_session.?);
+    if (session.kind != .local_keystore) return error.InvalidCli;
+
+    resolved.local_signer_selectors = try delegatedSessionLocalSignerSelectors(allocator, &resolved.delegated_session.?);
+    resolved.provider = .{
+        .default_keystore = .{
+            .preparation = .{
+                .signer_selectors = resolved.local_signer_selectors.?,
+                .from_keystore = false,
+                .infer_sender_from_signers = true,
+            },
+            .session = session,
+        },
+    };
+    return resolved;
 }
 
 fn writeDelegatedSessionArtifactMetadata(
@@ -6159,10 +6502,17 @@ pub fn runCommandWithProgrammaticProvider(
         break :blk owned_cli_provider.?.provider;
     };
 
-    const effective_programmatic_provider = if (cli.supportsProgrammableInput(args))
+    const base_programmatic_provider = if (cli.supportsProgrammableInput(args))
         resolvedProgrammaticProvider(args, programmatic_provider orelse cli_provider)
     else
         null;
+    var owned_delegated_provider = try ownProgrammaticProviderWithDelegatedSession(
+        allocator,
+        args,
+        base_programmatic_provider,
+    );
+    defer owned_delegated_provider.deinit(allocator);
+    const effective_programmatic_provider = owned_delegated_provider.provider;
 
     switch (args.command) {
         .help => try cli.printUsage(writer),
@@ -25473,6 +25823,132 @@ test "runCommand request_send request artifact uses local programmable builder p
     try testing.expectEqual(@as(usize, 0), state.unsafe_calls);
 }
 
+test "runCommand request_send request artifact can derive local signer execution from delegated session" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const seed = [_]u8{0x53} ** 32;
+    var encoded_key_bytes: [33]u8 = undefined;
+    encoded_key_bytes[0] = 0;
+    encoded_key_bytes[1..].* = seed;
+    const encoded_len = std.base64.standard.Encoder.calcSize(encoded_key_bytes.len);
+    const encoded_key = try allocator.alloc(u8, encoded_len);
+    defer allocator.free(encoded_key);
+    _ = std.base64.standard.Encoder.encode(encoded_key, &encoded_key_bytes);
+
+    const keystore_contents = try std.fmt.allocPrint(allocator, "[\"{s}\"]", .{encoded_key});
+    defer allocator.free(keystore_contents);
+    const expected_sender = try client.keystore.resolveAddressFromKeystoreContents(
+        allocator,
+        keystore_contents,
+        encoded_key,
+    ) orelse return error.TestUnexpectedResult;
+    defer allocator.free(expected_sender);
+
+    const keystore_path = "tmp_request_send_session_keystore.json";
+    try std.fs.cwd().writeFile(.{
+        .sub_path = keystore_path,
+        .data = keystore_contents,
+    });
+    defer std.fs.cwd().deleteFile(keystore_path) catch {};
+
+    const registry_path = try std.fmt.allocPrint(allocator, "tmp_request_send_session_registry_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(registry_path);
+    defer std.fs.cwd().deleteFile(registry_path) catch {};
+
+    const old_keystore_override = client.keystore.test_keystore_path_override;
+    client.keystore.test_keystore_path_override = keystore_path;
+    defer client.keystore.test_keystore_path_override = old_keystore_override;
+
+    const old_registry_override = wallet_session_registry.test_wallet_session_registry_path_override;
+    wallet_session_registry.test_wallet_session_registry_path_override = registry_path;
+    defer wallet_session_registry.test_wallet_session_registry_path_override = old_registry_override;
+
+    const entries = try allocator.alloc(wallet_session_registry.OwnedWalletSessionEntry, 1);
+    entries[0] = .{
+        .selector = try allocator.dupe(u8, "session:local-send"),
+        .label = try allocator.dupe(u8, "local-send"),
+        .wallet_selector = null,
+        .address = try allocator.dupe(u8, expected_sender),
+        .session_id = try allocator.dupe(u8, "session-1"),
+        .session_kind = try allocator.dupe(u8, "local_signer"),
+        .state = try allocator.dupe(u8, "active"),
+        .policy_json = null,
+        .created_at_ms = 100,
+        .updated_at_ms = 101,
+        .expires_at_ms = std.time.milliTimestamp() + 60_000,
+    };
+    var registry = wallet_session_registry.OwnedWalletSessionRegistry{ .entries = entries };
+    defer registry.deinit(allocator);
+    try wallet_session_registry.writeDefaultWalletSessionRegistry(allocator, &registry);
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "request",
+        "send",
+        "--request",
+        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"typeArguments\":[],\"arguments\":[7]}],\"gasBudget\":1200,\"gasPayment\":[{\"objectId\":\"0x9999999999999999999999999999999999999999999999999999999999999999\",\"version\":\"1\",\"digest\":\"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}],\"summarize\":true}",
+        "--session",
+        "session-1",
+    });
+    defer args.deinit(allocator);
+
+    const State = struct {
+        gas_price: usize = 0,
+        normalized: usize = 0,
+        execute_calls: usize = 0,
+        unsafe_calls: usize = 0,
+    };
+    var state = State{};
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const ctx = @as(*State, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "suix_getReferenceGasPrice")) {
+                ctx.gas_price += 1;
+                return alloc.dupe(u8, "{\"result\":\"8\"}");
+            }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                ctx.normalized += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"parameters\":[\"U64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\"}}}]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_executeTransactionBlock")) {
+                ctx.execute_calls += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"digest\":\"0xrequestsendsession\",\"effects\":{\"status\":{\"status\":\"success\"}},\"balanceChanges\":[]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall") or std.mem.eql(u8, req.method, "unsafe_batchTransaction")) {
+                ctx.unsafe_calls += 1;
+                return alloc.dupe(u8, "{\"result\":{\"txBytes\":\"AQIDBA==\"}}");
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = &state,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    try testing.expectEqual(@as(usize, 1), state.gas_price);
+    try testing.expectEqual(@as(usize, 1), state.normalized);
+    try testing.expectEqual(@as(usize, 1), state.execute_calls);
+    try testing.expectEqual(@as(usize, 0), state.unsafe_calls);
+}
+
 test "runCommand request_sponsor prints sponsor envelope artifact" {
     const testing = std.testing;
 
@@ -25713,6 +26189,132 @@ test "runCommand request_sign request artifact uses local programmable builder p
     try testing.expect(parsed.value.array.items.len >= 2);
     try testing.expect(parsed.value.array.items[0].string.len > 0);
     try testing.expectEqual(@as(usize, 1), parsed.value.array.items[1].array.items.len);
+}
+
+test "runCommandWithProgrammaticProvider request_sign request artifact injects delegated session into authorizer" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const registry_path = try std.fmt.allocPrint(allocator, "tmp_request_sign_session_registry_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(registry_path);
+    defer std.fs.cwd().deleteFile(registry_path) catch {};
+
+    const old_registry_override = wallet_session_registry.test_wallet_session_registry_path_override;
+    wallet_session_registry.test_wallet_session_registry_path_override = registry_path;
+    defer wallet_session_registry.test_wallet_session_registry_path_override = old_registry_override;
+
+    const entries = try allocator.alloc(wallet_session_registry.OwnedWalletSessionEntry, 1);
+    entries[0] = .{
+        .selector = try allocator.dupe(u8, "session:provider-sign"),
+        .label = try allocator.dupe(u8, "provider-sign"),
+        .wallet_selector = try allocator.dupe(u8, "passkey:alice"),
+        .address = try allocator.dupe(u8, "0x1111111111111111111111111111111111111111111111111111111111111111"),
+        .session_id = try allocator.dupe(u8, "session-1"),
+        .session_kind = try allocator.dupe(u8, "passkey"),
+        .state = try allocator.dupe(u8, "active"),
+        .policy_json = null,
+        .created_at_ms = 100,
+        .updated_at_ms = 101,
+        .expires_at_ms = std.time.milliTimestamp() + 60_000,
+    };
+    var registry = wallet_session_registry.OwnedWalletSessionRegistry{ .entries = entries };
+    defer registry.deinit(allocator);
+    try wallet_session_registry.writeDefaultWalletSessionRegistry(allocator, &registry);
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "request",
+        "sign",
+        "--request",
+        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"typeArguments\":[],\"arguments\":[7]}],\"sender\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"gasBudget\":1200,\"gasPayment\":[{\"objectId\":\"0x9999999999999999999999999999999999999999999999999999999999999999\",\"version\":\"1\",\"digest\":\"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}]}",
+        "--session",
+        "session-1",
+    });
+    defer args.deinit(allocator);
+
+    const State = struct {
+        gas_price: usize = 0,
+        normalized: usize = 0,
+        unsafe_calls: usize = 0,
+    };
+    var state = State{};
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const ctx = @as(*State, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "suix_getReferenceGasPrice")) {
+                ctx.gas_price += 1;
+                return alloc.dupe(u8, "{\"result\":\"8\"}");
+            }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                ctx.normalized += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"parameters\":[\"U64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\"}}}]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall") or std.mem.eql(u8, req.method, "unsafe_batchTransaction")) {
+                ctx.unsafe_calls += 1;
+                return alloc.dupe(u8, "{\"result\":{\"txBytes\":\"AQIDBA==\"}}");
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = &state,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    var authorizer_called = false;
+    try runCommandWithProgrammaticProvider(
+        allocator,
+        &rpc,
+        &args,
+        output.writer(allocator),
+        .{
+            .passkey = .{
+                .address = "0x1111111111111111111111111111111111111111111111111111111111111111",
+                .session = .{
+                    .kind = .passkey,
+                    .session_id = "pending-provider-session",
+                },
+                .authorizer = .{
+                    .context = &authorizer_called,
+                    .callback = struct {
+                        fn call(context: *anyopaque, _: std.mem.Allocator, req: client.tx_request_builder.RemoteAuthorizationRequest) !client.tx_request_builder.RemoteAuthorizationResult {
+                            const seen = @as(*bool, @ptrCast(@alignCast(context)));
+                            seen.* = true;
+                            try testing.expectEqual(client.tx_request_builder.AccountSessionKind.passkey, req.account_session.kind);
+                            try testing.expectEqualStrings("session-1", req.account_session.session_id.?);
+                            return .{
+                                .sender = "0x1111111111111111111111111111111111111111111111111111111111111111",
+                                .signatures = &.{"sig-provider-session-1"},
+                                .session = req.account_session,
+                            };
+                        }
+                    }.call,
+                },
+                .session_supports_execute = true,
+            },
+        },
+    );
+
+    try testing.expect(authorizer_called);
+    try testing.expectEqual(@as(usize, 1), state.gas_price);
+    try testing.expectEqual(@as(usize, 1), state.normalized);
+    try testing.expectEqual(@as(usize, 0), state.unsafe_calls);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    try testing.expect(parsed.value == .array);
+    try testing.expectEqualStrings("sig-provider-session-1", parsed.value.array.items[1].array.items[0].string);
 }
 
 test "runCommand request_schedule prints scheduler job artifact" {
