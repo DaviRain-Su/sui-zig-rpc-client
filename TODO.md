@@ -279,6 +279,9 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
 - [x] Ignore unrelated `tx_session_response` values on non-execute local
   build/simulate/dry-run artifact paths so provider-backed local builders do
   not fall back to legacy unsafe tx-bytes helpers.
+- [x] When local command-source `tx_dry_run` lowering fails with `InvalidCli`,
+  fall back to unsafe tx-bytes construction instead of aborting before the
+  dry-run request is sent.
 - [ ] Continue shrinking `unsafe_moveCall` usage.
 - [ ] Continue shrinking `unsafe_batchTransaction` usage.
 - [x] Keep construction, simulation, and execution aligned to the same local

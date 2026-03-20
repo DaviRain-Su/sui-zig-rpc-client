@@ -1790,7 +1790,7 @@ fn buildLocalCommandSourceTxBytes(
     ) orelse return null;
     defer local.deinit(allocator);
 
-    return try rpc.buildLocalProgrammableTransactionTxBytesFromCommandSource(
+    return rpc.buildLocalProgrammableTransactionTxBytesFromCommandSource(
         allocator,
         local.source,
         local.sender,
@@ -1798,7 +1798,10 @@ fn buildLocalCommandSourceTxBytes(
         local.gas_price,
         local.gas_budget,
         null,
-    );
+    ) catch |err| switch (err) {
+        error.InvalidCli => null,
+        else => err,
+    };
 }
 
 const OwnedLocalCommandSourceBuildContext = struct {
@@ -20942,7 +20945,9 @@ test "runCommandWithProgrammaticProvider tx_dry_run move-call with selected args
             }
             if (std.mem.eql(u8, req.method, "sui_dryRunTransactionBlock")) {
                 st.dry_run += 1;
-                st.params_text = try alloc.dupe(u8, req.params_json);
+                if (st.params_text == null) {
+                    st.params_text = try alloc.dupe(u8, req.params_json);
+                }
                 return alloc.dupe(
                     u8,
                     "{\"result\":{\"effects\":{\"status\":{\"status\":\"success\"},\"gasUsed\":{\"computationCost\":\"7\",\"storageCost\":\"2\",\"storageRebate\":\"1\"}},\"balanceChanges\":[]}}",
@@ -21002,6 +21007,104 @@ test "runCommandWithProgrammaticProvider tx_dry_run move-call with selected args
     try testing.expectEqual(@as(usize, 1), state.object);
     try testing.expectEqual(@as(usize, 1), state.dry_run);
     try testing.expectEqual(@as(usize, 0), state.unsafe);
+    try testing.expect(std.mem.indexOf(u8, output.items, "success") != null);
+
+    const captured = state.params_text orelse return error.TestUnexpectedResult;
+    defer allocator.free(captured);
+    const params = try std.json.parseFromSlice(std.json.Value, allocator, captured, .{});
+    defer params.deinit();
+    try testing.expect(params.value == .array);
+    try testing.expect(params.value.array.items[0].string.len > 0);
+}
+
+test "runCommand tx_dry_run falls back to unsafe tx bytes when local lowering returns invalid cli" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var args = cli.ParsedArgs{
+        .command = .tx_dry_run,
+        .has_command = true,
+        .tx_build_package = "0x2",
+        .tx_build_module = "counter",
+        .tx_build_function = "increment",
+        .tx_build_type_args = "[]",
+        .tx_build_args = "[7,7]",
+        .tx_build_sender = "0x123",
+        .tx_build_gas_budget = 1200,
+        .tx_build_gas_price = 8,
+        .tx_build_gas_payment = "[{\"objectId\":\"0x999\",\"version\":\"3\",\"digest\":\"0x3333333333333333333333333333333333333333333333333333333333333333\"}]",
+    };
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    const State = struct {
+        normalized: usize = 0,
+        unsafe: usize = 0,
+        dry_run: usize = 0,
+        params_text: ?[]const u8 = null,
+    };
+    var state = State{};
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const st = @as(*State, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                st.normalized += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"parameters\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"counter\",\"name\":\"Counter\"}},\"U64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\"}}}]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveModule")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"structs\":{\"Counter\":{\"abilities\":{\"abilities\":[\"Key\",\"Store\"]},\"typeParameters\":[],\"fields\":[{\"name\":\"id\",\"type\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"object\",\"name\":\"UID\",\"typeParams\":[]}}}]}}}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getObject")) {
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, "0x999") != null);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":{\"objectId\":\"0x999\",\"version\":\"3\",\"digest\":\"0x3333333333333333333333333333333333333333333333333333333333333333\"}}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "suix_getReferenceGasPrice")) {
+                return alloc.dupe(u8, "{\"result\":\"8\"}");
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall")) {
+                st.unsafe += 1;
+                return alloc.dupe(u8, "{\"result\":{\"txBytes\":\"AQIDBA==\"}}");
+            }
+            if (std.mem.eql(u8, req.method, "sui_dryRunTransactionBlock")) {
+                st.dry_run += 1;
+                if (st.params_text == null) {
+                    st.params_text = try alloc.dupe(u8, req.params_json);
+                }
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"effects\":{\"status\":{\"status\":\"success\"},\"gasUsed\":{\"computationCost\":\"7\",\"storageCost\":\"2\",\"storageRebate\":\"1\"}},\"balanceChanges\":[]}}",
+                );
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+    rpc.request_sender = .{
+        .context = &state,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    try testing.expect(state.normalized >= 1);
+    try testing.expectEqual(@as(usize, 1), state.unsafe);
+    try testing.expect(state.dry_run >= 1);
     try testing.expect(std.mem.indexOf(u8, output.items, "success") != null);
 
     const captured = state.params_text orelse return error.TestUnexpectedResult;
