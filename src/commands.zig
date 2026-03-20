@@ -25465,6 +25465,453 @@ test "runCommand request_rebroadcast sends stored requests and updates tracked d
     try testing.expectEqual(@as(u64, 1), loaded.entries[0].submit_count);
 }
 
+test "wallet MPP smoke covers sponsored transfer and scheduled self-transfer flows" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const keystore_path = try std.fmt.allocPrint(allocator, "tmp_wallet_mpp_smoke_keystore_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(keystore_path);
+    defer std.fs.cwd().deleteFile(keystore_path) catch {};
+
+    const wallet_state_path = try std.fmt.allocPrint(allocator, "tmp_wallet_mpp_smoke_state_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(wallet_state_path);
+    defer std.fs.cwd().deleteFile(wallet_state_path) catch {};
+
+    const wallet_registry_path = try std.fmt.allocPrint(allocator, "tmp_wallet_mpp_smoke_registry_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(wallet_registry_path);
+    defer std.fs.cwd().deleteFile(wallet_registry_path) catch {};
+
+    const wallet_sessions_path = try std.fmt.allocPrint(allocator, "tmp_wallet_mpp_smoke_sessions_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(wallet_sessions_path);
+    defer std.fs.cwd().deleteFile(wallet_sessions_path) catch {};
+
+    const request_state_path = try std.fmt.allocPrint(allocator, "tmp_wallet_mpp_smoke_request_state_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(request_state_path);
+    defer std.fs.cwd().deleteFile(request_state_path) catch {};
+
+    const old_keystore_override = client.keystore.test_keystore_path_override;
+    client.keystore.test_keystore_path_override = keystore_path;
+    defer client.keystore.test_keystore_path_override = old_keystore_override;
+
+    const old_wallet_state_override = wallet_state.test_wallet_state_path_override;
+    wallet_state.test_wallet_state_path_override = wallet_state_path;
+    defer wallet_state.test_wallet_state_path_override = old_wallet_state_override;
+
+    const old_wallet_registry_override = wallet_registry.test_wallet_registry_path_override;
+    wallet_registry.test_wallet_registry_path_override = wallet_registry_path;
+    defer wallet_registry.test_wallet_registry_path_override = old_wallet_registry_override;
+
+    const old_wallet_sessions_override = wallet_session_registry.test_wallet_session_registry_path_override;
+    wallet_session_registry.test_wallet_session_registry_path_override = wallet_sessions_path;
+    defer wallet_session_registry.test_wallet_session_registry_path_override = old_wallet_sessions_override;
+
+    const old_request_state_override = request_state.test_request_state_path_override;
+    request_state.test_request_state_path_override = request_state_path;
+    defer request_state.test_request_state_path_override = old_request_state_override;
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    var create_alice_args = try cli.parseCliArgs(allocator, &.{
+        "wallet",
+        "create",
+        "--alias",
+        "alice",
+        "--json",
+    });
+    defer create_alice_args.deinit(allocator);
+
+    var create_alice_output = std.ArrayList(u8){};
+    defer create_alice_output.deinit(allocator);
+    try runCommand(allocator, &rpc, &create_alice_args, create_alice_output.writer(allocator));
+
+    const create_alice_parsed = try std.json.parseFromSlice(std.json.Value, allocator, create_alice_output.items, .{});
+    defer create_alice_parsed.deinit();
+    const alice_address = create_alice_parsed.value.object.get("address").?.string;
+    try testing.expectEqualStrings("wallet_created", create_alice_parsed.value.object.get("action").?.string);
+    try testing.expectEqualStrings("alice", create_alice_parsed.value.object.get("selector").?.string);
+
+    var create_bob_args = try cli.parseCliArgs(allocator, &.{
+        "wallet",
+        "create",
+        "--alias",
+        "bob",
+        "--no-activate",
+        "--json",
+    });
+    defer create_bob_args.deinit(allocator);
+
+    var create_bob_output = std.ArrayList(u8){};
+    defer create_bob_output.deinit(allocator);
+    try runCommand(allocator, &rpc, &create_bob_args, create_bob_output.writer(allocator));
+
+    const create_bob_parsed = try std.json.parseFromSlice(std.json.Value, allocator, create_bob_output.items, .{});
+    defer create_bob_parsed.deinit();
+    try testing.expectEqualStrings("wallet_created", create_bob_parsed.value.object.get("action").?.string);
+    try testing.expectEqualStrings("bob", create_bob_parsed.value.object.get("selector").?.string);
+
+    var use_alice_args = try cli.parseCliArgs(allocator, &.{
+        "wallet",
+        "use",
+        "alice",
+    });
+    defer use_alice_args.deinit(allocator);
+    var use_alice_output = std.ArrayList(u8){};
+    defer use_alice_output.deinit(allocator);
+    try runCommand(allocator, &rpc, &use_alice_args, use_alice_output.writer(allocator));
+
+    var sponsored_transfer_request_args = try cli.parseCliArgs(allocator, &.{
+        "wallet",
+        "fund",
+        "bob",
+        "--amount",
+        "77",
+        "--emit-request",
+    });
+    defer sponsored_transfer_request_args.deinit(allocator);
+
+    var sponsored_transfer_request_output = std.ArrayList(u8){};
+    defer sponsored_transfer_request_output.deinit(allocator);
+    try runCommand(allocator, &rpc, &sponsored_transfer_request_args, sponsored_transfer_request_output.writer(allocator));
+
+    const sponsored_transfer_request = try std.json.parseFromSlice(std.json.Value, allocator, sponsored_transfer_request_output.items, .{});
+    defer sponsored_transfer_request.deinit();
+    try testing.expectEqualStrings(alice_address, sponsored_transfer_request.value.object.get("sender").?.string);
+    try testing.expect(sponsored_transfer_request.value.object.get("autoGasPayment").?.bool);
+    try testing.expect(sponsored_transfer_request.value.object.get("autoGasBudget").?.bool);
+    try testing.expectEqual(@as(i64, 77), sponsored_transfer_request.value.object.get("gasPaymentMinBalance").?.integer);
+    try testing.expectEqual(@as(usize, 2), sponsored_transfer_request.value.object.get("commands").?.array.items.len);
+    try testing.expectEqualStrings("SplitCoins", sponsored_transfer_request.value.object.get("commands").?.array.items[0].object.get("kind").?.string);
+    try testing.expectEqualStrings("TransferObjects", sponsored_transfer_request.value.object.get("commands").?.array.items[1].object.get("kind").?.string);
+
+    var sponsor_args = try cli.parseCliArgs(allocator, &.{
+        "request",
+        "sponsor",
+        "--request",
+        sponsored_transfer_request_output.items,
+        "--sponsor-mode",
+        "optional",
+        "--payment-reference",
+        "fund-bob",
+        "--payment-memo",
+        "wallet-fund",
+        "--invoice-reference",
+        "inv-fund-1",
+        "--reconciliation-group",
+        "wallet-transfers",
+        "--execution-lane",
+        "fund-lane",
+        "--gas-lane",
+        "fund-gas",
+        "--conflict-keys",
+        "[\"owned:alice\",\"owned:bob\"]",
+        "--correlation-id",
+        "sponsored-transfer-1",
+    });
+    defer sponsor_args.deinit(allocator);
+
+    var sponsor_output = std.ArrayList(u8){};
+    defer sponsor_output.deinit(allocator);
+    try runCommand(allocator, &rpc, &sponsor_args, sponsor_output.writer(allocator));
+
+    const sponsor_parsed = try std.json.parseFromSlice(std.json.Value, allocator, sponsor_output.items, .{});
+    defer sponsor_parsed.deinit();
+    try testing.expectEqualStrings("sponsor_envelope", sponsor_parsed.value.object.get("artifact_kind").?.string);
+    try testing.expectEqualStrings(alice_address, sponsor_parsed.value.object.get("sender").?.string);
+    try testing.expectEqualStrings("optional", sponsor_parsed.value.object.get("sponsor").?.object.get("mode").?.string);
+    try testing.expectEqualStrings("prefer_sponsor", sponsor_parsed.value.object.get("sponsor").?.object.get("gas_source_preference").?.string);
+    try testing.expectEqualStrings("fallback_to_sender", sponsor_parsed.value.object.get("sponsor").?.object.get("refusal_fallback").?.string);
+    try testing.expectEqualStrings("fund-bob", sponsor_parsed.value.object.get("payment").?.object.get("payment_reference").?.string);
+    try testing.expectEqualStrings("fund-lane", sponsor_parsed.value.object.get("concurrency").?.object.get("execution_lane").?.string);
+    try testing.expectEqual(@as(usize, 2), sponsor_parsed.value.object.get("concurrency").?.object.get("conflict_keys").?.array.items.len);
+
+    var self_transfer_request_args = try cli.parseCliArgs(allocator, &.{
+        "wallet",
+        "fund",
+        "alice",
+        "--amount",
+        "11",
+        "--emit-request",
+    });
+    defer self_transfer_request_args.deinit(allocator);
+
+    var self_transfer_request_output = std.ArrayList(u8){};
+    defer self_transfer_request_output.deinit(allocator);
+    try runCommand(allocator, &rpc, &self_transfer_request_args, self_transfer_request_output.writer(allocator));
+
+    const self_transfer_request = try std.json.parseFromSlice(std.json.Value, allocator, self_transfer_request_output.items, .{});
+    defer self_transfer_request.deinit();
+    try testing.expectEqualStrings(alice_address, self_transfer_request.value.object.get("sender").?.string);
+    try testing.expectEqualStrings(
+        alice_address,
+        self_transfer_request.value.object.get("commands").?.array.items[1].object.get("address").?.string,
+    );
+
+    var schedule_args = try cli.parseCliArgs(allocator, &.{
+        "request",
+        "schedule",
+        "--request",
+        self_transfer_request_output.items,
+        "--schedule-id",
+        "self-transfer-1",
+        "--schedule-at-ms",
+        "500",
+        "--correlation-id",
+        "self-transfer-correlation",
+        "--payment-reference",
+        "scheduled-self-transfer",
+        "--execution-lane",
+        "self-lane",
+        "--gas-lane",
+        "self-gas",
+        "--conflict-keys",
+        "[\"owned:alice\"]",
+    });
+    defer schedule_args.deinit(allocator);
+
+    var schedule_output = std.ArrayList(u8){};
+    defer schedule_output.deinit(allocator);
+    try runCommand(allocator, &rpc, &schedule_args, schedule_output.writer(allocator));
+
+    const schedule_parsed = try std.json.parseFromSlice(std.json.Value, allocator, schedule_output.items, .{});
+    defer schedule_parsed.deinit();
+    try testing.expectEqualStrings("schedule_job", schedule_parsed.value.object.get("artifact_kind").?.string);
+    try testing.expectEqualStrings("scheduled", schedule_parsed.value.object.get("state").?.string);
+    try testing.expectEqualStrings("self-transfer-1", schedule_parsed.value.object.get("schedule").?.object.get("job_id").?.string);
+    try testing.expectEqualStrings("scheduled-self-transfer", schedule_parsed.value.object.get("payment").?.object.get("payment_reference").?.string);
+    try testing.expectEqualStrings("self-lane", schedule_parsed.value.object.get("concurrency").?.object.get("execution_lane").?.string);
+    try testing.expectEqualStrings("fail_closed", schedule_parsed.value.object.get("execution_requirements").?.object.get("stale_object_policy").?.string);
+
+    var stored_requests = try request_state.loadDefaultRequestState(allocator);
+    defer stored_requests.deinit(allocator);
+    try testing.expectEqual(@as(usize, 1), stored_requests.entries.len);
+    try testing.expectEqualStrings("self-transfer-1", stored_requests.entries[0].id);
+    try testing.expectEqualStrings("schedule_job", stored_requests.entries[0].kind);
+    try testing.expectEqualStrings("scheduled", stored_requests.entries[0].state);
+
+    var list_args = try cli.parseCliArgs(allocator, &.{
+        "request",
+        "list",
+    });
+    defer list_args.deinit(allocator);
+
+    var list_output = std.ArrayList(u8){};
+    defer list_output.deinit(allocator);
+    try runCommand(allocator, &rpc, &list_args, list_output.writer(allocator));
+
+    const list_parsed = try std.json.parseFromSlice(std.json.Value, allocator, list_output.items, .{});
+    defer list_parsed.deinit();
+    try testing.expectEqualStrings("request_state_list", list_parsed.value.object.get("artifact_kind").?.string);
+    try testing.expectEqual(@as(usize, 1), list_parsed.value.object.get("entries").?.array.items.len);
+    try testing.expectEqualStrings("self-transfer-1", list_parsed.value.object.get("entries").?.array.items[0].object.get("id").?.string);
+    try testing.expectEqualStrings("schedule_job", list_parsed.value.object.get("entries").?.array.items[0].object.get("kind").?.string);
+    try testing.expectEqualStrings("scheduled", list_parsed.value.object.get("entries").?.array.items[0].object.get("state").?.string);
+}
+
+test "wallet MPP smoke covers session-limited swap and sponsored swap artifacts" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const keystore_path = try std.fmt.allocPrint(allocator, "tmp_wallet_mpp_swap_keystore_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(keystore_path);
+    defer std.fs.cwd().deleteFile(keystore_path) catch {};
+
+    const wallet_state_path = try std.fmt.allocPrint(allocator, "tmp_wallet_mpp_swap_state_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(wallet_state_path);
+    defer std.fs.cwd().deleteFile(wallet_state_path) catch {};
+
+    const wallet_registry_path = try std.fmt.allocPrint(allocator, "tmp_wallet_mpp_swap_registry_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(wallet_registry_path);
+    defer std.fs.cwd().deleteFile(wallet_registry_path) catch {};
+
+    const wallet_sessions_path = try std.fmt.allocPrint(allocator, "tmp_wallet_mpp_swap_sessions_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(wallet_sessions_path);
+    defer std.fs.cwd().deleteFile(wallet_sessions_path) catch {};
+
+    const request_state_path = try std.fmt.allocPrint(allocator, "tmp_wallet_mpp_swap_request_state_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(request_state_path);
+    defer std.fs.cwd().deleteFile(request_state_path) catch {};
+
+    const old_keystore_override = client.keystore.test_keystore_path_override;
+    client.keystore.test_keystore_path_override = keystore_path;
+    defer client.keystore.test_keystore_path_override = old_keystore_override;
+
+    const old_wallet_state_override = wallet_state.test_wallet_state_path_override;
+    wallet_state.test_wallet_state_path_override = wallet_state_path;
+    defer wallet_state.test_wallet_state_path_override = old_wallet_state_override;
+
+    const old_wallet_registry_override = wallet_registry.test_wallet_registry_path_override;
+    wallet_registry.test_wallet_registry_path_override = wallet_registry_path;
+    defer wallet_registry.test_wallet_registry_path_override = old_wallet_registry_override;
+
+    const old_wallet_sessions_override = wallet_session_registry.test_wallet_session_registry_path_override;
+    wallet_session_registry.test_wallet_session_registry_path_override = wallet_sessions_path;
+    defer wallet_session_registry.test_wallet_session_registry_path_override = old_wallet_sessions_override;
+
+    const old_request_state_override = request_state.test_request_state_path_override;
+    request_state.test_request_state_path_override = request_state_path;
+    defer request_state.test_request_state_path_override = old_request_state_override;
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    var create_alice_args = try cli.parseCliArgs(allocator, &.{
+        "wallet",
+        "create",
+        "--alias",
+        "alice",
+        "--json",
+    });
+    defer create_alice_args.deinit(allocator);
+
+    var create_alice_output = std.ArrayList(u8){};
+    defer create_alice_output.deinit(allocator);
+    try runCommand(allocator, &rpc, &create_alice_args, create_alice_output.writer(allocator));
+
+    const create_alice_parsed = try std.json.parseFromSlice(std.json.Value, allocator, create_alice_output.items, .{});
+    defer create_alice_parsed.deinit();
+    const alice_address = create_alice_parsed.value.object.get("address").?.string;
+
+    var session_create_args = try cli.parseCliArgs(allocator, &.{
+        "wallet",
+        "session",
+        "create",
+        "alice",
+        "--session-id",
+        "swap-session-1",
+        "--label",
+        "swap-session",
+        "--policy",
+        "{\"session_id\":\"swap-session-1\"}",
+        "--policy-recurring-limit",
+        "1000000",
+        "--policy-recurring-interval-ms",
+        "60000",
+        "--policy-recipient-allowlist",
+        "[\"0xfeed\"]",
+        "--policy-protocol-allowlist",
+        "[\"0x2::router::swap_exact_in\"]",
+        "--json",
+    });
+    defer session_create_args.deinit(allocator);
+
+    var session_create_output = std.ArrayList(u8){};
+    defer session_create_output.deinit(allocator);
+    try runCommand(allocator, &rpc, &session_create_args, session_create_output.writer(allocator));
+
+    const session_create_parsed = try std.json.parseFromSlice(std.json.Value, allocator, session_create_output.items, .{});
+    defer session_create_parsed.deinit();
+    try testing.expectEqualStrings("wallet_session_entry", session_create_parsed.value.object.get("artifact_kind").?.string);
+    try testing.expectEqualStrings("session_created", session_create_parsed.value.object.get("action").?.string);
+    try testing.expectEqualStrings("local_signer", session_create_parsed.value.object.get("session_kind").?.string);
+    try testing.expectEqualStrings("swap-session-1", session_create_parsed.value.object.get("session_id").?.string);
+
+    var session_registry = try wallet_session_registry.loadDefaultWalletSessionRegistry(allocator);
+    defer session_registry.deinit(allocator);
+    try testing.expectEqual(@as(usize, 1), session_registry.entries.len);
+    try testing.expectEqualStrings("swap-session-1", session_registry.entries[0].session_id);
+    const session_policy = try std.json.parseFromSlice(std.json.Value, allocator, session_registry.entries[0].policy_json.?, .{});
+    defer session_policy.deinit();
+    try testing.expectEqualStrings("swap-session-1", session_policy.value.object.get("session_id").?.string);
+    try testing.expectEqualStrings("0x2::router::swap_exact_in", session_policy.value.object.get("protocol_allowlist").?.array.items[0].string);
+
+    const swap_request_json = try std.fmt.allocPrint(
+        allocator,
+        "{{\"commands\":[{{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"router\",\"function\":\"swap_exact_in\",\"typeArguments\":[],\"arguments\":[7,8]}}],\"sender\":\"{s}\",\"gasBudget\":1200}}",
+        .{alice_address},
+    );
+    defer allocator.free(swap_request_json);
+
+    var intent_args = try cli.parseCliArgs(allocator, &.{
+        "wallet",
+        "intent",
+        "build",
+        "--request",
+        swap_request_json,
+        "--network",
+        "sui:testnet",
+        "--execution-mode",
+        "send",
+        "--policy",
+        "{\"session_id\":\"swap-session-1\"}",
+        "--policy-protocol-allowlist",
+        "[\"0x2::router::swap_exact_in\"]",
+        "--payment-reference",
+        "swap-pay-1",
+        "--payment-memo",
+        "session-limited-swap",
+        "--reconciliation-group",
+        "swap-batch",
+        "--execution-lane",
+        "swap-lane",
+        "--gas-lane",
+        "swap-gas",
+        "--conflict-keys",
+        "[\"shared:router\",\"owned:session:swap-session-1\"]",
+    });
+    defer intent_args.deinit(allocator);
+
+    var intent_output = std.ArrayList(u8){};
+    defer intent_output.deinit(allocator);
+    try runCommand(allocator, &rpc, &intent_args, intent_output.writer(allocator));
+
+    const intent_parsed = try std.json.parseFromSlice(std.json.Value, allocator, intent_output.items, .{});
+    defer intent_parsed.deinit();
+    try testing.expectEqualStrings("wallet_intent", intent_parsed.value.object.get("artifact_kind").?.string);
+    try testing.expectEqualStrings("sui:testnet", intent_parsed.value.object.get("network").?.string);
+    try testing.expectEqualStrings("swap-session-1", intent_parsed.value.object.get("policy").?.object.get("session_id").?.string);
+    try testing.expectEqualStrings("0x2::router::swap_exact_in", intent_parsed.value.object.get("policy").?.object.get("protocol_allowlist").?.array.items[0].string);
+    try testing.expectEqualStrings("swap-pay-1", intent_parsed.value.object.get("payment").?.object.get("payment_reference").?.string);
+    try testing.expectEqualStrings("swap-lane", intent_parsed.value.object.get("concurrency").?.object.get("execution_lane").?.string);
+    try testing.expectEqual(@as(i64, 1), intent_parsed.value.object.get("request_summary").?.object.get("command_count").?.integer);
+    try testing.expectEqualStrings("MoveCall", intent_parsed.value.object.get("request_summary").?.object.get("command_kinds").?.array.items[0].string);
+    try testing.expectEqualStrings("swap_exact_in", intent_parsed.value.object.get("request").?.object.get("commands").?.array.items[0].object.get("function").?.string);
+
+    var sponsor_swap_args = try cli.parseCliArgs(allocator, &.{
+        "request",
+        "sponsor",
+        "--request",
+        swap_request_json,
+        "--sponsor-mode",
+        "required",
+        "--sponsor-policy",
+        "{\"route\":\"sponsored-swap\"}",
+        "--sponsor-gas-source",
+        "sponsor",
+        "--sponsor-refusal-fallback",
+        "fail_closed",
+        "--payment-reference",
+        "swap-sponsor-1",
+        "--execution-lane",
+        "sponsored-swap-lane",
+        "--gas-lane",
+        "sponsored-swap-gas",
+        "--conflict-keys",
+        "[\"shared:router\",\"owned:coin:sui\"]",
+    });
+    defer sponsor_swap_args.deinit(allocator);
+
+    var sponsor_swap_output = std.ArrayList(u8){};
+    defer sponsor_swap_output.deinit(allocator);
+    try runCommand(allocator, &rpc, &sponsor_swap_args, sponsor_swap_output.writer(allocator));
+
+    const sponsor_swap_parsed = try std.json.parseFromSlice(std.json.Value, allocator, sponsor_swap_output.items, .{});
+    defer sponsor_swap_parsed.deinit();
+    try testing.expectEqualStrings("sponsor_envelope", sponsor_swap_parsed.value.object.get("artifact_kind").?.string);
+    try testing.expectEqualStrings("required", sponsor_swap_parsed.value.object.get("sponsor").?.object.get("mode").?.string);
+    try testing.expectEqualStrings("sponsor", sponsor_swap_parsed.value.object.get("sponsor").?.object.get("gas_source_preference").?.string);
+    try testing.expectEqualStrings("fail_closed", sponsor_swap_parsed.value.object.get("sponsor").?.object.get("refusal_fallback").?.string);
+    try testing.expectEqualStrings("swap-sponsor-1", sponsor_swap_parsed.value.object.get("payment").?.object.get("payment_reference").?.string);
+    try testing.expectEqualStrings("sponsored-swap-lane", sponsor_swap_parsed.value.object.get("concurrency").?.object.get("execution_lane").?.string);
+    try testing.expectEqualStrings("sponsored-swap", sponsor_swap_parsed.value.object.get("sponsor").?.object.get("policy_metadata").?.object.get("route").?.string);
+}
+
 test "runCommand tx_build move-call with --summarize prints instruction summaries" {
     const testing = std.testing;
 

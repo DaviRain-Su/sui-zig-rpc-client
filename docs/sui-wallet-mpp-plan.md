@@ -764,6 +764,10 @@ These are the next concrete steps that fit this repo.
    - session-limited swap
    - scheduled self-transfer
 
+This is now covered by deterministic command-level regressions in
+`src/commands.zig`, so the wallet/request lifecycle has an executable smoke
+layer in addition to the lower-level parser and artifact tests.
+
 ## Risks
 
 ### Over-Abstracting Too Early

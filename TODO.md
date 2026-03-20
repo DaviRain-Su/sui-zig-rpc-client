@@ -389,3 +389,5 @@ what the generic path still needs to finish.
   `wallet session create/list/revoke`.
 - [x] Add a broader wallet lifecycle funding command:
   `wallet fund`.
+- [x] Add deterministic wallet smoke regressions for sponsored transfer,
+  sponsored swap, session-limited swap, and scheduled self-transfer.

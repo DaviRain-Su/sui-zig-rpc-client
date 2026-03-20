@@ -1041,6 +1041,7 @@ pub fn main() !void {
 - `request resume <id>`: 把本地调度条目恢复成 `scheduled`。
 - `request rebroadcast <id>`: 从本地 `request_state.json` 读取已保存的 request artifact，再走标准 `request send` 主线路重新发送，并回写最新 digest / state。
 - `request status <digest>`: 复用交易状态读取路径查询 request 执行结果；支持 `--summarize`、`--observe`、`--poll-ms`、`--confirm-timeout-ms`。
+- `wallet/request` 这一层现在已经有 deterministic smoke regressions，覆盖 `sponsored transfer`、`sponsored swap`、`session-limited swap`、`scheduled self-transfer`，不再只靠零散 unit tests 验证 artifact 字段。
 - `account list`: 列出 keystore 条目。
 - `account info <selector>`: 按索引或别名/地址/密钥字段查询并展示单条 keystore 记录；`--json` 输出 JSON。
 - `account coins <selector|0xaddress>`: 查询 owner 的 coin page；支持 `--coin-type`、`--limit`、`--all`、`--json`。
