@@ -360,6 +360,11 @@ what the generic path still needs to finish.
 
 ## Sui Wallet MPP Plan
 
+- [x] Add a concrete `wallet-core v1` closure checklist. See
+  `docs/wallet-core-v1-checklist.md`.
+- [x] Add a separate `wallet-web` architecture plan so the future frontend can
+  consume the existing core instead of rebuilding transaction logic. See
+  `docs/wallet-web-architecture.md`.
 - [x] Add a first-class wallet intent schema and artifact contract for web and
   CLI, including `wallet intent build/dry-run/send`.
 - [x] Add initial `wallet` CLI lifecycle commands:
@@ -403,3 +408,15 @@ what the generic path still needs to finish.
   available.
 - [x] Add deterministic wallet smoke regressions for sponsored transfer,
   sponsored swap, session-limited swap, and scheduled self-transfer.
+
+## Wallet Core V1 Follow-Up
+
+- [ ] Wire `request sign/send` challenge-prompt states into the same request
+  lifecycle store instead of leaving them outside the tracked state machine.
+- [ ] Keep shrinking `unsafe_moveCall` / `unsafe_batchTransaction` usage in the
+  remaining generic Sui execution paths.
+- [ ] Finish transaction-level joint selection for
+  `Pool + Position + Coin + gas`.
+- [ ] Keep the live protocol release gate lightweight but repeatable:
+  Cetus mainnet sanity plus local Hashi publish/deposit smoke before calling
+  the current core `wallet-core v1`.

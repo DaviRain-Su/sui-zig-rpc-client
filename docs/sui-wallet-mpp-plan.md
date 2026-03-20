@@ -784,37 +784,25 @@ Current status:
 
 ## Immediate Work Items
 
-These are the next concrete steps that fit this repo.
+The first wallet/request implementation wave in this repo is now in place.
 
-1. Add a documented wallet intent schema to the repo.
-2. Add explicit `wallet` CLI lifecycle commands:
-   - create/import/use/address/balance/coins/objects
-3. Add explicit `request` CLI lifecycle commands:
-   - build/inspect/dry-run/sponsor/sign/send/schedule/status
-4. Make request artifacts explicitly sponsor-friendly.
-5. Add a passkey/session signer abstraction boundary.
-6. Add an explicit embedded/external account-mode model to the design and CLI.
-7. Extend policy fields beyond recurring limits / recipient scoping / protocol
-   scoping into enforceable session lifecycle flows.
-8. Add scheduler-friendly artifact metadata:
-   - validity window
-   - sender
-   - sponsor mode
-   - object freshness requirements
-9. Add payment reference and reconciliation metadata to the wallet artifact
-   plan.
-10. Add concurrency-lane metadata for parallel-safe execution planning.
-11. Add wallet smoke scenarios that cover:
-   - sponsored transfer
-   - sponsored swap
-   - session-limited swap
-   - scheduled self-transfer
+- `wallet` lifecycle commands exist
+- `request` lifecycle commands exist
+- `wallet intent` exists as a first-class artifact
+- delegated sessions, sponsor metadata, scheduler metadata, payment metadata,
+  and concurrency metadata are all explicit contracts
+- deterministic wallet smoke regressions exist in `src/commands.zig`
 
-This is now covered by deterministic command-level regressions in
-`src/commands.zig`, so the wallet/request lifecycle has an executable smoke
-layer in addition to the lower-level parser and artifact tests.
+The next concrete step is not "add another disconnected command". It is to
+close the current core as a stable v1 and then move the product surface into a
+separate web wallet.
 
-The wallet/request lifecycle now also accepts full `move function --summarize`
+- `wallet-core v1` closure checklist:
+  [`docs/wallet-core-v1-checklist.md`](/Users/davirian/dev/zig/sui-zig-rpc-client/docs/wallet-core-v1-checklist.md)
+- future `wallet-web` architecture:
+  [`docs/wallet-web-architecture.md`](/Users/davirian/dev/zig/sui-zig-rpc-client/docs/wallet-web-architecture.md)
+
+The wallet/request lifecycle also accepts full `move function --summarize`
 artifacts as `--request` input, extracting the preferred or base request
 template automatically. That keeps the reusable artifact flow intact while
 removing another layer of manual `call_template.*` copy/paste.
