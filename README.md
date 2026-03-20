@@ -789,6 +789,7 @@ pub fn main() !void {
 `runCommandSource*WithChallengeResponseWithAccountProvider` 这一层现在也对齐到同一条 owned-plan / local builder 主线，不再自己单独拼 execute payload；challenge-response 之后的 command-source 执行会和 `options/commands` helper 一样，把 provider authorizer 继续喂成结构化 `options`，而不是退回 `tx_bytes_base64`。
 对 still-legacy 的 `buildCommandSourceExecutePayloadWithSignatures` / `...FromDefaultKeystore` helper，只要已经给了明确 `gas_object_id`，CLI 现在也会先把它解析成本地 `gasPayment + gasPrice`，再优先走 local programmable builder，而不是直接落回 `unsafe_moveCall` / `unsafe_batchTransaction`。
 同样，legacy 的 `buildCommandSourceTxBytes` helper 在 `gas_object_id` 已知且命令源本地可 lowering 时，也会先走 local programmable builder，而不是直接落回 `unsafe_moveCall` / `unsafe_batchTransaction`。
+更底层的 `buildMoveCallTxBytes` / `buildBatchTransactionTxBytes` 在 `gas_object_id` 已知且输入本地可 lowering 时，也会优先走同一条 local programmable builder 主线，避免旧 helper 绕开这层收口。
 - `tx build programmable`: 提供 `--commands` JSON 数组直接构建任意 PTB `ProgrammableTransaction`。
 - `tx build --signer`: 可复用 keystore 选择器（alias/address/key）；未提供 `--sender` 时优先使用首个可解析出地址的 signer。
 - `account list`: 列出 keystore 条目。

@@ -2450,6 +2450,24 @@ pub const SuiRpcClient = struct {
         gas_object_id: ?[]const u8,
         gas_budget: u64,
     ) ![]u8 {
+        if (try self.tryBuildLocalCommandSourceTxBytesWithKnownGasObject(
+            allocator,
+            signer,
+            .{
+                .move_call = .{
+                    .package_id = package_id,
+                    .module = module,
+                    .function_name = function_name,
+                    .type_args = type_args_json,
+                    .arguments = arguments_json,
+                },
+            },
+            gas_object_id,
+            gas_budget,
+        )) |tx_bytes| {
+            return tx_bytes;
+        }
+
         const normalized_type_args = blk: {
             const raw = type_args_json orelse "[]";
             const trimmed = std.mem.trim(u8, raw, " \n\r\t");
@@ -2508,6 +2526,16 @@ pub const SuiRpcClient = struct {
         gas_object_id: ?[]const u8,
         gas_budget: u64,
     ) ![]u8 {
+        if (try self.tryBuildLocalCommandSourceTxBytesWithKnownGasObject(
+            allocator,
+            signer,
+            .{ .commands_json = commands_json },
+            gas_object_id,
+            gas_budget,
+        )) |tx_bytes| {
+            return tx_bytes;
+        }
+
         const single_transaction_params = try buildUnsafeBatchTransactionParamsJson(allocator, commands_json);
         defer allocator.free(single_transaction_params);
 
@@ -27240,6 +27268,151 @@ test "buildCommandSourceTxBytes prefers local builder when gas object is known" 
         allocator,
         "0xowner",
         .{ .commands_json = "[{\"kind\":\"TransferObjects\",\"objects\":[\"0xcoin\"],\"address\":\"0xreceiver\"}]" },
+        "0xgas",
+        100,
+    );
+    defer allocator.free(tx_bytes);
+
+    try testing.expect(tx_bytes.len != 0);
+    try testing.expectEqual(@as(usize, 1), state.gas_price);
+    try testing.expectEqual(@as(usize, 2), state.object);
+    try testing.expectEqual(@as(usize, 0), state.unsafe);
+}
+
+test "buildMoveCallTxBytes prefers local builder when gas object is known" {
+    const testing = std.testing;
+    const State = struct {
+        normalized: usize = 0,
+        gas_price: usize = 0,
+        object: usize = 0,
+        unsafe: usize = 0,
+    };
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var state = State{};
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const st = @as(*State, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                st.normalized += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"parameters\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"pool\",\"name\":\"Pool\",\"typeParams\":[]}},\"U64\",\"Address\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[],\"typeParameters\":[],\"visibility\":\"Public\",\"isEntry\":true}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "suix_getReferenceGasPrice")) {
+                st.gas_price += 1;
+                return alloc.dupe(u8, "{\"result\":\"5\"}");
+            }
+            if (std.mem.eql(u8, req.method, "sui_getObject")) {
+                st.object += 1;
+                if (std.mem.indexOf(u8, req.params_json, "0xpool") != null) {
+                    return alloc.dupe(
+                        u8,
+                        "{\"result\":{\"data\":{\"objectId\":\"0xpool\",\"version\":\"7\",\"digest\":\"pool-digest\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}}",
+                    );
+                }
+                if (std.mem.indexOf(u8, req.params_json, "0xgas") != null) {
+                    return alloc.dupe(
+                        u8,
+                        "{\"result\":{\"data\":{\"objectId\":\"0xgas\",\"version\":\"8\",\"digest\":\"gas-digest\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}}",
+                    );
+                }
+                return error.TestUnexpectedResult;
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall") or std.mem.eql(u8, req.method, "unsafe_batchTransaction")) {
+                st.unsafe += 1;
+                return error.TestUnexpectedResult;
+            }
+            return error.TestUnexpectedResult;
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &state,
+        .callback = callback,
+    };
+
+    const tx_bytes = try client_instance.buildMoveCallTxBytes(
+        allocator,
+        "0xowner",
+        "0x2",
+        "pool",
+        "swap",
+        "[]",
+        "[\"0xpool\",7,\"0xreceiver\"]",
+        "0xgas",
+        100,
+    );
+    defer allocator.free(tx_bytes);
+
+    try testing.expect(tx_bytes.len != 0);
+    try testing.expectEqual(@as(usize, 1), state.normalized);
+    try testing.expectEqual(@as(usize, 1), state.gas_price);
+    try testing.expectEqual(@as(usize, 2), state.object);
+    try testing.expectEqual(@as(usize, 0), state.unsafe);
+}
+
+test "buildBatchTransactionTxBytes prefers local builder when gas object is known" {
+    const testing = std.testing;
+    const State = struct {
+        gas_price: usize = 0,
+        object: usize = 0,
+        unsafe: usize = 0,
+    };
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var state = State{};
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const st = @as(*State, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "suix_getReferenceGasPrice")) {
+                st.gas_price += 1;
+                return alloc.dupe(u8, "{\"result\":\"17\"}");
+            }
+            if (std.mem.eql(u8, req.method, "sui_getObject")) {
+                st.object += 1;
+                if (std.mem.indexOf(u8, req.params_json, "0xcoin") != null) {
+                    return alloc.dupe(
+                        u8,
+                        "{\"result\":{\"data\":{\"objectId\":\"0xcoin\",\"version\":\"10\",\"digest\":\"coin-digest-4\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}}",
+                    );
+                }
+                if (std.mem.indexOf(u8, req.params_json, "0xgas") != null) {
+                    return alloc.dupe(
+                        u8,
+                        "{\"result\":{\"data\":{\"objectId\":\"0xgas\",\"version\":\"11\",\"digest\":\"gas-digest-4\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}}",
+                    );
+                }
+                return error.TestUnexpectedResult;
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall") or std.mem.eql(u8, req.method, "unsafe_batchTransaction")) {
+                st.unsafe += 1;
+                return error.TestUnexpectedResult;
+            }
+            return error.TestUnexpectedResult;
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &state,
+        .callback = callback,
+    };
+
+    const tx_bytes = try client_instance.buildBatchTransactionTxBytes(
+        allocator,
+        "0xowner",
+        "[{\"kind\":\"TransferObjects\",\"objects\":[\"0xcoin\"],\"address\":\"0xreceiver\"}]",
         "0xgas",
         100,
     );
