@@ -369,6 +369,7 @@ Implemented wallet lifecycle commands:
 - `wallet export-public`
 - `wallet signer inspect`
 - `wallet session create`
+- `wallet policy inspect`
 - `wallet session list`
 - `wallet session revoke`
 - `wallet intent build`

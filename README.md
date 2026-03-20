@@ -999,6 +999,7 @@ pub fn main() !void {
 - `wallet session create [selector]`: 为 wallet selector 或当前 active wallet 注册 delegated session 条目；支持 `--session-id`、`--session-kind`、`--label`、`--expires-at-ms` 和统一的 `--policy*` 字段。`session_kind` 默认会从 selector/source 推断成 `passkey`、`external_wallet` 或 `local_signer`。
 - `wallet session list`: 列出本地 delegated session registry 条目；输出 `selector/session_id/state/wallet_selector/active_wallet_match`，适合检查后续 session policy 生命周期。
 - `wallet session revoke <selector|label|session-id|0xaddress>`: 把本地 delegated session 条目标成 `revoked`；不会隐式断开底层 wallet selector，只更新 session registry。
+- `wallet policy inspect [session-selector|label|session-id|0xaddress]`: 归一化检查 wallet policy contract。支持直接读取 session registry 里的 base policy，并和 `--policy`、`--policy-recurring-*`、`--policy-recipient-allowlist`、`--policy-protocol-allowlist` 叠加，输出统一后的 policy summary。
 - `wallet address [selector]`: 输出解析后的钱包地址；未给 selector 时优先读取 active wallet selector，再回退到默认 keystore 的首个地址。
 - `wallet balance [selector]`: 聚合钱包 coin 余额；支持 `--coin-type`、`--limit`、`--all`。默认只聚合单页并显式输出 `has_next_page/next_cursor`，`--all` 会扫描全部 coin page；未给 selector 时同样优先用 active wallet selector。
 - `wallet coins [selector]`: 直接查询钱包 coin page；支持 `--coin-type`、`--cursor`、`--limit`、`--all`、`--json`。

@@ -26,6 +26,7 @@ pub const Command = enum {
     wallet_session_create,
     wallet_session_list,
     wallet_session_revoke,
+    wallet_policy_inspect,
     wallet_export_public,
     wallet_signer_inspect,
     wallet_address,
@@ -445,7 +446,9 @@ fn isWalletIntentLifecycleCommand(command: Command) bool {
 }
 
 fn usesWalletPolicyContract(command: Command) bool {
-    return isWalletIntentLifecycleCommand(command) or command == .wallet_session_create;
+    return isWalletIntentLifecycleCommand(command) or
+        command == .wallet_session_create or
+        command == .wallet_policy_inspect;
 }
 
 const LoadedArg = struct {
@@ -529,6 +532,13 @@ pub fn supportsProgrammableInput(parsed: *const ParsedArgs) bool {
     return parsed.tx_build_package != null and
         parsed.tx_build_module != null and
         parsed.tx_build_function != null;
+}
+
+fn anyExtraIntentPolicyFields(parsed: *const ParsedArgs) bool {
+    return parsed.intent_policy_recurring_limit != null or
+        parsed.intent_policy_recurring_interval_ms != null or
+        parsed.intent_policy_recipient_allowlist_json != null or
+        parsed.intent_policy_protocol_allowlist_json != null;
 }
 
 pub fn validateProgrammaticCommandEntry(entry: std.json.Value) !void {
@@ -3135,6 +3145,21 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
                     }
                     return error.InvalidCli;
                 }
+                if (std.mem.eql(u8, sub, "policy")) {
+                    if (i + 2 >= args.len) return error.InvalidCli;
+                    const policy_sub = args[i + 2];
+                    if (std.mem.eql(u8, policy_sub, "inspect")) {
+                        parsed.command = .wallet_policy_inspect;
+                        parsed.has_command = true;
+                        i += 3;
+                        if (i < args.len and !std.mem.startsWith(u8, args[i], "--")) {
+                            parsed.account_selector = args[i];
+                            i += 1;
+                        }
+                        continue;
+                    }
+                    return error.InvalidCli;
+                }
                 if (std.mem.eql(u8, sub, "import")) {
                     parsed.command = .wallet_import;
                     parsed.has_command = true;
@@ -5067,6 +5092,7 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
             parsed.command == .wallet_session_create or
             parsed.command == .wallet_session_list or
             parsed.command == .wallet_session_revoke or
+            parsed.command == .wallet_policy_inspect or
             parsed.command == .wallet_use or
             parsed.command == .wallet_export_public or
             parsed.command == .wallet_signer_inspect)
@@ -6230,6 +6256,14 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
     if (parsed.command == .wallet_session_create) {
         if (parsed.wallet_session_id == null) return error.InvalidCli;
     }
+    if (parsed.command == .wallet_policy_inspect) {
+        if (parsed.account_selector) |selector| {
+            if (selector.len == 0) return error.InvalidCli;
+        }
+        if (parsed.account_selector == null and parsed.intent_policy_json == null and !anyExtraIntentPolicyFields(&parsed)) {
+            return error.InvalidCli;
+        }
+    }
 
     if (usesWalletPolicyContract(parsed.command)) {
         const has_recurring_limit = parsed.intent_policy_recurring_limit != null;
@@ -6634,6 +6668,10 @@ pub fn printUsage(writer: anytype) !void {
         "  wallet session revoke <selector|label|session-id|0xaddress>\n" ++
         "                                       Mark a locally tracked delegated session as revoked\n" ++
         "    --json                            Emit machine-readable session metadata\n" ++
+        "  wallet policy inspect [session-selector|session-id|0xaddress]\n" ++
+        "                                       Inspect the effective wallet policy from inline flags and/or a stored session entry\n" ++
+        "    --policy <json|@file>            Optional base policy JSON; also supports --policy-recurring-* and allowlists\n" ++
+        "    --json                            Emit machine-readable policy metadata\n" ++
         "  wallet use <selector|0xaddress>     Set the active wallet selector for wallet commands\n" ++
         "    --json                            Emit machine-readable wallet metadata\n" ++
         "  wallet export-public [selector]     Export public wallet metadata without private keys\n" ++
@@ -9689,6 +9727,42 @@ test "parseCliArgs parses wallet session revoke command" {
 
     try testing.expectEqual(Command.wallet_session_revoke, parsed.command);
     try testing.expectEqualStrings("session-1", parsed.account_selector.?);
+    try testing.expect(parsed.wallet_json);
+}
+
+test "parseCliArgs parses wallet policy inspect command" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "wallet",
+        "policy",
+        "inspect",
+        "session-1",
+        "--policy",
+        "{\"session_key\":\"0x1\"}",
+        "--policy-recurring-limit",
+        "1000000",
+        "--policy-recurring-interval-ms",
+        "86400000",
+        "--policy-recipient-allowlist",
+        "[\"0xabc\"]",
+        "--policy-protocol-allowlist",
+        "[\"cetus::swap\"]",
+        "--json",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.wallet_policy_inspect, parsed.command);
+    try testing.expectEqualStrings("session-1", parsed.account_selector.?);
+    try testing.expectEqualStrings("{\"session_key\":\"0x1\"}", parsed.intent_policy_json.?);
+    try testing.expectEqual(@as(?u64, 1000000), parsed.intent_policy_recurring_limit);
+    try testing.expectEqual(@as(?u64, 86400000), parsed.intent_policy_recurring_interval_ms);
+    try testing.expectEqualStrings("[\"0xabc\"]", parsed.intent_policy_recipient_allowlist_json.?);
+    try testing.expectEqualStrings("[\"cetus::swap\"]", parsed.intent_policy_protocol_allowlist_json.?);
     try testing.expect(parsed.wallet_json);
 }
 

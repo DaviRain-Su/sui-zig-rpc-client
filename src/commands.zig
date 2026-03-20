@@ -3076,6 +3076,34 @@ const OwnedWalletSessionLifecycleSummary = struct {
     }
 };
 
+const OwnedWalletPolicyInspectSummary = struct {
+    artifact_kind: []const u8 = "wallet_policy",
+    source_kind: []u8,
+    selector: ?[]u8 = null,
+    wallet_selector: ?[]u8 = null,
+    address: ?[]u8 = null,
+    session_id: ?[]u8 = null,
+    session_kind: ?[]u8 = null,
+    state: ?[]u8 = null,
+    active_selector: ?[]u8 = null,
+    active_wallet_match: bool = false,
+    registry_path: ?[]const u8 = null,
+    policy_json: ?[]u8 = null,
+
+    fn deinit(self: *OwnedWalletPolicyInspectSummary, allocator: std.mem.Allocator) void {
+        allocator.free(self.source_kind);
+        if (self.selector) |value| allocator.free(value);
+        if (self.wallet_selector) |value| allocator.free(value);
+        if (self.address) |value| allocator.free(value);
+        if (self.session_id) |value| allocator.free(value);
+        if (self.session_kind) |value| allocator.free(value);
+        if (self.state) |value| allocator.free(value);
+        if (self.active_selector) |value| allocator.free(value);
+        if (self.registry_path) |value| allocator.free(value);
+        if (self.policy_json) |value| allocator.free(value);
+    }
+};
+
 const OwnedResolvedWalletEntrySummary = struct {
     source_kind: []u8,
     selector: ?[]u8 = null,
@@ -3376,6 +3404,35 @@ fn formatWalletSessionLifecycleSummary(
     if (summary.registry_path) |value| try writer.print("wallet_sessions_path: {s}\n", .{value});
     if (summary.active_selector) |value| try writer.print("active_wallet: {s}\n", .{value});
     try writer.print("active_wallet_match: {any}\n", .{summary.active_wallet_match});
+}
+
+fn formatWalletPolicyInspectSummary(
+    writer: anytype,
+    summary: *const OwnedWalletPolicyInspectSummary,
+    json_output: bool,
+    pretty: bool,
+) !void {
+    if (json_output or pretty) {
+        try printStructuredJson(writer, summary.*, pretty);
+        return;
+    }
+
+    try writer.print("policy source: {s}\n", .{summary.source_kind});
+    if (summary.selector) |value| try writer.print("selector: {s}\n", .{value});
+    if (summary.session_id) |value| try writer.print("session_id: {s}\n", .{value});
+    if (summary.wallet_selector) |value| try writer.print("wallet_selector: {s}\n", .{value});
+    if (summary.address) |value| try writer.print("address: {s}\n", .{value});
+    if (summary.session_kind) |value| try writer.print("session_kind: {s}\n", .{value});
+    if (summary.state) |value| try writer.print("state: {s}\n", .{value});
+    if (summary.registry_path) |value| try writer.print("wallet_sessions_path: {s}\n", .{value});
+    if (summary.active_selector) |value| try writer.print("active_wallet: {s}\n", .{value});
+    try writer.print("active_wallet_match: {any}\n", .{summary.active_wallet_match});
+    try writer.writeAll("policy: ");
+    if (summary.policy_json) |value| {
+        try writer.print("{s}\n", .{value});
+    } else {
+        try writer.writeAll("null\n");
+    }
 }
 
 fn duplicateOptionalOwned(allocator: std.mem.Allocator, value: ?[]const u8) !?[]u8 {
@@ -4261,6 +4318,59 @@ fn runWalletSessionRevoke(
     try formatWalletSessionLifecycleSummary(writer, &summary, args.wallet_json, args.pretty);
 }
 
+fn runWalletPolicyInspect(
+    allocator: std.mem.Allocator,
+    args: *const cli.ParsedArgs,
+    writer: anytype,
+) !void {
+    const inline_policy_present = args.intent_policy_json != null or anyExtraIntentPolicyFields(args);
+
+    if (args.account_selector) |selector_or_address| {
+        const registry_path = try wallet_session_registry.resolveDefaultWalletSessionRegistryPath(allocator) orelse return error.InvalidCli;
+        defer allocator.free(registry_path);
+
+        var registry = try wallet_session_registry.loadDefaultWalletSessionRegistry(allocator);
+        defer registry.deinit(allocator);
+
+        const index = findWalletSessionIndexAnyState(&registry, selector_or_address) orelse return error.InvalidCli;
+        const entry = &registry.entries[index];
+        const active_selector = try wallet_state.resolveActiveSelector(allocator);
+        const policy_json = try buildMergedWalletPolicyJsonWithBase(allocator, entry.policy_json, args);
+        defer if (policy_json) |value| allocator.free(value);
+
+        var summary = OwnedWalletPolicyInspectSummary{
+            .source_kind = try allocator.dupe(u8, if (inline_policy_present) "session_registry_plus_inline" else "session_registry"),
+            .selector = try allocator.dupe(u8, entry.selector),
+            .wallet_selector = try duplicateOptionalSlice(allocator, entry.wallet_selector),
+            .address = try duplicateOptionalSlice(allocator, entry.address),
+            .session_id = try allocator.dupe(u8, entry.session_id),
+            .session_kind = try duplicateOptionalSlice(allocator, entry.session_kind),
+            .state = try allocator.dupe(u8, entry.state),
+            .active_selector = active_selector,
+            .active_wallet_match = sessionEntryMatchesActiveWalletSelector(active_selector, entry),
+            .registry_path = try allocator.dupe(u8, registry_path),
+            .policy_json = try duplicateOptionalSlice(allocator, policy_json),
+        };
+        defer summary.deinit(allocator);
+
+        try formatWalletPolicyInspectSummary(writer, &summary, args.wallet_json, args.pretty);
+        return;
+    }
+
+    const active_selector = try wallet_state.resolveActiveSelector(allocator);
+    const policy_json = try buildMergedWalletPolicyJson(allocator, args);
+    defer if (policy_json) |value| allocator.free(value);
+
+    var summary = OwnedWalletPolicyInspectSummary{
+        .source_kind = try allocator.dupe(u8, "inline"),
+        .active_selector = active_selector,
+        .policy_json = try duplicateOptionalSlice(allocator, policy_json),
+    };
+    defer summary.deinit(allocator);
+
+    try formatWalletPolicyInspectSummary(writer, &summary, args.wallet_json, args.pretty);
+}
+
 fn sameWalletSelectorOrAddress(
     active_selector: ?[]const u8,
     selector: ?[]const u8,
@@ -5007,28 +5117,51 @@ fn parsePolicyArrayJson(
     return parsed;
 }
 
-fn writeMergedWalletPolicy(
+fn isWalletPolicyMergeReservedKey(key: []const u8) bool {
+    return std.mem.eql(u8, key, "recurring_limit") or
+        std.mem.eql(u8, key, "recurringLimit") or
+        std.mem.eql(u8, key, "recipient_allowlist") or
+        std.mem.eql(u8, key, "recipientAllowlist") or
+        std.mem.eql(u8, key, "protocol_allowlist") or
+        std.mem.eql(u8, key, "protocolAllowlist");
+}
+
+fn appendMergedWalletPolicyGenericFields(
+    target: *std.json.ObjectMap,
+    object: std.json.ObjectMap,
+) !void {
+    var iterator = object.iterator();
+    while (iterator.next()) |entry| {
+        if (isWalletPolicyMergeReservedKey(entry.key_ptr.*)) continue;
+        try target.put(entry.key_ptr.*, entry.value_ptr.*);
+    }
+}
+
+fn writeMergedWalletPolicyWithBase(
     allocator: std.mem.Allocator,
     writer: anytype,
+    base_policy_json: ?[]const u8,
     args: *const cli.ParsedArgs,
 ) !void {
     const has_extra_fields = anyExtraIntentPolicyFields(args);
-
-    if (!has_extra_fields) {
-        if (args.intent_policy_json) |value| {
-            try writer.writeAll(value);
-        } else {
-            try writer.writeAll("null");
-        }
+    const override_policy_json = args.intent_policy_json;
+    if (base_policy_json == null and override_policy_json == null and !has_extra_fields) {
+        try writer.writeAll("null");
         return;
     }
 
     var parsed_base: ?std.json.Parsed(std.json.Value) = null;
     defer if (parsed_base) |*value| value.deinit();
-
-    if (args.intent_policy_json) |value| {
+    if (base_policy_json) |value| {
         parsed_base = try std.json.parseFromSlice(std.json.Value, allocator, value, .{});
         if (parsed_base.?.value != .object) return error.InvalidCli;
+    }
+
+    var parsed_override: ?std.json.Parsed(std.json.Value) = null;
+    defer if (parsed_override) |*value| value.deinit();
+    if (override_policy_json) |value| {
+        parsed_override = try std.json.parseFromSlice(std.json.Value, allocator, value, .{});
+        if (parsed_override.?.value != .object) return error.InvalidCli;
     }
 
     var parsed_recipients: ?std.json.Parsed(std.json.Value) = null;
@@ -5043,60 +5176,98 @@ fn writeMergedWalletPolicy(
         parsed_protocols = try parsePolicyArrayJson(allocator, value);
     }
 
-    try writer.writeAll("{");
-    var wrote_any_field = false;
+    var merged = std.json.ObjectMap.init(allocator);
+    defer merged.deinit();
 
     if (parsed_base) |base| {
-        var iterator = base.value.object.iterator();
-        while (iterator.next()) |entry| {
-            if (std.mem.eql(u8, entry.key_ptr.*, "recurring_limit") or
-                std.mem.eql(u8, entry.key_ptr.*, "recurringLimit") or
-                std.mem.eql(u8, entry.key_ptr.*, "recipient_allowlist") or
-                std.mem.eql(u8, entry.key_ptr.*, "recipientAllowlist") or
-                std.mem.eql(u8, entry.key_ptr.*, "protocol_allowlist") or
-                std.mem.eql(u8, entry.key_ptr.*, "protocolAllowlist"))
-            {
-                continue;
+        try appendMergedWalletPolicyGenericFields(&merged, base.value.object);
+    }
+    if (parsed_override) |override| {
+        try appendMergedWalletPolicyGenericFields(&merged, override.value.object);
+    }
+
+    var recurring_limit_object: ?std.json.ObjectMap = null;
+    defer if (recurring_limit_object) |*value| value.deinit();
+
+    if (args.intent_policy_recurring_limit) |amount| {
+        recurring_limit_object = std.json.ObjectMap.init(allocator);
+        try recurring_limit_object.?.put("amount", .{ .integer = @as(i64, @intCast(amount)) });
+        try recurring_limit_object.?.put("interval_ms", .{ .integer = @as(i64, @intCast(args.intent_policy_recurring_interval_ms.?)) });
+        try merged.put("recurring_limit", .{ .object = recurring_limit_object.? });
+    } else if (parsed_override) |override| {
+        if (jsonObjectFieldAny(override.value.object, &.{ "recurring_limit", "recurringLimit" })) |value| {
+            try merged.put("recurring_limit", value);
+        } else if (parsed_base) |base| {
+            if (jsonObjectFieldAny(base.value.object, &.{ "recurring_limit", "recurringLimit" })) |value| {
+                try merged.put("recurring_limit", value);
             }
-            if (wrote_any_field) try writer.writeAll(",");
-            try writer.print("{f}:", .{std.json.fmt(entry.key_ptr.*, .{})});
-            try writer.print("{f}", .{std.json.fmt(entry.value_ptr.*, .{})});
-            wrote_any_field = true;
+        }
+    } else if (parsed_base) |base| {
+        if (jsonObjectFieldAny(base.value.object, &.{ "recurring_limit", "recurringLimit" })) |value| {
+            try merged.put("recurring_limit", value);
         }
     }
 
-    if (args.intent_policy_recurring_limit) |amount| {
-        if (wrote_any_field) try writer.writeAll(",");
-        try writer.print("\"recurring_limit\":{{\"amount\":{d},\"interval_ms\":{d}}}", .{
-            amount,
-            args.intent_policy_recurring_interval_ms.?,
-        });
-        wrote_any_field = true;
-    }
     if (parsed_recipients) |value| {
-        if (wrote_any_field) try writer.writeAll(",");
-        try writer.writeAll("\"recipient_allowlist\":");
-        try writer.print("{f}", .{std.json.fmt(value.value, .{})});
-        wrote_any_field = true;
+        try merged.put("recipient_allowlist", value.value);
+    } else if (parsed_override) |override| {
+        if (jsonObjectFieldAny(override.value.object, &.{ "recipient_allowlist", "recipientAllowlist" })) |value| {
+            try merged.put("recipient_allowlist", value);
+        } else if (parsed_base) |base| {
+            if (jsonObjectFieldAny(base.value.object, &.{ "recipient_allowlist", "recipientAllowlist" })) |value| {
+                try merged.put("recipient_allowlist", value);
+            }
+        }
+    } else if (parsed_base) |base| {
+        if (jsonObjectFieldAny(base.value.object, &.{ "recipient_allowlist", "recipientAllowlist" })) |value| {
+            try merged.put("recipient_allowlist", value);
+        }
     }
+
     if (parsed_protocols) |value| {
-        if (wrote_any_field) try writer.writeAll(",");
-        try writer.writeAll("\"protocol_allowlist\":");
-        try writer.print("{f}", .{std.json.fmt(value.value, .{})});
-        wrote_any_field = true;
+        try merged.put("protocol_allowlist", value.value);
+    } else if (parsed_override) |override| {
+        if (jsonObjectFieldAny(override.value.object, &.{ "protocol_allowlist", "protocolAllowlist" })) |value| {
+            try merged.put("protocol_allowlist", value);
+        } else if (parsed_base) |base| {
+            if (jsonObjectFieldAny(base.value.object, &.{ "protocol_allowlist", "protocolAllowlist" })) |value| {
+                try merged.put("protocol_allowlist", value);
+            }
+        }
+    } else if (parsed_base) |base| {
+        if (jsonObjectFieldAny(base.value.object, &.{ "protocol_allowlist", "protocolAllowlist" })) |value| {
+            try merged.put("protocol_allowlist", value);
+        }
     }
-    try writer.writeAll("}");
+
+    try writer.print("{f}", .{std.json.fmt(std.json.Value{ .object = merged }, .{})});
+}
+
+fn writeMergedWalletPolicy(
+    allocator: std.mem.Allocator,
+    writer: anytype,
+    args: *const cli.ParsedArgs,
+) !void {
+    try writeMergedWalletPolicyWithBase(allocator, writer, null, args);
 }
 
 fn buildMergedWalletPolicyJson(
     allocator: std.mem.Allocator,
     args: *const cli.ParsedArgs,
 ) !?[]u8 {
-    if (args.intent_policy_json == null and !anyExtraIntentPolicyFields(args)) return null;
+    return try buildMergedWalletPolicyJsonWithBase(allocator, null, args);
+}
+
+fn buildMergedWalletPolicyJsonWithBase(
+    allocator: std.mem.Allocator,
+    base_policy_json: ?[]const u8,
+    args: *const cli.ParsedArgs,
+) !?[]u8 {
+    if (base_policy_json == null and args.intent_policy_json == null and !anyExtraIntentPolicyFields(args)) return null;
 
     var output = std.ArrayList(u8){};
     errdefer output.deinit(allocator);
-    try writeMergedWalletPolicy(allocator, output.writer(allocator), args);
+    try writeMergedWalletPolicyWithBase(allocator, output.writer(allocator), base_policy_json, args);
     return try output.toOwnedSlice(allocator);
 }
 
@@ -5819,6 +5990,7 @@ pub fn runCommandWithProgrammaticProvider(
         .wallet_session_create => try runWalletSessionCreate(allocator, args, writer),
         .wallet_session_list => try runWalletSessionList(allocator, args, writer),
         .wallet_session_revoke => try runWalletSessionRevoke(allocator, args, writer),
+        .wallet_policy_inspect => try runWalletPolicyInspect(allocator, args, writer),
         .wallet_export_public => {
             var resolved = try resolveWalletEntrySummary(allocator, args);
             defer resolved.deinit(allocator);
@@ -24153,6 +24325,132 @@ test "runCommand wallet_session_revoke marks sessions revoked without clearing a
     try testing.expect(active_selector != null);
     defer allocator.free(active_selector.?);
     try testing.expectEqualStrings("passkey:iphone", active_selector.?);
+}
+
+test "runCommand wallet_policy_inspect prints merged inline wallet policy" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "wallet",
+        "policy",
+        "inspect",
+        "--policy",
+        "{\"session_key\":\"0x1\",\"recipient_allowlist\":[\"0xold\"]}",
+        "--policy-recurring-limit",
+        "1000000",
+        "--policy-recurring-interval-ms",
+        "86400000",
+        "--policy-recipient-allowlist",
+        "[\"0xabc\"]",
+        "--policy-protocol-allowlist",
+        "[\"cetus::swap\"]",
+        "--json",
+    });
+    defer args.deinit(allocator);
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    try testing.expectEqualStrings("wallet_policy", parsed.value.object.get("artifact_kind").?.string);
+    try testing.expectEqualStrings("inline", parsed.value.object.get("source_kind").?.string);
+
+    const policy = try std.json.parseFromSlice(std.json.Value, allocator, parsed.value.object.get("policy_json").?.string, .{});
+    defer policy.deinit();
+    try testing.expectEqualStrings("0x1", policy.value.object.get("session_key").?.string);
+    try testing.expectEqual(@as(i64, 1_000_000), policy.value.object.get("recurring_limit").?.object.get("amount").?.integer);
+    try testing.expectEqual(@as(i64, 86_400_000), policy.value.object.get("recurring_limit").?.object.get("interval_ms").?.integer);
+    try testing.expectEqualStrings("0xabc", policy.value.object.get("recipient_allowlist").?.array.items[0].string);
+    try testing.expectEqualStrings("cetus::swap", policy.value.object.get("protocol_allowlist").?.array.items[0].string);
+}
+
+test "runCommand wallet_policy_inspect merges session registry policy with inline overrides" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const registry_path = try std.fmt.allocPrint(allocator, "tmp_commands_wallet_policy_inspect_registry_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(registry_path);
+    defer std.fs.cwd().deleteFile(registry_path) catch {};
+
+    const state_path = try std.fmt.allocPrint(allocator, "tmp_commands_wallet_policy_inspect_state_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(state_path);
+    defer std.fs.cwd().deleteFile(state_path) catch {};
+
+    const old_registry_override = wallet_session_registry.test_wallet_session_registry_path_override;
+    wallet_session_registry.test_wallet_session_registry_path_override = registry_path;
+    defer wallet_session_registry.test_wallet_session_registry_path_override = old_registry_override;
+
+    const old_state_override = wallet_state.test_wallet_state_path_override;
+    wallet_state.test_wallet_state_path_override = state_path;
+    defer wallet_state.test_wallet_state_path_override = old_state_override;
+
+    const entries = try allocator.alloc(wallet_session_registry.OwnedWalletSessionEntry, 1);
+    entries[0] = .{
+        .selector = try allocator.dupe(u8, "session:swap"),
+        .label = try allocator.dupe(u8, "swap"),
+        .wallet_selector = try allocator.dupe(u8, "passkey:iphone"),
+        .address = try allocator.dupe(u8, "0xabc"),
+        .session_id = try allocator.dupe(u8, "session-1"),
+        .session_kind = try allocator.dupe(u8, "passkey"),
+        .state = try allocator.dupe(u8, "active"),
+        .policy_json = try allocator.dupe(u8, "{\"session_key\":\"0x1\",\"recipient_allowlist\":[\"0xold\"]}"),
+        .created_at_ms = 100,
+        .updated_at_ms = 101,
+        .expires_at_ms = 200,
+    };
+    var registry = wallet_session_registry.OwnedWalletSessionRegistry{ .entries = entries };
+    defer registry.deinit(allocator);
+    try wallet_session_registry.writeDefaultWalletSessionRegistry(allocator, &registry);
+
+    try wallet_state.writeDefaultWalletState(allocator, "passkey:iphone");
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "wallet",
+        "policy",
+        "inspect",
+        "session-1",
+        "--policy",
+        "{\"memo\":\"review\"}",
+        "--policy-recipient-allowlist",
+        "[\"0xdef\"]",
+        "--json",
+    });
+    defer args.deinit(allocator);
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    try testing.expectEqualStrings("wallet_policy", parsed.value.object.get("artifact_kind").?.string);
+    try testing.expectEqualStrings("session_registry_plus_inline", parsed.value.object.get("source_kind").?.string);
+    try testing.expectEqualStrings("session:swap", parsed.value.object.get("selector").?.string);
+    try testing.expectEqualStrings("session-1", parsed.value.object.get("session_id").?.string);
+    try testing.expectEqualStrings("passkey:iphone", parsed.value.object.get("wallet_selector").?.string);
+    try testing.expectEqualStrings("0xabc", parsed.value.object.get("address").?.string);
+    try testing.expect(parsed.value.object.get("active_wallet_match").?.bool);
+
+    const policy = try std.json.parseFromSlice(std.json.Value, allocator, parsed.value.object.get("policy_json").?.string, .{});
+    defer policy.deinit();
+    try testing.expectEqualStrings("0x1", policy.value.object.get("session_key").?.string);
+    try testing.expectEqualStrings("review", policy.value.object.get("memo").?.string);
+    try testing.expectEqualStrings("0xdef", policy.value.object.get("recipient_allowlist").?.array.items[0].string);
 }
 
 test "runCommand wallet_accounts combines keystore and wallet registry entries" {
