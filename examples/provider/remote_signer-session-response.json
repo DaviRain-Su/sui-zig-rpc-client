@@ -1,0 +1,7 @@
+{
+  "supportsExecute": true,
+  "session": {
+    "kind": "remote_signer",
+    "sessionId": "remote-signer-example-approved"
+  }
+}

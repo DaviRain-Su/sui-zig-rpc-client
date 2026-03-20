@@ -1,0 +1,7 @@
+{
+  "supportsExecute": true,
+  "session": {
+    "kind": "passkey",
+    "sessionId": "passkey-example-approved"
+  }
+}

@@ -148,6 +148,7 @@ pub const ParsedArgs = struct {
     tx_send_summarize: bool = false,
     tx_send_observe: bool = false,
     tx_session_response: ?[]const u8 = null,
+    tx_provider_config: ?[]const u8 = null,
     from_keystore: bool = false,
     owned_rpc_url: ?[]const u8 = null,
     owned_params: ?[]const u8 = null,
@@ -165,6 +166,7 @@ pub const ParsedArgs = struct {
     owned_tx_build_args: ?[]const u8 = null,
     owned_tx_build_gas_payment: ?[]const u8 = null,
     owned_tx_session_response: ?[]const u8 = null,
+    owned_tx_provider_config: ?[]const u8 = null,
     owned_account_objects_filter: ?[]const u8 = null,
     owned_account_objects_package: ?[]const u8 = null,
     owned_event_filter: ?[]const u8 = null,
@@ -210,6 +212,7 @@ pub const ParsedArgs = struct {
         if (self.owned_tx_build_args) |value| allocator.free(value);
         if (self.owned_tx_build_gas_payment) |value| allocator.free(value);
         if (self.owned_tx_session_response) |value| allocator.free(value);
+        if (self.owned_tx_provider_config) |value| allocator.free(value);
         if (self.owned_account_objects_filter) |value| allocator.free(value);
         if (self.owned_account_objects_package) |value| allocator.free(value);
         if (self.owned_event_filter) |value| allocator.free(value);
@@ -2352,6 +2355,7 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
         if (std.mem.eql(u8, token, "--poll-ms")) {
             if (i + 1 >= args.len) return error.InvalidCli;
             parsed.confirm_poll_ms = try parseIntValue(args[i + 1]);
+            if (parsed.confirm_poll_ms == 0) return error.InvalidCli;
             i += 2;
             continue;
         }
@@ -2831,6 +2835,17 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
                 i += 2;
                 continue;
             }
+            if (std.mem.eql(u8, token, "--provider")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                try setOptionalFileBackedArg(
+                    allocator,
+                    &parsed.owned_tx_provider_config,
+                    &parsed.tx_provider_config,
+                    args[i + 1],
+                );
+                i += 2;
+                continue;
+            }
             if (std.mem.eql(u8, token, "--signer")) {
                 if (i + 1 >= args.len) return error.InvalidCli;
                 try appendSignerValue(allocator, &parsed, args[i + 1]);
@@ -3161,6 +3176,17 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
                 i += 2;
                 continue;
             }
+            if (std.mem.eql(u8, token, "--provider")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                try setOptionalFileBackedArg(
+                    allocator,
+                    &parsed.owned_tx_provider_config,
+                    &parsed.tx_provider_config,
+                    args[i + 1],
+                );
+                i += 2;
+                continue;
+            }
             if (std.mem.eql(u8, token, "--signature") or std.mem.eql(u8, token, "--sig") or std.mem.eql(u8, token, "--signature-file")) {
                 if (i + 1 >= args.len) return error.InvalidCli;
                 try parseSignatureArgument(allocator, &parsed, args[i + 1], std.mem.eql(u8, token, "--signature-file"));
@@ -3411,6 +3437,17 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
                 i += 2;
                 continue;
             }
+            if (std.mem.eql(u8, token, "--provider")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                try setOptionalFileBackedArg(
+                    allocator,
+                    &parsed.owned_tx_provider_config,
+                    &parsed.tx_provider_config,
+                    args[i + 1],
+                );
+                i += 2;
+                continue;
+            }
             if (std.mem.eql(u8, token, "--emit-tx-block") or std.mem.eql(u8, token, "--tx-block")) {
                 parsed.tx_build_emit_tx_block = true;
                 i += 1;
@@ -3578,6 +3615,17 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
                     allocator,
                     &parsed.owned_tx_session_response,
                     &parsed.tx_session_response,
+                    args[i + 1],
+                );
+                i += 2;
+                continue;
+            }
+            if (std.mem.eql(u8, token, "--provider")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                try setOptionalFileBackedArg(
+                    allocator,
+                    &parsed.owned_tx_provider_config,
+                    &parsed.tx_provider_config,
                     args[i + 1],
                 );
                 i += 2;
@@ -4038,6 +4086,28 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
                 i += 1;
                 continue;
             }
+            if (parsed.command == .move_function and std.mem.eql(u8, token, "--session-response")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                try setOptionalFileBackedArg(
+                    allocator,
+                    &parsed.owned_tx_session_response,
+                    &parsed.tx_session_response,
+                    args[i + 1],
+                );
+                i += 2;
+                continue;
+            }
+            if (parsed.command == .move_function and std.mem.eql(u8, token, "--provider")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                try setOptionalFileBackedArg(
+                    allocator,
+                    &parsed.owned_tx_provider_config,
+                    &parsed.tx_provider_config,
+                    args[i + 1],
+                );
+                i += 2;
+                continue;
+            }
             return error.InvalidCli;
         }
 
@@ -4187,6 +4257,7 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
         if (parsed.tx_build_auto_gas_payment and parsed.tx_build_gas_payment != null) return error.InvalidCli;
         if (parsed.tx_build_gas_payment_min_balance != null and !parsed.tx_build_auto_gas_payment) return error.InvalidCli;
         if (parsed.tx_session_response != null and !hasProgrammaticTxInput(&parsed)) return error.InvalidCli;
+        if (parsed.tx_provider_config != null and !hasProgrammaticTxInput(&parsed)) return error.InvalidCli;
         if (hasProgrammaticTxContext(&parsed) and !hasProgrammaticTxInput(&parsed)) return error.InvalidCli;
         if (hasProgrammaticTxInput(&parsed) and simulate_positional_params) return error.InvalidCli;
         try validateProgrammaticTxInput(&parsed);
@@ -4207,15 +4278,17 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
     if (parsed.command == .tx_send) {
         if (parsed.tx_build_auto_gas_payment and parsed.tx_build_gas_payment != null) return error.InvalidCli;
         if (parsed.tx_build_gas_payment_min_balance != null and !parsed.tx_build_auto_gas_payment) return error.InvalidCli;
-        if (parsed.signatures.items.len == 0 and !parsed.from_keystore and parsed.signers.items.len == 0) {
+        if (parsed.signatures.items.len == 0 and !parsed.from_keystore and parsed.signers.items.len == 0 and parsed.tx_provider_config == null) {
             return error.InvalidCli;
         }
         if (parsed.tx_bytes == null and !hasProgrammaticTxInput(&parsed)) {
             return error.InvalidCli;
         }
         if (parsed.tx_session_response != null and !hasProgrammaticTxInput(&parsed)) return error.InvalidCli;
+        if (parsed.tx_provider_config != null and !hasProgrammaticTxInput(&parsed)) return error.InvalidCli;
         if (hasProgrammaticTxContext(&parsed) and !hasProgrammaticTxInput(&parsed)) return error.InvalidCli;
         if (parsed.tx_bytes != null and hasProgrammaticTxInput(&parsed)) return error.InvalidCli;
+        if (parsed.tx_bytes != null and parsed.tx_provider_config != null) return error.InvalidCli;
         if (hasProgrammaticTxInput(&parsed) and send_positional_params) return error.InvalidCli;
         if (parsed.tx_send_summarize and parsed.tx_send_observe) return error.InvalidCli;
         try validateProgrammaticTxInput(&parsed);
@@ -4234,8 +4307,10 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
             return error.InvalidCli;
         }
         if (parsed.tx_session_response != null and !hasProgrammaticTxInput(&parsed)) return error.InvalidCli;
+        if (parsed.tx_provider_config != null and !hasProgrammaticTxInput(&parsed)) return error.InvalidCli;
         if (hasProgrammaticTxContext(&parsed) and !hasProgrammaticTxInput(&parsed)) return error.InvalidCli;
         if (parsed.tx_bytes != null and hasProgrammaticTxInput(&parsed)) return error.InvalidCli;
+        if (parsed.tx_bytes != null and parsed.tx_provider_config != null) return error.InvalidCli;
         try validateProgrammaticTxInput(&parsed);
     }
 
@@ -4254,7 +4329,10 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
             },
         }
         if (parsed.tx_session_response != null and !parsed.tx_build_emit_tx_block) return error.InvalidCli;
+        if (parsed.tx_provider_config != null and !parsed.tx_build_emit_tx_block) return error.InvalidCli;
     }
+
+    if (parsed.tx_session_response != null and parsed.tx_provider_config == null) return error.InvalidCli;
 
     if (parsed.command == .move_package and parsed.move_package == null) return error.InvalidCli;
     if (parsed.command == .move_module) {
@@ -4271,6 +4349,16 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
         if (parsed.tx_send_wait and !parsed.move_function_execute_send) return error.InvalidCli;
         if (parsed.tx_send_observe and !parsed.move_function_execute_send) return error.InvalidCli;
         if (parsed.tx_send_summarize and parsed.tx_send_observe) return error.InvalidCli;
+        if (parsed.tx_provider_config != null and
+            !(parsed.move_function_execute_dry_run or parsed.move_function_execute_send))
+        {
+            return error.InvalidCli;
+        }
+        if (parsed.tx_session_response != null and
+            !(parsed.move_function_execute_dry_run or parsed.move_function_execute_send))
+        {
+            return error.InvalidCli;
+        }
     }
 
     if (parsed.command == .object_get and parsed.object_id == null) return error.InvalidCli;
@@ -4388,6 +4476,8 @@ pub fn printUsage(writer: anytype) !void {
         "    --sender <address|selector>         Optional owner context for discovery hints and tx templates\n" ++
         "    --signer <alias|address|key>        Optional signer selector; first address-compatible signer becomes owner context\n" ++
         "    --from-keystore                     Use the first default keystore address as owner context when needed\n" ++
+        "    --provider <json|@file>             Standalone session-backed provider config for --dry-run/--send\n" ++
+        "    --session-response <json|@file>     Apply a previously approved provider session response for --dry-run/--send\n" ++
         "    --wait|--observe                    Forward send execution mode when used with --send\n" ++
         "    --summarize                         Print parameter/return signature summary, lowering hints, discovery hints, and tx call templates\n" ++
         "  object get <object-id-or-alias>      Call sui_getObject\n" ++
@@ -4436,6 +4526,8 @@ pub fn printUsage(writer: anytype) !void {
         "    --gas-budget <gas>                 Optional gas budget\n" ++
         "    --gas-price <gas>                  Optional gas price\n" ++
         "    --emit-tx-block                    Build programmable transaction block JSON\n" ++
+        "    --provider <json|@file>           Standalone session-backed provider config for tx-block builds\n" ++
+        "    --session-response <json|@file>   Apply a previously approved provider session response\n" ++
         "    typed arg tokens: @0x... addr:0x... obj:0x... bytes:0x... bool:true u64:7 u128:... ptb:name:<alias>[:idx]\n" ++
         "                      <alias>[.<idx>] vec:[...] vector[...] option:some:<json> some(...) option:none\n" ++
         "    selected request tokens: select:{{\"kind\":\"owned_object_struct_type\",...}} select:{{\"kind\":\"coin_with_min_balance\",...}} select:{{\"kind\":\"object_preset\",\"name\":\"clock\"}} select:{{\"kind\":\"object_input\",\"objectId\":\"0x...\",\"inputKind\":\"shared\",\"mutable\":true,\"initialSharedVersion\":1}}\n" ++
@@ -4467,6 +4559,8 @@ pub fn printUsage(writer: anytype) !void {
         "    --gas-budget <gas>                 Optional gas budget\n" ++
         "    --gas-price <gas>                  Optional gas price\n" ++
         "    --signer <name|address|key>         Optional signer selector/index; first address-compatible signer is used as sender\n" ++
+        "    --provider <json|@file>             Standalone session-backed provider config\n" ++
+        "    --session-response <json|@file>     Apply a previously approved provider session response\n" ++
         "    --options <json|@file>              optional inspect options\n" ++
         "  tx dry-run [tx-bytes|@file]          Call sui_dryRunTransactionBlock\n" ++
         "    --tx-bytes <base64|@file>           Prebuilt tx bytes for dry-run\n" ++
@@ -4531,7 +4625,8 @@ pub fn printUsage(writer: anytype) !void {
         "    --signature-file <path>                  Load signature from file\n" ++
         "    --signer <name|address|key>         Select key from keystore\n" ++
         "    --from-keystore                     Append first key from keystore when signatures are missing\n" ++
-        "    --session-response <json|@file>     Apply a provider challenge response when continuing a prompted send\n" ++
+        "    --provider <json|@file>             Standalone session-backed provider config\n" ++
+        "    --session-response <json|@file>     Apply a previously approved provider session response\n" ++
         "    --options <json|@file>              optional execute options\n" ++
         "  tx payload                           Build execute params from tx bytes/signatures/options\n" ++
         "    --tx-bytes <base64>                 (required) tx_bytes input\n" ++
@@ -4563,7 +4658,8 @@ pub fn printUsage(writer: anytype) !void {
         "    --signature-file <path>                  Load signature from file\n" ++
         "    --signer <name|address|key>         Select key from keystore\n" ++
         "    --from-keystore                     Append first key from keystore when signatures are missing\n" ++
-        "    --session-response <json|@file>     Apply a provider challenge response when continuing a prompted build\n" ++
+        "    --provider <json|@file>             Standalone session-backed provider config\n" ++
+        "    --session-response <json|@file>     Apply a previously approved provider session response\n" ++
         "    --summarize                         Print structured execute-payload summary instead of raw payload\n" ++
         "    --options <json|@file>              optional execute options\n" ++
         "  tx status <digest>                   Query sui_getTransactionBlock once\n" ++
@@ -5600,7 +5696,32 @@ test "parseCliArgs parses tx_send --wait flag" {
     try testing.expect(parsed.tx_send_wait);
 }
 
-test "parseCliArgs parses tx_send session response" {
+test "parseCliArgs rejects session response without standalone provider config" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    try testing.expectError(error.InvalidCli, parseCliArgs(allocator, &.{
+        "tx",
+        "send",
+        "--package",
+        "0x2",
+        "--module",
+        "counter",
+        "--function",
+        "increment",
+        "--gas-budget",
+        "1200",
+        "--signature",
+        "sig-a",
+        "--session-response",
+        "{\"supportsExecute\":true,\"session\":{\"kind\":\"passkey\",\"sessionId\":\"session-1\"}}",
+    }));
+}
+
+test "parseCliArgs parses tx_send standalone provider continuation" {
     const testing = std.testing;
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -5618,21 +5739,18 @@ test "parseCliArgs parses tx_send session response" {
         "increment",
         "--gas-budget",
         "1200",
-        "--signature",
-        "sig-a",
+        "--provider",
+        "{\"kind\":\"passkey\",\"address\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"session\":{\"kind\":\"passkey\",\"sessionId\":\"session-1\"},\"challenge\":{\"passkey\":{\"rpId\":\"wallet.example\",\"challengeB64url\":\"challenge-1\"}},\"authorizer\":{\"exec\":[\"wallet-helper\",\"authorize\"]}}",
         "--session-response",
-        "{\"supportsExecute\":true,\"session\":{\"kind\":\"passkey\",\"sessionId\":\"session-1\"}}",
+        "{\"supportsExecute\":true,\"session\":{\"kind\":\"passkey\",\"sessionId\":\"session-1-approved\"}}",
     });
     defer parsed.deinit(allocator);
 
-    try testing.expectEqual(Command.tx_send, parsed.command);
-    try testing.expectEqualStrings(
-        "{\"supportsExecute\":true,\"session\":{\"kind\":\"passkey\",\"sessionId\":\"session-1\"}}",
-        parsed.tx_session_response.?,
-    );
+    try testing.expect(parsed.tx_provider_config != null);
+    try testing.expectEqualStrings("{\"supportsExecute\":true,\"session\":{\"kind\":\"passkey\",\"sessionId\":\"session-1-approved\"}}", parsed.tx_session_response.?);
 }
 
-test "parseCliArgs parses tx_simulate session response" {
+test "parseCliArgs parses tx_simulate standalone provider continuation" {
     const testing = std.testing;
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -5650,19 +5768,18 @@ test "parseCliArgs parses tx_simulate session response" {
         "increment",
         "--gas-budget",
         "1200",
+        "--provider",
+        "{\"kind\":\"passkey\",\"address\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"session\":{\"kind\":\"passkey\",\"sessionId\":\"session-2\"},\"challenge\":{\"passkey\":{\"rpId\":\"wallet.example\",\"challengeB64url\":\"challenge-2\"}},\"authorizer\":{\"exec\":[\"wallet-helper\",\"authorize\"]}}",
         "--session-response",
         "{\"supportsExecute\":true,\"session\":{\"kind\":\"passkey\",\"sessionId\":\"session-2\"}}",
     });
     defer parsed.deinit(allocator);
 
-    try testing.expectEqual(Command.tx_simulate, parsed.command);
-    try testing.expectEqualStrings(
-        "{\"supportsExecute\":true,\"session\":{\"kind\":\"passkey\",\"sessionId\":\"session-2\"}}",
-        parsed.tx_session_response.?,
-    );
+    try testing.expect(parsed.tx_provider_config != null);
+    try testing.expect(parsed.tx_session_response != null);
 }
 
-test "parseCliArgs parses tx_build session response for tx block builds" {
+test "parseCliArgs parses tx_build standalone provider continuation" {
     const testing = std.testing;
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -5676,20 +5793,18 @@ test "parseCliArgs parses tx_build session response for tx block builds" {
         "--command",
         "{\"kind\":\"TransferObjects\",\"objects\":[\"0xcoin\"],\"address\":\"0xreceiver\"}",
         "--emit-tx-block",
+        "--provider",
+        "{\"kind\":\"passkey\",\"address\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"session\":{\"kind\":\"passkey\",\"sessionId\":\"session-3\"},\"challenge\":{\"passkey\":{\"rpId\":\"wallet.example\",\"challengeB64url\":\"challenge-3\"}},\"authorizer\":{\"exec\":[\"wallet-helper\",\"authorize\"]}}",
         "--session-response",
         "{\"supportsExecute\":true,\"session\":{\"kind\":\"passkey\",\"sessionId\":\"session-3\"}}",
     });
     defer parsed.deinit(allocator);
 
-    try testing.expectEqual(Command.tx_build, parsed.command);
-    try testing.expect(parsed.tx_build_emit_tx_block);
-    try testing.expectEqualStrings(
-        "{\"supportsExecute\":true,\"session\":{\"kind\":\"passkey\",\"sessionId\":\"session-3\"}}",
-        parsed.tx_session_response.?,
-    );
+    try testing.expect(parsed.tx_provider_config != null);
+    try testing.expect(parsed.tx_session_response != null);
 }
 
-test "parseCliArgs parses tx_payload session response" {
+test "parseCliArgs parses tx_payload standalone provider continuation" {
     const testing = std.testing;
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -5707,16 +5822,31 @@ test "parseCliArgs parses tx_payload session response" {
         "increment",
         "--gas-budget",
         "1200",
+        "--provider",
+        "{\"kind\":\"passkey\",\"address\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"session\":{\"kind\":\"passkey\",\"sessionId\":\"session-4\"},\"challenge\":{\"passkey\":{\"rpId\":\"wallet.example\",\"challengeB64url\":\"challenge-4\"}},\"authorizer\":{\"exec\":[\"wallet-helper\",\"authorize\"]}}",
         "--session-response",
         "{\"supportsExecute\":true,\"session\":{\"kind\":\"passkey\",\"sessionId\":\"session-4\"}}",
     });
     defer parsed.deinit(allocator);
 
-    try testing.expectEqual(Command.tx_payload, parsed.command);
-    try testing.expectEqualStrings(
-        "{\"supportsExecute\":true,\"session\":{\"kind\":\"passkey\",\"sessionId\":\"session-4\"}}",
-        parsed.tx_session_response.?,
-    );
+    try testing.expect(parsed.tx_provider_config != null);
+    try testing.expect(parsed.tx_session_response != null);
+}
+
+test "parseCliArgs rejects zero poll interval" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    try testing.expectError(error.InvalidCli, parseCliArgs(allocator, &.{
+        "--poll-ms",
+        "0",
+        "tx",
+        "confirm",
+        "0xdigest",
+    }));
 }
 
 test "parseCliArgs parses tx_send summarize and observe flags" {
@@ -7597,6 +7727,32 @@ test "parseCliArgs parses move function direct execution flags" {
     try testing.expectEqualStrings("builder", parsed.signers.items[0]);
 }
 
+test "parseCliArgs parses move function standalone provider continuation" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "move",
+        "function",
+        "0x2",
+        "pool",
+        "swap",
+        "--send",
+        "--provider",
+        "{\"kind\":\"passkey\",\"address\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"session\":{\"kind\":\"passkey\",\"sessionId\":\"move-function-session\"},\"challenge\":{\"passkey\":{\"rpId\":\"wallet.example\",\"challengeB64url\":\"challenge-move-function\"}},\"authorizer\":{\"exec\":[\"wallet-helper\",\"authorize\"]}}",
+        "--session-response",
+        "{\"supportsExecute\":true,\"session\":{\"kind\":\"passkey\",\"sessionId\":\"move-function-approved\"}}",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expect(parsed.move_function_execute_send);
+    try testing.expect(parsed.tx_provider_config != null);
+    try testing.expect(parsed.tx_session_response != null);
+}
+
 test "parseCliArgs rejects move function direct execution mixed with emitted template output" {
     const testing = std.testing;
 
@@ -7630,6 +7786,24 @@ test "parseCliArgs rejects move function wait without direct send" {
         "pool",
         "swap",
         "--wait",
+    }));
+}
+
+test "parseCliArgs rejects move function provider without direct execution" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    try testing.expectError(error.InvalidCli, parseCliArgs(allocator, &.{
+        "move",
+        "function",
+        "0x2",
+        "pool",
+        "swap",
+        "--provider",
+        "{\"kind\":\"passkey\",\"address\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"authorizer\":{\"exec\":[\"wallet-helper\",\"authorize\"]}}",
     }));
 }
 

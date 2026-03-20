@@ -10,6 +10,7 @@ const Allocator = std.mem.Allocator;
 const default_sui_client_config_path = ".sui/sui_config/client.yaml";
 const default_sui_keystore_path = ".sui/sui_config/sui.keystore";
 var test_keystore_path_override: ?[]const u8 = null;
+const RpcConfigError = error{InvalidRpcConfig};
 
 fn printCliError(message: []const u8) u8 {
     std.fs.File.stderr().deprecatedWriter().print("{s}", .{message}) catch {};
@@ -20,15 +21,15 @@ fn printLastError(rpc: *client.SuiRpcClient) u8 {
     if (rpc.getLastError()) |rpc_error| {
         const writer = std.fs.File.stderr().deprecatedWriter();
         if (rpc_error.code) |code| {
-            writer.print("error: rpc call failed (code={})\n", .{code}) catch {};
+            writer.print("error: request failed (code={})\n", .{code}) catch {};
         } else {
-            writer.print("error: rpc call failed\n", .{}) catch {};
+            writer.print("error: request failed\n", .{}) catch {};
         }
         writer.print("  message: {s}\n", .{rpc_error.message}) catch {};
         return 1;
     }
 
-    std.fs.File.stderr().deprecatedWriter().print("error: rpc error\n", .{}) catch {};
+    std.fs.File.stderr().deprecatedWriter().print("error: request failed\n", .{}) catch {};
     return 1;
 }
 
@@ -54,23 +55,37 @@ fn expandTildePath(allocator: Allocator, path: []const u8) !?[]const u8 {
 }
 
 fn resolveRpcUrlFromConfig(allocator: Allocator) !?[]const u8 {
-    const env_or_default_config_path = std.process.getEnvVarOwned(allocator, "SUI_CONFIG") catch |err| switch (err) {
-        error.EnvironmentVariableNotFound => try defaultSuiClientConfigPath(allocator),
+    const env_config_path = std.process.getEnvVarOwned(allocator, "SUI_CONFIG") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => null,
         else => return err,
     };
+    const explicit_config_path = env_config_path != null;
+    const env_or_default_config_path = env_config_path orelse try defaultSuiClientConfigPath(allocator);
     if (env_or_default_config_path == null) return null;
     const config_path = env_or_default_config_path.?;
     defer allocator.free(config_path);
-    if (config_path.len == 0) return null;
+    if (config_path.len == 0) {
+        if (explicit_config_path) return RpcConfigError.InvalidRpcConfig;
+        return null;
+    }
 
     const resolved_path = try expandTildePath(allocator, config_path);
-    if (resolved_path == null) return null;
+    if (resolved_path == null) {
+        if (explicit_config_path) return RpcConfigError.InvalidRpcConfig;
+        return null;
+    }
     defer allocator.free(resolved_path.?);
 
-    const contents = std.fs.cwd().readFileAlloc(allocator, resolved_path.?, 2 * 1024 * 1024) catch return null;
+    const contents = std.fs.cwd().readFileAlloc(allocator, resolved_path.?, 2 * 1024 * 1024) catch |err| switch (err) {
+        error.FileNotFound => {
+            if (explicit_config_path) return RpcConfigError.InvalidRpcConfig;
+            return null;
+        },
+        else => return RpcConfigError.InvalidRpcConfig,
+    };
     defer allocator.free(contents);
 
-    return try parseRpcUrlFromConfigContent(allocator, contents);
+    return try requireRpcUrlFromConfigContent(allocator, contents);
 }
 
 fn defaultSuiClientConfigPath(allocator: Allocator) !?[]const u8 {
@@ -305,6 +320,10 @@ fn parseRpcUrlFromConfigContent(allocator: Allocator, contents: []const u8) !?[]
     return null;
 }
 
+fn requireRpcUrlFromConfigContent(allocator: Allocator, contents: []const u8) ![]const u8 {
+    return try parseRpcUrlFromConfigContent(allocator, contents) orelse RpcConfigError.InvalidRpcConfig;
+}
+
 fn resolveDefaultRpcUrl(allocator: Allocator) !?[]const u8 {
     const rpc_env = std.process.getEnvVarOwned(allocator, "SUI_RPC_URL") catch |err| switch (err) {
         error.EnvironmentVariableNotFound => null,
@@ -483,7 +502,14 @@ pub fn main() !void {
     defer parsed.deinit(allocator);
 
     if (!parsed.has_rpc_url) {
-        if (try resolveDefaultRpcUrl(allocator)) |rpc_url| {
+        const resolved_rpc_url = resolveDefaultRpcUrl(allocator) catch |err| switch (err) {
+            RpcConfigError.InvalidRpcConfig => {
+                _ = printCliError("error: invalid rpc config\n");
+                return;
+            },
+            else => return err,
+        };
+        if (resolved_rpc_url) |rpc_url| {
             parsed.owned_rpc_url = rpc_url;
             parsed.rpc_url = rpc_url;
         }
@@ -604,8 +630,7 @@ test "parseRpcUrlFromConfigContent parses active_env Sui yaml config" {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const rpc_url = try parseRpcUrlFromConfigContent(
-        allocator,
+    const rpc_url = try parseRpcUrlFromConfigContent(allocator,
         \\active_env: testnet
         \\envs:
         \\  - alias: devnet
@@ -619,14 +644,34 @@ test "parseRpcUrlFromConfigContent parses active_env Sui yaml config" {
     try testing.expectEqualStrings("https://testnet.example", rpc_url.?);
 }
 
+test "requireRpcUrlFromConfigContent rejects blank config" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    try testing.expectError(RpcConfigError.InvalidRpcConfig, requireRpcUrlFromConfigContent(allocator, " \n\t "));
+}
+
+test "requireRpcUrlFromConfigContent rejects unsupported structured config" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    try testing.expectError(
+        RpcConfigError.InvalidRpcConfig,
+        requireRpcUrlFromConfigContent(allocator, "{\"active_env\":\"testnet\"}"),
+    );
+}
+
 test "parseRpcUrlFromConfigContent parses fallback yaml url when active_env is absent" {
     const testing = std.testing;
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const rpc_url = try parseRpcUrlFromConfigContent(
-        allocator,
+    const rpc_url = try parseRpcUrlFromConfigContent(allocator,
         \\envs:
         \\  - alias: devnet
         \\    rpc: https://devnet.example
@@ -645,8 +690,7 @@ test "parseFirstSuiKeystoreKey reads first key from json array" {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const key = try parseFirstSuiKeystoreKey(
-        allocator,
+    const key = try parseFirstSuiKeystoreKey(allocator,
         \\["sk1", "sk2", "sk3"]
     );
     try testing.expect(key != null);
@@ -670,8 +714,7 @@ test "parseFirstSuiKeystoreKey reads privateKey field from object entry" {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const key = try parseFirstSuiKeystoreKey(
-        allocator,
+    const key = try parseFirstSuiKeystoreKey(allocator,
         \\[{"key":"alias","privateKey":"sk_obj"}]
     );
     try testing.expect(key != null);
@@ -715,11 +758,12 @@ test "resolveSuiKeystoreAddressFromKeystoreContents resolves alias to address" {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const contents = \\[
+    const contents =
+        \\[
         \\  {"alias":"main","privateKey":"sk1","address":"0xabc"},
         \\  {"alias":"dev","suiAddress":"0xdef","privateKey":"sk2"}
         \\]
-;
+    ;
 
     const resolved = try resolveSuiKeystoreAddressFromKeystoreContents(allocator, contents, "dev");
     defer if (resolved) |value| allocator.free(value);

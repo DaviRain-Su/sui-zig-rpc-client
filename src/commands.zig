@@ -263,6 +263,16 @@ fn buildDerivedMoveFunctionExecutionArgs(
     derived.pretty = args.pretty;
     derived.confirm_timeout_ms = args.confirm_timeout_ms;
     derived.confirm_poll_ms = args.confirm_poll_ms;
+    if (args.tx_session_response) |raw| {
+        const owned = try allocator.dupe(u8, raw);
+        derived.owned_tx_session_response = owned;
+        derived.tx_session_response = owned;
+    }
+    if (args.tx_provider_config) |raw| {
+        const owned = try allocator.dupe(u8, raw);
+        derived.owned_tx_provider_config = owned;
+        derived.tx_provider_config = owned;
+    }
 
     switch (command) {
         .tx_dry_run => {
@@ -290,6 +300,395 @@ const ParsedSessionChallengeResponse = struct {
         self.arena.deinit();
     }
 };
+
+const OwnedCliProgrammaticProvider = struct {
+    arena: std.heap.ArenaAllocator,
+    provider: client.tx_request_builder.AccountProvider,
+
+    fn deinit(self: *OwnedCliProgrammaticProvider) void {
+        self.arena.deinit();
+    }
+};
+
+const CliProviderKind = enum {
+    remote_signer,
+    passkey,
+    zklogin,
+    multisig,
+};
+
+const CliProviderAuthorizerContext = struct {
+    rpc: *client.SuiRpcClient,
+    argv: []const []const u8,
+    response_storage: [provider_authorizer_response_storage_size]u8 = undefined,
+};
+
+const provider_command_output_limit: usize = 1024 * 1024;
+const provider_command_error_snippet_limit: usize = 200;
+const provider_authorizer_response_storage_size: usize = 16 * 1024;
+
+fn parseRequiredJsonString(
+    allocator: std.mem.Allocator,
+    object: std.json.ObjectMap,
+    comptime names: []const []const u8,
+) ![]const u8 {
+    return (try parseOptionalJsonString(allocator, object, names)) orelse error.InvalidCli;
+}
+
+fn parseOptionalJsonStringArray(
+    allocator: std.mem.Allocator,
+    object: std.json.ObjectMap,
+    comptime names: []const []const u8,
+) !?[]const []const u8 {
+    const value = jsonObjectFieldAny(object, names) orelse return null;
+    return switch (value) {
+        .null => null,
+        .array => |array| blk: {
+            const items = try allocator.alloc([]const u8, array.items.len);
+            for (array.items, 0..) |entry, index| {
+                if (entry != .string or entry.string.len == 0) return error.InvalidCli;
+                items[index] = try allocator.dupe(u8, entry.string);
+            }
+            break :blk items;
+        },
+        else => error.InvalidCli,
+    };
+}
+
+fn parseSessionChallengeActionValue(value: std.json.Value) !client.tx_request_builder.SessionChallengeAction {
+    return switch (value) {
+        .string => |text| std.meta.stringToEnum(client.tx_request_builder.SessionChallengeAction, text) orelse return error.InvalidCli,
+        else => error.InvalidCli,
+    };
+}
+
+fn parseProviderKind(text: []const u8) !CliProviderKind {
+    if (std.mem.eql(u8, text, "remote_signer") or std.mem.eql(u8, text, "remoteSigner")) return .remote_signer;
+    if (std.mem.eql(u8, text, "passkey")) return .passkey;
+    if (std.mem.eql(u8, text, "zklogin") or std.mem.eql(u8, text, "zkLogin")) return .zklogin;
+    if (std.mem.eql(u8, text, "multisig")) return .multisig;
+    return error.InvalidCli;
+}
+
+fn parseSignPersonalMessageChallengeFromJsonValue(
+    allocator: std.mem.Allocator,
+    value: std.json.Value,
+) !client.tx_request_builder.SignPersonalMessageChallenge {
+    if (value != .object) return error.InvalidCli;
+    return .{
+        .domain = try parseRequiredJsonString(allocator, value.object, &.{"domain"}),
+        .statement = try parseRequiredJsonString(allocator, value.object, &.{"statement"}),
+        .nonce = try parseRequiredJsonString(allocator, value.object, &.{"nonce"}),
+        .address = try parseOptionalJsonString(allocator, value.object, &.{"address"}),
+        .uri = try parseOptionalJsonString(allocator, value.object, &.{"uri"}),
+        .chain = (try parseOptionalJsonString(allocator, value.object, &.{"chain"})) orelse try allocator.dupe(u8, "sui"),
+        .issued_at_ms = try parseOptionalJsonU64(value.object, &.{ "issued_at_ms", "issuedAtMs" }),
+        .expires_at_ms = try parseOptionalJsonU64(value.object, &.{ "expires_at_ms", "expiresAtMs" }),
+        .resources = (try parseOptionalJsonStringArray(allocator, value.object, &.{"resources"})) orelse &.{},
+    };
+}
+
+fn parsePasskeyChallengeFromJsonValue(
+    allocator: std.mem.Allocator,
+    value: std.json.Value,
+) !client.tx_request_builder.PasskeyChallenge {
+    if (value != .object) return error.InvalidCli;
+    return .{
+        .rp_id = try parseRequiredJsonString(allocator, value.object, &.{ "rp_id", "rpId" }),
+        .challenge_b64url = try parseRequiredJsonString(allocator, value.object, &.{ "challenge_b64url", "challengeB64url" }),
+        .user_name = try parseOptionalJsonString(allocator, value.object, &.{ "user_name", "userName" }),
+        .user_display_name = try parseOptionalJsonString(allocator, value.object, &.{ "user_display_name", "userDisplayName" }),
+        .timeout_ms = try parseOptionalJsonU64(value.object, &.{ "timeout_ms", "timeoutMs" }),
+    };
+}
+
+fn parseZkLoginNonceChallengeFromJsonValue(
+    allocator: std.mem.Allocator,
+    value: std.json.Value,
+) !client.tx_request_builder.ZkLoginNonceChallenge {
+    if (value != .object) return error.InvalidCli;
+    return .{
+        .nonce = try parseRequiredJsonString(allocator, value.object, &.{"nonce"}),
+        .provider = try parseOptionalJsonString(allocator, value.object, &.{"provider"}),
+        .max_epoch = try parseOptionalJsonU64(value.object, &.{ "max_epoch", "maxEpoch" }),
+    };
+}
+
+fn parseSessionChallengeFromJsonValue(
+    allocator: std.mem.Allocator,
+    value: std.json.Value,
+) !client.tx_request_builder.SessionChallenge {
+    if (value != .object) return error.InvalidCli;
+    if (jsonObjectFieldAny(value.object, &.{ "sign_personal_message", "signPersonalMessage" })) |challenge_value| {
+        return .{ .sign_personal_message = try parseSignPersonalMessageChallengeFromJsonValue(allocator, challenge_value) };
+    }
+    if (jsonObjectFieldAny(value.object, &.{"passkey"})) |challenge_value| {
+        return .{ .passkey = try parsePasskeyChallengeFromJsonValue(allocator, challenge_value) };
+    }
+    if (jsonObjectFieldAny(value.object, &.{ "zklogin_nonce", "zkloginNonce" })) |challenge_value| {
+        return .{ .zklogin_nonce = try parseZkLoginNonceChallengeFromJsonValue(allocator, challenge_value) };
+    }
+    return error.InvalidCli;
+}
+
+fn parseRemoteAuthorizationResultFromJsonValue(
+    allocator: std.mem.Allocator,
+    value: std.json.Value,
+) !client.tx_request_builder.RemoteAuthorizationResult {
+    if (value != .object) return error.InvalidCli;
+    const session = if (jsonObjectFieldAny(value.object, &.{"session"})) |session_value|
+        switch (session_value) {
+            .null => null,
+            else => try parseAccountSessionFromJsonValue(allocator, session_value),
+        }
+    else
+        null;
+    return .{
+        .sender = try parseOptionalJsonString(allocator, value.object, &.{"sender"}),
+        .signatures = (try parseOptionalJsonStringArray(allocator, value.object, &.{"signatures"})) orelse &.{},
+        .session = session,
+        .supports_execute = (try parseOptionalJsonBool(value.object, &.{ "supports_execute", "supportsExecute" })) orelse true,
+    };
+}
+
+fn parseRemoteAuthorizationResultJson(
+    allocator: std.mem.Allocator,
+    raw: []const u8,
+) !client.tx_request_builder.RemoteAuthorizationResult {
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, raw, .{});
+    defer parsed.deinit();
+    return try parseRemoteAuthorizationResultFromJsonValue(allocator, parsed.value);
+}
+
+fn cliProviderStaticChallengePromptCallback(
+    _: *anyopaque,
+    _: std.mem.Allocator,
+    _: client.tx_request_builder.SessionChallengeRequest,
+) anyerror!client.tx_request_builder.SessionChallengeResponse {
+    return error.InvalidCli;
+}
+
+fn appendProviderCommandOutputSnippet(
+    writer: anytype,
+    label: []const u8,
+    output: []const u8,
+) !void {
+    const trimmed = std.mem.trim(u8, output, " \n\r\t");
+    if (trimmed.len == 0) return;
+
+    try writer.print("; {s}: ", .{label});
+    const limit = @min(trimmed.len, provider_command_error_snippet_limit);
+    for (trimmed[0..limit]) |ch| {
+        try writer.writeByte(switch (ch) {
+            '\n', '\r', '\t' => ' ',
+            else => ch,
+        });
+    }
+    if (trimmed.len > limit) try writer.writeAll("...");
+}
+
+fn recordProviderAuthorizerFailure(
+    ctx: *const CliProviderAuthorizerContext,
+    allocator: std.mem.Allocator,
+    base_message: []const u8,
+    stdout: []const u8,
+    stderr: []const u8,
+) void {
+    var rendered = std.ArrayList(u8){};
+    defer rendered.deinit(allocator);
+
+    const command_name = if (ctx.argv.len != 0) ctx.argv[0] else "<unknown>";
+    const writer = rendered.writer(allocator);
+    writer.print("provider authorizer `{s}`: {s}", .{ command_name, base_message }) catch return;
+    appendProviderCommandOutputSnippet(writer, "stderr", stderr) catch return;
+    appendProviderCommandOutputSnippet(writer, "stdout", stdout) catch return;
+
+    const message = rendered.toOwnedSlice(allocator) catch return;
+    defer allocator.free(message);
+    ctx.rpc.recordErrorMessage(message) catch {};
+}
+
+fn cliProviderAuthorizerCallback(
+    context: *anyopaque,
+    allocator: std.mem.Allocator,
+    request: client.tx_request_builder.RemoteAuthorizationRequest,
+) anyerror!client.tx_request_builder.RemoteAuthorizationResult {
+    const ctx = @as(*CliProviderAuthorizerContext, @ptrCast(@alignCast(context)));
+
+    const request_json = try std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(request, .{})});
+    defer allocator.free(request_json);
+
+    var child = std.process.Child.init(ctx.argv, allocator);
+    child.stdin_behavior = .Pipe;
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Pipe;
+
+    child.spawn() catch |err| {
+        const message = std.fmt.allocPrint(allocator, "failed to start ({s})", .{@errorName(err)}) catch return err;
+        defer allocator.free(message);
+        recordProviderAuthorizerFailure(ctx, allocator, message, "", "");
+        return client.ClientError.RpcError;
+    };
+    child.waitForSpawn() catch |err| {
+        const message = std.fmt.allocPrint(allocator, "failed to initialize ({s})", .{@errorName(err)}) catch return err;
+        defer allocator.free(message);
+        recordProviderAuthorizerFailure(ctx, allocator, message, "", "");
+        return client.ClientError.RpcError;
+    };
+
+    if (child.stdin) |stdin| {
+        try stdin.writeAll(request_json);
+        stdin.close();
+        child.stdin = null;
+    }
+
+    var stdout = std.ArrayList(u8){};
+    defer stdout.deinit(allocator);
+    var stderr = std.ArrayList(u8){};
+    defer stderr.deinit(allocator);
+    child.collectOutput(allocator, &stdout, &stderr, provider_command_output_limit) catch |err| {
+        const message = std.fmt.allocPrint(allocator, "failed while reading output ({s})", .{@errorName(err)}) catch return err;
+        defer allocator.free(message);
+        recordProviderAuthorizerFailure(ctx, allocator, message, stdout.items, stderr.items);
+        return if (err == error.OutOfMemory) err else client.ClientError.RpcError;
+    };
+
+    const term = child.wait() catch |err| {
+        const message = std.fmt.allocPrint(allocator, "failed while waiting for exit ({s})", .{@errorName(err)}) catch return err;
+        defer allocator.free(message);
+        recordProviderAuthorizerFailure(ctx, allocator, message, stdout.items, stderr.items);
+        return if (err == error.OutOfMemory) err else client.ClientError.RpcError;
+    };
+    switch (term) {
+        .Exited => |code| if (code != 0) {
+            const message = std.fmt.allocPrint(allocator, "exited with code {}", .{code}) catch return error.OutOfMemory;
+            defer allocator.free(message);
+            recordProviderAuthorizerFailure(ctx, allocator, message, stdout.items, stderr.items);
+            return client.ClientError.RpcError;
+        },
+        else => {
+            recordProviderAuthorizerFailure(ctx, allocator, "terminated unexpectedly", stdout.items, stderr.items);
+            return client.ClientError.RpcError;
+        },
+    }
+
+    var fixed_buffer = std.heap.FixedBufferAllocator.init(&ctx.response_storage);
+    return parseRemoteAuthorizationResultJson(fixed_buffer.allocator(), stdout.items) catch |err| {
+        if (err == error.OutOfMemory) return err;
+        const message = std.fmt.allocPrint(allocator, "returned invalid JSON ({s})", .{@errorName(err)}) catch return error.OutOfMemory;
+        defer allocator.free(message);
+        recordProviderAuthorizerFailure(ctx, allocator, message, stdout.items, stderr.items);
+        return client.ClientError.RpcError;
+    };
+}
+
+fn ownCliProgrammaticProvider(
+    rpc: *client.SuiRpcClient,
+    allocator: std.mem.Allocator,
+    raw: []const u8,
+) !OwnedCliProgrammaticProvider {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+
+    const arena_allocator = arena.allocator();
+    const parsed = try std.json.parseFromSlice(std.json.Value, arena_allocator, raw, .{});
+    const value = parsed.value;
+    if (value != .object) return error.InvalidCli;
+
+    const kind_text = try parseRequiredJsonString(arena_allocator, value.object, &.{"kind"});
+    const provider_kind = try parseProviderKind(kind_text);
+    const address = try parseOptionalJsonString(arena_allocator, value.object, &.{"address"});
+    var session = if (jsonObjectFieldAny(value.object, &.{"session"})) |session_value|
+        switch (session_value) {
+            .null => client.tx_request_builder.AccountSession{},
+            else => try parseAccountSessionFromJsonValue(arena_allocator, session_value),
+        }
+    else
+        client.tx_request_builder.AccountSession{};
+    const challenge = if (jsonObjectFieldAny(value.object, &.{"challenge"})) |challenge_value|
+        switch (challenge_value) {
+            .null => null,
+            else => try parseSessionChallengeFromJsonValue(arena_allocator, challenge_value),
+        }
+    else
+        null;
+    const action = if (jsonObjectFieldAny(value.object, &.{"action"})) |action_value|
+        try parseSessionChallengeActionValue(action_value)
+    else
+        client.tx_request_builder.SessionChallengeAction.execute;
+    const supports_execute = (try parseOptionalJsonBool(value.object, &.{ "supports_execute", "supportsExecute" })) orelse (challenge == null);
+
+    const authorizer_value = jsonObjectFieldAny(value.object, &.{"authorizer"}) orelse return error.InvalidCli;
+    if (authorizer_value != .object) return error.InvalidCli;
+    const authorizer_argv = (try parseOptionalJsonStringArray(arena_allocator, authorizer_value.object, &.{"exec"})) orelse return error.InvalidCli;
+    if (authorizer_argv.len == 0) return error.InvalidCli;
+    const authorizer_context = try arena_allocator.create(CliProviderAuthorizerContext);
+    authorizer_context.* = .{
+        .rpc = rpc,
+        .argv = authorizer_argv,
+    };
+
+    switch (provider_kind) {
+        .remote_signer => {
+            if (session.kind == .none) session.kind = .remote_signer;
+            return .{
+                .arena = arena,
+                .provider = .{
+                    .remote_signer = .{
+                        .address = address,
+                        .authorizer = .{
+                            .context = authorizer_context,
+                            .callback = cliProviderAuthorizerCallback,
+                        },
+                        .session = session,
+                        .session_challenger = if (challenge != null)
+                            .{
+                                .context = undefined,
+                                .callback = cliProviderStaticChallengePromptCallback,
+                            }
+                        else
+                            null,
+                        .session_challenge = challenge,
+                        .session_action = action,
+                        .session_supports_execute = supports_execute,
+                    },
+                },
+            };
+        },
+        .passkey, .zklogin, .multisig => {
+            if (session.kind == .none) {
+                session.kind = switch (provider_kind) {
+                    .passkey => .passkey,
+                    .zklogin => .zklogin,
+                    .multisig => .multisig,
+                    else => unreachable,
+                };
+            }
+
+            const account = client.tx_request_builder.FutureWalletAccount{
+                .address = address,
+                .session = session,
+                .authorizer = .{
+                    .context = authorizer_context,
+                    .callback = cliProviderAuthorizerCallback,
+                },
+                .session_challenge = challenge,
+                .session_action = action,
+                .session_supports_execute = supports_execute,
+            };
+
+            return .{
+                .arena = arena,
+                .provider = switch (provider_kind) {
+                    .passkey => .{ .passkey = account },
+                    .zklogin => .{ .zklogin = account },
+                    .multisig => .{ .multisig = account },
+                    else => unreachable,
+                },
+            };
+        },
+    }
+}
 
 fn jsonObjectFieldAny(
     object: std.json.ObjectMap,
@@ -1265,14 +1664,14 @@ fn ownLocalCommandSourceBuildContext(
         if (args.tx_build_auto_gas_payment and effective_gas_budget != requested_gas_budget) {
             allocator.free(gas_payment_json);
             gas_payment_json = try resolvedLocalBuilderGasPaymentJson(
-            allocator,
-            rpc,
-            args,
-            sender,
-            effective_gas_budget,
-            implicit_auto_gas_payment_min_balance,
-            excluded_object_ids.items.items,
-        ) orelse {
+                allocator,
+                rpc,
+                args,
+                sender,
+                effective_gas_budget,
+                implicit_auto_gas_payment_min_balance,
+                excluded_object_ids.items.items,
+            ) orelse {
                 owned_source.deinit(allocator);
                 allocator.free(sender);
                 return null;
@@ -2549,8 +2948,18 @@ pub fn runCommandWithProgrammaticProvider(
     writer: anytype,
     programmatic_provider: ?client.tx_request_builder.AccountProvider,
 ) !void {
+    var owned_cli_provider: ?OwnedCliProgrammaticProvider = null;
+    defer if (owned_cli_provider) |*value| value.deinit();
+
+    const cli_provider = blk: {
+        if (programmatic_provider != null) break :blk null;
+        const raw = args.tx_provider_config orelse break :blk null;
+        owned_cli_provider = try ownCliProgrammaticProvider(rpc, allocator, raw);
+        break :blk owned_cli_provider.?.provider;
+    };
+
     const effective_programmatic_provider = if (cli.supportsProgrammableInput(args))
-        resolvedProgrammaticProvider(args, programmatic_provider)
+        resolvedProgrammaticProvider(args, programmatic_provider orelse cli_provider)
     else
         null;
 
@@ -2595,12 +3004,25 @@ pub fn runCommandWithProgrammaticProvider(
                 else => {},
             }
 
+            var move_function_query_args = args.*;
+            const move_function_args = blk: {
+                if (args.command != .move_function) break :blk args;
+                if (args.tx_build_sender != null or args.signers.items.len != 0 or args.from_keystore) break :blk args;
+                if (effective_programmatic_provider) |provider| {
+                    if (defaultSenderFromProgrammaticProvider(provider)) |sender| {
+                        move_function_query_args.tx_build_sender = sender;
+                        break :blk &move_function_query_args;
+                    }
+                }
+                break :blk args;
+            };
+
             if (args.command == .move_function and
                 (args.move_function_template_output != null or
                     args.move_function_execute_dry_run or
                     args.move_function_execute_send))
             {
-                var query = try readQueryFromArgs(allocator, args);
+                var query = try readQueryFromArgs(allocator, move_function_args);
                 defer query.deinit(allocator);
                 var result = try rpc.runReadQueryAction(
                     allocator,
@@ -2639,7 +3061,7 @@ pub fn runCommandWithProgrammaticProvider(
                 }
             }
 
-            var query = try readQueryFromArgs(allocator, args);
+            var query = try readQueryFromArgs(allocator, move_function_args);
             defer query.deinit(allocator);
             var result = try rpc.runReadQueryAction(
                 allocator,
@@ -7955,6 +8377,761 @@ test "runCommand move function with --send executes preferred send request artif
     try testing.expectEqual(@as(usize, 0), state.unsafe_calls);
 
     try testing.expect(std.mem.indexOf(u8, output.items, "success") != null);
+}
+
+test "runCommand tx_send move-call with standalone provider prints challenge prompt" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "tx",
+        "send",
+        "--package",
+        "0x2",
+        "--module",
+        "counter",
+        "--function",
+        "increment",
+        "--arg",
+        "7",
+        "--gas-budget",
+        "1200",
+        "--provider",
+        "{\"kind\":\"passkey\",\"address\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"session\":{\"kind\":\"passkey\",\"sessionId\":\"standalone-provider-session\"},\"challenge\":{\"passkey\":{\"rpId\":\"wallet.example\",\"challengeB64url\":\"challenge-standalone-provider\"}},\"authorizer\":{\"exec\":[\"wallet-helper\",\"authorize\"]}}",
+    });
+    defer args.deinit(allocator);
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    const State = struct {
+        gas_price: usize = 0,
+        normalized: usize = 0,
+        coins: usize = 0,
+        execute_calls: usize = 0,
+        unsafe_calls: usize = 0,
+    };
+    var state = State{};
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const ctx = @as(*State, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                ctx.normalized += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"parameters\":[\"U64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\"}}}]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "suix_getReferenceGasPrice")) {
+                ctx.gas_price += 1;
+                return alloc.dupe(u8, "{\"result\":\"8\"}");
+            }
+            if (std.mem.eql(u8, req.method, "suix_getCoins")) {
+                ctx.coins += 1;
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, "0x1111111111111111111111111111111111111111111111111111111111111111") != null);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinObjectId\":\"0x9999999999999999999999999999999999999999999999999999999999999999\",\"version\":\"1\",\"digest\":\"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"balance\":\"1000000000\"}],\"nextCursor\":null,\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_executeTransactionBlock")) {
+                ctx.execute_calls += 1;
+                return alloc.dupe(u8, "{\"result\":{\"digest\":\"0xshouldnotexecute\"}}");
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall") or std.mem.eql(u8, req.method, "unsafe_batchTransaction")) {
+                ctx.unsafe_calls += 1;
+                return alloc.dupe(u8, "{\"result\":{\"txBytes\":\"AQIDBA==\"}}");
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+    rpc.request_sender = .{
+        .context = &state,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    try testing.expectEqual(@as(usize, 1), state.gas_price);
+    try testing.expectEqual(@as(usize, 1), state.normalized);
+    try testing.expectEqual(@as(usize, 1), state.coins);
+    try testing.expectEqual(@as(usize, 0), state.execute_calls);
+    try testing.expectEqual(@as(usize, 0), state.unsafe_calls);
+    try testing.expect(std.mem.indexOf(u8, output.items, "\"account_address\":\"0x1111111111111111111111111111111111111111111111111111111111111111\"") != null);
+    try testing.expect(std.mem.indexOf(u8, output.items, "\"challenge\"") != null);
+}
+
+test "runCommand tx_send standalone provider records authorizer stderr on command failure" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var args = cli.ParsedArgs{
+        .command = .tx_send,
+        .has_command = true,
+        .tx_build_package = "0x2",
+        .tx_build_module = "counter",
+        .tx_build_function = "increment",
+        .tx_build_type_args = "[]",
+        .tx_build_args = "[7]",
+        .tx_build_gas_budget = 1200,
+        .tx_session_response = "{\"supportsExecute\":true,\"session\":{\"kind\":\"passkey\",\"sessionId\":\"standalone-provider-approved\"}}",
+        .tx_provider_config = "{\"kind\":\"passkey\",\"address\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"session\":{\"kind\":\"passkey\",\"sessionId\":\"standalone-provider-session\"},\"challenge\":{\"passkey\":{\"rpId\":\"wallet.example\",\"challengeB64url\":\"challenge-standalone-provider\"}},\"authorizer\":{\"exec\":[\"/bin/sh\",\"-c\",\"echo provider-authorizer-failed >&2; exit 7\"]}}",
+    };
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    const State = struct {
+        gas_price: usize = 0,
+        normalized: usize = 0,
+        coins: usize = 0,
+        execute_calls: usize = 0,
+    };
+    var state = State{};
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const ctx = @as(*State, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                ctx.normalized += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"parameters\":[\"U64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\"}}}]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "suix_getReferenceGasPrice")) {
+                ctx.gas_price += 1;
+                return alloc.dupe(u8, "{\"result\":\"8\"}");
+            }
+            if (std.mem.eql(u8, req.method, "suix_getCoins")) {
+                ctx.coins += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinObjectId\":\"0x9999999999999999999999999999999999999999999999999999999999999999\",\"version\":\"1\",\"digest\":\"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"balance\":\"1000000000\"}],\"nextCursor\":null,\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_executeTransactionBlock")) {
+                ctx.execute_calls += 1;
+                return alloc.dupe(u8, "{\"result\":{\"digest\":\"0xshouldnotexecute\"}}");
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+    rpc.request_sender = .{
+        .context = &state,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try testing.expectError(client.ClientError.RpcError, runCommand(allocator, &rpc, &args, output.writer(allocator)));
+    try testing.expectEqual(@as(usize, 0), state.execute_calls);
+
+    const last_error = rpc.getLastError() orelse return error.TestExpectedError;
+    try testing.expect(std.mem.indexOf(u8, last_error.message, "exited with code 7") != null);
+    try testing.expect(std.mem.indexOf(u8, last_error.message, "provider-authorizer-failed") != null);
+}
+
+test "runCommand tx_send standalone provider records invalid authorizer json" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var args = cli.ParsedArgs{
+        .command = .tx_send,
+        .has_command = true,
+        .tx_build_package = "0x2",
+        .tx_build_module = "counter",
+        .tx_build_function = "increment",
+        .tx_build_type_args = "[]",
+        .tx_build_args = "[7]",
+        .tx_build_gas_budget = 1200,
+        .tx_session_response = "{\"supportsExecute\":true,\"session\":{\"kind\":\"passkey\",\"sessionId\":\"standalone-provider-approved\"}}",
+        .tx_provider_config = "{\"kind\":\"passkey\",\"address\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"session\":{\"kind\":\"passkey\",\"sessionId\":\"standalone-provider-session\"},\"challenge\":{\"passkey\":{\"rpId\":\"wallet.example\",\"challengeB64url\":\"challenge-standalone-provider\"}},\"authorizer\":{\"exec\":[\"/bin/sh\",\"-c\",\"printf '%s' 'not-json'; echo provider-authorizer-parse >&2\"]}}",
+    };
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    const State = struct {
+        gas_price: usize = 0,
+        normalized: usize = 0,
+        coins: usize = 0,
+        execute_calls: usize = 0,
+    };
+    var state = State{};
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const ctx = @as(*State, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                ctx.normalized += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"parameters\":[\"U64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\"}}}]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "suix_getReferenceGasPrice")) {
+                ctx.gas_price += 1;
+                return alloc.dupe(u8, "{\"result\":\"8\"}");
+            }
+            if (std.mem.eql(u8, req.method, "suix_getCoins")) {
+                ctx.coins += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinObjectId\":\"0x9999999999999999999999999999999999999999999999999999999999999999\",\"version\":\"1\",\"digest\":\"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"balance\":\"1000000000\"}],\"nextCursor\":null,\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_executeTransactionBlock")) {
+                ctx.execute_calls += 1;
+                return alloc.dupe(u8, "{\"result\":{\"digest\":\"0xshouldnotexecute\"}}");
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+    rpc.request_sender = .{
+        .context = &state,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try testing.expectError(client.ClientError.RpcError, runCommand(allocator, &rpc, &args, output.writer(allocator)));
+    try testing.expectEqual(@as(usize, 0), state.execute_calls);
+
+    const last_error = rpc.getLastError() orelse return error.TestExpectedError;
+    try testing.expect(std.mem.indexOf(u8, last_error.message, "returned invalid JSON") != null);
+    try testing.expect(std.mem.indexOf(u8, last_error.message, "provider-authorizer-parse") != null);
+    try testing.expect(std.mem.indexOf(u8, last_error.message, "not-json") != null);
+}
+
+test "buildDerivedMoveFunctionExecutionArgs carries standalone provider continuation" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const provider_config =
+        "{\"kind\":\"passkey\",\"address\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"session\":{\"kind\":\"passkey\",\"sessionId\":\"move-function-provider-session\"},\"challenge\":{\"passkey\":{\"rpId\":\"wallet.example\",\"challengeB64url\":\"challenge-move-function-provider\"}},\"authorizer\":{\"exec\":[\"wallet-helper\",\"authorize\"]}}";
+    const session_response =
+        "{\"supportsExecute\":true,\"session\":{\"kind\":\"passkey\",\"sessionId\":\"move-function-provider-approved\"}}";
+
+    var args = cli.ParsedArgs{
+        .command = .move_function,
+        .has_command = true,
+        .tx_session_response = session_response,
+        .tx_provider_config = provider_config,
+        .tx_send_wait = true,
+        .tx_send_summarize = true,
+    };
+
+    var derived = try buildDerivedMoveFunctionExecutionArgs(
+        allocator,
+        &args,
+        .tx_send,
+        "{\"commands\":[{\"kind\":\"TransferObjects\",\"objects\":[\"0xcoin\"],\"address\":\"0xreceiver\"}],\"sender\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"gasBudget\":1200}",
+    );
+    defer derived.deinit(allocator);
+
+    try testing.expectEqual(cli.Command.tx_send, derived.command);
+    try testing.expectEqualStrings(session_response, derived.tx_session_response.?);
+    try testing.expectEqualStrings(provider_config, derived.tx_provider_config.?);
+    try testing.expect(derived.tx_session_response.?.ptr != session_response.ptr);
+    try testing.expect(derived.tx_provider_config.?.ptr != provider_config.ptr);
+    try testing.expect(derived.tx_send_wait);
+    try testing.expect(derived.tx_send_summarize);
+    try testing.expectEqualStrings(
+        "0x1111111111111111111111111111111111111111111111111111111111111111",
+        derived.tx_build_sender.?,
+    );
+    try testing.expectEqual(@as(u64, 1200), derived.tx_build_gas_budget.?);
+}
+
+test "ownCliProgrammaticProvider parses remote signer challenge config" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    var owned = try ownCliProgrammaticProvider(
+        &rpc,
+        allocator,
+        "{\"kind\":\"remote_signer\",\"address\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"challenge\":{\"signPersonalMessage\":{\"domain\":\"wallet.example\",\"statement\":\"Sign in\",\"nonce\":\"nonce-1\"}},\"action\":\"cloud_agent_access\",\"authorizer\":{\"exec\":[\"wallet-helper\",\"authorize\"]}}",
+    );
+    defer owned.deinit();
+
+    switch (owned.provider) {
+        .remote_signer => |account| {
+            try testing.expectEqualStrings(
+                "0x1111111111111111111111111111111111111111111111111111111111111111",
+                account.address.?,
+            );
+            try testing.expectEqual(client.tx_request_builder.AccountSessionKind.remote_signer, account.session.kind);
+            try testing.expect(account.session_challenger != null);
+            try testing.expectEqual(client.tx_request_builder.SessionChallengeAction.cloud_agent_access, account.session_action);
+            try testing.expect(!account.session_supports_execute);
+            try testing.expect(account.session_challenge != null);
+            switch (account.session_challenge.?) {
+                .sign_personal_message => |challenge| {
+                    try testing.expectEqualStrings("wallet.example", challenge.domain);
+                    try testing.expectEqualStrings("Sign in", challenge.statement);
+                    try testing.expectEqualStrings("nonce-1", challenge.nonce);
+                },
+                else => return error.TestUnexpectedResult,
+            }
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "ownCliProgrammaticProvider parses zklogin challenge config" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    var owned = try ownCliProgrammaticProvider(
+        &rpc,
+        allocator,
+        "{\"kind\":\"zklogin\",\"address\":\"0x2222222222222222222222222222222222222222222222222222222222222222\",\"challenge\":{\"zkloginNonce\":{\"nonce\":\"nonce-zk\",\"provider\":\"google\",\"maxEpoch\":44}},\"authorizer\":{\"exec\":[\"wallet-helper\",\"authorize\"]}}",
+    );
+    defer owned.deinit();
+
+    switch (owned.provider) {
+        .zklogin => |account| {
+            try testing.expectEqual(client.tx_request_builder.AccountSessionKind.zklogin, account.session.kind);
+            try testing.expect(!account.session_supports_execute);
+            try testing.expect(account.authorizer != null);
+            try testing.expect(account.session_challenge != null);
+            switch (account.session_challenge.?) {
+                .zklogin_nonce => |challenge| {
+                    try testing.expectEqualStrings("nonce-zk", challenge.nonce);
+                    try testing.expectEqualStrings("google", challenge.provider.?);
+                    try testing.expectEqual(@as(u64, 44), challenge.max_epoch.?);
+                },
+                else => return error.TestUnexpectedResult,
+            }
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "ownCliProgrammaticProvider parses multisig config with executable session defaults" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    var owned = try ownCliProgrammaticProvider(
+        &rpc,
+        allocator,
+        "{\"kind\":\"multisig\",\"address\":\"0x3333333333333333333333333333333333333333333333333333333333333333\",\"authorizer\":{\"exec\":[\"wallet-helper\",\"authorize\"]}}",
+    );
+    defer owned.deinit();
+
+    switch (owned.provider) {
+        .multisig => |account| {
+            try testing.expectEqual(client.tx_request_builder.AccountSessionKind.multisig, account.session.kind);
+            try testing.expect(account.authorizer != null);
+            try testing.expect(account.session_challenge == null);
+            try testing.expect(account.session_supports_execute);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "runCommand tx_send standalone remote signer prints challenge prompt" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var args = cli.ParsedArgs{
+        .command = .tx_send,
+        .has_command = true,
+        .tx_build_package = "0x2",
+        .tx_build_module = "counter",
+        .tx_build_function = "increment",
+        .tx_build_type_args = "[]",
+        .tx_build_args = "[7]",
+        .tx_build_gas_budget = 1200,
+        .tx_provider_config = "{\"kind\":\"remote_signer\",\"address\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"challenge\":{\"signPersonalMessage\":{\"domain\":\"wallet.example\",\"statement\":\"Sign in\",\"nonce\":\"nonce-remote\"}},\"authorizer\":{\"exec\":[\"wallet-helper\",\"authorize\"]}}",
+    };
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    const State = struct {
+        gas_price: usize = 0,
+        normalized: usize = 0,
+        coins: usize = 0,
+        execute_calls: usize = 0,
+    };
+    var state = State{};
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const ctx = @as(*State, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                ctx.normalized += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"parameters\":[\"U64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\"}}}]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "suix_getReferenceGasPrice")) {
+                ctx.gas_price += 1;
+                return alloc.dupe(u8, "{\"result\":\"8\"}");
+            }
+            if (std.mem.eql(u8, req.method, "suix_getCoins")) {
+                ctx.coins += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinObjectId\":\"0x9999999999999999999999999999999999999999999999999999999999999999\",\"version\":\"1\",\"digest\":\"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"balance\":\"1000000000\"}],\"nextCursor\":null,\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_executeTransactionBlock")) {
+                ctx.execute_calls += 1;
+                return alloc.dupe(u8, "{\"result\":{\"digest\":\"0xshouldnotexecute\"}}");
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+    rpc.request_sender = .{
+        .context = &state,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    try testing.expectEqual(@as(usize, 0), state.execute_calls);
+    try testing.expect(std.mem.indexOf(u8, output.items, "\"account_address\":\"0x1111111111111111111111111111111111111111111111111111111111111111\"") != null);
+    try testing.expect(std.mem.indexOf(u8, output.items, "wallet.example") != null);
+    try testing.expect(std.mem.indexOf(u8, output.items, "nonce-remote") != null);
+}
+
+test "runCommand tx_send standalone zklogin prints challenge prompt" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var args = cli.ParsedArgs{
+        .command = .tx_send,
+        .has_command = true,
+        .tx_build_package = "0x2",
+        .tx_build_module = "counter",
+        .tx_build_function = "increment",
+        .tx_build_type_args = "[]",
+        .tx_build_args = "[7]",
+        .tx_build_gas_budget = 1200,
+        .tx_provider_config = "{\"kind\":\"zklogin\",\"address\":\"0x2222222222222222222222222222222222222222222222222222222222222222\",\"challenge\":{\"zkloginNonce\":{\"nonce\":\"nonce-zk-prompt\",\"provider\":\"google\",\"maxEpoch\":66}},\"authorizer\":{\"exec\":[\"wallet-helper\",\"authorize\"]}}",
+    };
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    const State = struct {
+        gas_price: usize = 0,
+        normalized: usize = 0,
+        coins: usize = 0,
+        execute_calls: usize = 0,
+    };
+    var state = State{};
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const ctx = @as(*State, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                ctx.normalized += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"parameters\":[\"U64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\"}}}]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "suix_getReferenceGasPrice")) {
+                ctx.gas_price += 1;
+                return alloc.dupe(u8, "{\"result\":\"8\"}");
+            }
+            if (std.mem.eql(u8, req.method, "suix_getCoins")) {
+                ctx.coins += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinObjectId\":\"0x9999999999999999999999999999999999999999999999999999999999999999\",\"version\":\"1\",\"digest\":\"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"balance\":\"1000000000\"}],\"nextCursor\":null,\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_executeTransactionBlock")) {
+                ctx.execute_calls += 1;
+                return alloc.dupe(u8, "{\"result\":{\"digest\":\"0xshouldnotexecute\"}}");
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+    rpc.request_sender = .{
+        .context = &state,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    try testing.expectEqual(@as(usize, 0), state.execute_calls);
+    try testing.expect(std.mem.indexOf(u8, output.items, "\"account_address\":\"0x2222222222222222222222222222222222222222222222222222222222222222\"") != null);
+    try testing.expect(std.mem.indexOf(u8, output.items, "nonce-zk-prompt") != null);
+    try testing.expect(std.mem.indexOf(u8, output.items, "google") != null);
+}
+
+test "runCommand tx_send standalone remote signer continuation executes successfully" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var args = cli.ParsedArgs{
+        .command = .tx_send,
+        .has_command = true,
+        .tx_build_package = "0x2",
+        .tx_build_module = "counter",
+        .tx_build_function = "increment",
+        .tx_build_type_args = "[]",
+        .tx_build_args = "[7]",
+        .tx_build_gas_budget = 1200,
+        .tx_session_response = "{\"supportsExecute\":true,\"session\":{\"kind\":\"remote_signer\",\"sessionId\":\"remote-approved\"}}",
+        .tx_provider_config = "{\"kind\":\"remote_signer\",\"address\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"challenge\":{\"signPersonalMessage\":{\"domain\":\"wallet.example\",\"statement\":\"Sign in\",\"nonce\":\"nonce-remote-success\"}},\"authorizer\":{\"exec\":[\"/bin/sh\",\"-c\",\"printf '%s' '{\\\"sender\\\":\\\"0x1111111111111111111111111111111111111111111111111111111111111111\\\",\\\"signatures\\\":[\\\"sig-remote-success\\\"],\\\"session\\\":{\\\"kind\\\":\\\"remote_signer\\\",\\\"sessionId\\\":\\\"remote-approved\\\"},\\\"supportsExecute\\\":true}'\"]}}",
+    };
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    const State = struct {
+        gas_price: usize = 0,
+        normalized: usize = 0,
+        coins: usize = 0,
+        execute_calls: usize = 0,
+    };
+    var state = State{};
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const ctx = @as(*State, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                ctx.normalized += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"parameters\":[\"U64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\"}}}]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "suix_getReferenceGasPrice")) {
+                ctx.gas_price += 1;
+                return alloc.dupe(u8, "{\"result\":\"8\"}");
+            }
+            if (std.mem.eql(u8, req.method, "suix_getCoins")) {
+                ctx.coins += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinObjectId\":\"0x9999999999999999999999999999999999999999999999999999999999999999\",\"version\":\"1\",\"digest\":\"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"balance\":\"1000000000\"}],\"nextCursor\":null,\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_executeTransactionBlock")) {
+                ctx.execute_calls += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"digest\":\"0xremoteprovidersuccess\",\"effects\":{\"status\":{\"status\":\"success\"}}}}",
+                );
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+    rpc.request_sender = .{
+        .context = &state,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    try testing.expectEqual(@as(usize, 1), state.execute_calls);
+    try testing.expect(std.mem.indexOf(u8, output.items, "0xremoteprovidersuccess") != null);
+}
+
+test "runCommand tx_send standalone zklogin continuation executes successfully" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var args = cli.ParsedArgs{
+        .command = .tx_send,
+        .has_command = true,
+        .tx_build_package = "0x2",
+        .tx_build_module = "counter",
+        .tx_build_function = "increment",
+        .tx_build_type_args = "[]",
+        .tx_build_args = "[7]",
+        .tx_build_gas_budget = 1200,
+        .tx_session_response = "{\"supportsExecute\":true,\"session\":{\"kind\":\"zklogin\",\"sessionId\":\"zk-approved\"}}",
+        .tx_provider_config = "{\"kind\":\"zklogin\",\"address\":\"0x2222222222222222222222222222222222222222222222222222222222222222\",\"challenge\":{\"zkloginNonce\":{\"nonce\":\"nonce-zk-success\",\"provider\":\"google\",\"maxEpoch\":66}},\"authorizer\":{\"exec\":[\"/bin/sh\",\"-c\",\"printf '%s' '{\\\"sender\\\":\\\"0x2222222222222222222222222222222222222222222222222222222222222222\\\",\\\"signatures\\\":[\\\"sig-zk-success\\\"],\\\"session\\\":{\\\"kind\\\":\\\"zklogin\\\",\\\"sessionId\\\":\\\"zk-approved\\\"},\\\"supportsExecute\\\":true}'\"]}}",
+    };
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    const State = struct {
+        gas_price: usize = 0,
+        normalized: usize = 0,
+        coins: usize = 0,
+        execute_calls: usize = 0,
+    };
+    var state = State{};
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const ctx = @as(*State, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                ctx.normalized += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"parameters\":[\"U64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\"}}}]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "suix_getReferenceGasPrice")) {
+                ctx.gas_price += 1;
+                return alloc.dupe(u8, "{\"result\":\"8\"}");
+            }
+            if (std.mem.eql(u8, req.method, "suix_getCoins")) {
+                ctx.coins += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinObjectId\":\"0x9999999999999999999999999999999999999999999999999999999999999999\",\"version\":\"1\",\"digest\":\"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"balance\":\"1000000000\"}],\"nextCursor\":null,\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_executeTransactionBlock")) {
+                ctx.execute_calls += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"digest\":\"0xzkprovidersuccess\",\"effects\":{\"status\":{\"status\":\"success\"}}}}",
+                );
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+    rpc.request_sender = .{
+        .context = &state,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    try testing.expectEqual(@as(usize, 1), state.execute_calls);
+    try testing.expect(std.mem.indexOf(u8, output.items, "0xzkprovidersuccess") != null);
+}
+
+test "runCommand tx_send standalone multisig executes successfully without challenge continuation" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var args = cli.ParsedArgs{
+        .command = .tx_send,
+        .has_command = true,
+        .tx_build_package = "0x2",
+        .tx_build_module = "counter",
+        .tx_build_function = "increment",
+        .tx_build_type_args = "[]",
+        .tx_build_args = "[7]",
+        .tx_build_gas_budget = 1200,
+        .tx_provider_config = "{\"kind\":\"multisig\",\"address\":\"0x3333333333333333333333333333333333333333333333333333333333333333\",\"authorizer\":{\"exec\":[\"/bin/sh\",\"-c\",\"printf '%s' '{\\\"sender\\\":\\\"0x3333333333333333333333333333333333333333333333333333333333333333\\\",\\\"signatures\\\":[\\\"sig-multisig-success\\\"],\\\"session\\\":{\\\"kind\\\":\\\"multisig\\\",\\\"sessionId\\\":\\\"multisig-direct\\\"},\\\"supportsExecute\\\":true}'\"]}}",
+    };
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    const State = struct {
+        gas_price: usize = 0,
+        normalized: usize = 0,
+        coins: usize = 0,
+        execute_calls: usize = 0,
+    };
+    var state = State{};
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const ctx = @as(*State, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                ctx.normalized += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"parameters\":[\"U64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\"}}}]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "suix_getReferenceGasPrice")) {
+                ctx.gas_price += 1;
+                return alloc.dupe(u8, "{\"result\":\"8\"}");
+            }
+            if (std.mem.eql(u8, req.method, "suix_getCoins")) {
+                ctx.coins += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinObjectId\":\"0x9999999999999999999999999999999999999999999999999999999999999999\",\"version\":\"1\",\"digest\":\"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"balance\":\"1000000000\"}],\"nextCursor\":null,\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_executeTransactionBlock")) {
+                ctx.execute_calls += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"digest\":\"0xmultisigprovidersuccess\",\"effects\":{\"status\":{\"status\":\"success\"}}}}",
+                );
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+    rpc.request_sender = .{
+        .context = &state,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    try testing.expectEqual(@as(usize, 1), state.execute_calls);
+    try testing.expect(std.mem.indexOf(u8, output.items, "0xmultisigprovidersuccess") != null);
 }
 
 test "runCommand move function indexed explicit args override parameter positions in preferred templates" {
