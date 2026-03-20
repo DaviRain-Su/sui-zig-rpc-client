@@ -19,6 +19,10 @@ pub const ParsedEnvelope = struct {
     payment_memo: ?[]u8 = null,
     invoice_reference: ?[]u8 = null,
     reconciliation_group: ?[]u8 = null,
+    execution_lane: ?[]u8 = null,
+    gas_lane: ?[]u8 = null,
+    conflict_keys_json: ?[]u8 = null,
+    conflict_strategy: ?[]u8 = null,
 
     pub fn deinit(self: *ParsedEnvelope, allocator: std.mem.Allocator) void {
         allocator.free(self.request_json);
@@ -34,6 +38,10 @@ pub const ParsedEnvelope = struct {
         if (self.payment_memo) |value| allocator.free(value);
         if (self.invoice_reference) |value| allocator.free(value);
         if (self.reconciliation_group) |value| allocator.free(value);
+        if (self.execution_lane) |value| allocator.free(value);
+        if (self.gas_lane) |value| allocator.free(value);
+        if (self.conflict_keys_json) |value| allocator.free(value);
+        if (self.conflict_strategy) |value| allocator.free(value);
     }
 };
 
@@ -202,6 +210,30 @@ pub fn parseEnvelope(
         );
     }
 
+    if (object.get("concurrency")) |concurrency_value| {
+        if (concurrency_value != .object) return error.InvalidCli;
+        envelope.execution_lane = try jsonOptionalStringDup(
+            allocator,
+            concurrency_value.object,
+            &.{ "execution_lane", "executionLane" },
+        );
+        envelope.gas_lane = try jsonOptionalStringDup(
+            allocator,
+            concurrency_value.object,
+            &.{ "gas_lane", "gasLane" },
+        );
+        envelope.conflict_keys_json = try jsonOptionalCompactValue(
+            allocator,
+            concurrency_value.object,
+            &.{ "conflict_keys", "conflictKeys" },
+        );
+        envelope.conflict_strategy = try jsonOptionalStringDup(
+            allocator,
+            concurrency_value.object,
+            &.{ "conflict_strategy", "conflictStrategy" },
+        );
+    }
+
     if (envelope.execution_mode) |value| try validateExecutionMode(value);
     return envelope;
 }
@@ -219,6 +251,7 @@ test "wallet_intent parseEnvelope reads request and sponsor metadata" {
         \\  "request":{"commands":[{"kind":"MoveCall","package":"0x2","module":"counter","function":"increment","typeArguments":[],"arguments":[7]}],"sender":"0xabc","gasBudget":1200},
         \\  "sponsor":{"mode":"required","policy_metadata":{"tier":"vip"},"gas_source_preference":"sponsor","refusal_fallback":"fail_closed"},
         \\  "payment":{"payment_reference":"pay-1","memo":"coffee","invoice_reference":"inv-7","reconciliation_group":"merchant-a"},
+        \\  "concurrency":{"execution_lane":"lane-1","gas_lane":"gas-a","conflict_keys":["shared:pool-1","owned:wallet-1"],"conflict_strategy":"serialize_same_lane"},
         \\  "policy":{"session_key":"0x1"},
         \\  "correlation_id":"req-1",
         \\  "valid_after_ms":100,
@@ -239,6 +272,10 @@ test "wallet_intent parseEnvelope reads request and sponsor metadata" {
     try testing.expectEqualStrings("coffee", parsed.payment_memo.?);
     try testing.expectEqualStrings("inv-7", parsed.invoice_reference.?);
     try testing.expectEqualStrings("merchant-a", parsed.reconciliation_group.?);
+    try testing.expectEqualStrings("lane-1", parsed.execution_lane.?);
+    try testing.expectEqualStrings("gas-a", parsed.gas_lane.?);
+    try testing.expectEqualStrings("[\"shared:pool-1\",\"owned:wallet-1\"]", parsed.conflict_keys_json.?);
+    try testing.expectEqualStrings("serialize_same_lane", parsed.conflict_strategy.?);
     try testing.expectEqualStrings("req-1", parsed.correlation_id.?);
     try testing.expectEqual(@as(u64, 100), parsed.valid_after_ms.?);
     try testing.expectEqual(@as(u64, 200), parsed.valid_before_ms.?);

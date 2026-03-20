@@ -4666,6 +4666,8 @@ fn buildWalletIntentJsonFromArgs(
     try writer.writeAll(summary_json);
     try writer.writeAll(",\"payment\":");
     try writeResolvedRequestPaymentMetadata(writer, args);
+    try writer.writeAll(",\"concurrency\":");
+    try writeResolvedRequestConcurrencyMetadata(writer, args);
     try writer.writeAll(",\"sponsor\":{");
     try writeResolvedRequestSponsorContract(writer, args);
     try writer.writeAll("}");
@@ -4769,6 +4771,56 @@ fn writeResolvedRequestPaymentMetadata(
     try writer.writeAll("}");
 }
 
+fn hasRequestConcurrencyMetadata(args: *const cli.ParsedArgs) bool {
+    return args.request_execution_lane != null or
+        args.request_gas_lane != null or
+        args.request_conflict_keys_json != null or
+        args.request_conflict_strategy != null;
+}
+
+fn resolvedRequestConflictStrategy(args: *const cli.ParsedArgs) []const u8 {
+    return args.request_conflict_strategy orelse "serialize_same_lane";
+}
+
+fn writeResolvedRequestConcurrencyMetadata(
+    writer: anytype,
+    args: *const cli.ParsedArgs,
+) !void {
+    if (!hasRequestConcurrencyMetadata(args)) {
+        try writer.writeAll("null");
+        return;
+    }
+
+    const planner_ready = args.request_execution_lane != null or
+        args.request_gas_lane != null or
+        args.request_conflict_keys_json != null;
+
+    try writer.writeAll("{");
+    try writer.writeAll("\"execution_lane\":");
+    if (args.request_execution_lane) |value| {
+        try writer.print("{f}", .{std.json.fmt(value, .{})});
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll(",\"gas_lane\":");
+    if (args.request_gas_lane) |value| {
+        try writer.print("{f}", .{std.json.fmt(value, .{})});
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll(",\"conflict_keys\":");
+    if (args.request_conflict_keys_json) |value| {
+        try writer.writeAll(value);
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll(",\"conflict_strategy\":");
+    try writer.print("{f}", .{std.json.fmt(resolvedRequestConflictStrategy(args), .{})});
+    try writer.print(",\"planner_ready\":{any}", .{planner_ready});
+    try writer.print(",\"parallel_safe_hint\":{any}", .{planner_ready});
+    try writer.writeAll("}");
+}
+
 fn buildRequestSponsorEnvelopeJson(
     allocator: std.mem.Allocator,
     args: *const cli.ParsedArgs,
@@ -4795,6 +4847,8 @@ fn buildRequestSponsorEnvelopeJson(
     try writer.writeAll(summary_json);
     try writer.writeAll(",\"payment\":");
     try writeResolvedRequestPaymentMetadata(writer, args);
+    try writer.writeAll(",\"concurrency\":");
+    try writeResolvedRequestConcurrencyMetadata(writer, args);
     try writer.writeAll(",\"sender\":");
     if (request.value.object.get("sender")) |sender| {
         try writer.print("{f}", .{std.json.fmt(sender, .{})});
@@ -4850,6 +4904,8 @@ fn buildRequestScheduleJobJson(
     try writer.writeAll(summary_json);
     try writer.writeAll(",\"payment\":");
     try writeResolvedRequestPaymentMetadata(writer, args);
+    try writer.writeAll(",\"concurrency\":");
+    try writeResolvedRequestConcurrencyMetadata(writer, args);
     try writer.writeAll(",\"schedule\":{");
     try writer.writeAll("\"job_id\":");
     try writer.print("{f}", .{std.json.fmt(resolved_schedule_id, .{})});
@@ -23299,6 +23355,14 @@ test "runCommand wallet_intent_build prints first-class wallet intent artifacts"
         "inv-7",
         "--reconciliation-group",
         "merchant-a",
+        "--execution-lane",
+        "lane-1",
+        "--gas-lane",
+        "gas-a",
+        "--conflict-keys",
+        "[\"shared:pool-1\",\"owned:wallet-1\"]",
+        "--conflict-strategy",
+        "serialize_same_lane",
         "--correlation-id",
         "req-1",
         "--valid-after-ms",
@@ -23327,6 +23391,12 @@ test "runCommand wallet_intent_build prints first-class wallet intent artifacts"
     try testing.expectEqualStrings("coffee", parsed.value.object.get("payment").?.object.get("memo").?.string);
     try testing.expectEqualStrings("inv-7", parsed.value.object.get("payment").?.object.get("invoice_reference").?.string);
     try testing.expectEqualStrings("merchant-a", parsed.value.object.get("payment").?.object.get("reconciliation_group").?.string);
+    try testing.expectEqualStrings("lane-1", parsed.value.object.get("concurrency").?.object.get("execution_lane").?.string);
+    try testing.expectEqualStrings("gas-a", parsed.value.object.get("concurrency").?.object.get("gas_lane").?.string);
+    try testing.expectEqualStrings("serialize_same_lane", parsed.value.object.get("concurrency").?.object.get("conflict_strategy").?.string);
+    try testing.expectEqual(@as(usize, 2), parsed.value.object.get("concurrency").?.object.get("conflict_keys").?.array.items.len);
+    try testing.expectEqual(true, parsed.value.object.get("concurrency").?.object.get("planner_ready").?.bool);
+    try testing.expectEqual(true, parsed.value.object.get("concurrency").?.object.get("parallel_safe_hint").?.bool);
     try testing.expectEqual(@as(i64, 100), parsed.value.object.get("valid_after_ms").?.integer);
     try testing.expectEqual(@as(i64, 200), parsed.value.object.get("valid_before_ms").?.integer);
     try testing.expectEqualStrings("req-1", parsed.value.object.get("correlation_id").?.string);
@@ -23803,6 +23873,14 @@ test "runCommand request_sponsor prints sponsor envelope artifact" {
         "inv-7",
         "--reconciliation-group",
         "merchant-a",
+        "--execution-lane",
+        "lane-1",
+        "--gas-lane",
+        "gas-a",
+        "--conflict-keys",
+        "[\"shared:pool-1\",\"owned:wallet-1\"]",
+        "--conflict-strategy",
+        "serialize_same_lane",
         "--valid-after-ms",
         "100",
         "--valid-before-ms",
@@ -23827,6 +23905,11 @@ test "runCommand request_sponsor prints sponsor envelope artifact" {
     try testing.expectEqualStrings("coffee", parsed.value.object.get("payment").?.object.get("memo").?.string);
     try testing.expectEqualStrings("inv-7", parsed.value.object.get("payment").?.object.get("invoice_reference").?.string);
     try testing.expectEqualStrings("merchant-a", parsed.value.object.get("payment").?.object.get("reconciliation_group").?.string);
+    try testing.expectEqualStrings("lane-1", parsed.value.object.get("concurrency").?.object.get("execution_lane").?.string);
+    try testing.expectEqualStrings("gas-a", parsed.value.object.get("concurrency").?.object.get("gas_lane").?.string);
+    try testing.expectEqualStrings("serialize_same_lane", parsed.value.object.get("concurrency").?.object.get("conflict_strategy").?.string);
+    try testing.expectEqual(@as(usize, 2), parsed.value.object.get("concurrency").?.object.get("conflict_keys").?.array.items.len);
+    try testing.expectEqual(true, parsed.value.object.get("concurrency").?.object.get("planner_ready").?.bool);
     try testing.expectEqualStrings("0xabc", parsed.value.object.get("sender").?.string);
     try testing.expectEqual(@as(i64, 1200), parsed.value.object.get("estimated_gas_budget").?.integer);
     try testing.expectEqual(@as(i64, 100), parsed.value.object.get("valid_after_ms").?.integer);
@@ -23958,6 +24041,14 @@ test "runCommand request_schedule prints scheduler job artifact" {
         "pay-1",
         "--reconciliation-group",
         "merchant-a",
+        "--execution-lane",
+        "lane-1",
+        "--gas-lane",
+        "gas-a",
+        "--conflict-keys",
+        "[\"shared:pool-1\",\"owned:wallet-1\"]",
+        "--conflict-strategy",
+        "serialize_same_lane",
     });
     defer args.deinit(allocator);
 
@@ -23975,6 +24066,11 @@ test "runCommand request_schedule prints scheduler job artifact" {
     try testing.expectEqualStrings("scheduled", parsed.value.object.get("state").?.string);
     try testing.expectEqualStrings("pay-1", parsed.value.object.get("payment").?.object.get("payment_reference").?.string);
     try testing.expectEqualStrings("merchant-a", parsed.value.object.get("payment").?.object.get("reconciliation_group").?.string);
+    try testing.expectEqualStrings("lane-1", parsed.value.object.get("concurrency").?.object.get("execution_lane").?.string);
+    try testing.expectEqualStrings("gas-a", parsed.value.object.get("concurrency").?.object.get("gas_lane").?.string);
+    try testing.expectEqualStrings("serialize_same_lane", parsed.value.object.get("concurrency").?.object.get("conflict_strategy").?.string);
+    try testing.expectEqual(@as(usize, 2), parsed.value.object.get("concurrency").?.object.get("conflict_keys").?.array.items.len);
+    try testing.expectEqual(true, parsed.value.object.get("concurrency").?.object.get("planner_ready").?.bool);
     try testing.expectEqualStrings("job-1", parsed.value.object.get("schedule").?.object.get("job_id").?.string);
     try testing.expectEqualStrings("job-0", parsed.value.object.get("schedule").?.object.get("replace_job_id").?.string);
     try testing.expectEqualStrings("cancel_previous_job", parsed.value.object.get("schedule").?.object.get("replacement_behavior").?.string);

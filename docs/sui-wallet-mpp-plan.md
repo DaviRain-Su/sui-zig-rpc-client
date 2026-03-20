@@ -667,6 +667,19 @@ This should become both:
 - a planner concern in the engine
 - a UX concept in the wallet
 
+The CLI/artifact layer now carries the first concrete contract for this:
+
+- `concurrency.execution_lane`
+- `concurrency.gas_lane`
+- `concurrency.conflict_keys`
+- `concurrency.conflict_strategy`
+- `concurrency.planner_ready`
+- `concurrency.parallel_safe_hint`
+
+These fields now exist on `wallet_intent`, `sponsor_envelope`, and
+`schedule_job` artifacts so queueing, scheduling, and wallet UX can reason
+about object-safe concurrency without mutating the underlying Sui request body.
+
 ## MVP Phases
 
 ### Phase 0: Documentation and Boundaries
