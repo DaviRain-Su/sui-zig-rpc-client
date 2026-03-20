@@ -263,6 +263,91 @@ Existing low-level commands remain the execution substrate:
 New wallet commands should compile down to those same core paths instead of
 adding a second transaction-construction stack.
 
+## Tempo CLI Parity Check
+
+This section answers a narrower question:
+
+`Do we already cover the capability shape implied by Tempo's wallet/request CLI?`
+
+Short answer:
+
+- we cover the core transaction-experience direction
+- we do not yet fully specify the operational CLI lifecycle around wallet
+  management and request lifecycle management
+- that missing part should be added explicitly instead of assumed
+
+### `tempo wallet` Style Capabilities
+
+The design already includes or strongly implies:
+
+- account listing
+- balance inspection
+- passkey-backed account model
+- session/access policy management
+- sponsor-aware execution
+
+The design does not yet spell out enough operational wallet commands for a real
+CLI user journey. These should be added explicitly:
+
+- `wallet create`
+- `wallet import`
+- `wallet export-public`
+- `wallet use`
+- `wallet address`
+- `wallet coins`
+- `wallet objects`
+- `wallet signer inspect`
+- `wallet passkey register`
+- `wallet passkey login`
+- `wallet session revoke`
+
+That means the current design is directionally correct but not yet at
+Tempo-style CLI completeness for wallet lifecycle management.
+
+### `tempo request` Style Capabilities
+
+The design already includes or strongly implies:
+
+- a request-like abstraction in the form of `wallet intent`
+- dry-run before execution
+- sponsor-aware request handling
+- scheduled execution metadata
+- shared web/CLI artifact flow
+
+What is still missing is an explicit request lifecycle API at the CLI level.
+That should be added as a first-class command group rather than buried inside
+`wallet intent`.
+
+Recommended commands:
+
+- `request build`
+- `request inspect`
+- `request dry-run`
+- `request sponsor`
+- `request sign`
+- `request send`
+- `request schedule`
+- `request status`
+
+Recommended artifacts:
+
+- `wallet-intent.json`
+- `request-artifact.json`
+- `sponsor-envelope.json`
+- `schedule-job.json`
+
+### Concrete Gap Summary
+
+So the right answer is:
+
+- `wallet` parity: partial
+- `request` parity: partial
+- architecture: yes
+- CLI lifecycle design: not yet complete
+
+The missing work is not a rethink. It is a documentation and implementation
+expansion around command groups and artifact contracts.
+
 ## Frontend Direction
 
 The frontend should not reimplement transaction logic. It should:
@@ -358,15 +443,18 @@ This means scheduler correctness depends on:
 These are the next concrete steps that fit this repo.
 
 1. Add a documented wallet intent schema to the repo.
-2. Add CLI commands that build and inspect wallet intents.
-3. Make request artifacts explicitly sponsor-friendly.
-4. Add a passkey/session signer abstraction boundary.
-5. Add scheduler-friendly artifact metadata:
+2. Add explicit `wallet` CLI lifecycle commands:
+   - create/import/use/address/balance/coins/objects
+3. Add explicit `request` CLI lifecycle commands:
+   - build/inspect/dry-run/sponsor/sign/send/schedule/status
+4. Make request artifacts explicitly sponsor-friendly.
+5. Add a passkey/session signer abstraction boundary.
+6. Add scheduler-friendly artifact metadata:
    - validity window
    - sender
    - sponsor mode
    - object freshness requirements
-6. Add wallet smoke scenarios that cover:
+7. Add wallet smoke scenarios that cover:
    - sponsored transfer
    - sponsored swap
    - session-limited swap
