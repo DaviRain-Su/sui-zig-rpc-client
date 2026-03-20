@@ -6812,6 +6812,90 @@ fn buildDerivedRequestCommandArgs(
     return derived;
 }
 
+fn updateTrackedRequestEntryFromStatusOutput(
+    allocator: std.mem.Allocator,
+    entry: *request_state.OwnedRequestEntry,
+    output_json: []const u8,
+) !void {
+    const now_ms = std.time.milliTimestamp();
+    if (std.json.parseFromSlice(std.json.Value, allocator, output_json, .{})) |parsed| {
+        defer parsed.deinit();
+        if (jsonFindFirstStringField(parsed.value, "digest")) |digest| {
+            try replaceOptionalRequestStateField(allocator, &entry.digest, digest);
+        }
+        if (jsonFindFirstStringField(parsed.value, "status")) |status| {
+            try setRequestStateEntryStateAt(
+                allocator,
+                entry,
+                if (std.mem.eql(u8, status, "success"))
+                    "confirmed"
+                else if (std.mem.eql(u8, status, "failure"))
+                    "failed"
+                else
+                    "submitted",
+                now_ms,
+            );
+            if (std.mem.eql(u8, status, "success")) {
+                try replaceOptionalRequestStateField(allocator, &entry.last_error, null);
+            } else if (std.mem.eql(u8, status, "failure")) {
+                const failure_message = (try ownedRequestLifecycleStatusMessage(allocator, parsed.value)) orelse
+                    try allocator.dupe(u8, "transaction status failure");
+                defer allocator.free(failure_message);
+                try replaceOptionalRequestStateField(allocator, &entry.last_error, failure_message);
+            }
+        } else {
+            entry.updated_at_ms = now_ms;
+        }
+    } else |_| {
+        entry.updated_at_ms = now_ms;
+    }
+}
+
+fn runTrackedRequestStatusLikeCommand(
+    allocator: std.mem.Allocator,
+    rpc: *client.SuiRpcClient,
+    args: *const cli.ParsedArgs,
+    writer: anytype,
+    effective_programmatic_provider: ?client.tx_request_builder.AccountProvider,
+    tx_command: cli.Command,
+) anyerror!void {
+    const target = args.request_entry_id orelse return error.InvalidCli;
+    var state = try request_state.loadDefaultRequestState(allocator);
+    defer state.deinit(allocator);
+
+    const matched_index = findRequestStateEntryIndex(&state, target);
+    const status_digest = if (matched_index) |index|
+        try allocator.dupe(u8, state.entries[index].digest orelse return error.InvalidCli)
+    else
+        try allocator.dupe(u8, target);
+    defer allocator.free(status_digest);
+
+    var derived_args = args.*;
+    derived_args.command = tx_command;
+    derived_args.tx_digest = status_digest;
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+    try runCommandWithProgrammaticProvider(
+        allocator,
+        rpc,
+        &derived_args,
+        output.writer(allocator),
+        effective_programmatic_provider,
+    );
+
+    if (matched_index) |index| {
+        try updateTrackedRequestEntryFromStatusOutput(
+            allocator,
+            &state.entries[index],
+            output.items,
+        );
+        try request_state.writeDefaultRequestState(allocator, &state);
+    }
+
+    try writer.writeAll(output.items);
+}
+
 fn jsonFindFirstStringField(value: std.json.Value, field_name: []const u8) ?[]const u8 {
     switch (value) {
         .string => return null,
@@ -7391,68 +7475,24 @@ pub fn runCommandWithProgrammaticProvider(
             try writer.writeAll(execute_output.items);
         },
         .request_status => {
-            const target = args.request_entry_id orelse return error.InvalidCli;
-            var state = try request_state.loadDefaultRequestState(allocator);
-            defer state.deinit(allocator);
-
-            const matched_index = findRequestStateEntryIndex(&state, target);
-            const status_digest = if (matched_index) |index|
-                try allocator.dupe(u8, state.entries[index].digest orelse return error.InvalidCli)
-            else
-                try allocator.dupe(u8, target);
-            defer allocator.free(status_digest);
-
-            var derived_args = args.*;
-            derived_args.command = .tx_status;
-            derived_args.tx_digest = status_digest;
-
-            var output = std.ArrayList(u8){};
-            defer output.deinit(allocator);
-            try runCommandWithProgrammaticProvider(
+            try runTrackedRequestStatusLikeCommand(
                 allocator,
                 rpc,
-                &derived_args,
-                output.writer(allocator),
+                args,
+                writer,
                 effective_programmatic_provider,
+                .tx_status,
             );
-
-            if (matched_index) |index| {
-                const now_ms = std.time.milliTimestamp();
-                if (std.json.parseFromSlice(std.json.Value, allocator, output.items, .{})) |parsed| {
-                    defer parsed.deinit();
-                    if (jsonFindFirstStringField(parsed.value, "digest")) |digest| {
-                        try replaceOptionalRequestStateField(allocator, &state.entries[index].digest, digest);
-                    }
-                    if (jsonFindFirstStringField(parsed.value, "status")) |status| {
-                        try setRequestStateEntryStateAt(
-                            allocator,
-                            &state.entries[index],
-                            if (std.mem.eql(u8, status, "success"))
-                                "confirmed"
-                            else if (std.mem.eql(u8, status, "failure"))
-                                "failed"
-                                else
-                                    "submitted",
-                            now_ms,
-                        );
-                        if (std.mem.eql(u8, status, "success")) {
-                            try replaceOptionalRequestStateField(allocator, &state.entries[index].last_error, null);
-                        } else if (std.mem.eql(u8, status, "failure")) {
-                            const failure_message = (try ownedRequestLifecycleStatusMessage(allocator, parsed.value)) orelse
-                                try allocator.dupe(u8, "transaction status failure");
-                            defer allocator.free(failure_message);
-                            try replaceOptionalRequestStateField(allocator, &state.entries[index].last_error, failure_message);
-                        }
-                    } else {
-                        state.entries[index].updated_at_ms = now_ms;
-                    }
-                } else |_| {
-                    state.entries[index].updated_at_ms = now_ms;
-                }
-                try request_state.writeDefaultRequestState(allocator, &state);
-            }
-
-            try writer.writeAll(output.items);
+        },
+        .request_confirm => {
+            try runTrackedRequestStatusLikeCommand(
+                allocator,
+                rpc,
+                args,
+                writer,
+                effective_programmatic_provider,
+                .tx_confirm,
+            );
         },
         .account_resources => {
             const resolved = try resolveAccountQueryOwner(allocator, args);
@@ -29145,6 +29185,91 @@ test "runCommand request_status records chain failure messages in tracked reques
     try testing.expectEqualStrings("0xfailed", loaded.entries[0].digest.?);
     try testing.expect(loaded.entries[0].last_error != null);
     try testing.expectEqualStrings("insufficient gas", loaded.entries[0].last_error.?);
+}
+
+test "runCommand request_confirm waits for tracked request digests and updates lifecycle state" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const state_path = try std.fmt.allocPrint(allocator, "tmp_request_confirm_state_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(state_path);
+    defer std.fs.cwd().deleteFile(state_path) catch {};
+
+    const old_state_override = request_state.test_request_state_path_override;
+    request_state.test_request_state_path_override = state_path;
+    defer request_state.test_request_state_path_override = old_state_override;
+
+    var entries = try allocator.alloc(request_state.OwnedRequestEntry, 1);
+    entries[0] = .{
+        .id = try allocator.dupe(u8, "req-confirm"),
+        .kind = try allocator.dupe(u8, "request_execution"),
+        .state = try allocator.dupe(u8, "submitted"),
+        .request_json = try allocator.dupe(u8, "{\"commands\":[]}"),
+        .artifact_json = try allocator.dupe(u8, "{\"result\":{\"digest\":\"0xconfirm\"}}"),
+        .digest = try allocator.dupe(u8, "0xconfirm"),
+        .correlation_id = try allocator.dupe(u8, "req-confirm"),
+        .created_at_ms = 100,
+        .updated_at_ms = 100,
+        .submit_count = 1,
+        .last_error = try allocator.dupe(u8, "old failure"),
+    };
+    var state = request_state.OwnedRequestState{ .entries = entries };
+    defer state.deinit(allocator);
+    try request_state.writeDefaultRequestState(allocator, &state);
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "request",
+        "confirm",
+        "req-confirm",
+        "--poll-ms",
+        "1",
+        "--confirm-timeout-ms",
+        "5000",
+    });
+    defer args.deinit(allocator);
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    const MockContext = struct {
+        call_count: usize = 0,
+    };
+    var mock = MockContext{};
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const ctx = @as(*MockContext, @ptrCast(@alignCast(context)));
+            std.debug.assert(std.mem.eql(u8, req.method, "sui_getTransactionBlock"));
+            std.debug.assert(std.mem.eql(u8, req.params_json, "[\"0xconfirm\",{\"showEffects\":true,\"showBalanceChanges\":true}]"));
+            ctx.call_count += 1;
+            if (ctx.call_count == 1) {
+                return alloc.dupe(u8, "{\"result\":null}");
+            }
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"digest\":\"0xconfirm\",\"effects\":{\"status\":\"success\"}}}",
+            );
+        }
+    }.call;
+
+    rpc.request_sender = .{
+        .context = &mock,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    var loaded = try request_state.loadDefaultRequestState(allocator);
+    defer loaded.deinit(allocator);
+    try testing.expectEqualStrings("confirmed", loaded.entries[0].state);
+    try testing.expectEqualStrings("0xconfirm", loaded.entries[0].digest.?);
+    try testing.expect(loaded.entries[0].last_error == null);
+    try testing.expectEqual(@as(usize, 2), mock.call_count);
 }
 
 test "runCommand request_rebroadcast sends stored requests and updates tracked digests" {

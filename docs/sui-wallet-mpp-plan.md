@@ -426,6 +426,7 @@ Implemented request lifecycle commands:
 - `request dry-run`
 - `request send`
 - `request status`
+- `request confirm|wait`
 - `request sponsor`
 - `request sign`
 - `request schedule`
@@ -513,6 +514,11 @@ reuse the stored digest and write the refreshed `submitted/confirmed/failed`
 status back into that same entry. Success clears stale `last_error`; failure
 responses propagate the chain-side error text back into `last_error` when one
 is available.
+
+`request confirm|wait` follows the same request-state lookup path, but reuses
+the `tx confirm` polling flow instead of a single status read. That keeps the
+request lifecycle explicit all the way through "wait until confirmed" without
+forcing the user to leave the request command surface.
 
 ### Request Operations
 

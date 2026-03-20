@@ -54,6 +54,7 @@ pub const Command = enum {
     request_resume,
     request_rebroadcast,
     request_status,
+    request_confirm,
     events,
     move_package,
     move_module,
@@ -3458,6 +3459,22 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
                     }
                     continue;
                 }
+                if (std.mem.eql(u8, sub, "confirm") or std.mem.eql(u8, sub, "wait")) {
+                    parsed.command = .request_confirm;
+                    parsed.has_command = true;
+                    i += 2;
+                    if (i < args.len and !std.mem.startsWith(u8, args[i], "--")) {
+                        try setOptionalStringArg(
+                            allocator,
+                            &parsed,
+                            args[i],
+                            &parsed.owned_request_entry_id,
+                            &parsed.request_entry_id,
+                        );
+                        i += 1;
+                    }
+                    continue;
+                }
 
                 return error.InvalidCli;
             }
@@ -6165,7 +6182,7 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
             return error.InvalidCli;
         }
 
-        if (parsed.command == .tx_confirm or parsed.command == .tx_status or parsed.command == .request_status) {
+        if (parsed.command == .tx_confirm or parsed.command == .tx_status or parsed.command == .request_status or parsed.command == .request_confirm) {
             if (std.mem.eql(u8, token, "--poll-ms")) {
                 if (i + 1 >= args.len) return error.InvalidCli;
                 parsed.confirm_poll_ms = try parseIntValue(args[i + 1]);
@@ -6311,7 +6328,7 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
         try validateProgrammaticTxInput(&parsed);
     }
 
-    if ((parsed.command == .tx_status or parsed.command == .tx_confirm or parsed.command == .request_status) and
+    if ((parsed.command == .tx_status or parsed.command == .tx_confirm or parsed.command == .request_status or parsed.command == .request_confirm) and
         parsed.tx_send_summarize and parsed.tx_send_observe)
     {
         return error.InvalidCli;
@@ -6531,7 +6548,7 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
         if (parsed.wallet_fund_dry_run and (parsed.tx_send_wait or parsed.tx_send_observe)) return error.InvalidCli;
         if (parsed.tx_send_summarize and parsed.tx_send_observe) return error.InvalidCli;
     }
-    if (parsed.command == .request_status) {
+    if (parsed.command == .request_status or parsed.command == .request_confirm) {
         const entry_id = parsed.request_entry_id orelse return error.InvalidCli;
         if (entry_id.len == 0) return error.InvalidCli;
     }
@@ -6891,8 +6908,11 @@ pub fn printUsage(writer: anytype) !void {
         "  request resume <id>                 Return a locally tracked scheduled request to scheduled state\n" ++
         "  request rebroadcast <id>            Re-send a locally tracked request through the standard request send path\n" ++
         "    same signer/provider output flags as request send\n" ++
-        "  request status <digest>             Query the execution status of a previously sent request\n" ++
+        "  request status <entry-id|digest>    Query the execution status of a previously sent request\n" ++
         "    same options as tx status, including --summarize/--observe/--poll-ms/--confirm-timeout-ms\n" ++
+        "  request confirm|wait <entry-id|digest>\n" ++
+        "                                      Poll a tracked request digest until it confirms or times out\n" ++
+        "    same options as tx confirm, including --summarize/--observe/--poll-ms/--confirm-timeout-ms\n" ++
         "  account list                        List local keystore accounts\n" ++
         "  tx simulate [params-json]            Call sui_devInspectTransactionBlock\n" ++
         "    --package <package-id-or-alias>     Move package id\n" ++
@@ -10566,6 +10586,47 @@ test "parseCliArgs parses request status command" {
     try testing.expectEqual(Command.request_status, parsed.command);
     try testing.expectEqualStrings("0xdigest", parsed.request_entry_id.?);
     try testing.expect(parsed.tx_send_summarize);
+}
+
+test "parseCliArgs parses request confirm command" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "request",
+        "confirm",
+        "req-1",
+        "--observe",
+        "--poll-ms",
+        "5",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.request_confirm, parsed.command);
+    try testing.expectEqualStrings("req-1", parsed.request_entry_id.?);
+    try testing.expect(parsed.tx_send_observe);
+    try testing.expectEqual(@as(u64, 5), parsed.confirm_poll_ms);
+}
+
+test "parseCliArgs parses request wait alias" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "request",
+        "wait",
+        "req-2",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.request_confirm, parsed.command);
+    try testing.expectEqualStrings("req-2", parsed.request_entry_id.?);
 }
 
 test "parseCliArgs parses account coins command" {
