@@ -262,6 +262,8 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
 - [x] Keep direct-signature and default-keystore command-source execute-payload
   helpers on the local programmable builder when a concrete `gas_object_id`
   is already known.
+- [x] Keep legacy `buildCommandSourceTxBytes` helpers on the local programmable
+  builder when a concrete `gas_object_id` is already known.
 - [ ] Continue shrinking `unsafe_moveCall` usage.
 - [ ] Continue shrinking `unsafe_batchTransaction` usage.
 - [ ] Keep construction, simulation, and execution aligned to the same local
