@@ -624,6 +624,17 @@ For Sui this likely means:
 - explorer/deeplink integration
 - optional on-chain companion objects for higher-assurance flows
 
+The CLI/artifact layer now carries the first part of that contract directly:
+
+- `payment.payment_reference`
+- `payment.memo`
+- `payment.invoice_reference`
+- `payment.reconciliation_group`
+
+These fields now exist on `wallet_intent`, `sponsor_envelope`, and
+`schedule_job` artifacts so later web/export/indexing work has a stable schema
+to build on without mutating the underlying Sui request body.
+
 ## Assets and Metadata
 
 The product needs an explicit metadata layer instead of relying on raw coin

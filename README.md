@@ -1011,12 +1011,18 @@ pub fn main() !void {
   - `--sponsor-mode <direct|optional|required>`
   - `--sponsor-gas-source <sender|prefer_sponsor|sponsor>`
   - `--sponsor-refusal-fallback <fallback_to_sender|fail_closed>`
+  以及 payment/reconciliation 字段：
+  - `--payment-reference <text>`
+  - `--payment-memo <text>`
+  - `--invoice-reference <text>`
+  - `--reconciliation-group <text>`
 - `wallet intent dry-run`: 对 `wallet_intent` 或 request-shaped 输入直接执行 dry-run，底层继续复用现有本地 programmable builder。
 - `wallet intent send`: 对 `wallet_intent` 或 request-shaped 输入直接执行发送，底层继续复用现有 `request send` / local builder 主线。
 - `request build`: 把 move-call / programmable 输入规范化成可复用 request artifact。
 - `request inspect`: 输出 request artifact 的结构化摘要，适合在 sponsor/sign/send 前做检查。
 - `request dry-run`: 直接对 request artifact 或 request-shaped 输入执行 dry-run，复用现有本地 programmable builder 路径。
 - `request sponsor`: 把 request artifact 包成 `sponsor-envelope`；支持 `--sponsor-mode`、`--sponsor-policy`、`--sponsor-gas-source`、`--sponsor-refusal-fallback`、`--valid-after-ms`、`--valid-before-ms`、`--correlation-id`，适合交给后续 sponsor service 或 web 流程。artifact 会显式写出 `gas_source_preference` 和 `refusal_fallback`，不再让 sponsor service 自己猜默认值。
+- `request sponsor` / `request schedule` / `wallet intent *` 现在也支持 payment metadata：`--payment-reference`、`--payment-memo`、`--invoice-reference`、`--reconciliation-group`。这些字段会进入 artifact 顶层 `payment` object，供后续 reconciliation/export 使用，而不会混进底层 Sui request body。
 - `request sign`: 直接对 request artifact 或 request-shaped 输入附加 signer/provider 审批，并输出 execute payload；复用现有本地 programmable builder 和 `tx payload` 路径。
 - `request send`: 直接对 request artifact 或 request-shaped 输入执行发送，复用现有本地 programmable builder 和 signer/provider 路径。
 - `request schedule`: 把 request artifact 包成 `schedule-job`；支持 `--schedule-at-ms`、`--schedule-id`、`--replace-schedule-id`，并显式带上 sponsor mode / validity window / object freshness 要求。artifact 现在也会写出 `replacement_behavior` 和 `stale_object_policy = fail_closed`；本地 state 在 replace 时会保留旧 job，并把它标成 `replaced`。

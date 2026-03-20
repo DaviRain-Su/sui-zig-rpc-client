@@ -383,5 +383,5 @@ what the generic path still needs to finish.
   scoping.
 - [x] Add scheduler semantics for cancel/replace/stale-object handling.
 - [x] Add sponsor policy / gas preference / sponsor refusal fallback semantics.
-- [ ] Add payment reference and reconciliation metadata to the wallet plan.
+- [x] Add payment reference and reconciliation metadata to the wallet plan.
 - [ ] Add concurrency-lane planning for parallel-safe Sui execution.

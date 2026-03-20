@@ -15,6 +15,10 @@ pub const ParsedEnvelope = struct {
     sponsor_policy_json: ?[]u8 = null,
     sponsor_gas_source_preference: ?[]u8 = null,
     sponsor_refusal_fallback: ?[]u8 = null,
+    payment_reference: ?[]u8 = null,
+    payment_memo: ?[]u8 = null,
+    invoice_reference: ?[]u8 = null,
+    reconciliation_group: ?[]u8 = null,
 
     pub fn deinit(self: *ParsedEnvelope, allocator: std.mem.Allocator) void {
         allocator.free(self.request_json);
@@ -26,6 +30,10 @@ pub const ParsedEnvelope = struct {
         if (self.sponsor_policy_json) |value| allocator.free(value);
         if (self.sponsor_gas_source_preference) |value| allocator.free(value);
         if (self.sponsor_refusal_fallback) |value| allocator.free(value);
+        if (self.payment_reference) |value| allocator.free(value);
+        if (self.payment_memo) |value| allocator.free(value);
+        if (self.invoice_reference) |value| allocator.free(value);
+        if (self.reconciliation_group) |value| allocator.free(value);
     }
 };
 
@@ -170,6 +178,30 @@ pub fn parseEnvelope(
         }
     }
 
+    if (object.get("payment")) |payment_value| {
+        if (payment_value != .object) return error.InvalidCli;
+        envelope.payment_reference = try jsonOptionalStringDup(
+            allocator,
+            payment_value.object,
+            &.{ "payment_reference", "paymentReference", "reference" },
+        );
+        envelope.payment_memo = try jsonOptionalStringDup(
+            allocator,
+            payment_value.object,
+            &.{ "memo", "payment_memo", "paymentMemo" },
+        );
+        envelope.invoice_reference = try jsonOptionalStringDup(
+            allocator,
+            payment_value.object,
+            &.{ "invoice_reference", "invoiceReference" },
+        );
+        envelope.reconciliation_group = try jsonOptionalStringDup(
+            allocator,
+            payment_value.object,
+            &.{ "reconciliation_group", "reconciliationGroup" },
+        );
+    }
+
     if (envelope.execution_mode) |value| try validateExecutionMode(value);
     return envelope;
 }
@@ -186,6 +218,7 @@ test "wallet_intent parseEnvelope reads request and sponsor metadata" {
         \\  "execution_mode":"send",
         \\  "request":{"commands":[{"kind":"MoveCall","package":"0x2","module":"counter","function":"increment","typeArguments":[],"arguments":[7]}],"sender":"0xabc","gasBudget":1200},
         \\  "sponsor":{"mode":"required","policy_metadata":{"tier":"vip"},"gas_source_preference":"sponsor","refusal_fallback":"fail_closed"},
+        \\  "payment":{"payment_reference":"pay-1","memo":"coffee","invoice_reference":"inv-7","reconciliation_group":"merchant-a"},
         \\  "policy":{"session_key":"0x1"},
         \\  "correlation_id":"req-1",
         \\  "valid_after_ms":100,
@@ -202,6 +235,10 @@ test "wallet_intent parseEnvelope reads request and sponsor metadata" {
     try testing.expectEqualStrings("{\"tier\":\"vip\"}", parsed.sponsor_policy_json.?);
     try testing.expectEqualStrings("sponsor", parsed.sponsor_gas_source_preference.?);
     try testing.expectEqualStrings("fail_closed", parsed.sponsor_refusal_fallback.?);
+    try testing.expectEqualStrings("pay-1", parsed.payment_reference.?);
+    try testing.expectEqualStrings("coffee", parsed.payment_memo.?);
+    try testing.expectEqualStrings("inv-7", parsed.invoice_reference.?);
+    try testing.expectEqualStrings("merchant-a", parsed.reconciliation_group.?);
     try testing.expectEqualStrings("req-1", parsed.correlation_id.?);
     try testing.expectEqual(@as(u64, 100), parsed.valid_after_ms.?);
     try testing.expectEqual(@as(u64, 200), parsed.valid_before_ms.?);

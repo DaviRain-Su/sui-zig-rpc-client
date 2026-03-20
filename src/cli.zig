@@ -138,6 +138,10 @@ pub const ParsedArgs = struct {
     request_sponsor_policy: ?[]const u8 = null,
     request_sponsor_gas_source_preference: ?[]const u8 = null,
     request_sponsor_refusal_fallback: ?[]const u8 = null,
+    request_payment_reference: ?[]const u8 = null,
+    request_payment_memo: ?[]const u8 = null,
+    request_invoice_reference: ?[]const u8 = null,
+    request_reconciliation_group: ?[]const u8 = null,
     request_valid_after_ms: ?u64 = null,
     request_valid_before_ms: ?u64 = null,
     request_correlation_id: ?[]const u8 = null,
@@ -246,6 +250,10 @@ pub const ParsedArgs = struct {
     owned_request_sponsor_policy: ?[]const u8 = null,
     owned_request_sponsor_gas_source_preference: ?[]const u8 = null,
     owned_request_sponsor_refusal_fallback: ?[]const u8 = null,
+    owned_request_payment_reference: ?[]const u8 = null,
+    owned_request_payment_memo: ?[]const u8 = null,
+    owned_request_invoice_reference: ?[]const u8 = null,
+    owned_request_reconciliation_group: ?[]const u8 = null,
     owned_request_correlation_id: ?[]const u8 = null,
     owned_request_entry_id: ?[]const u8 = null,
     owned_request_schedule_id: ?[]const u8 = null,
@@ -314,6 +322,10 @@ pub const ParsedArgs = struct {
         if (self.owned_request_sponsor_policy) |value| allocator.free(value);
         if (self.owned_request_sponsor_gas_source_preference) |value| allocator.free(value);
         if (self.owned_request_sponsor_refusal_fallback) |value| allocator.free(value);
+        if (self.owned_request_payment_reference) |value| allocator.free(value);
+        if (self.owned_request_payment_memo) |value| allocator.free(value);
+        if (self.owned_request_invoice_reference) |value| allocator.free(value);
+        if (self.owned_request_reconciliation_group) |value| allocator.free(value);
         if (self.owned_request_correlation_id) |value| allocator.free(value);
         if (self.owned_request_entry_id) |value| allocator.free(value);
         if (self.owned_request_schedule_id) |value| allocator.free(value);
@@ -1036,6 +1048,42 @@ pub fn applyWalletIntentArtifact(
             value,
         );
         envelope.sponsor_refusal_fallback = null;
+    }
+    if (envelope.payment_reference) |value| {
+        replaceOwnedOptionalValue(
+            allocator,
+            &parsed.owned_request_payment_reference,
+            &parsed.request_payment_reference,
+            value,
+        );
+        envelope.payment_reference = null;
+    }
+    if (envelope.payment_memo) |value| {
+        replaceOwnedOptionalValue(
+            allocator,
+            &parsed.owned_request_payment_memo,
+            &parsed.request_payment_memo,
+            value,
+        );
+        envelope.payment_memo = null;
+    }
+    if (envelope.invoice_reference) |value| {
+        replaceOwnedOptionalValue(
+            allocator,
+            &parsed.owned_request_invoice_reference,
+            &parsed.request_invoice_reference,
+            value,
+        );
+        envelope.invoice_reference = null;
+    }
+    if (envelope.reconciliation_group) |value| {
+        replaceOwnedOptionalValue(
+            allocator,
+            &parsed.owned_request_reconciliation_group,
+            &parsed.request_reconciliation_group,
+            value,
+        );
+        envelope.reconciliation_group = null;
     }
 }
 
@@ -4515,6 +4563,54 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
                         i += 2;
                         continue;
                     }
+                    if (std.mem.eql(u8, token, "--payment-reference")) {
+                        if (i + 1 >= args.len) return error.InvalidCli;
+                        try setOptionalStringArg(
+                            allocator,
+                            &parsed,
+                            args[i + 1],
+                            &parsed.owned_request_payment_reference,
+                            &parsed.request_payment_reference,
+                        );
+                        i += 2;
+                        continue;
+                    }
+                    if (std.mem.eql(u8, token, "--payment-memo")) {
+                        if (i + 1 >= args.len) return error.InvalidCli;
+                        try setOptionalStringArg(
+                            allocator,
+                            &parsed,
+                            args[i + 1],
+                            &parsed.owned_request_payment_memo,
+                            &parsed.request_payment_memo,
+                        );
+                        i += 2;
+                        continue;
+                    }
+                    if (std.mem.eql(u8, token, "--invoice-reference")) {
+                        if (i + 1 >= args.len) return error.InvalidCli;
+                        try setOptionalStringArg(
+                            allocator,
+                            &parsed,
+                            args[i + 1],
+                            &parsed.owned_request_invoice_reference,
+                            &parsed.request_invoice_reference,
+                        );
+                        i += 2;
+                        continue;
+                    }
+                    if (std.mem.eql(u8, token, "--reconciliation-group")) {
+                        if (i + 1 >= args.len) return error.InvalidCli;
+                        try setOptionalStringArg(
+                            allocator,
+                            &parsed,
+                            args[i + 1],
+                            &parsed.owned_request_reconciliation_group,
+                            &parsed.request_reconciliation_group,
+                        );
+                        i += 2;
+                        continue;
+                    }
                     if (std.mem.eql(u8, token, "--valid-after-ms")) {
                         if (i + 1 >= args.len) return error.InvalidCli;
                         parsed.request_valid_after_ms = try parseIntValue(args[i + 1]);
@@ -5873,6 +5969,18 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
         if (parsed.request_correlation_id) |value| {
             if (value.len == 0) return error.InvalidCli;
         }
+        if (parsed.request_payment_reference) |value| {
+            if (value.len == 0) return error.InvalidCli;
+        }
+        if (parsed.request_payment_memo) |value| {
+            if (value.len == 0) return error.InvalidCli;
+        }
+        if (parsed.request_invoice_reference) |value| {
+            if (value.len == 0) return error.InvalidCli;
+        }
+        if (parsed.request_reconciliation_group) |value| {
+            if (value.len == 0) return error.InvalidCli;
+        }
     }
     if (parsed.command == .request_schedule) {
         if (parsed.request_schedule_at_ms == null and parsed.request_valid_after_ms == null and parsed.request_valid_before_ms == null) {
@@ -6067,6 +6175,8 @@ pub fn printUsage(writer: anytype) !void {
         "    same input options as request build plus --intent/--network/--execution-mode/--policy\n" ++
         "    policy helpers: --policy-recurring-limit/--policy-recurring-interval-ms\n" ++
         "      --policy-recipient-allowlist/--policy-protocol-allowlist\n" ++
+        "    payment helpers: --payment-reference/--payment-memo/--invoice-reference\n" ++
+        "      --reconciliation-group\n" ++
         "  wallet intent dry-run               Dry-run a wallet intent or request-shaped tx input\n" ++
         "    same input options as request dry-run plus --intent/--network/--execution-mode/--policy\n" ++
         "      and the same policy helper flags as wallet intent build\n" ++
@@ -6098,6 +6208,10 @@ pub fn printUsage(writer: anytype) !void {
         "                                       Preferred gas source contract for sponsor/direct execution\n" ++
         "    --sponsor-refusal-fallback <fallback_to_sender|fail_closed>\n" ++
         "                                       Behavior when an optional sponsor declines execution\n" ++
+        "    --payment-reference <text>       Stable payment reference for reconciliation/export\n" ++
+        "    --payment-memo <text>            Human-readable payment memo\n" ++
+        "    --invoice-reference <text>       Invoice or payment-request identifier\n" ++
+        "    --reconciliation-group <text>    Grouping key for merchant/export reconciliation\n" ++
         "    --valid-after-ms/--valid-before-ms Optional validity window metadata\n" ++
         "    --correlation-id <text>           Optional replay/correlation id\n" ++
         "  request sign                        Attach signer/provider approvals and print an execute payload\n" ++
@@ -8972,6 +9086,14 @@ test "parseCliArgs parses wallet intent build command" {
         "prefer_sponsor",
         "--sponsor-refusal-fallback",
         "fallback_to_sender",
+        "--payment-reference",
+        "pay-1",
+        "--payment-memo",
+        "coffee",
+        "--invoice-reference",
+        "inv-7",
+        "--reconciliation-group",
+        "merchant-a",
         "--correlation-id",
         "req-1",
     });
@@ -8985,6 +9107,10 @@ test "parseCliArgs parses wallet intent build command" {
     try testing.expectEqualStrings("optional", parsed.request_sponsor_mode.?);
     try testing.expectEqualStrings("prefer_sponsor", parsed.request_sponsor_gas_source_preference.?);
     try testing.expectEqualStrings("fallback_to_sender", parsed.request_sponsor_refusal_fallback.?);
+    try testing.expectEqualStrings("pay-1", parsed.request_payment_reference.?);
+    try testing.expectEqualStrings("coffee", parsed.request_payment_memo.?);
+    try testing.expectEqualStrings("inv-7", parsed.request_invoice_reference.?);
+    try testing.expectEqualStrings("merchant-a", parsed.request_reconciliation_group.?);
     try testing.expectEqualStrings("req-1", parsed.request_correlation_id.?);
 }
 
@@ -9214,6 +9340,14 @@ test "parseCliArgs parses request sponsor command" {
         "sponsor",
         "--sponsor-refusal-fallback",
         "fail_closed",
+        "--payment-reference",
+        "pay-1",
+        "--payment-memo",
+        "coffee",
+        "--invoice-reference",
+        "inv-7",
+        "--reconciliation-group",
+        "merchant-a",
         "--valid-after-ms",
         "100",
         "--valid-before-ms",
@@ -9228,6 +9362,10 @@ test "parseCliArgs parses request sponsor command" {
     try testing.expectEqualStrings("{\"tier\":\"vip\"}", parsed.request_sponsor_policy.?);
     try testing.expectEqualStrings("sponsor", parsed.request_sponsor_gas_source_preference.?);
     try testing.expectEqualStrings("fail_closed", parsed.request_sponsor_refusal_fallback.?);
+    try testing.expectEqualStrings("pay-1", parsed.request_payment_reference.?);
+    try testing.expectEqualStrings("coffee", parsed.request_payment_memo.?);
+    try testing.expectEqualStrings("inv-7", parsed.request_invoice_reference.?);
+    try testing.expectEqualStrings("merchant-a", parsed.request_reconciliation_group.?);
     try testing.expectEqual(@as(?u64, 100), parsed.request_valid_after_ms);
     try testing.expectEqual(@as(?u64, 200), parsed.request_valid_before_ms);
     try testing.expectEqualStrings("req-123", parsed.request_correlation_id.?);

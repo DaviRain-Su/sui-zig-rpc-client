@@ -4664,6 +4664,8 @@ fn buildWalletIntentJsonFromArgs(
     try writer.writeAll(request_json);
     try writer.writeAll(",\"request_summary\":");
     try writer.writeAll(summary_json);
+    try writer.writeAll(",\"payment\":");
+    try writeResolvedRequestPaymentMetadata(writer, args);
     try writer.writeAll(",\"sponsor\":{");
     try writeResolvedRequestSponsorContract(writer, args);
     try writer.writeAll("}");
@@ -4721,6 +4723,52 @@ fn writeResolvedRequestSponsorContract(
     try writer.print("{f}", .{std.json.fmt(refusal_fallback, .{})});
 }
 
+fn hasRequestPaymentMetadata(args: *const cli.ParsedArgs) bool {
+    return args.request_payment_reference != null or
+        args.request_payment_memo != null or
+        args.request_invoice_reference != null or
+        args.request_reconciliation_group != null;
+}
+
+fn writeResolvedRequestPaymentMetadata(
+    writer: anytype,
+    args: *const cli.ParsedArgs,
+) !void {
+    if (!hasRequestPaymentMetadata(args)) {
+        try writer.writeAll("null");
+        return;
+    }
+
+    try writer.writeAll("{");
+    var wrote_field = false;
+
+    if (args.request_payment_reference) |value| {
+        if (wrote_field) try writer.writeAll(",");
+        try writer.writeAll("\"payment_reference\":");
+        try writer.print("{f}", .{std.json.fmt(value, .{})});
+        wrote_field = true;
+    }
+    if (args.request_payment_memo) |value| {
+        if (wrote_field) try writer.writeAll(",");
+        try writer.writeAll("\"memo\":");
+        try writer.print("{f}", .{std.json.fmt(value, .{})});
+        wrote_field = true;
+    }
+    if (args.request_invoice_reference) |value| {
+        if (wrote_field) try writer.writeAll(",");
+        try writer.writeAll("\"invoice_reference\":");
+        try writer.print("{f}", .{std.json.fmt(value, .{})});
+        wrote_field = true;
+    }
+    if (args.request_reconciliation_group) |value| {
+        if (wrote_field) try writer.writeAll(",");
+        try writer.writeAll("\"reconciliation_group\":");
+        try writer.print("{f}", .{std.json.fmt(value, .{})});
+    }
+
+    try writer.writeAll("}");
+}
+
 fn buildRequestSponsorEnvelopeJson(
     allocator: std.mem.Allocator,
     args: *const cli.ParsedArgs,
@@ -4745,6 +4793,8 @@ fn buildRequestSponsorEnvelopeJson(
     try writer.writeAll(request_json);
     try writer.writeAll(",\"request_summary\":");
     try writer.writeAll(summary_json);
+    try writer.writeAll(",\"payment\":");
+    try writeResolvedRequestPaymentMetadata(writer, args);
     try writer.writeAll(",\"sender\":");
     if (request.value.object.get("sender")) |sender| {
         try writer.print("{f}", .{std.json.fmt(sender, .{})});
@@ -4798,6 +4848,8 @@ fn buildRequestScheduleJobJson(
     try writer.writeAll(request_json);
     try writer.writeAll(",\"request_summary\":");
     try writer.writeAll(summary_json);
+    try writer.writeAll(",\"payment\":");
+    try writeResolvedRequestPaymentMetadata(writer, args);
     try writer.writeAll(",\"schedule\":{");
     try writer.writeAll("\"job_id\":");
     try writer.print("{f}", .{std.json.fmt(resolved_schedule_id, .{})});
@@ -23239,6 +23291,14 @@ test "runCommand wallet_intent_build prints first-class wallet intent artifacts"
         "sponsor",
         "--sponsor-refusal-fallback",
         "fail_closed",
+        "--payment-reference",
+        "pay-1",
+        "--payment-memo",
+        "coffee",
+        "--invoice-reference",
+        "inv-7",
+        "--reconciliation-group",
+        "merchant-a",
         "--correlation-id",
         "req-1",
         "--valid-after-ms",
@@ -23263,6 +23323,10 @@ test "runCommand wallet_intent_build prints first-class wallet intent artifacts"
     try testing.expectEqualStrings("sui:testnet", parsed.value.object.get("network").?.string);
     try testing.expectEqualStrings("dry_run", parsed.value.object.get("execution_mode").?.string);
     try testing.expectEqualStrings("0xabc", parsed.value.object.get("sender").?.string);
+    try testing.expectEqualStrings("pay-1", parsed.value.object.get("payment").?.object.get("payment_reference").?.string);
+    try testing.expectEqualStrings("coffee", parsed.value.object.get("payment").?.object.get("memo").?.string);
+    try testing.expectEqualStrings("inv-7", parsed.value.object.get("payment").?.object.get("invoice_reference").?.string);
+    try testing.expectEqualStrings("merchant-a", parsed.value.object.get("payment").?.object.get("reconciliation_group").?.string);
     try testing.expectEqual(@as(i64, 100), parsed.value.object.get("valid_after_ms").?.integer);
     try testing.expectEqual(@as(i64, 200), parsed.value.object.get("valid_before_ms").?.integer);
     try testing.expectEqualStrings("req-1", parsed.value.object.get("correlation_id").?.string);
@@ -23731,6 +23795,14 @@ test "runCommand request_sponsor prints sponsor envelope artifact" {
         "sponsor",
         "--sponsor-refusal-fallback",
         "fail_closed",
+        "--payment-reference",
+        "pay-1",
+        "--payment-memo",
+        "coffee",
+        "--invoice-reference",
+        "inv-7",
+        "--reconciliation-group",
+        "merchant-a",
         "--valid-after-ms",
         "100",
         "--valid-before-ms",
@@ -23751,6 +23823,10 @@ test "runCommand request_sponsor prints sponsor envelope artifact" {
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
     defer parsed.deinit();
     try testing.expectEqualStrings("sponsor_envelope", parsed.value.object.get("artifact_kind").?.string);
+    try testing.expectEqualStrings("pay-1", parsed.value.object.get("payment").?.object.get("payment_reference").?.string);
+    try testing.expectEqualStrings("coffee", parsed.value.object.get("payment").?.object.get("memo").?.string);
+    try testing.expectEqualStrings("inv-7", parsed.value.object.get("payment").?.object.get("invoice_reference").?.string);
+    try testing.expectEqualStrings("merchant-a", parsed.value.object.get("payment").?.object.get("reconciliation_group").?.string);
     try testing.expectEqualStrings("0xabc", parsed.value.object.get("sender").?.string);
     try testing.expectEqual(@as(i64, 1200), parsed.value.object.get("estimated_gas_budget").?.integer);
     try testing.expectEqual(@as(i64, 100), parsed.value.object.get("valid_after_ms").?.integer);
@@ -23878,6 +23954,10 @@ test "runCommand request_schedule prints scheduler job artifact" {
         "prefer_sponsor",
         "--sponsor-refusal-fallback",
         "fallback_to_sender",
+        "--payment-reference",
+        "pay-1",
+        "--reconciliation-group",
+        "merchant-a",
     });
     defer args.deinit(allocator);
 
@@ -23893,6 +23973,8 @@ test "runCommand request_schedule prints scheduler job artifact" {
     defer parsed.deinit();
     try testing.expectEqualStrings("schedule_job", parsed.value.object.get("artifact_kind").?.string);
     try testing.expectEqualStrings("scheduled", parsed.value.object.get("state").?.string);
+    try testing.expectEqualStrings("pay-1", parsed.value.object.get("payment").?.object.get("payment_reference").?.string);
+    try testing.expectEqualStrings("merchant-a", parsed.value.object.get("payment").?.object.get("reconciliation_group").?.string);
     try testing.expectEqualStrings("job-1", parsed.value.object.get("schedule").?.object.get("job_id").?.string);
     try testing.expectEqualStrings("job-0", parsed.value.object.get("schedule").?.object.get("replace_job_id").?.string);
     try testing.expectEqualStrings("cancel_previous_job", parsed.value.object.get("schedule").?.object.get("replacement_behavior").?.string);
