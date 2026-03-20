@@ -532,6 +532,7 @@ fn commandRequestConfigFromOptions(
         .gas_budget = options.gas_budget,
         .gas_price = options.gas_price,
         .gas_payment_json = options.gas_payment_json,
+        .expiration_json = options.expiration_json,
         .signatures = options.signatures,
         .options_json = options.options_json,
         .wait_for_confirmation = options.wait_for_confirmation,
@@ -2010,6 +2011,7 @@ fn buildProgrammaticTxExecutePayload(
         gas_budget,
         gas_price,
         null,
+        null,
         signatures,
         options_json,
     );
@@ -2029,6 +2031,7 @@ fn buildProgrammaticTxSimulatePayload(
         sender,
         gas_budget,
         gas_price,
+        null,
         null,
         options_json,
     );

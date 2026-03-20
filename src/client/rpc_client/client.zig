@@ -12321,13 +12321,14 @@ pub const SuiRpcClient = struct {
         );
         defer parts.deinit(allocator);
 
-        if (expiration_json == null and accountProviderCanUseLocalOwnedPlanExecutePayload(provider)) {
+        if (accountProviderCanUseLocalOwnedPlanExecutePayload(provider)) {
             var owned = try tx_request_builder.ownOptions(allocator, .{
                 .source = .{ .commands_json = parts.commands_json },
                 .sender = parts.sender,
                 .gas_budget = gas_budget,
                 .gas_price = gas_price,
                 .gas_payment_json = gas_payment_json,
+                .expiration_json = parts.expiration_json,
                 .options_json = options_json,
             });
             var plan = owned.authorizationPlan(provider);
@@ -12383,13 +12384,14 @@ pub const SuiRpcClient = struct {
         );
         defer parts.deinit(allocator);
 
-        if (expiration_json == null and accountProviderCanUseLocalOwnedPlanExecutePayload(provider)) {
+        if (accountProviderCanUseLocalOwnedPlanExecutePayload(provider)) {
             var owned = try tx_request_builder.ownOptions(allocator, .{
                 .source = .{ .commands_json = parts.commands_json },
                 .sender = parts.sender,
                 .gas_budget = gas_budget,
                 .gas_price = gas_price,
                 .gas_payment_json = gas_payment_json,
+                .expiration_json = parts.expiration_json,
                 .options_json = options_json,
             });
             var plan = owned.authorizationPlan(provider);
@@ -12403,6 +12405,7 @@ pub const SuiRpcClient = struct {
             .gas_budget = gas_budget,
             .gas_price = gas_price,
             .gas_payment_json = gas_payment_json,
+            .expiration_json = parts.expiration_json,
             .options_json = options_json,
         };
         if (try self.getOwnedSessionChallengePrompt(allocator, options, provider)) |prompt| {
@@ -12444,7 +12447,7 @@ pub const SuiRpcClient = struct {
         action: ProgrammaticClientAction,
     ) !ProgrammaticClientActionResult {
         const updated_provider = try self.applySessionChallengeResponse(provider, response);
-        if (expiration_json == null and accountProviderCanUseLocalOwnedPlanExecutePayload(updated_provider)) {
+        if (accountProviderCanUseLocalOwnedPlanExecutePayload(updated_provider)) {
             var parts = try self.ownLocalProgrammableTransactionPartsFromCommandSource(
                 allocator,
                 source,
@@ -12462,6 +12465,7 @@ pub const SuiRpcClient = struct {
                 .gas_budget = gas_budget,
                 .gas_price = gas_price,
                 .gas_payment_json = gas_payment_json,
+                .expiration_json = parts.expiration_json,
                 .options_json = options_json,
             });
             var plan = owned.authorizationPlan(updated_provider);
@@ -27191,6 +27195,7 @@ test "runCommandSourceResolvingSelectedArgumentTokensOrChallengePromptWithAccoun
             .sender = "0xowner",
             .gas_budget = 100,
             .gas_payment_json = "[{\"objectId\":\"0xgas\",\"version\":\"1\",\"digest\":\"digest-gas\"}]",
+            .expiration_json = "{\"Epoch\":42}",
         },
         .{
             .remote_signer = .{
@@ -27368,6 +27373,7 @@ test "runCommandSourceWithAutoGasPaymentOrChallengePromptWithAccountProvider ret
         .{
             .sender = "0xowner",
             .gas_budget = 100,
+            .expiration_json = "{\"Epoch\":7}",
         },
         .{
             .remote_signer = .{
@@ -36344,6 +36350,8 @@ test "executeProgrammaticTransaction builds execute payload from context" {
         "0xsender",
         900,
         5,
+        null,
+        null,
         null,
     );
     defer programmatic_context.deinit(allocator);

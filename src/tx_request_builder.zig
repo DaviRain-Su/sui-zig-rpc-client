@@ -165,6 +165,7 @@ pub const ProgrammaticRequestOptions = struct {
     gas_budget: ?u64 = null,
     gas_price: ?u64 = null,
     gas_payment_json: ?[]const u8 = null,
+    expiration_json: ?[]const u8 = null,
     signatures: []const []const u8 = &.{},
     options_json: ?[]const u8 = null,
     wait_for_confirmation: bool = false,
@@ -177,6 +178,7 @@ pub const CommandRequestConfig = struct {
     gas_budget: ?u64 = null,
     gas_price: ?u64 = null,
     gas_payment_json: ?[]const u8 = null,
+    expiration_json: ?[]const u8 = null,
     signatures: []const []const u8 = &.{},
     options_json: ?[]const u8 = null,
     wait_for_confirmation: bool = false,
@@ -380,6 +382,7 @@ pub const AuthorizedPreparedRequest = struct {
             self.prepared.request.gas_budget,
             self.prepared.request.gas_price,
             self.prepared.request.gas_payment_json,
+            self.prepared.request.expiration_json,
         );
         return try out.toOwnedSlice(allocator);
     }
@@ -559,6 +562,7 @@ pub const OwnedProgrammaticRequestOptions = struct {
     owned_commands_json: ?[]u8 = null,
     owned_sender: ?[]u8 = null,
     owned_gas_payment_json: ?[]u8 = null,
+    owned_expiration_json: ?[]u8 = null,
     owned_options_json: ?[]u8 = null,
     owned_signatures: std.ArrayListUnmanaged([]const u8) = .{},
 
@@ -569,6 +573,8 @@ pub const OwnedProgrammaticRequestOptions = struct {
         self.owned_sender = null;
         if (self.owned_gas_payment_json) |value| allocator.free(value);
         self.owned_gas_payment_json = null;
+        if (self.owned_expiration_json) |value| allocator.free(value);
+        self.owned_expiration_json = null;
         if (self.owned_options_json) |value| allocator.free(value);
         self.owned_options_json = null;
         for (self.owned_signatures.items) |value| allocator.free(value);
@@ -636,6 +642,7 @@ pub fn ownOptions(
             .gas_budget = prepared.request.gas_budget,
             .gas_price = prepared.request.gas_price,
             .gas_payment_json = null,
+            .expiration_json = null,
             .signatures = &.{},
             .options_json = null,
             .wait_for_confirmation = prepared.request.wait_for_confirmation,
@@ -656,6 +663,11 @@ pub fn ownOptions(
     if (prepared.request.gas_payment_json) |value| {
         owned.owned_gas_payment_json = try allocator.dupe(u8, value);
         owned.options.gas_payment_json = owned.owned_gas_payment_json;
+    }
+
+    if (prepared.request.expiration_json) |value| {
+        owned.owned_expiration_json = try allocator.dupe(u8, value);
+        owned.options.expiration_json = owned.owned_expiration_json;
     }
 
     if (prepared.request.options_json) |value| {
@@ -3134,6 +3146,7 @@ pub fn optionsFromCommandSource(
         .gas_budget = config.gas_budget,
         .gas_price = config.gas_price,
         .gas_payment_json = config.gas_payment_json,
+        .expiration_json = config.expiration_json,
         .signatures = config.signatures,
         .options_json = config.options_json,
         .wait_for_confirmation = config.wait_for_confirmation,
@@ -3338,6 +3351,7 @@ pub fn requestFromOptions(options: ProgrammaticRequestOptions) tx_builder.Progra
         .gas_budget = options.gas_budget,
         .gas_price = options.gas_price,
         .gas_payment_json = options.gas_payment_json,
+        .expiration_json = options.expiration_json,
         .signatures = options.signatures,
         .options_json = options.options_json,
         .wait_for_confirmation = options.wait_for_confirmation,
@@ -3353,6 +3367,7 @@ pub fn optionsFromRequest(request: tx_builder.ProgrammaticTxRequest) Programmati
         .gas_budget = request.gas_budget,
         .gas_price = request.gas_price,
         .gas_payment_json = request.gas_payment_json,
+        .expiration_json = request.expiration_json,
         .signatures = request.signatures,
         .options_json = request.options_json,
         .wait_for_confirmation = request.wait_for_confirmation,

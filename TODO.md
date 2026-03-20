@@ -255,7 +255,7 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
   path instead of dropping back to real-builder `tx_bytes`.
 - [x] Keep local programmable command-source execute payloads on the same
   local owned-plan / local builder path for challenge-approved account
-  providers when no custom expiration is requested.
+  providers, including calls with a custom expiration.
 - [x] Keep `runCommandSource*WithChallengeResponseWithAccountProvider`
   aligned to the same local owned-plan / local builder path that the
   `options/commands` challenge-response helpers already use.

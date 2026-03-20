@@ -346,6 +346,7 @@ pub fn writeProgrammableTransaction(
     gas_budget: ?u64,
     gas_price: ?u64,
     gas_payment_json: ?[]const u8,
+    expiration_json: ?[]const u8,
 ) !void {
     const trimmed = std.mem.trim(u8, commands_json, " \n\r\t");
     if (trimmed.len == 0) {
@@ -372,6 +373,10 @@ pub fn writeProgrammableTransaction(
     if (gas_payment_json) |value| {
         try writer.writeAll(",\"gasPayment\":");
         try writeRequiredJsonArray(allocator, writer, value);
+    }
+    if (expiration_json) |value| {
+        try writer.writeAll(",\"expiration\":");
+        try writeRequiredJsonValue(allocator, writer, value);
     }
     try writer.writeAll("}\n");
 }
@@ -656,6 +661,7 @@ pub fn buildProgrammaticTxExecutePayload(
     gas_budget: ?u64,
     gas_price: ?u64,
     gas_payment_json: ?[]const u8,
+    expiration_json: ?[]const u8,
     signatures: []const []const u8,
     options_json: ?[]const u8,
 ) ![]u8 {
@@ -672,6 +678,7 @@ pub fn buildProgrammaticTxExecutePayload(
             gas_budget,
             gas_price,
             gas_payment_json,
+            expiration_json,
         );
     }
 
@@ -691,6 +698,7 @@ pub fn buildProgrammaticTxSimulatePayload(
     gas_budget: ?u64,
     gas_price: ?u64,
     gas_payment_json: ?[]const u8,
+    expiration_json: ?[]const u8,
     options_json: ?[]const u8,
 ) ![]u8 {
     var tx_block = std.ArrayList(u8){};
@@ -706,6 +714,7 @@ pub fn buildProgrammaticTxSimulatePayload(
             gas_budget,
             gas_price,
             gas_payment_json,
+            expiration_json,
         );
     }
 
@@ -786,6 +795,7 @@ pub const ProgrammaticTxContext = struct {
     gas_budget: ?u64,
     gas_price: ?u64,
     gas_payment_json: ?[]const u8,
+    expiration_json: ?[]const u8,
     options_json: ?[]const u8,
 
     pub fn initResolved(
@@ -795,6 +805,7 @@ pub const ProgrammaticTxContext = struct {
         gas_budget: ?u64,
         gas_price: ?u64,
         gas_payment_json: ?[]const u8,
+        expiration_json: ?[]const u8,
         options_json: ?[]const u8,
     ) !ProgrammaticTxContext {
         const commands_json = try resolveCommands(allocator, source);
@@ -804,6 +815,7 @@ pub const ProgrammaticTxContext = struct {
             .gas_budget = gas_budget,
             .gas_price = gas_price,
             .gas_payment_json = gas_payment_json,
+            .expiration_json = expiration_json,
             .options_json = options_json,
         };
     }
@@ -828,6 +840,7 @@ pub const ProgrammaticTxContext = struct {
             self.gas_budget,
             self.gas_price,
             self.gas_payment_json,
+            self.expiration_json,
         );
         return tx_block.toOwnedSlice(allocator);
     }
@@ -843,6 +856,7 @@ pub const ProgrammaticTxContext = struct {
             self.gas_budget,
             self.gas_price,
             self.gas_payment_json,
+            self.expiration_json,
             self.options_json,
         );
     }
@@ -859,6 +873,7 @@ pub const ProgrammaticTxContext = struct {
             self.gas_budget,
             self.gas_price,
             self.gas_payment_json,
+            self.expiration_json,
             signatures,
             self.options_json,
         );
@@ -870,6 +885,7 @@ pub const PreparedProgrammaticTxRequest = struct {
     owned_commands_json: []u8,
     owned_sender: ?[]u8 = null,
     owned_gas_payment_json: ?[]u8 = null,
+    owned_expiration_json: ?[]u8 = null,
     owned_options_json: ?[]u8 = null,
     signatures: std.ArrayListUnmanaged([]const u8) = .{},
     owned_signatures: std.ArrayListUnmanaged([]const u8) = .{},
@@ -878,6 +894,7 @@ pub const PreparedProgrammaticTxRequest = struct {
         allocator.free(self.owned_commands_json);
         if (self.owned_sender) |value| allocator.free(value);
         if (self.owned_gas_payment_json) |value| allocator.free(value);
+        if (self.owned_expiration_json) |value| allocator.free(value);
         if (self.owned_options_json) |value| allocator.free(value);
         for (self.owned_signatures.items) |value| allocator.free(value);
         self.signatures.deinit(allocator);
@@ -895,6 +912,7 @@ pub const PreparedProgrammaticTxRequest = struct {
             self.request.gas_budget,
             self.request.gas_price,
             self.request.gas_payment_json,
+            self.request.expiration_json,
             self.request.options_json,
         );
     }
@@ -910,6 +928,7 @@ pub const PreparedProgrammaticTxRequest = struct {
             self.request.gas_budget,
             self.request.gas_price,
             self.request.gas_payment_json,
+            self.request.expiration_json,
             self.request.signatures,
             self.request.options_json,
         );
@@ -922,6 +941,7 @@ pub const ProgrammaticTxRequest = struct {
     gas_budget: ?u64 = null,
     gas_price: ?u64 = null,
     gas_payment_json: ?[]const u8 = null,
+    expiration_json: ?[]const u8 = null,
     signatures: []const []const u8 = &.{},
     options_json: ?[]const u8 = null,
     wait_for_confirmation: bool = false,
@@ -946,6 +966,7 @@ pub const ProgrammaticTxRequest = struct {
             self.gas_budget,
             self.gas_price,
             self.gas_payment_json,
+            self.expiration_json,
             self.options_json,
         );
     }
@@ -989,6 +1010,11 @@ pub fn prepareRequest(
     if (request.gas_payment_json) |value| {
         prepared.owned_gas_payment_json = try allocator.dupe(u8, value);
         prepared.request.gas_payment_json = prepared.owned_gas_payment_json.?;
+    }
+
+    if (request.expiration_json) |value| {
+        prepared.owned_expiration_json = try allocator.dupe(u8, value);
+        prepared.request.expiration_json = prepared.owned_expiration_json.?;
     }
 
     if (request.options_json) |value| {
@@ -1064,6 +1090,8 @@ test "ProgrammaticTxContext builds inspect and execute payloads" {
         "0xabc",
         1000,
         7,
+        null,
+        null,
         "{\"skipChecks\":true}",
     );
     defer context.deinit(allocator);
