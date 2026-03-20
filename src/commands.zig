@@ -2547,7 +2547,7 @@ fn resourceQueryFromArgs(
     owner: []const u8,
 ) !client.rpc_client.ResourceQuery {
     return switch (args.command) {
-        .account_coins => .{
+        .account_coins, .wallet_coins => .{
             .coins = if (args.account_coins_all)
                 .{
                     .all = .{
@@ -2571,7 +2571,7 @@ fn resourceQueryFromArgs(
                     },
                 },
         },
-        .account_objects => .{
+        .account_objects, .wallet_objects => .{
             .owned_objects = if (args.account_objects_all)
                 .{
                     .all = .{
@@ -2719,8 +2719,8 @@ fn readQueryActionFromArgs(args: *const cli.ParsedArgs) client.rpc_client.ReadQu
         .account_list => if (args.account_list_json) .raw else .summarize,
         .account_info => if (args.account_info_json) .raw else .summarize,
         .account_resources => if (args.account_resources_json) .raw else .summarize,
-        .account_coins => if (args.account_coins_json) .raw else .summarize,
-        .account_objects => if (args.account_objects_json) .raw else .summarize,
+        .account_coins, .wallet_coins => if (args.account_coins_json) .raw else .summarize,
+        .account_objects, .wallet_objects => if (args.account_objects_json) .raw else .summarize,
         .events => if (args.events_json) .raw else .summarize,
         else => blk: {
             if (args.tx_send_observe) break :blk .observe;
@@ -2732,8 +2732,8 @@ fn readQueryActionFromArgs(args: *const cli.ParsedArgs) client.rpc_client.ReadQu
 
 fn resourceQueryActionFromArgs(args: *const cli.ParsedArgs) client.rpc_client.ResourceQueryAction {
     return switch (args.command) {
-        .account_coins => if (args.account_coins_json) .raw else .summarize,
-        .account_objects => if (args.account_objects_json) .raw else .summarize,
+        .account_coins, .wallet_coins => if (args.account_coins_json) .raw else .summarize,
+        .account_objects, .wallet_objects => if (args.account_objects_json) .raw else .summarize,
         .account_resources => if (args.account_resources_json) .raw else .summarize,
         else => .summarize,
     };
@@ -3324,6 +3324,18 @@ pub fn runCommandWithProgrammaticProvider(
 
             try printStructuredJson(writer, summary, args.pretty);
         },
+        .wallet_coins, .wallet_objects => {
+            const resolved = try resolveWalletOwner(allocator, args);
+            defer if (resolved.owned) |value| allocator.free(value);
+
+            var result = try rpc.runResourceQueryAction(
+                allocator,
+                try resourceQueryFromArgs(args, resolved.owner),
+                resourceQueryActionFromArgs(args),
+            );
+            defer result.deinit(allocator);
+            try printResourceQueryActionResult(allocator, writer, result, args.pretty);
+        },
         .request_build => {
             const request_json = try buildRequestArtifactJsonFromArgs(allocator, args);
             defer allocator.free(request_json);
@@ -3337,6 +3349,28 @@ pub fn runCommandWithProgrammaticProvider(
         .request_dry_run => {
             var derived_args = args.*;
             derived_args.command = .tx_dry_run;
+            return try runCommandWithProgrammaticProvider(
+                allocator,
+                rpc,
+                &derived_args,
+                writer,
+                effective_programmatic_provider,
+            );
+        },
+        .request_send => {
+            var derived_args = args.*;
+            derived_args.command = .tx_send;
+            return try runCommandWithProgrammaticProvider(
+                allocator,
+                rpc,
+                &derived_args,
+                writer,
+                effective_programmatic_provider,
+            );
+        },
+        .request_status => {
+            var derived_args = args.*;
+            derived_args.command = .tx_status;
             return try runCommandWithProgrammaticProvider(
                 allocator,
                 rpc,
@@ -20159,6 +20193,125 @@ test "runCommand wallet_balance aggregates all coin pages when requested" {
     try testing.expectEqualStrings("9", balances[1].object.get("total_balance").?.string);
 }
 
+test "runCommand wallet_coins resolves the default wallet owner" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const keystore_path = try std.fmt.allocPrint(allocator, "tmp_commands_wallet_coins_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(keystore_path);
+
+    const old_override = client.keystore.test_keystore_path_override;
+    client.keystore.test_keystore_path_override = keystore_path;
+    defer client.keystore.test_keystore_path_override = old_override;
+
+    var file = try std.fs.cwd().createFile(keystore_path, .{ .truncate = true });
+    defer file.close();
+    defer _ = std.fs.cwd().deleteFile(keystore_path) catch {};
+    try file.writeAll("[{\"alias\":\"main\",\"privateKey\":\"sk_wallet\",\"address\":\"0x123\"}]");
+
+    var params_ok = false;
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) error{OutOfMemory}![]u8 {
+            const ok = @as(*bool, @ptrCast(@alignCast(context)));
+            ok.* = std.mem.eql(u8, req.method, "suix_getCoins") and
+                std.mem.eql(u8, req.params_json, "[\"0x123\",\"0x2::sui::SUI\",null,2]");
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xcoin-1\",\"balance\":\"5\"}],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = &params_ok,
+        .callback = callback,
+    };
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "wallet",
+        "coins",
+        "--coin-type",
+        "0x2::sui::SUI",
+        "--limit",
+        "2",
+    });
+    defer args.deinit(allocator);
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    try testing.expect(params_ok);
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    try testing.expectEqualStrings("0xcoin-1", parsed.value.object.get("entries").?.array.items[0].object.get("coin_object_id").?.string);
+}
+
+test "runCommand wallet_objects resolves the default wallet owner" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const keystore_path = try std.fmt.allocPrint(allocator, "tmp_commands_wallet_objects_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(keystore_path);
+
+    const old_override = client.keystore.test_keystore_path_override;
+    client.keystore.test_keystore_path_override = keystore_path;
+    defer client.keystore.test_keystore_path_override = old_override;
+
+    var file = try std.fs.cwd().createFile(keystore_path, .{ .truncate = true });
+    defer file.close();
+    defer _ = std.fs.cwd().deleteFile(keystore_path) catch {};
+    try file.writeAll("[{\"alias\":\"main\",\"privateKey\":\"sk_wallet\",\"address\":\"0x123\"}]");
+
+    var params_ok = false;
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) error{OutOfMemory}![]u8 {
+            const ok = @as(*bool, @ptrCast(@alignCast(context)));
+            ok.* = std.mem.eql(u8, req.method, "suix_getOwnedObjects") and
+                std.mem.indexOf(u8, req.params_json, "\"0x123\"") != null and
+                std.mem.indexOf(u8, req.params_json, "\"StructType\":\"0x2::coin::Coin<0x2::sui::SUI>\"") != null;
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"data\":{\"objectId\":\"0xowned-1\",\"type\":\"0x2::coin::Coin<0x2::sui::SUI>\",\"owner\":{\"AddressOwner\":\"0x123\"}}}],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = &params_ok,
+        .callback = callback,
+    };
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "wallet",
+        "objects",
+        "--struct-type",
+        "0x2::coin::Coin<0x2::sui::SUI>",
+    });
+    defer args.deinit(allocator);
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    try testing.expect(params_ok);
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    try testing.expectEqualStrings("0xowned-1", parsed.value.object.get("entries").?.array.items[0].object.get("object_id").?.string);
+}
+
 test "runCommand request_build move-call prints normalized request artifacts" {
     const testing = std.testing;
 
@@ -20301,6 +20454,144 @@ test "runCommand request_dry_run request artifact uses local programmable builde
     try testing.expectEqual(@as(usize, 1), counts.normalized);
     try testing.expectEqual(@as(usize, 1), counts.dry_run);
     try testing.expectEqual(@as(usize, 0), counts.unsafe);
+}
+
+test "runCommand request_send request artifact uses local programmable builder path" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const seed = [_]u8{0x52} ** 32;
+    var encoded_key_bytes: [33]u8 = undefined;
+    encoded_key_bytes[0] = 0;
+    encoded_key_bytes[1..].* = seed;
+    const encoded_len = std.base64.standard.Encoder.calcSize(encoded_key_bytes.len);
+    const encoded_key = try allocator.alloc(u8, encoded_len);
+    defer allocator.free(encoded_key);
+    _ = std.base64.standard.Encoder.encode(encoded_key, &encoded_key_bytes);
+
+    const keystore_contents = try std.fmt.allocPrint(allocator, "[\"{s}\"]", .{encoded_key});
+    defer allocator.free(keystore_contents);
+
+    const keystore_path = "tmp_request_send_wallet_keystore.json";
+    try std.fs.cwd().writeFile(.{
+        .sub_path = keystore_path,
+        .data = keystore_contents,
+    });
+    defer std.fs.cwd().deleteFile(keystore_path) catch {};
+
+    const old_override = client.keystore.test_keystore_path_override;
+    client.keystore.test_keystore_path_override = keystore_path;
+    defer client.keystore.test_keystore_path_override = old_override;
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "request",
+        "send",
+        "--request",
+        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"typeArguments\":[],\"arguments\":[7]}],\"fromKeystore\":true,\"signer\":\"0\",\"gasBudget\":1200,\"gasPayment\":[{\"objectId\":\"0x9999999999999999999999999999999999999999999999999999999999999999\",\"version\":\"1\",\"digest\":\"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}],\"summarize\":true}",
+    });
+    defer args.deinit(allocator);
+
+    const State = struct {
+        gas_price: usize = 0,
+        normalized: usize = 0,
+        execute_calls: usize = 0,
+        unsafe_calls: usize = 0,
+    };
+    var state = State{};
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const ctx = @as(*State, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "suix_getReferenceGasPrice")) {
+                ctx.gas_price += 1;
+                return alloc.dupe(u8, "{\"result\":\"8\"}");
+            }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                ctx.normalized += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"parameters\":[\"U64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\"}}}]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_executeTransactionBlock")) {
+                ctx.execute_calls += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"digest\":\"0xrequestsend\",\"effects\":{\"status\":{\"status\":\"success\"}},\"balanceChanges\":[]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall") or std.mem.eql(u8, req.method, "unsafe_batchTransaction")) {
+                ctx.unsafe_calls += 1;
+                return alloc.dupe(u8, "{\"result\":{\"txBytes\":\"AQIDBA==\"}}");
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = &state,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    try testing.expectEqual(@as(usize, 1), state.gas_price);
+    try testing.expectEqual(@as(usize, 1), state.normalized);
+    try testing.expectEqual(@as(usize, 1), state.execute_calls);
+    try testing.expectEqual(@as(usize, 0), state.unsafe_calls);
+}
+
+test "runCommand request_status prints structured summaries" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "request",
+        "status",
+        "0xstatus",
+        "--summarize",
+    });
+    defer args.deinit(allocator);
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            std.debug.assert(std.mem.eql(u8, req.method, "sui_getTransactionBlock"));
+            std.debug.assert(std.mem.eql(u8, req.params_json, "[\"0xstatus\",{\"showEffects\":true,\"showBalanceChanges\":true}]"));
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"digest\":\"0xstatus\",\"effects\":{\"status\":{\"status\":\"success\"},\"gasUsed\":{\"computationCost\":\"6\",\"storageCost\":\"2\",\"storageRebate\":\"1\"}},\"balanceChanges\":[{\"owner\":{\"AddressOwner\":\"0xreader\"},\"coinType\":\"0x2::sui::SUI\",\"amount\":\"-7\"}]}}",
+            );
+        }
+    }.call;
+
+    rpc.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    try testing.expectEqualStrings("success", parsed.value.object.get("status").?.string);
+    try testing.expect(parsed.value.object.get("gas_summary") != null);
+    try testing.expect(parsed.value.object.get("balance_changes") != null);
 }
 
 test "runCommand tx_build move-call with --summarize prints instruction summaries" {

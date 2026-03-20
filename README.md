@@ -988,9 +988,13 @@ pub fn main() !void {
 - `tx build --signer`: 可复用 keystore 选择器（alias/address/key）；未提供 `--sender` 时优先使用首个可解析出地址的 signer。
 - `wallet address [selector]`: 输出解析后的钱包地址；未给 selector 时默认读取默认 keystore 的首个地址。
 - `wallet balance [selector]`: 聚合钱包 coin 余额；支持 `--coin-type`、`--limit`、`--all`。默认只聚合单页并显式输出 `has_next_page/next_cursor`，`--all` 会扫描全部 coin page。
+- `wallet coins [selector]`: 直接查询钱包 coin page；支持 `--coin-type`、`--cursor`、`--limit`、`--all`、`--json`。
+- `wallet objects [selector]`: 直接查询钱包 owned objects；支持 `--struct-type`、`--object-id`、`--package`、`--module`、`--cursor`、`--limit`、`--all`、`--json`。
 - `request build`: 把 move-call / programmable 输入规范化成可复用 request artifact。
 - `request inspect`: 输出 request artifact 的结构化摘要，适合在 sponsor/sign/send 前做检查。
 - `request dry-run`: 直接对 request artifact 或 request-shaped 输入执行 dry-run，复用现有本地 programmable builder 路径。
+- `request send`: 直接对 request artifact 或 request-shaped 输入执行发送，复用现有本地 programmable builder 和 signer/provider 路径。
+- `request status <digest>`: 复用交易状态读取路径查询 request 执行结果；支持 `--summarize`、`--observe`、`--poll-ms`、`--confirm-timeout-ms`。
 - `account list`: 列出 keystore 条目。
 - `account info <selector>`: 按索引或别名/地址/密钥字段查询并展示单条 keystore 记录；`--json` 输出 JSON。
 - `account coins <selector|0xaddress>`: 查询 owner 的 coin page；支持 `--coin-type`、`--limit`、`--all`、`--json`。

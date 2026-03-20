@@ -359,11 +359,15 @@ what the generic path still needs to finish.
 - [x] Add initial `wallet` CLI lifecycle commands:
   `address/balance`.
 - [ ] Add remaining `wallet` CLI lifecycle commands:
-  create/import/use/coins/objects.
+  create/import/use.
 - [x] Add initial `request` CLI lifecycle commands:
   build/inspect/dry-run.
+- [x] Extend initial `wallet` CLI lifecycle commands with direct resource views:
+  `coins/objects`.
+- [x] Extend initial `request` CLI lifecycle commands with execution/status:
+  `send/status`.
 - [ ] Add remaining `request` CLI lifecycle commands:
-  sponsor/sign/send/schedule/status.
+  sponsor/sign/schedule.
 - [ ] Design embedded passkey account mode and external wallet mode as equal
   first-class flows.
 - [ ] Add passkey credential registry / device management / revocation design.
