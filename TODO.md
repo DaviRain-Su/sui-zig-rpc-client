@@ -282,6 +282,9 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
 - [x] When local command-source `tx_dry_run` lowering fails with `InvalidCli`,
   fall back to unsafe tx-bytes construction instead of aborting before the
   dry-run request is sent.
+- [x] When local programmable artifact helpers (`tx_build`, `tx_simulate`,
+  `tx_payload`, `tx_send`) hit `InvalidCli` during lowering, return `null`
+  so the command can continue into its non-local fallback path.
 - [ ] Continue shrinking `unsafe_moveCall` usage.
 - [ ] Continue shrinking `unsafe_batchTransaction` usage.
 - [x] Keep construction, simulation, and execution aligned to the same local

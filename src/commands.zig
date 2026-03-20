@@ -1722,7 +1722,7 @@ fn buildLocalCommandSourceExecutePayload(
     defer local.deinit(allocator);
 
     if (args.signatures.items.len != 0) {
-        return try rpc.buildLocalProgrammableTransactionExecutePayloadFromCommandSourceWithSignatures(
+        return rpc.buildLocalProgrammableTransactionExecutePayloadFromCommandSourceWithSignatures(
             allocator,
             local.source,
             local.sender,
@@ -1732,7 +1732,10 @@ fn buildLocalCommandSourceExecutePayload(
             null,
             args.signatures.items,
             options.options_json,
-        );
+        ) catch |err| switch (err) {
+            error.InvalidCli => null,
+            else => err,
+        };
     }
 
     if (provider) |value| {
@@ -1749,12 +1752,13 @@ fn buildLocalCommandSourceExecutePayload(
             options.options_json,
             value,
         ) catch |err| switch (err) {
+            error.InvalidCli => null,
             error.UnsupportedAccountProvider => null,
             else => err,
         };
     }
 
-    return try rpc.buildLocalProgrammableTransactionExecutePayloadFromCommandSourceFromDefaultKeystore(
+    return rpc.buildLocalProgrammableTransactionExecutePayloadFromCommandSourceFromDefaultKeystore(
         allocator,
         local.source,
         local.sender,
@@ -1768,7 +1772,10 @@ fn buildLocalCommandSourceExecutePayload(
             .from_keystore = args.from_keystore,
             .infer_sender_from_signers = true,
         },
-    );
+    ) catch |err| switch (err) {
+        error.InvalidCli => null,
+        else => err,
+    };
 }
 
 fn buildLocalCommandSourceTxBytes(
@@ -1965,7 +1972,7 @@ fn buildLocalCommandSourceTransactionBlock(
     ) orelse return null;
     defer local.deinit(allocator);
 
-    return try rpc.buildLocalProgrammableTransactionBlockFromCommandSource(
+    return rpc.buildLocalProgrammableTransactionBlockFromCommandSource(
         allocator,
         local.source,
         local.sender,
@@ -1973,7 +1980,10 @@ fn buildLocalCommandSourceTransactionBlock(
         local.gas_price,
         local.gas_budget,
         null,
-    );
+    ) catch |err| switch (err) {
+        error.InvalidCli => null,
+        else => err,
+    };
 }
 
 fn buildLocalCommandSourceInspectPayload(
@@ -1995,7 +2005,7 @@ fn buildLocalCommandSourceInspectPayload(
     ) orelse return null;
     defer local.deinit(allocator);
 
-    return try rpc.buildLocalProgrammableTransactionInspectPayloadFromCommandSource(
+    return rpc.buildLocalProgrammableTransactionInspectPayloadFromCommandSource(
         allocator,
         local.source,
         local.sender,
@@ -2004,7 +2014,10 @@ fn buildLocalCommandSourceInspectPayload(
         local.gas_budget,
         null,
         args.tx_options,
-    );
+    ) catch |err| switch (err) {
+        error.InvalidCli => null,
+        else => err,
+    };
 }
 
 fn runLocalCommandSourceAction(
@@ -30588,6 +30601,79 @@ test "runCommand tx_build programmable outputs transaction block" {
     try testing.expectEqual(@as(usize, 1), commands.array.items.len);
     const instruction = commands.array.items[0];
     try testing.expectEqualStrings("MoveCall", instruction.object.get("kind").?.string);
+}
+
+test "runCommand tx_build programmable falls back when local artifact lowering returns invalid cli" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var args = cli.ParsedArgs{
+        .command = .tx_build,
+        .has_command = true,
+        .tx_build_kind = .programmable,
+        .tx_build_commands = "[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"typeArguments\":[],\"arguments\":[7,7]}]",
+        .tx_build_sender = "0xabc",
+        .tx_build_gas_budget = 1000,
+        .tx_build_gas_price = 7,
+        .tx_build_gas_payment = "[{\"objectId\":\"0x999\",\"version\":\"3\",\"digest\":\"0x3333333333333333333333333333333333333333333333333333333333333333\"}]",
+    };
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    const State = struct {
+        normalized: usize = 0,
+        unsafe: usize = 0,
+    };
+    var state = State{};
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const st = @as(*State, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                st.normalized += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"parameters\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"counter\",\"name\":\"Counter\"}},\"U64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\"}}}]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveModule")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"structs\":{\"Counter\":{\"abilities\":{\"abilities\":[\"Key\",\"Store\"]},\"typeParameters\":[],\"fields\":[{\"name\":\"id\",\"type\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"object\",\"name\":\"UID\",\"typeParams\":[]}}}]}}}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall") or std.mem.eql(u8, req.method, "unsafe_batchTransaction")) {
+                st.unsafe += 1;
+                return alloc.dupe(u8, "{\"result\":{\"txBytes\":\"AQIDBA==\"}}");
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+    rpc.request_sender = .{
+        .context = &state,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    try testing.expect(state.normalized >= 1);
+    try testing.expectEqual(@as(usize, 0), state.unsafe);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+
+    try testing.expectEqualStrings("ProgrammableTransaction", parsed.value.object.get("kind").?.string);
+    try testing.expectEqualStrings("0xabc", parsed.value.object.get("sender").?.string);
+    const commands = parsed.value.object.get("commands").?;
+    try testing.expect(commands == .array);
+    try testing.expectEqual(@as(usize, 1), commands.array.items.len);
+    try testing.expectEqualStrings("MoveCall", commands.array.items[0].object.get("kind").?.string);
 }
 
 test "runCommand tx_build programmable lowers typed make-move-vec pure elements into local transaction blocks" {
