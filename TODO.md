@@ -256,6 +256,9 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
 - [x] Keep local programmable command-source execute payloads on the same
   local owned-plan / local builder path for challenge-approved account
   providers when no custom expiration is requested.
+- [x] Keep `runCommandSource*WithChallengeResponseWithAccountProvider`
+  aligned to the same local owned-plan / local builder path that the
+  `options/commands` challenge-response helpers already use.
 - [ ] Continue shrinking `unsafe_moveCall` usage.
 - [ ] Continue shrinking `unsafe_batchTransaction` usage.
 - [ ] Keep construction, simulation, and execution aligned to the same local

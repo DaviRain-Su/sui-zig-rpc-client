@@ -14900,17 +14900,13 @@ pub const SuiRpcClient = struct {
         response: tx_request_builder.SessionChallengeResponse,
         action: ProgrammaticClientAction,
     ) !ProgrammaticClientActionResult {
-        var owned = try self.ownOptionsFromCommandSourceResolvingSelectedArgumentTokens(
+        var plan = (try self.ownOptionsFromCommandSourceResolvingSelectedArgumentTokens(
             allocator,
             source,
             config,
-        );
-        defer owned.deinit(allocator);
-
-        const updated_provider = try self.applySessionChallengeResponse(provider, response);
-        const payload = try self.buildExecutePayloadFromOwnedOptionsWithAccountProvider(allocator, &owned, updated_provider);
-        defer allocator.free(payload);
-        return try self.runExecutePayloadAction(allocator, payload, action);
+        )).authorizationPlan(provider);
+        defer plan.deinit(allocator);
+        return try self.runOwnedPlanWithChallengeResponse(allocator, &plan, response, action);
     }
 
     pub fn runCommandSourceWithAutoGasPaymentOrChallengePromptWithAccountProvider(
@@ -14949,18 +14945,14 @@ pub const SuiRpcClient = struct {
         response: tx_request_builder.SessionChallengeResponse,
         action: ProgrammaticClientAction,
     ) !ProgrammaticClientActionResult {
-        var owned = try self.ownOptionsFromCommandSourceWithAutoGasPayment(
+        var plan = (try self.ownOptionsFromCommandSourceWithAutoGasPayment(
             allocator,
             source,
             config,
             min_balance_override,
-        );
-        defer owned.deinit(allocator);
-
-        const updated_provider = try self.applySessionChallengeResponse(provider, response);
-        const payload = try self.buildExecutePayloadFromOwnedOptionsWithAccountProvider(allocator, &owned, updated_provider);
-        defer allocator.free(payload);
-        return try self.runExecutePayloadAction(allocator, payload, action);
+        )).authorizationPlan(provider);
+        defer plan.deinit(allocator);
+        return try self.runOwnedPlanWithChallengeResponse(allocator, &plan, response, action);
     }
 
     pub fn executeCommandSourceResolvingSelectedArgumentTokensWithSignatures(
@@ -27264,8 +27256,7 @@ test "runCommandSourceResolvingSelectedArgumentTokensWithChallengeResponseWithAc
 
     const authorizer = struct {
         fn call(_: *anyopaque, _: std.mem.Allocator, req: tx_request_builder.RemoteAuthorizationRequest) !tx_request_builder.RemoteAuthorizationResult {
-            try testing.expect(req.tx_bytes_base64 != null);
-            try testing.expect(req.tx_bytes_base64.?.len > 0);
+            try testing.expect(req.tx_bytes_base64 == null);
             try testing.expectEqualStrings("approved-real-selected", req.account_session.session_id.?);
             return .{
                 .sender = "0xowner",
@@ -27443,8 +27434,7 @@ test "runCommandSourceWithAutoGasPaymentWithChallengeResponseWithAccountProvider
 
     const authorizer = struct {
         fn call(_: *anyopaque, _: std.mem.Allocator, req: tx_request_builder.RemoteAuthorizationRequest) !tx_request_builder.RemoteAuthorizationResult {
-            try testing.expect(req.tx_bytes_base64 != null);
-            try testing.expect(req.tx_bytes_base64.?.len > 0);
+            try testing.expect(req.tx_bytes_base64 == null);
             try testing.expectEqualStrings("approved-real-auto", req.account_session.session_id.?);
             return .{
                 .sender = "0xowner",
