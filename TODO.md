@@ -267,6 +267,8 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
 - [x] Keep legacy `buildMoveCallTxBytes` / `buildBatchTransactionTxBytes`
   helpers on the local programmable builder when a concrete `gas_object_id`
   is already known.
+- [x] Keep low-level tx-bytes helpers on the local programmable builder when a
+  sender is known and gas can be auto-selected locally.
 - [ ] Continue shrinking `unsafe_moveCall` usage.
 - [ ] Continue shrinking `unsafe_batchTransaction` usage.
 - [ ] Keep construction, simulation, and execution aligned to the same local

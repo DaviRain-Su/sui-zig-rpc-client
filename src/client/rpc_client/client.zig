@@ -2450,7 +2450,7 @@ pub const SuiRpcClient = struct {
         gas_object_id: ?[]const u8,
         gas_budget: u64,
     ) ![]u8 {
-        if (try self.tryBuildLocalCommandSourceTxBytesWithKnownGasObject(
+        if (try self.tryBuildLocalCommandSourceTxBytes(
             allocator,
             signer,
             .{
@@ -2526,7 +2526,7 @@ pub const SuiRpcClient = struct {
         gas_object_id: ?[]const u8,
         gas_budget: u64,
     ) ![]u8 {
-        if (try self.tryBuildLocalCommandSourceTxBytesWithKnownGasObject(
+        if (try self.tryBuildLocalCommandSourceTxBytes(
             allocator,
             signer,
             .{ .commands_json = commands_json },
@@ -2569,7 +2569,7 @@ pub const SuiRpcClient = struct {
         gas_object_id: ?[]const u8,
         gas_budget: u64,
     ) ![]u8 {
-        if (try self.tryBuildLocalCommandSourceTxBytesWithKnownGasObject(
+        if (try self.tryBuildLocalCommandSourceTxBytes(
             allocator,
             signer,
             source,
@@ -14336,7 +14336,7 @@ pub const SuiRpcClient = struct {
         );
     }
 
-    fn tryBuildLocalCommandSourceTxBytesWithKnownGasObject(
+    fn tryBuildLocalCommandSourceTxBytes(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
         sender: []const u8,
@@ -14344,18 +14344,38 @@ pub const SuiRpcClient = struct {
         gas_object_id: ?[]const u8,
         gas_budget: u64,
     ) !?[]u8 {
-        const resolved_gas_object_id = gas_object_id orelse return null;
         if (!(try commandSourceSupportsLocalProgrammableTransactionBuilder(
             allocator,
             source,
         ))) return null;
 
-        const gas_payment_json = self.buildGasPaymentJsonFromGasObjectId(
-            allocator,
-            resolved_gas_object_id,
-        ) catch |err| switch (err) {
-            error.OutOfMemory => return err,
-            else => return null,
+        const gas_payment_json = blk: {
+            if (gas_object_id) |resolved_gas_object_id| {
+                break :blk self.buildGasPaymentJsonFromGasObjectId(
+                    allocator,
+                    resolved_gas_object_id,
+                ) catch |err| switch (err) {
+                    error.OutOfMemory => return err,
+                    else => return null,
+                };
+            }
+
+            var excluded_object_ids = self.ownReferencedObjectIdsFromCommandSource(
+                allocator,
+                source,
+            ) catch |err| switch (err) {
+                error.OutOfMemory => return err,
+                else => return null,
+            };
+            defer excluded_object_ids.deinit(allocator);
+
+            break :blk (try self.ownResolvedGasPaymentJsonWithDefaultOwnerAndExclusions(
+                allocator,
+                null,
+                sender,
+                if (gas_budget == 0) 1 else gas_budget,
+                excluded_object_ids.items.items,
+            )) orelse return null;
         };
         defer allocator.free(gas_payment_json);
 
@@ -14364,7 +14384,7 @@ pub const SuiRpcClient = struct {
             else => return null,
         };
 
-        return try self.buildLocalProgrammableTransactionTxBytesFromCommandSource(
+        return self.buildLocalProgrammableTransactionTxBytesFromCommandSource(
             allocator,
             source,
             sender,
@@ -14372,7 +14392,10 @@ pub const SuiRpcClient = struct {
             gas_price,
             gas_budget,
             null,
-        );
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => return null,
+        };
     }
 
     fn tryBuildLocalCommandSourceExecutePayloadWithKnownGasObject(
@@ -27421,6 +27444,76 @@ test "buildBatchTransactionTxBytes prefers local builder when gas object is know
     try testing.expect(tx_bytes.len != 0);
     try testing.expectEqual(@as(usize, 1), state.gas_price);
     try testing.expectEqual(@as(usize, 2), state.object);
+    try testing.expectEqual(@as(usize, 0), state.unsafe);
+}
+
+test "buildCommandSourceTxBytes auto-selects gas locally when gas object is omitted" {
+    const testing = std.testing;
+    const State = struct {
+        gas_price: usize = 0,
+        coins: usize = 0,
+        object: usize = 0,
+        unsafe: usize = 0,
+    };
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var state = State{};
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const st = @as(*State, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "suix_getReferenceGasPrice")) {
+                st.gas_price += 1;
+                return alloc.dupe(u8, "{\"result\":\"19\"}");
+            }
+            if (std.mem.eql(u8, req.method, "suix_getCoins")) {
+                st.coins += 1;
+                try testing.expect(std.mem.indexOf(u8, req.params_json, "0xowner") != null);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xgasauto\",\"version\":\"21\",\"digest\":\"gas-auto-digest\",\"balance\":\"500\"}],\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getObject")) {
+                st.object += 1;
+                if (std.mem.indexOf(u8, req.params_json, "0xcoin") != null) {
+                    return alloc.dupe(
+                        u8,
+                        "{\"result\":{\"data\":{\"objectId\":\"0xcoin\",\"version\":\"10\",\"digest\":\"coin-digest-5\",\"owner\":{\"AddressOwner\":\"0xowner\"}}}}",
+                    );
+                }
+                return error.TestUnexpectedResult;
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall") or std.mem.eql(u8, req.method, "unsafe_batchTransaction")) {
+                st.unsafe += 1;
+                return error.TestUnexpectedResult;
+            }
+            return error.TestUnexpectedResult;
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &state,
+        .callback = callback,
+    };
+
+    const tx_bytes = try client_instance.buildCommandSourceTxBytes(
+        allocator,
+        "0xowner",
+        .{ .commands_json = "[{\"kind\":\"TransferObjects\",\"objects\":[\"0xcoin\"],\"address\":\"0xreceiver\"}]" },
+        null,
+        100,
+    );
+    defer allocator.free(tx_bytes);
+
+    try testing.expect(tx_bytes.len != 0);
+    try testing.expectEqual(@as(usize, 1), state.gas_price);
+    try testing.expectEqual(@as(usize, 1), state.coins);
+    try testing.expectEqual(@as(usize, 1), state.object);
     try testing.expectEqual(@as(usize, 0), state.unsafe);
 }
 
