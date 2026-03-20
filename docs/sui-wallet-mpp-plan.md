@@ -510,7 +510,9 @@ continues the flow.
 `request status` now accepts either a raw digest or a locally tracked request
 entry id. When the target resolves through `request_state.json`, the CLI will
 reuse the stored digest and write the refreshed `submitted/confirmed/failed`
-status back into that same entry.
+status back into that same entry. Success clears stale `last_error`; failure
+responses propagate the chain-side error text back into `last_error` when one
+is available.
 
 ### Request Operations
 
