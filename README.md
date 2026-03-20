@@ -1003,6 +1003,7 @@ pub fn main() !void {
 - `wallet balance [selector]`: 聚合钱包 coin 余额；支持 `--coin-type`、`--limit`、`--all`。默认只聚合单页并显式输出 `has_next_page/next_cursor`，`--all` 会扫描全部 coin page；未给 selector 时同样优先用 active wallet selector。
 - `wallet coins [selector]`: 直接查询钱包 coin page；支持 `--coin-type`、`--cursor`、`--limit`、`--all`、`--json`。
 - `wallet objects [selector]`: 直接查询钱包 owned objects；支持 `--struct-type`、`--object-id`、`--package`、`--module`、`--cursor`、`--limit`、`--all`、`--json`。
+- `wallet fund <selector|0xaddress>`: 构建一个一等公民的钱包注资路径；当前先支持 `SUI` 注资，会把命令 lower 成 `SplitCoins(GasCoin) + TransferObjects`。支持 `--amount <mist>`、`--from <selector|0xaddress>`、`--emit-request`、`--dry-run`，执行路径默认继续复用现有 `request send` / local programmable builder，并默认开启 `autoGasPayment + autoGasBudget`。
 - `wallet export-public [selector]`: 导出钱包公开元数据；只输出 selector/alias/address/public key 等公开字段，不回显私钥。
 - `wallet signer inspect [selector]`: 检查 wallet selector 的 sender 解析结果、本地可签名状态、active wallet 命中情况以及 keystore/wallet state 来源。
 - `wallet intent build`: 把 request-shaped 输入包成一等公民 `wallet_intent` artifact；支持 `--intent <json|@file>` 归一化现有 intent，以及 `--network`、`--execution-mode`、`--policy`。现在也支持显式 policy 字段：

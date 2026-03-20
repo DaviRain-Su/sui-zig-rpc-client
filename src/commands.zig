@@ -4554,39 +4554,44 @@ fn formatWalletSignerInspectSummary(
     if (summary.wallet_state_path) |value| try writer.print("wallet_state: {s}\n", .{value});
 }
 
-fn resolveWalletOwner(
+const WalletOwnerResolution = struct {
+    owner: []const u8,
+    owned: ?[]const u8,
+};
+
+fn resolveWalletOwnerFromSelector(
     allocator: std.mem.Allocator,
-    args: *const cli.ParsedArgs,
-) !struct { owner: []const u8, owned: ?[]const u8 } {
+    selector: ?[]const u8,
+) !WalletOwnerResolution {
     var registry = try wallet_registry.loadDefaultWalletRegistry(allocator);
     defer registry.deinit(allocator);
 
-    if (args.account_selector) |selector| {
-        if (std.mem.startsWith(u8, selector, "0x")) {
-            if (findActivePasskeyIndex(&registry, selector)) |index| {
+    if (selector) |value| {
+        if (std.mem.startsWith(u8, value, "0x")) {
+            if (findActivePasskeyIndex(&registry, value)) |index| {
                 const resolved = try allocator.dupe(u8, registry.passkey_credentials[index].address);
                 return .{ .owner = resolved, .owned = resolved };
             }
-            if (findConnectedExternalWalletIndex(&registry, selector)) |index| {
+            if (findConnectedExternalWalletIndex(&registry, value)) |index| {
                 const resolved = try allocator.dupe(u8, registry.external_wallets[index].address);
                 return .{ .owner = resolved, .owned = resolved };
             }
             return .{
-                .owner = selector,
+                .owner = value,
                 .owned = null,
             };
         }
 
-        if (findActivePasskeyIndex(&registry, selector)) |index| {
+        if (findActivePasskeyIndex(&registry, value)) |index| {
             const resolved = try allocator.dupe(u8, registry.passkey_credentials[index].address);
             return .{ .owner = resolved, .owned = resolved };
         }
-        if (findConnectedExternalWalletIndex(&registry, selector)) |index| {
+        if (findConnectedExternalWalletIndex(&registry, value)) |index| {
             const resolved = try allocator.dupe(u8, registry.external_wallets[index].address);
             return .{ .owner = resolved, .owned = resolved };
         }
 
-        const resolved_explicit = try client.keystore.resolveAddressBySelector(allocator, selector) orelse return error.InvalidCli;
+        const resolved_explicit = try client.keystore.resolveAddressBySelector(allocator, value) orelse return error.InvalidCli;
         return .{
             .owner = resolved_explicit,
             .owned = resolved_explicit,
@@ -4617,6 +4622,108 @@ fn resolveWalletOwner(
 
     const resolved_default = try client.keystore.resolveFirstAddressFromDefaultKeystore(allocator) orelse return error.InvalidCli;
     return .{ .owner = resolved_default, .owned = resolved_default };
+}
+
+fn resolveWalletOwner(
+    allocator: std.mem.Allocator,
+    args: *const cli.ParsedArgs,
+) !WalletOwnerResolution {
+    return try resolveWalletOwnerFromSelector(allocator, args.account_selector);
+}
+
+fn buildWalletFundCommandsJson(
+    allocator: std.mem.Allocator,
+    amount: u64,
+    destination: []const u8,
+) ![]u8 {
+    var builder = tx_builder.CommandBuilder.init(allocator);
+    defer builder.deinit();
+
+    const amounts_json = try std.fmt.allocPrint(allocator, "[{d}]", .{amount});
+    defer allocator.free(amounts_json);
+    const destination_json = try std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(destination, .{})});
+    defer allocator.free(destination_json);
+
+    try builder.appendSplitCoins(.{
+        .coin_json = "\"GasCoin\"",
+        .amounts_json = amounts_json,
+    });
+    try builder.appendTransferObjects(.{
+        .objects_json = "[{\"NestedResult\":[0,0]}]",
+        .address_json = destination_json,
+    });
+    return try builder.finish();
+}
+
+fn runWalletFund(
+    allocator: std.mem.Allocator,
+    rpc: *client.SuiRpcClient,
+    args: *const cli.ParsedArgs,
+    writer: anytype,
+    programmatic_provider: ?client.tx_request_builder.AccountProvider,
+) anyerror!void {
+    const amount = args.wallet_fund_amount orelse return error.InvalidCli;
+
+    const destination = try resolveWalletOwnerFromSelector(allocator, args.account_selector);
+    defer if (destination.owned) |value| allocator.free(value);
+
+    var source_lookup_args = args.*;
+    source_lookup_args.account_selector = args.tx_build_sender;
+    var source_summary = try resolveWalletEntrySummary(allocator, &source_lookup_args);
+    defer source_summary.deinit(allocator);
+    const source_owner = source_summary.address orelse return error.InvalidCli;
+
+    const commands_json = try buildWalletFundCommandsJson(allocator, amount, destination.owner);
+    defer allocator.free(commands_json);
+
+    var derived_args = cli.ParsedArgs{
+        .command = if (args.wallet_fund_emit_request)
+            .request_build
+        else if (args.wallet_fund_dry_run)
+            .request_dry_run
+        else
+            .request_send,
+        .has_command = true,
+        .pretty = args.pretty,
+        .tx_build_gas_budget = args.tx_build_gas_budget,
+        .tx_build_gas_price = args.tx_build_gas_price,
+        .tx_build_auto_gas_payment = true,
+        .tx_build_auto_gas_budget = args.tx_build_gas_budget == null,
+        .tx_build_gas_payment_min_balance = args.tx_build_gas_payment_min_balance orelse amount,
+        .tx_send_wait = args.tx_send_wait,
+        .tx_send_summarize = args.tx_send_summarize,
+        .tx_send_observe = args.tx_send_observe,
+        .confirm_timeout_ms = args.confirm_timeout_ms,
+        .confirm_poll_ms = args.confirm_poll_ms,
+    };
+    defer derived_args.deinit(allocator);
+
+    derived_args.owned_tx_build_commands = try allocator.dupe(u8, commands_json);
+    derived_args.tx_build_commands = derived_args.owned_tx_build_commands;
+    derived_args.owned_tx_build_sender = try allocator.dupe(u8, source_owner);
+    derived_args.tx_build_sender = derived_args.owned_tx_build_sender;
+
+    if (args.tx_session_response) |raw| {
+        derived_args.owned_tx_session_response = try allocator.dupe(u8, raw);
+        derived_args.tx_session_response = derived_args.owned_tx_session_response;
+    }
+    if (args.tx_provider_config) |raw| {
+        derived_args.owned_tx_provider_config = try allocator.dupe(u8, raw);
+        derived_args.tx_provider_config = derived_args.owned_tx_provider_config;
+    }
+
+    if (!args.wallet_fund_emit_request and !args.wallet_fund_dry_run and programmatic_provider == null and args.tx_provider_config == null) {
+        if (!source_summary.can_sign_locally) return error.InvalidCli;
+        derived_args.from_keystore = true;
+    }
+
+    return try runCommandWithProgrammaticProvider(
+        allocator,
+        rpc,
+        &derived_args,
+        writer,
+        programmatic_provider,
+    );
 }
 
 fn summarizeWalletCoinBalances(
@@ -5819,6 +5926,13 @@ pub fn runCommandWithProgrammaticProvider(
             defer result.deinit(allocator);
             try printResourceQueryActionResult(allocator, writer, result, args.pretty);
         },
+        .wallet_fund => try runWalletFund(
+            allocator,
+            rpc,
+            args,
+            writer,
+            programmatic_provider orelse cli_provider,
+        ),
         .wallet_intent_build => {
             const intent_json = try buildWalletIntentJsonFromArgs(allocator, args, "send");
             defer allocator.free(intent_json);
@@ -22950,6 +23064,167 @@ test "runCommand wallet_objects resolves the default wallet owner" {
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
     defer parsed.deinit();
     try testing.expectEqualStrings("0xowned-1", parsed.value.object.get("entries").?.array.items[0].object.get("object_id").?.string);
+}
+
+test "runCommand wallet_fund emit-request builds split-and-transfer request artifacts" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const keystore_path = try std.fmt.allocPrint(allocator, "tmp_commands_wallet_fund_request_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(keystore_path);
+    defer std.fs.cwd().deleteFile(keystore_path) catch {};
+
+    const old_override = client.keystore.test_keystore_path_override;
+    client.keystore.test_keystore_path_override = keystore_path;
+    defer client.keystore.test_keystore_path_override = old_override;
+
+    var file = try std.fs.cwd().createFile(keystore_path, .{ .truncate = true });
+    defer file.close();
+    try file.writeAll("[{\"alias\":\"main\",\"privateKey\":\"sk_wallet\",\"address\":\"0x123\"}]");
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "wallet",
+        "fund",
+        "0x2222222222222222222222222222222222222222222222222222222222222222",
+        "--amount",
+        "77",
+        "--emit-request",
+    });
+    defer args.deinit(allocator);
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    try testing.expectEqualStrings("0x123", parsed.value.object.get("sender").?.string);
+    try testing.expect(parsed.value.object.get("autoGasPayment").?.bool);
+    try testing.expect(parsed.value.object.get("autoGasBudget").?.bool);
+    try testing.expectEqual(@as(i64, 77), parsed.value.object.get("gasPaymentMinBalance").?.integer);
+
+    const commands = parsed.value.object.get("commands").?.array.items;
+    try testing.expectEqual(@as(usize, 2), commands.len);
+    try testing.expectEqualStrings("SplitCoins", commands[0].object.get("kind").?.string);
+    try testing.expectEqualStrings("GasCoin", commands[0].object.get("coin").?.string);
+    try testing.expectEqual(@as(i64, 77), commands[0].object.get("amounts").?.array.items[0].integer);
+    try testing.expectEqualStrings("TransferObjects", commands[1].object.get("kind").?.string);
+    try testing.expectEqual(@as(i64, 0), commands[1].object.get("objects").?.array.items[0].object.get("NestedResult").?.array.items[0].integer);
+    try testing.expectEqual(@as(i64, 0), commands[1].object.get("objects").?.array.items[0].object.get("NestedResult").?.array.items[1].integer);
+    try testing.expectEqualStrings("0x2222222222222222222222222222222222222222222222222222222222222222", commands[1].object.get("address").?.string);
+}
+
+test "runCommand wallet_fund send keeps local signer transfers on the local builder path" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const seed = [_]u8{0x5a} ** 32;
+    var encoded_key_bytes: [33]u8 = undefined;
+    encoded_key_bytes[0] = 0;
+    encoded_key_bytes[1..].* = seed;
+    const encoded_len = std.base64.standard.Encoder.calcSize(encoded_key_bytes.len);
+    const encoded_key = try allocator.alloc(u8, encoded_len);
+    defer allocator.free(encoded_key);
+    _ = std.base64.standard.Encoder.encode(encoded_key, &encoded_key_bytes);
+
+    const keystore_contents = try std.fmt.allocPrint(allocator, "[\"{s}\"]", .{encoded_key});
+    defer allocator.free(keystore_contents);
+    const expected_sender = try client.keystore.resolveAddressFromKeystoreContents(
+        allocator,
+        keystore_contents,
+        encoded_key,
+    ) orelse return error.TestUnexpectedResult;
+    defer allocator.free(expected_sender);
+
+    const keystore_path = "tmp_wallet_fund_send_keystore.json";
+    try std.fs.cwd().writeFile(.{
+        .sub_path = keystore_path,
+        .data = keystore_contents,
+    });
+    defer std.fs.cwd().deleteFile(keystore_path) catch {};
+
+    const old_override = client.keystore.test_keystore_path_override;
+    client.keystore.test_keystore_path_override = keystore_path;
+    defer client.keystore.test_keystore_path_override = old_override;
+
+    const State = struct {
+        coin_calls: usize = 0,
+        execute_calls: usize = 0,
+        unsafe_calls: usize = 0,
+        expected_sender: []const u8,
+    };
+    var state = State{
+        .expected_sender = expected_sender,
+    };
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const ctx = @as(*State, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "suix_getCoins")) {
+                ctx.coin_calls += 1;
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, ctx.expected_sender) != null);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0x901\",\"version\":\"14\",\"digest\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"balance\":\"5000\"}],\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_executeTransactionBlock")) {
+                ctx.execute_calls += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"digest\":\"0xwalletfund\",\"effects\":{\"status\":{\"status\":\"success\"}},\"balanceChanges\":[]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall") or std.mem.eql(u8, req.method, "unsafe_batchTransaction")) {
+                ctx.unsafe_calls += 1;
+                return alloc.dupe(u8, "{\"result\":{\"txBytes\":\"AQIDBA==\"}}");
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = &state,
+        .callback = callback,
+    };
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "wallet",
+        "fund",
+        "0x2222222222222222222222222222222222222222222222222222222222222222",
+        "--amount",
+        "77",
+        "--gas-budget",
+        "1200",
+        "--gas-price",
+        "8",
+        "--summarize",
+    });
+    defer args.deinit(allocator);
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    try testing.expectEqual(@as(usize, 1), state.coin_calls);
+    try testing.expectEqual(@as(usize, 1), state.execute_calls);
+    try testing.expectEqual(@as(usize, 0), state.unsafe_calls);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    try testing.expectEqualStrings("success", parsed.value.object.get("status").?.string);
 }
 
 test "runCommand wallet_create writes a keystore entry and activates it" {

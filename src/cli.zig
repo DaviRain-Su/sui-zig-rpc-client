@@ -32,6 +32,7 @@ pub const Command = enum {
     wallet_balance,
     wallet_coins,
     wallet_objects,
+    wallet_fund,
     wallet_intent_build,
     wallet_intent_dry_run,
     wallet_intent_send,
@@ -132,6 +133,9 @@ pub const ParsedArgs = struct {
     wallet_session_id: ?[]const u8 = null,
     wallet_session_kind: ?[]const u8 = null,
     wallet_session_expires_at_ms: ?u64 = null,
+    wallet_fund_amount: ?u64 = null,
+    wallet_fund_emit_request: bool = false,
+    wallet_fund_dry_run: bool = false,
     wallet_activate: bool = true,
     intent_network: ?[]const u8 = null,
     intent_execution_mode: ?[]const u8 = null,
@@ -3104,6 +3108,16 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
                     }
                     continue;
                 }
+                if (std.mem.eql(u8, sub, "fund")) {
+                    parsed.command = .wallet_fund;
+                    parsed.has_command = true;
+                    i += 2;
+                    if (i < args.len and !std.mem.startsWith(u8, args[i], "--")) {
+                        parsed.account_selector = args[i];
+                        i += 1;
+                    }
+                    continue;
+                }
 
                 return error.InvalidCli;
             }
@@ -5296,6 +5310,93 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
             return error.InvalidCli;
         }
 
+        if (parsed.command == .wallet_fund) {
+            if (std.mem.eql(u8, token, "--amount")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                parsed.wallet_fund_amount = try parseIntValue(args[i + 1]);
+                i += 2;
+                continue;
+            }
+            if (std.mem.eql(u8, token, "--from")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                try setOptionalStringArg(
+                    allocator,
+                    &parsed,
+                    args[i + 1],
+                    &parsed.owned_tx_build_sender,
+                    &parsed.tx_build_sender,
+                );
+                i += 2;
+                continue;
+            }
+            if (std.mem.eql(u8, token, "--emit-request")) {
+                parsed.wallet_fund_emit_request = true;
+                i += 1;
+                continue;
+            }
+            if (std.mem.eql(u8, token, "--dry-run") or std.mem.eql(u8, token, "--dry_run") or std.mem.eql(u8, token, "--dryrun")) {
+                parsed.wallet_fund_dry_run = true;
+                i += 1;
+                continue;
+            }
+            if (std.mem.eql(u8, token, "--gas-budget")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                parsed.tx_build_gas_budget = try parseIntValue(args[i + 1]);
+                i += 2;
+                continue;
+            }
+            if (std.mem.eql(u8, token, "--gas-price")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                parsed.tx_build_gas_price = try parseIntValue(args[i + 1]);
+                i += 2;
+                continue;
+            }
+            if (std.mem.eql(u8, token, "--gas-payment-min-balance")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                parsed.tx_build_gas_payment_min_balance = try parseIntValue(args[i + 1]);
+                i += 2;
+                continue;
+            }
+            if (std.mem.eql(u8, token, "--wait")) {
+                parsed.tx_send_wait = true;
+                i += 1;
+                continue;
+            }
+            if (std.mem.eql(u8, token, "--summarize") or std.mem.eql(u8, token, "--summary")) {
+                parsed.tx_send_summarize = true;
+                i += 1;
+                continue;
+            }
+            if (std.mem.eql(u8, token, "--observe")) {
+                parsed.tx_send_observe = true;
+                i += 1;
+                continue;
+            }
+            if (std.mem.eql(u8, token, "--session-response")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                try setOptionalFileBackedArg(
+                    allocator,
+                    &parsed.owned_tx_session_response,
+                    &parsed.tx_session_response,
+                    args[i + 1],
+                );
+                i += 2;
+                continue;
+            }
+            if (std.mem.eql(u8, token, "--provider")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                try setOptionalFileBackedArg(
+                    allocator,
+                    &parsed.owned_tx_provider_config,
+                    &parsed.tx_provider_config,
+                    args[i + 1],
+                );
+                i += 2;
+                continue;
+            }
+            return error.InvalidCli;
+        }
+
         if (parsed.command == .account_objects) {
             if (std.mem.eql(u8, token, "--json")) {
                 parsed.account_objects_json = true;
@@ -6142,6 +6243,19 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
         if (has_object_id_filter and (has_package_filter or has_module_filter)) return error.InvalidCli;
         if (has_module_filter and !has_package_filter) return error.InvalidCli;
     }
+    if (parsed.command == .wallet_fund) {
+        const selector = parsed.account_selector orelse return error.InvalidCli;
+        if (selector.len == 0) return error.InvalidCli;
+        const amount = parsed.wallet_fund_amount orelse return error.InvalidCli;
+        if (amount == 0) return error.InvalidCli;
+        if (parsed.tx_build_sender) |sender| {
+            if (sender.len == 0) return error.InvalidCli;
+        }
+        if (parsed.wallet_fund_emit_request and parsed.wallet_fund_dry_run) return error.InvalidCli;
+        if (parsed.wallet_fund_emit_request and (parsed.tx_send_wait or parsed.tx_send_summarize or parsed.tx_send_observe)) return error.InvalidCli;
+        if (parsed.wallet_fund_dry_run and (parsed.tx_send_wait or parsed.tx_send_observe)) return error.InvalidCli;
+        if (parsed.tx_send_summarize and parsed.tx_send_observe) return error.InvalidCli;
+    }
     if (parsed.command == .request_status) {
         const digest = parsed.tx_digest orelse return error.InvalidCli;
         if (digest.len == 0) return error.InvalidCli;
@@ -6417,6 +6531,15 @@ pub fn printUsage(writer: anytype) !void {
         "    same options as account coins, including --json/--coin-type/--cursor/--limit/--all\n" ++
         "  wallet objects [selector]           Query wallet-owned objects with default-wallet fallback\n" ++
         "    same options as account objects, including typed filters and --json\n" ++
+        "  wallet fund <selector|0xaddress>    Build or execute a SUI funding transfer to another wallet\n" ++
+        "    --amount <mist>                   Required funding amount in MIST\n" ++
+        "    --from <selector|0xaddress>       Optional source wallet selector; defaults to active/default wallet\n" ++
+        "    --emit-request                    Print the derived request artifact instead of executing it\n" ++
+        "    --dry-run                         Dry-run the derived funding request instead of sending it\n" ++
+        "    --provider <json|@file>           Optional provider config for non-local signer execution\n" ++
+        "    --session-response <json|@file>   Optional approved provider session response\n" ++
+        "    --gas-budget/--gas-price          Optional gas overrides; otherwise auto gas is enabled\n" ++
+        "    --wait/--summarize/--observe      Reuse request send output modes when executing\n" ++
         "  wallet intent build                 Build a first-class wallet intent envelope around a request artifact\n" ++
         "    same input options as request build plus --intent/--network/--execution-mode/--policy\n" ++
         "    policy helpers: --policy-recurring-limit/--policy-recurring-interval-ms\n" ++
@@ -9055,6 +9178,55 @@ test "parseCliArgs parses wallet objects command options" {
     try testing.expectEqualStrings("pool", parsed.account_objects_module.?);
     try testing.expectEqual(@as(?u64, 10), parsed.account_objects_limit);
     try testing.expect(parsed.account_objects_json);
+}
+
+test "parseCliArgs parses wallet fund command options" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "wallet",
+        "fund",
+        "0x2222222222222222222222222222222222222222222222222222222222222222",
+        "--amount",
+        "77",
+        "--from",
+        "main",
+        "--dry-run",
+        "--gas-budget",
+        "1200",
+        "--summarize",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.wallet_fund, parsed.command);
+    try testing.expectEqualStrings("0x2222222222222222222222222222222222222222222222222222222222222222", parsed.account_selector.?);
+    try testing.expectEqual(@as(?u64, 77), parsed.wallet_fund_amount);
+    try testing.expectEqualStrings("main", parsed.tx_build_sender.?);
+    try testing.expect(parsed.wallet_fund_dry_run);
+    try testing.expectEqual(@as(?u64, 1200), parsed.tx_build_gas_budget);
+    try testing.expect(parsed.tx_send_summarize);
+}
+
+test "parseCliArgs rejects wallet fund with conflicting output modes" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    try testing.expectError(error.InvalidCli, parseCliArgs(allocator, &.{
+        "wallet",
+        "fund",
+        "0x2222222222222222222222222222222222222222222222222222222222222222",
+        "--amount",
+        "77",
+        "--emit-request",
+        "--dry-run",
+    }));
 }
 
 test "parseCliArgs parses wallet create command options" {

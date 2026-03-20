@@ -387,3 +387,5 @@ what the generic path still needs to finish.
 - [x] Add concurrency-lane planning for parallel-safe Sui execution.
 - [x] Add delegated session registry commands:
   `wallet session create/list/revoke`.
+- [x] Add a broader wallet lifecycle funding command:
+  `wallet fund`.

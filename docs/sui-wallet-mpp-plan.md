@@ -374,13 +374,11 @@ Implemented wallet lifecycle commands:
 - `wallet intent build`
 - `wallet intent dry-run`
 - `wallet intent send`
-
-Still missing from the broader wallet lifecycle:
-
 - `wallet fund`
 
-That means the current design is directionally correct but still not yet at
-Tempo-style CLI completeness for the broader wallet lifecycle.
+That means the broader wallet lifecycle now has a concrete first pass:
+wallet inventory, active wallet selection, delegated sessions, first-class
+wallet intents, and a convenience funding path all exist as CLI surfaces.
 
 ### `tempo request` Style Capabilities
 
