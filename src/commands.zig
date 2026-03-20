@@ -22872,6 +22872,174 @@ test "runCommand tx_send move-call falls back after local payload lowering retur
     try testing.expectEqualStrings("sig-a", signatures.items[0].string);
 }
 
+test "runCommand tx_payload commands falls back after local payload lowering returns invalid cli" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var args = cli.ParsedArgs{
+        .command = .tx_payload,
+        .has_command = true,
+        .tx_build_commands =
+        \\[
+        \\  {"kind":"MoveCall","package":"0x2","module":"counter","function":"increment","typeArguments":[],"arguments":[7,7]}
+        \\]
+        ,
+        .tx_build_sender = "0xabc",
+        .tx_build_gas_budget = 800,
+        .tx_build_gas_price = 6,
+        .tx_build_gas_payment = "[{\"objectId\":\"0x999\",\"version\":\"3\",\"digest\":\"0x3333333333333333333333333333333333333333333333333333333333333333\"}]",
+    };
+    try args.signatures.append(allocator, "sig-a");
+    defer args.signatures.deinit(allocator);
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    const Counts = struct { normalized: usize = 0, unsafe: usize = 0 };
+    var counts = Counts{};
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            _ = req.id;
+            _ = req.request_body;
+            const ctx = @as(*Counts, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                ctx.normalized += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"parameters\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"counter\",\"name\":\"Counter\"}},\"U64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\"}}}]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveModule")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"structs\":{\"Counter\":{\"abilities\":{\"abilities\":[\"Key\",\"Store\"]},\"typeParameters\":[],\"fields\":[{\"name\":\"id\",\"type\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"object\",\"name\":\"UID\",\"typeParams\":[]}}}]}}}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall") or std.mem.eql(u8, req.method, "unsafe_batchTransaction")) {
+                ctx.unsafe += 1;
+                return alloc.dupe(u8, "{\"result\":{\"txBytes\":\"AQIDBA==\"}}");
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+    rpc.request_sender = .{
+        .context = &counts,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+    try testing.expect(counts.normalized >= 1);
+    try testing.expectEqual(@as(usize, 0), counts.unsafe);
+
+    const payload = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer payload.deinit();
+    try testing.expect(payload.value == .array);
+    try testing.expect(payload.value.array.items[0].string.len > 0);
+    const signatures = payload.value.array.items[1].array;
+    try testing.expectEqual(@as(usize, 1), signatures.items.len);
+    try testing.expectEqualStrings("sig-a", signatures.items[0].string);
+}
+
+test "runCommand tx_send commands falls back after local payload lowering returns invalid cli" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var args = cli.ParsedArgs{
+        .command = .tx_send,
+        .has_command = true,
+        .tx_build_commands =
+        \\[
+        \\  {"kind":"MoveCall","package":"0x2","module":"counter","function":"increment","typeArguments":[],"arguments":[7,7]}
+        \\]
+        ,
+        .tx_build_sender = "0xabc",
+        .tx_build_gas_budget = 800,
+        .tx_build_gas_price = 6,
+        .tx_build_gas_payment = "[{\"objectId\":\"0x999\",\"version\":\"3\",\"digest\":\"0x3333333333333333333333333333333333333333333333333333333333333333\"}]",
+    };
+    try args.signatures.append(allocator, "sig-a");
+    defer args.signatures.deinit(allocator);
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    const Counts = struct { normalized: usize = 0, unsafe: usize = 0, execute: usize = 0 };
+    var counts = Counts{};
+    var params_text: ?[]const u8 = null;
+
+    const MockContext = struct {
+        counts: *Counts,
+        params_text: *?[]const u8,
+    };
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            _ = req.id;
+            _ = req.request_body;
+            const ctx = @as(*MockContext, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                ctx.counts.normalized += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"parameters\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"counter\",\"name\":\"Counter\"}},\"U64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\"}}}]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveModule")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"structs\":{\"Counter\":{\"abilities\":{\"abilities\":[\"Key\",\"Store\"]},\"typeParameters\":[],\"fields\":[{\"name\":\"id\",\"type\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"object\",\"name\":\"UID\",\"typeParams\":[]}}}]}}}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall") or std.mem.eql(u8, req.method, "unsafe_batchTransaction")) {
+                ctx.counts.unsafe += 1;
+                return alloc.dupe(u8, "{\"result\":{\"txBytes\":\"AQIDBA==\"}}");
+            }
+            if (std.mem.eql(u8, req.method, "sui_executeTransactionBlock")) {
+                ctx.counts.execute += 1;
+                ctx.params_text.* = try alloc.dupe(u8, req.params_json);
+                return alloc.dupe(u8, "{\"result\":{\"executed\":true}}");
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+
+    var mock_ctx = MockContext{
+        .counts = &counts,
+        .params_text = &params_text,
+    };
+    rpc.request_sender = .{
+        .context = &mock_ctx,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+    try testing.expect(counts.normalized >= 1);
+    try testing.expectEqual(@as(usize, 0), counts.unsafe);
+    try testing.expectEqual(@as(usize, 1), counts.execute);
+    try testing.expectEqualStrings("{\"result\":{\"executed\":true}}\n", output.items);
+
+    const captured = params_text orelse return error.TestUnexpectedResult;
+    defer allocator.free(captured);
+    const params = try std.json.parseFromSlice(std.json.Value, allocator, captured, .{});
+    defer params.deinit();
+    try testing.expect(params.value == .array);
+    try testing.expect(params.value.array.items[0].string.len > 0);
+    const signatures = params.value.array.items[1].array;
+    try testing.expectEqual(@as(usize, 1), signatures.items.len);
+    try testing.expectEqualStrings("sig-a", signatures.items[0].string);
+}
+
 test "runCommand tx_send move-call with from-keystore uses local programmable builder path" {
     const testing = std.testing;
 

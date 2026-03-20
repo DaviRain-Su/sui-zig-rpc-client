@@ -285,6 +285,9 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
 - [x] When local programmable artifact helpers (`tx_build`, `tx_simulate`,
   `tx_payload`, `tx_send`) hit `InvalidCli` during lowering, return `null`
   so the command can continue into its non-local fallback path.
+- [x] Keep batched `tx_payload` / `tx_send` command sources on the generic
+  execute-plan path when local payload lowering fails with `InvalidCli`,
+  without dropping back to `unsafe_batchTransaction`.
 - [ ] Continue shrinking `unsafe_moveCall` usage.
 - [ ] Continue shrinking `unsafe_batchTransaction` usage.
 - [x] Keep construction, simulation, and execution aligned to the same local
