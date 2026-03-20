@@ -327,6 +327,9 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
 - [x] Add a repeatable local `Hashi` smoke for
   `utxo_id -> utxo -> deposit_request -> coin::zero<SUI> -> deposit` using
   `tx send --commands` with PTB result chaining and event extraction.
+- [x] Document the `Tempo / MPP`-style Sui wallet architecture as a Sui-native
+  wallet intent, sponsor, policy, and scheduler plan instead of a fake chain
+  transaction-type fork. See `docs/sui-wallet-mpp-plan.md`.
 
 ## Cetus Readiness Gaps
 
