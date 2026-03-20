@@ -94,6 +94,20 @@ bash scripts/hashi_finish_publish_smoke.sh /tmp/hashi_inspect/packages/hashi
 bash scripts/hashi_deposit_smoke.sh /tmp/hashi_inspect/packages/hashi
 ```
 
+`request_withdrawal` 这条也已经有 smoke 脚本，但它有真实前置条件：
+- 先提供一个已 `publish + finish_publish` 完成的 `Hashi` 部署
+  (`HASHI_PACKAGE_ID` / `HASHI_HASHI_OBJECT_ID`)
+- sender 账户里必须已经有一枚 `Coin<${package_id}::btc::BTC>`
+- 脚本会先自动探测 coin；如果没有，会明确报缺口并退出
+- 有 coin 时，它会用 `move function ... --emit-template preferred-send-request`
+  生成 withdrawal request artifact，再通过 `tx send --request` 发出
+
+```bash
+HASHI_PACKAGE_ID=0x... \
+HASHI_HASHI_OBJECT_ID=0x... \
+bash scripts/hashi_request_withdrawal_smoke.sh /tmp/hashi_inspect/packages/hashi
+```
+
 当前默认测试图覆盖：
 - `C3 PTBs Introduction`
 - `D4 Transaction submission, Balance Changes, and Gas Profiling`

@@ -234,6 +234,11 @@
   [`scripts/hashi_finish_publish_smoke.sh`](/Users/davirian/dev/zig/sui-zig-rpc-client/scripts/hashi_finish_publish_smoke.sh)
 - 已收第三条可重复 smoke：
   [`scripts/hashi_deposit_smoke.sh`](/Users/davirian/dev/zig/sui-zig-rpc-client/scripts/hashi_deposit_smoke.sh)
+- `request_withdrawal` 已有 preconditioned smoke scaffold：
+  [`scripts/hashi_request_withdrawal_smoke.sh`](/Users/davirian/dev/zig/sui-zig-rpc-client/scripts/hashi_request_withdrawal_smoke.sh)
+  它会自动探测 `Coin<BTC>`；当前需要：
+  - 一个已 `publish + finish_publish` 完成的 Hashi 部署
+  - 外部 seed 流先把 hBTC 铺到 sender
 - 仓库位置：`https://github.com/MystenLabs/hashi`
 - 适合当“本地发布后的重协议样本”，不适合直接替代 `Cetus` 做公共链上 smoke
 
