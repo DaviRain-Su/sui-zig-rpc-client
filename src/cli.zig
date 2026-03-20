@@ -3431,7 +3431,13 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
                     parsed.has_command = true;
                     i += 2;
                     if (i < args.len and !std.mem.startsWith(u8, args[i], "--")) {
-                        parsed.tx_digest = args[i];
+                        try setOptionalStringArg(
+                            allocator,
+                            &parsed,
+                            args[i],
+                            &parsed.owned_request_entry_id,
+                            &parsed.request_entry_id,
+                        );
                         i += 1;
                     }
                     continue;
@@ -6510,8 +6516,8 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
         if (parsed.tx_send_summarize and parsed.tx_send_observe) return error.InvalidCli;
     }
     if (parsed.command == .request_status) {
-        const digest = parsed.tx_digest orelse return error.InvalidCli;
-        if (digest.len == 0) return error.InvalidCli;
+        const entry_id = parsed.request_entry_id orelse return error.InvalidCli;
+        if (entry_id.len == 0) return error.InvalidCli;
     }
     if (parsed.command == .request_cancel or parsed.command == .request_resume) {
         const entry_id = parsed.request_entry_id orelse return error.InvalidCli;
@@ -10542,7 +10548,7 @@ test "parseCliArgs parses request status command" {
     defer parsed.deinit(allocator);
 
     try testing.expectEqual(Command.request_status, parsed.command);
-    try testing.expectEqualStrings("0xdigest", parsed.tx_digest.?);
+    try testing.expectEqualStrings("0xdigest", parsed.request_entry_id.?);
     try testing.expect(parsed.tx_send_summarize);
 }
 

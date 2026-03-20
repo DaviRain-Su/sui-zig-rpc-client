@@ -7169,15 +7169,60 @@ pub fn runCommandWithProgrammaticProvider(
             try writer.writeAll(execute_output.items);
         },
         .request_status => {
+            const target = args.request_entry_id orelse return error.InvalidCli;
+            var state = try request_state.loadDefaultRequestState(allocator);
+            defer state.deinit(allocator);
+
+            const matched_index = findRequestStateEntryIndex(&state, target);
+            const status_digest = if (matched_index) |index|
+                try allocator.dupe(u8, state.entries[index].digest orelse return error.InvalidCli)
+            else
+                try allocator.dupe(u8, target);
+            defer allocator.free(status_digest);
+
             var derived_args = args.*;
             derived_args.command = .tx_status;
-            return try runCommandWithProgrammaticProvider(
+            derived_args.tx_digest = status_digest;
+
+            var output = std.ArrayList(u8){};
+            defer output.deinit(allocator);
+            try runCommandWithProgrammaticProvider(
                 allocator,
                 rpc,
                 &derived_args,
-                writer,
+                output.writer(allocator),
                 effective_programmatic_provider,
             );
+
+            if (matched_index) |index| {
+                const now_ms = std.time.milliTimestamp();
+                if (std.json.parseFromSlice(std.json.Value, allocator, output.items, .{})) |parsed| {
+                    defer parsed.deinit();
+                    if (jsonFindFirstStringField(parsed.value, "digest")) |digest| {
+                        try replaceOptionalRequestStateField(allocator, &state.entries[index].digest, digest);
+                    }
+                    if (jsonFindFirstStringField(parsed.value, "status")) |status| {
+                        try setRequestStateEntryStateAt(
+                            allocator,
+                            &state.entries[index],
+                            if (std.mem.eql(u8, status, "success"))
+                                "confirmed"
+                            else if (std.mem.eql(u8, status, "failure"))
+                                "failed"
+                            else
+                                "submitted",
+                            now_ms,
+                        );
+                    } else {
+                        state.entries[index].updated_at_ms = now_ms;
+                    }
+                } else |_| {
+                    state.entries[index].updated_at_ms = now_ms;
+                }
+                try request_state.writeDefaultRequestState(allocator, &state);
+            }
+
+            try writer.writeAll(output.items);
         },
         .account_resources => {
             const resolved = try resolveAccountQueryOwner(allocator, args);
@@ -27320,6 +27365,77 @@ test "runCommand request_status prints structured summaries" {
     try testing.expectEqualStrings("success", parsed.value.object.get("status").?.string);
     try testing.expect(parsed.value.object.get("gas_summary") != null);
     try testing.expect(parsed.value.object.get("balance_changes") != null);
+}
+
+test "runCommand request_status updates tracked request lifecycle state" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const state_path = try std.fmt.allocPrint(allocator, "tmp_request_status_state_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(state_path);
+    defer std.fs.cwd().deleteFile(state_path) catch {};
+
+    const old_state_override = request_state.test_request_state_path_override;
+    request_state.test_request_state_path_override = state_path;
+    defer request_state.test_request_state_path_override = old_state_override;
+
+    var entries = try allocator.alloc(request_state.OwnedRequestEntry, 1);
+    entries[0] = .{
+        .id = try allocator.dupe(u8, "req-1"),
+        .kind = try allocator.dupe(u8, "request_execution"),
+        .state = try allocator.dupe(u8, "submitted"),
+        .request_json = try allocator.dupe(u8, "{\"commands\":[]}"),
+        .artifact_json = try allocator.dupe(u8, "{\"result\":{\"digest\":\"0xstatus\"}}"),
+        .digest = try allocator.dupe(u8, "0xstatus"),
+        .correlation_id = try allocator.dupe(u8, "req-1"),
+        .created_at_ms = 100,
+        .updated_at_ms = 100,
+        .submit_count = 1,
+        .last_error = null,
+    };
+    var state = request_state.OwnedRequestState{ .entries = entries };
+    defer state.deinit(allocator);
+    try request_state.writeDefaultRequestState(allocator, &state);
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "request",
+        "status",
+        "req-1",
+        "--summarize",
+    });
+    defer args.deinit(allocator);
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            std.debug.assert(std.mem.eql(u8, req.method, "sui_getTransactionBlock"));
+            std.debug.assert(std.mem.eql(u8, req.params_json, "[\"0xstatus\",{\"showEffects\":true,\"showBalanceChanges\":true}]"));
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"digest\":\"0xstatus\",\"effects\":{\"status\":{\"status\":\"success\"},\"gasUsed\":{\"computationCost\":\"6\",\"storageCost\":\"2\",\"storageRebate\":\"1\"}},\"balanceChanges\":[]}}",
+            );
+        }
+    }.call;
+
+    rpc.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    var loaded = try request_state.loadDefaultRequestState(allocator);
+    defer loaded.deinit(allocator);
+    try testing.expectEqualStrings("confirmed", loaded.entries[0].state);
+    try testing.expectEqualStrings("0xstatus", loaded.entries[0].digest.?);
 }
 
 test "runCommand request_rebroadcast sends stored requests and updates tracked digests" {
