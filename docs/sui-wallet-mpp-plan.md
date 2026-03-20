@@ -498,6 +498,8 @@ The local CLI now persists a concrete first pass of that state machine in
 - `request send` -> `submitted` / `confirmed` / `failed`
 - provider/signer execution failures should also write `failed + last_error`
   back into the same lifecycle entry instead of only bubbling to stderr
+- `request rebroadcast` should reuse the same send-like lifecycle semantics,
+  including `challenge_required` and direct `failed + last_error` updates
 - `request schedule` / `request cancel` / `request resume` keep driving the
   scheduler-specific states on the same store
 
