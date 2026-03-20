@@ -61,6 +61,17 @@ zig build move-fixture-test
 - `MystenLabs/hashi`：已完成本地 Move 可行性验证，适合作为本地 publish /
   testnet publish 后的重协议交互样本，不直接替代 `Cetus` 的公共链上 smoke
 
+`Hashi` 的第一条可重复 smoke 已经收成脚本：
+
+```bash
+bash scripts/hashi_publish_smoke.sh /tmp/hashi_inspect/packages/hashi
+```
+
+它会：
+- 编译真实 `Hashi` Move 包
+- 提取真实 publish `modules/dependencies`
+- 用这个 CLI 本地构一笔 `Publish` programmable transaction block
+
 当前默认测试图覆盖：
 - `C3 PTBs Introduction`
 - `D4 Transaction submission, Balance Changes, and Gas Profiling`

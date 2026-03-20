@@ -315,7 +315,9 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
   not only live protocol smoke checks.
 - [x] Validate `MystenLabs/hashi` as a heavy external protocol target; local
   Move tests pass and the package is suitable for post-publish CLI interaction
-  checks covering shared state, coins, governance, and multi-step flows.
+  checks covering shared state, coins, governance, and multi-step flows. Keep
+  a repeatable first-step publish smoke in
+  `scripts/hashi_publish_smoke.sh`.
 
 ## Cetus Readiness Gaps
 

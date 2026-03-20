@@ -228,6 +228,8 @@
 当前状态：
 - 已完成初步可行性验证：本地仓库 `packages/hashi` 的 Move tests 通过，`63/63`
   passed
+- 已收第一条可重复 smoke：
+  [`scripts/hashi_publish_smoke.sh`](/Users/davirian/dev/zig/sui-zig-rpc-client/scripts/hashi_publish_smoke.sh)
 - 仓库位置：`https://github.com/MystenLabs/hashi`
 - 适合当“本地发布后的重协议样本”，不适合直接替代 `Cetus` 做公共链上 smoke
 
