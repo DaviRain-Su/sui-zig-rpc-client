@@ -23,6 +23,7 @@ pub const Command = enum {
     wallet_passkey_register,
     wallet_passkey_login,
     wallet_passkey_revoke,
+    wallet_session_create,
     wallet_session_list,
     wallet_session_revoke,
     wallet_export_public,
@@ -128,6 +129,9 @@ pub const ParsedArgs = struct {
     wallet_rp_id: ?[]const u8 = null,
     wallet_device_name: ?[]const u8 = null,
     wallet_user_name: ?[]const u8 = null,
+    wallet_session_id: ?[]const u8 = null,
+    wallet_session_kind: ?[]const u8 = null,
+    wallet_session_expires_at_ms: ?u64 = null,
     wallet_activate: bool = true,
     intent_network: ?[]const u8 = null,
     intent_execution_mode: ?[]const u8 = null,
@@ -247,6 +251,8 @@ pub const ParsedArgs = struct {
     owned_wallet_rp_id: ?[]const u8 = null,
     owned_wallet_device_name: ?[]const u8 = null,
     owned_wallet_user_name: ?[]const u8 = null,
+    owned_wallet_session_id: ?[]const u8 = null,
+    owned_wallet_session_kind: ?[]const u8 = null,
     owned_intent_network: ?[]const u8 = null,
     owned_intent_execution_mode: ?[]const u8 = null,
     owned_intent_policy_json: ?[]const u8 = null,
@@ -323,6 +329,8 @@ pub const ParsedArgs = struct {
         if (self.owned_wallet_rp_id) |value| allocator.free(value);
         if (self.owned_wallet_device_name) |value| allocator.free(value);
         if (self.owned_wallet_user_name) |value| allocator.free(value);
+        if (self.owned_wallet_session_id) |value| allocator.free(value);
+        if (self.owned_wallet_session_kind) |value| allocator.free(value);
         if (self.owned_intent_network) |value| allocator.free(value);
         if (self.owned_intent_execution_mode) |value| allocator.free(value);
         if (self.owned_intent_policy_json) |value| allocator.free(value);
@@ -430,6 +438,10 @@ fn isWalletIntentLifecycleCommand(command: Command) bool {
         => true,
         else => false,
     };
+}
+
+fn usesWalletPolicyContract(command: Command) bool {
+    return isWalletIntentLifecycleCommand(command) or command == .wallet_session_create;
 }
 
 const LoadedArg = struct {
@@ -2973,6 +2985,16 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
                 if (std.mem.eql(u8, sub, "session")) {
                     if (i + 2 >= args.len) return error.InvalidCli;
                     const session_sub = args[i + 2];
+                    if (std.mem.eql(u8, session_sub, "create")) {
+                        parsed.command = .wallet_session_create;
+                        parsed.has_command = true;
+                        i += 3;
+                        if (i < args.len and !std.mem.startsWith(u8, args[i], "--")) {
+                            parsed.account_selector = args[i];
+                            i += 1;
+                        }
+                        continue;
+                    }
                     if (std.mem.eql(u8, session_sub, "list")) {
                         parsed.command = .wallet_session_list;
                         parsed.has_command = true;
@@ -4538,7 +4560,7 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
                     i += 2;
                     continue;
                 }
-                if (isWalletIntentLifecycleCommand(parsed.command) and (std.mem.eql(u8, token, "--policy") or std.mem.eql(u8, token, "--intent-policy"))) {
+                if (usesWalletPolicyContract(parsed.command) and (std.mem.eql(u8, token, "--policy") or std.mem.eql(u8, token, "--intent-policy"))) {
                     if (i + 1 >= args.len) return error.InvalidCli;
                     try setOptionalFileBackedArg(
                         allocator,
@@ -4549,19 +4571,19 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
                     i += 2;
                     continue;
                 }
-                if (isWalletIntentLifecycleCommand(parsed.command) and std.mem.eql(u8, token, "--policy-recurring-limit")) {
+                if (usesWalletPolicyContract(parsed.command) and std.mem.eql(u8, token, "--policy-recurring-limit")) {
                     if (i + 1 >= args.len) return error.InvalidCli;
                     parsed.intent_policy_recurring_limit = try parseIntValue(args[i + 1]);
                     i += 2;
                     continue;
                 }
-                if (isWalletIntentLifecycleCommand(parsed.command) and std.mem.eql(u8, token, "--policy-recurring-interval-ms")) {
+                if (usesWalletPolicyContract(parsed.command) and std.mem.eql(u8, token, "--policy-recurring-interval-ms")) {
                     if (i + 1 >= args.len) return error.InvalidCli;
                     parsed.intent_policy_recurring_interval_ms = try parseIntValue(args[i + 1]);
                     i += 2;
                     continue;
                 }
-                if (isWalletIntentLifecycleCommand(parsed.command) and std.mem.eql(u8, token, "--policy-recipient-allowlist")) {
+                if (usesWalletPolicyContract(parsed.command) and std.mem.eql(u8, token, "--policy-recipient-allowlist")) {
                     if (i + 1 >= args.len) return error.InvalidCli;
                     try setOptionalFileBackedArg(
                         allocator,
@@ -4572,7 +4594,7 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
                     i += 2;
                     continue;
                 }
-                if (isWalletIntentLifecycleCommand(parsed.command) and std.mem.eql(u8, token, "--policy-protocol-allowlist")) {
+                if (usesWalletPolicyContract(parsed.command) and std.mem.eql(u8, token, "--policy-protocol-allowlist")) {
                     if (i + 1 >= args.len) return error.InvalidCli;
                     try setOptionalFileBackedArg(
                         allocator,
@@ -4910,6 +4932,7 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
             parsed.command == .wallet_passkey_register or
             parsed.command == .wallet_passkey_login or
             parsed.command == .wallet_passkey_revoke or
+            parsed.command == .wallet_session_create or
             parsed.command == .wallet_session_list or
             parsed.command == .wallet_session_revoke or
             parsed.command == .wallet_use or
@@ -4924,7 +4947,8 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
             if ((parsed.command == .wallet_create or
                 parsed.command == .wallet_import or
                 parsed.command == .wallet_connect or
-                parsed.command == .wallet_passkey_register) and
+                parsed.command == .wallet_passkey_register or
+                parsed.command == .wallet_session_create) and
                 (std.mem.eql(u8, token, "--alias") or std.mem.eql(u8, token, "--label")))
             {
                 if (i + 1 >= args.len) return error.InvalidCli;
@@ -4944,6 +4968,81 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
                     allocator,
                     &parsed.owned_wallet_private_key,
                     &parsed.wallet_private_key,
+                    args[i + 1],
+                );
+                i += 2;
+                continue;
+            }
+            if (parsed.command == .wallet_session_create and std.mem.eql(u8, token, "--session-id")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                try setOptionalStringArg(
+                    allocator,
+                    &parsed,
+                    args[i + 1],
+                    &parsed.owned_wallet_session_id,
+                    &parsed.wallet_session_id,
+                );
+                i += 2;
+                continue;
+            }
+            if (parsed.command == .wallet_session_create and std.mem.eql(u8, token, "--session-kind")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                try setOptionalStringArg(
+                    allocator,
+                    &parsed,
+                    args[i + 1],
+                    &parsed.owned_wallet_session_kind,
+                    &parsed.wallet_session_kind,
+                );
+                i += 2;
+                continue;
+            }
+            if (parsed.command == .wallet_session_create and std.mem.eql(u8, token, "--expires-at-ms")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                parsed.wallet_session_expires_at_ms = try parseIntValue(args[i + 1]);
+                i += 2;
+                continue;
+            }
+            if (usesWalletPolicyContract(parsed.command) and (std.mem.eql(u8, token, "--policy") or std.mem.eql(u8, token, "--intent-policy"))) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                try setOptionalFileBackedArg(
+                    allocator,
+                    &parsed.owned_intent_policy_json,
+                    &parsed.intent_policy_json,
+                    args[i + 1],
+                );
+                i += 2;
+                continue;
+            }
+            if (usesWalletPolicyContract(parsed.command) and std.mem.eql(u8, token, "--policy-recurring-limit")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                parsed.intent_policy_recurring_limit = try parseIntValue(args[i + 1]);
+                i += 2;
+                continue;
+            }
+            if (usesWalletPolicyContract(parsed.command) and std.mem.eql(u8, token, "--policy-recurring-interval-ms")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                parsed.intent_policy_recurring_interval_ms = try parseIntValue(args[i + 1]);
+                i += 2;
+                continue;
+            }
+            if (usesWalletPolicyContract(parsed.command) and std.mem.eql(u8, token, "--policy-recipient-allowlist")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                try setOptionalFileBackedArg(
+                    allocator,
+                    &parsed.owned_intent_policy_recipient_allowlist_json,
+                    &parsed.intent_policy_recipient_allowlist_json,
+                    args[i + 1],
+                );
+                i += 2;
+                continue;
+            }
+            if (usesWalletPolicyContract(parsed.command) and std.mem.eql(u8, token, "--policy-protocol-allowlist")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                try setOptionalFileBackedArg(
+                    allocator,
+                    &parsed.owned_intent_policy_protocol_allowlist_json,
+                    &parsed.intent_policy_protocol_allowlist_json,
                     args[i + 1],
                 );
                 i += 2;
@@ -5909,8 +6008,11 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
         if (!std.mem.startsWith(u8, address, "0x")) return error.InvalidCli;
         if (parsed.wallet_credential_id == null or parsed.wallet_public_key_value == null) return error.InvalidCli;
     }
+    if (parsed.command == .wallet_session_create) {
+        if (parsed.wallet_session_id == null) return error.InvalidCli;
+    }
 
-    if (isWalletIntentLifecycleCommand(parsed.command)) {
+    if (usesWalletPolicyContract(parsed.command)) {
         const has_recurring_limit = parsed.intent_policy_recurring_limit != null;
         const has_recurring_interval = parsed.intent_policy_recurring_interval_ms != null;
         if (has_recurring_limit != has_recurring_interval) return error.InvalidCli;
@@ -6288,6 +6390,13 @@ pub fn printUsage(writer: anytype) !void {
         "  wallet passkey revoke <selector|credential-id|0xaddress>\n" ++
         "                                       Revoke a locally registered passkey credential\n" ++
         "    --json                            Emit machine-readable wallet metadata\n" ++
+        "  wallet session create [selector]   Register a delegated session entry for a wallet selector or active wallet\n" ++
+        "    --session-id <id>                Required stable session identifier\n" ++
+        "    --session-kind <kind>            Optional session kind label (for example passkey)\n" ++
+        "    --label <name>                   Optional human-readable session label\n" ++
+        "    --expires-at-ms <ms>             Optional expiry timestamp for the local session record\n" ++
+        "    --policy <json|@file>            Optional session policy object; also supports --policy-recurring-* and allowlists\n" ++
+        "    --json                            Emit machine-readable session metadata\n" ++
         "  wallet session list                List locally tracked delegated session entries\n" ++
         "    --json                            Emit machine-readable session inventory\n" ++
         "  wallet session revoke <selector|label|session-id|0xaddress>\n" ++
@@ -9221,6 +9330,54 @@ test "parseCliArgs parses wallet session list command" {
     defer parsed.deinit(allocator);
 
     try testing.expectEqual(Command.wallet_session_list, parsed.command);
+    try testing.expect(parsed.wallet_json);
+}
+
+test "parseCliArgs parses wallet session create command" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "wallet",
+        "session",
+        "create",
+        "passkey:iphone",
+        "--session-id",
+        "session-1",
+        "--session-kind",
+        "passkey",
+        "--label",
+        "swap-session",
+        "--expires-at-ms",
+        "123456789",
+        "--policy",
+        "{\"session_key\":\"0x1\"}",
+        "--policy-recurring-limit",
+        "1000000",
+        "--policy-recurring-interval-ms",
+        "86400000",
+        "--policy-recipient-allowlist",
+        "[\"0xabc\"]",
+        "--policy-protocol-allowlist",
+        "[\"cetus::swap\"]",
+        "--json",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.wallet_session_create, parsed.command);
+    try testing.expectEqualStrings("passkey:iphone", parsed.account_selector.?);
+    try testing.expectEqualStrings("session-1", parsed.wallet_session_id.?);
+    try testing.expectEqualStrings("passkey", parsed.wallet_session_kind.?);
+    try testing.expectEqualStrings("swap-session", parsed.wallet_alias.?);
+    try testing.expectEqual(@as(?u64, 123456789), parsed.wallet_session_expires_at_ms);
+    try testing.expectEqualStrings("{\"session_key\":\"0x1\"}", parsed.intent_policy_json.?);
+    try testing.expectEqual(@as(?u64, 1000000), parsed.intent_policy_recurring_limit);
+    try testing.expectEqual(@as(?u64, 86400000), parsed.intent_policy_recurring_interval_ms);
+    try testing.expectEqualStrings("[\"0xabc\"]", parsed.intent_policy_recipient_allowlist_json.?);
+    try testing.expectEqualStrings("[\"cetus::swap\"]", parsed.intent_policy_protocol_allowlist_json.?);
     try testing.expect(parsed.wallet_json);
 }
 

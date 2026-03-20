@@ -996,6 +996,7 @@ pub fn main() !void {
 - `wallet passkey register <0xaddress>`: 注册 embedded passkey 条目；支持 `--label`、`--credential-id`、`--public-key`、`--rp-id`、`--device-name`、`--user-name`、`--network`、`--no-activate`。
 - `wallet passkey login <selector|label|credential-id|0xaddress>`: 将 passkey 条目切成 active wallet selector，并把非 revoked 条目标回 `active`。
 - `wallet passkey revoke <selector|label|credential-id|0xaddress>`: 把 passkey 条目标成 `revoked`；命中 active selector 时会同步清空 active wallet state。
+- `wallet session create [selector]`: 为 wallet selector 或当前 active wallet 注册 delegated session 条目；支持 `--session-id`、`--session-kind`、`--label`、`--expires-at-ms` 和统一的 `--policy*` 字段。`session_kind` 默认会从 selector/source 推断成 `passkey`、`external_wallet` 或 `local_signer`。
 - `wallet session list`: 列出本地 delegated session registry 条目；输出 `selector/session_id/state/wallet_selector/active_wallet_match`，适合检查后续 session policy 生命周期。
 - `wallet session revoke <selector|label|session-id|0xaddress>`: 把本地 delegated session 条目标成 `revoked`；不会隐式断开底层 wallet selector，只更新 session registry。
 - `wallet address [selector]`: 输出解析后的钱包地址；未给 selector 时优先读取 active wallet selector，再回退到默认 keystore 的首个地址。
@@ -1061,7 +1062,7 @@ pub fn main() !void {
   - 非 JSON/YAML 结构时按纯文本按原样解析为 URL（会 trim 空白）
 - `SUI_WALLET_STATE`: 覆盖 `wallet create/use` 和无 selector `wallet *` 命令使用的 active wallet state 文件（默认 `~/.sui/sui_config/wallet_state.json`）。
 - `SUI_WALLET_REGISTRY`: 覆盖 `wallet accounts/connect/disconnect/passkey *` 命令使用的 wallet registry 文件（默认 `~/.sui/sui_config/wallet_registry.json`）。
-- `SUI_WALLET_SESSIONS`: 覆盖 `wallet session list/revoke` 命令使用的 delegated session registry 文件（默认 `~/.sui/sui_config/wallet_sessions.json`）。
+- `SUI_WALLET_SESSIONS`: 覆盖 `wallet session create/list/revoke` 命令使用的 delegated session registry 文件（默认 `~/.sui/sui_config/wallet_sessions.json`）。
 - `SUI_REQUEST_STATE`: 覆盖 `request schedule/list/cancel/resume/rebroadcast` 命令使用的本地 request 状态文件（默认 `~/.sui/sui_config/request_state.json`）。
 - `SUI_CONFIG` 示例：
   - `client.yaml` 示例：

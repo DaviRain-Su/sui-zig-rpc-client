@@ -368,6 +368,7 @@ Implemented wallet lifecycle commands:
 - selector-less wallet queries resolve through active state first
 - `wallet export-public`
 - `wallet signer inspect`
+- `wallet session create`
 - `wallet session list`
 - `wallet session revoke`
 - `wallet intent build`
