@@ -3096,6 +3096,104 @@ test "runCommand tx_payload rejects non-object options for raw tx bytes" {
     ));
 }
 
+test "runCommand tx_payload with local default keystore signer stays fully local" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const seed = [_]u8{0x52} ** 32;
+    var encoded_key_bytes: [33]u8 = undefined;
+    encoded_key_bytes[0] = 0;
+    encoded_key_bytes[1..].* = seed;
+    const encoded_len = std.base64.standard.Encoder.calcSize(encoded_key_bytes.len);
+    const encoded_key = try allocator.alloc(u8, encoded_len);
+    defer allocator.free(encoded_key);
+    _ = std.base64.standard.Encoder.encode(encoded_key, &encoded_key_bytes);
+
+    const keystore_contents = try std.fmt.allocPrint(allocator, "[\"{s}\"]", .{encoded_key});
+    defer allocator.free(keystore_contents);
+    const sender_address = (try client.keystore.resolveAddressFromKeystoreContents(
+        allocator,
+        keystore_contents,
+        encoded_key,
+    )).?;
+    defer allocator.free(sender_address);
+
+    const keystore_path = "tmp_tx_payload_local_keystore.json";
+    try std.fs.cwd().writeFile(.{
+        .sub_path = keystore_path,
+        .data = keystore_contents,
+    });
+    defer std.fs.cwd().deleteFile(keystore_path) catch {};
+
+    const old_override = client.keystore.test_keystore_path_override;
+    client.keystore.test_keystore_path_override = keystore_path;
+    defer client.keystore.test_keystore_path_override = old_override;
+
+    const commands_json = "[{\"kind\":\"Publish\",\"modules\":[\"AQID\"],\"dependencies\":[\"0x2\"]}]";
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "tx",
+        "payload",
+        "--commands",
+        commands_json,
+        "--sender",
+        sender_address,
+        "--gas-budget",
+        "1000",
+        "--gas-price",
+        "1",
+        "--gas-payment",
+        "[{\"objectId\":\"0x2222222222222222222222222222222222222222222222222222222222222222\",\"version\":\"1\",\"digest\":\"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}]",
+        "--from-keystore",
+        "--signer",
+        sender_address,
+        "--summarize",
+    });
+    defer args.deinit(allocator);
+
+    const State = struct {
+        call_count: usize = 0,
+        last_method: ?[]const u8 = null,
+    };
+    var state = State{};
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const ctx = @as(*State, @ptrCast(@alignCast(context)));
+            ctx.call_count += 1;
+            ctx.last_method = req.method;
+            return alloc.dupe(u8, "{\"result\":\"unexpected\"}");
+        }
+    }.call;
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = &state,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    runCommand(allocator, &rpc, &args, output.writer(allocator)) catch |err| {
+        std.debug.print("unexpected rpc call_count={d} last_method={s}\n", .{
+            state.call_count,
+            state.last_method orelse "<none>",
+        });
+        return err;
+    };
+
+    try testing.expectEqual(@as(usize, 0), state.call_count);
+
+    const summary = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer summary.deinit();
+    try testing.expectEqualStrings("tx_bytes", summary.value.object.get("data_kind").?.string);
+    try testing.expectEqual(@as(i64, 1), summary.value.object.get("signature_count").?.integer);
+}
+
 test "runCommand help writes usage" {
     const testing = std.testing;
 

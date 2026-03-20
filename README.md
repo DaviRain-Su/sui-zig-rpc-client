@@ -72,6 +72,17 @@ bash scripts/hashi_publish_smoke.sh /tmp/hashi_inspect/packages/hashi
 - 提取真实 publish `modules/dependencies`
 - 用这个 CLI 本地构一笔 `Publish` programmable transaction block
 
+第二条 smoke 现在也已经打通，直接覆盖：
+- 用这个 CLI 本地 `Publish + TransferObjects(Result(0))`
+- 自动抽取真实 `package_id` / shared `Hashi` / `UpgradeCap`
+- 用 `move function ... --emit-template preferred-send-request`
+  生成 `finish_publish` request artifact
+- 再用 `tx send --request` 真实发出 `finish_publish`
+
+```bash
+bash scripts/hashi_finish_publish_smoke.sh /tmp/hashi_inspect/packages/hashi
+```
+
 当前默认测试图覆盖：
 - `C3 PTBs Introduction`
 - `D4 Transaction submission, Balance Changes, and Gas Profiling`

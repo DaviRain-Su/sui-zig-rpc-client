@@ -318,6 +318,9 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
   checks covering shared state, coins, governance, and multi-step flows. Keep
   a repeatable first-step publish smoke in
   `scripts/hashi_publish_smoke.sh`.
+- [x] Add a repeatable local `Hashi` smoke that completes
+  `publish -> finish_publish` through this CLI's `move function` template
+  generation and `tx send --request` execution path, not only raw publish.
 
 ## Cetus Readiness Gaps
 

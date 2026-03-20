@@ -12359,7 +12359,11 @@ pub const SuiRpcClient = struct {
         );
         defer parts.deinit(allocator);
 
-        if (accountProviderCanUseLocalOwnedPlanExecutePayload(provider)) {
+        const prefers_structured_execute_plan = switch (provider) {
+            .remote_signer, .zklogin, .passkey, .multisig => true,
+            else => false,
+        };
+        if (prefers_structured_execute_plan) {
             var owned = try tx_request_builder.ownOptions(allocator, .{
                 .source = .{ .commands_json = parts.commands_json },
                 .sender = parts.sender,
@@ -12388,10 +12392,11 @@ pub const SuiRpcClient = struct {
             tx_bytes,
             .{
                 .source = .{ .commands_json = parts.commands_json },
-                .sender = sender,
+                .sender = parts.sender,
                 .gas_budget = gas_budget,
                 .gas_price = gas_price,
                 .gas_payment_json = gas_payment_json,
+                .expiration_json = parts.expiration_json,
                 .options_json = options_json,
             },
             provider,
@@ -12422,7 +12427,11 @@ pub const SuiRpcClient = struct {
         );
         defer parts.deinit(allocator);
 
-        if (accountProviderCanUseLocalOwnedPlanExecutePayload(provider)) {
+        const prefers_structured_execute_plan = switch (provider) {
+            .remote_signer, .zklogin, .passkey, .multisig => true,
+            else => false,
+        };
+        if (prefers_structured_execute_plan) {
             var owned = try tx_request_builder.ownOptions(allocator, .{
                 .source = .{ .commands_json = parts.commands_json },
                 .sender = parts.sender,
@@ -12439,7 +12448,7 @@ pub const SuiRpcClient = struct {
 
         const options: tx_request_builder.ProgrammaticRequestOptions = .{
             .source = .{ .commands_json = parts.commands_json },
-            .sender = sender,
+            .sender = parts.sender,
             .gas_budget = gas_budget,
             .gas_price = gas_price,
             .gas_payment_json = gas_payment_json,
@@ -12485,7 +12494,11 @@ pub const SuiRpcClient = struct {
         action: ProgrammaticClientAction,
     ) !ProgrammaticClientActionResult {
         const updated_provider = try self.applySessionChallengeResponse(provider, response);
-        if (accountProviderCanUseLocalOwnedPlanExecutePayload(updated_provider)) {
+        const prefers_structured_execute_plan = switch (updated_provider) {
+            .remote_signer, .zklogin, .passkey, .multisig => true,
+            else => false,
+        };
+        if (prefers_structured_execute_plan) {
             var parts = try self.ownLocalProgrammableTransactionPartsFromCommandSource(
                 allocator,
                 source,
