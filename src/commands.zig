@@ -1682,13 +1682,17 @@ fn buildUnsafeCommandSourceTxBytes(
 
     const gas_object_id = try resolvedUnsafeMoveCallGasObjectId(allocator, rpc, args, sender);
     defer if (gas_object_id) |value| allocator.free(value);
+    const gas_budget = args.tx_build_gas_budget orelse if (args.tx_build_auto_gas_budget)
+        provisional_auto_gas_budget
+    else
+        return error.InvalidCli;
 
     return try rpc.buildCommandSourceTxBytes(
         allocator,
         sender,
         owned_source.source,
         gas_object_id,
-        args.tx_build_gas_budget orelse return error.InvalidCli,
+        gas_budget,
     );
 }
 
@@ -1709,7 +1713,7 @@ fn buildLocalCommandSourceExecutePayload(
     else
         allowReferenceGasPriceFallbackForLocalSignerPath(args);
 
-    var local = try ownLocalCommandSourceBuildContext(
+    var local = ownLocalCommandSourceBuildContext(
         allocator,
         rpc,
         args,
@@ -1718,7 +1722,10 @@ fn buildLocalCommandSourceExecutePayload(
         allow_reference_gas_price_fallback,
         false,
         implicit_auto_gas_payment_min_balance,
-    ) orelse return null;
+    ) catch |err| switch (err) {
+        error.InvalidCli => return null,
+        else => return err,
+    } orelse return null;
     defer local.deinit(allocator);
 
     if (args.signatures.items.len != 0) {
@@ -1785,7 +1792,7 @@ fn buildLocalCommandSourceTxBytes(
     provider: ?client.tx_request_builder.AccountProvider,
 ) !?[]u8 {
     const implicit_auto_gas_payment_min_balance = implicitLocalGasPaymentFallbackMinBalance(args, provider);
-    var local = try ownLocalCommandSourceBuildContext(
+    var local = ownLocalCommandSourceBuildContext(
         allocator,
         rpc,
         args,
@@ -1794,7 +1801,10 @@ fn buildLocalCommandSourceTxBytes(
         true,
         false,
         implicit_auto_gas_payment_min_balance,
-    ) orelse return null;
+    ) catch |err| switch (err) {
+        error.InvalidCli => return null,
+        else => return err,
+    } orelse return null;
     defer local.deinit(allocator);
 
     return rpc.buildLocalProgrammableTransactionTxBytesFromCommandSource(
@@ -1960,7 +1970,7 @@ fn buildLocalCommandSourceTransactionBlock(
     provider: ?client.tx_request_builder.AccountProvider,
 ) !?[]u8 {
     const implicit_auto_gas_payment_min_balance = implicitLocalGasPaymentFallbackMinBalance(args, provider);
-    var local = try ownLocalCommandSourceBuildContext(
+    var local = ownLocalCommandSourceBuildContext(
         allocator,
         rpc,
         args,
@@ -1969,7 +1979,10 @@ fn buildLocalCommandSourceTransactionBlock(
         true,
         false,
         implicit_auto_gas_payment_min_balance,
-    ) orelse return null;
+    ) catch |err| switch (err) {
+        error.InvalidCli => return null,
+        else => return err,
+    } orelse return null;
     defer local.deinit(allocator);
 
     return rpc.buildLocalProgrammableTransactionBlockFromCommandSource(
@@ -1993,7 +2006,7 @@ fn buildLocalCommandSourceInspectPayload(
     provider: ?client.tx_request_builder.AccountProvider,
 ) !?[]u8 {
     const implicit_auto_gas_payment_min_balance = implicitLocalGasPaymentFallbackMinBalance(args, provider);
-    var local = try ownLocalCommandSourceBuildContext(
+    var local = ownLocalCommandSourceBuildContext(
         allocator,
         rpc,
         args,
@@ -2002,7 +2015,10 @@ fn buildLocalCommandSourceInspectPayload(
         true,
         false,
         implicit_auto_gas_payment_min_balance,
-    ) orelse return null;
+    ) catch |err| switch (err) {
+        error.InvalidCli => return null,
+        else => return err,
+    } orelse return null;
     defer local.deinit(allocator);
 
     return rpc.buildLocalProgrammableTransactionInspectPayloadFromCommandSource(
@@ -21128,6 +21144,99 @@ test "runCommand tx_dry_run falls back to unsafe tx bytes when local lowering re
     try testing.expect(params.value.array.items[0].string.len > 0);
 }
 
+test "runCommand tx_dry_run with auto gas budget falls back after provisional local lowering returns invalid cli" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var args = cli.ParsedArgs{
+        .command = .tx_dry_run,
+        .has_command = true,
+        .tx_build_package = "0x2",
+        .tx_build_module = "counter",
+        .tx_build_function = "increment",
+        .tx_build_type_args = "[]",
+        .tx_build_args = "[7,7]",
+        .tx_build_sender = "0x123",
+        .tx_build_gas_price = 8,
+        .tx_build_gas_payment = "[{\"objectId\":\"0x999\",\"version\":\"3\",\"digest\":\"0x3333333333333333333333333333333333333333333333333333333333333333\"}]",
+        .tx_build_auto_gas_budget = true,
+    };
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    const State = struct {
+        normalized: usize = 0,
+        unsafe: usize = 0,
+        dry_run: usize = 0,
+        unsafe_params_text: ?[]const u8 = null,
+    };
+    var state = State{};
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const st = @as(*State, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                st.normalized += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"parameters\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"counter\",\"name\":\"Counter\"}},\"U64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\"}}}]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveModule")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"structs\":{\"Counter\":{\"abilities\":{\"abilities\":[\"Key\",\"Store\"]},\"typeParameters\":[],\"fields\":[{\"name\":\"id\",\"type\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"object\",\"name\":\"UID\",\"typeParams\":[]}}}]}}}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getObject")) {
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, "0x999") != null);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":{\"objectId\":\"0x999\",\"version\":\"3\",\"digest\":\"0x3333333333333333333333333333333333333333333333333333333333333333\"}}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "suix_getReferenceGasPrice")) {
+                return alloc.dupe(u8, "{\"result\":\"8\"}");
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall")) {
+                st.unsafe += 1;
+                st.unsafe_params_text = try alloc.dupe(u8, req.params_json);
+                return alloc.dupe(u8, "{\"result\":{\"txBytes\":\"AQIDBA==\"}}");
+            }
+            if (std.mem.eql(u8, req.method, "sui_dryRunTransactionBlock")) {
+                st.dry_run += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"effects\":{\"status\":{\"status\":\"success\"},\"gasUsed\":{\"computationCost\":\"7\",\"storageCost\":\"2\",\"storageRebate\":\"1\"}},\"balanceChanges\":[]}}",
+                );
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+    rpc.request_sender = .{
+        .context = &state,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    try testing.expect(state.normalized >= 1);
+    try testing.expectEqual(@as(usize, 1), state.unsafe);
+    try testing.expectEqual(@as(usize, 1), state.dry_run);
+    try testing.expect(std.mem.indexOf(u8, output.items, "success") != null);
+
+    const unsafe_params = state.unsafe_params_text orelse return error.TestUnexpectedResult;
+    defer allocator.free(unsafe_params);
+    try testing.expect(std.mem.indexOf(u8, unsafe_params, "\"100000000\"") != null);
+}
+
 test "runCommandWithProgrammaticProvider tx_build programmable applies generic provider challenge response" {
     const testing = std.testing;
 
@@ -30932,6 +31041,78 @@ test "runCommand tx_build programmable falls back when local artifact lowering r
 
     try testing.expectEqualStrings("ProgrammableTransaction", parsed.value.object.get("kind").?.string);
     try testing.expectEqualStrings("0xabc", parsed.value.object.get("sender").?.string);
+    const commands = parsed.value.object.get("commands").?;
+    try testing.expect(commands == .array);
+    try testing.expectEqual(@as(usize, 1), commands.array.items.len);
+    try testing.expectEqualStrings("MoveCall", commands.array.items[0].object.get("kind").?.string);
+}
+
+test "runCommand tx_build programmable with auto gas budget falls back when provisional local lowering returns invalid cli" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var args = cli.ParsedArgs{
+        .command = .tx_build,
+        .has_command = true,
+        .tx_build_kind = .programmable,
+        .tx_build_commands = "[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"typeArguments\":[],\"arguments\":[7,7]}]",
+        .tx_build_sender = "0xabc",
+        .tx_build_gas_price = 7,
+        .tx_build_gas_payment = "[{\"objectId\":\"0x999\",\"version\":\"3\",\"digest\":\"0x3333333333333333333333333333333333333333333333333333333333333333\"}]",
+        .tx_build_auto_gas_budget = true,
+    };
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    const State = struct {
+        normalized: usize = 0,
+        unsafe: usize = 0,
+    };
+    var state = State{};
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const st = @as(*State, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                st.normalized += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"parameters\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"counter\",\"name\":\"Counter\"}},\"U64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\"}}}]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveModule")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"structs\":{\"Counter\":{\"abilities\":{\"abilities\":[\"Key\",\"Store\"]},\"typeParameters\":[],\"fields\":[{\"name\":\"id\",\"type\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"object\",\"name\":\"UID\",\"typeParams\":[]}}}]}}}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall") or std.mem.eql(u8, req.method, "unsafe_batchTransaction")) {
+                st.unsafe += 1;
+                return alloc.dupe(u8, "{\"result\":{\"txBytes\":\"AQIDBA==\"}}");
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+    rpc.request_sender = .{
+        .context = &state,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    try testing.expect(state.normalized >= 1);
+    try testing.expectEqual(@as(usize, 0), state.unsafe);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+
+    try testing.expectEqualStrings("ProgrammableTransaction", parsed.value.object.get("kind").?.string);
     const commands = parsed.value.object.get("commands").?;
     try testing.expect(commands == .array);
     try testing.expectEqual(@as(usize, 1), commands.array.items.len);
