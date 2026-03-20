@@ -382,6 +382,16 @@ wallet inventory, active wallet selection, delegated sessions, first-class
 wallet intents, wallet-facing sponsor/schedule aliases, and a convenience
 funding path all exist as CLI surfaces.
 
+Delegated sessions are also first-class artifact inputs now:
+
+- `wallet intent build --session <selector|label|session-id|0xaddress>`
+- `request sponsor --session <...>`
+- `request schedule --session <...>`
+
+Those commands resolve the local delegated session registry entry, emit a
+top-level `delegated_session` object, and treat the stored session policy as
+the base policy contract before applying inline `--policy*` overrides.
+
 ### `tempo request` Style Capabilities
 
 The design already includes or strongly implies:

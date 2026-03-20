@@ -8,6 +8,7 @@ pub const ParsedEnvelope = struct {
     network: ?[]u8 = null,
     execution_mode: ?[]u8 = null,
     policy_json: ?[]u8 = null,
+    delegated_session_json: ?[]u8 = null,
     correlation_id: ?[]u8 = null,
     valid_after_ms: ?u64 = null,
     valid_before_ms: ?u64 = null,
@@ -29,6 +30,7 @@ pub const ParsedEnvelope = struct {
         if (self.network) |value| allocator.free(value);
         if (self.execution_mode) |value| allocator.free(value);
         if (self.policy_json) |value| allocator.free(value);
+        if (self.delegated_session_json) |value| allocator.free(value);
         if (self.correlation_id) |value| allocator.free(value);
         if (self.sponsor_mode) |value| allocator.free(value);
         if (self.sponsor_policy_json) |value| allocator.free(value);
@@ -154,6 +156,7 @@ pub fn parseEnvelope(
         .network = try jsonOptionalStringDup(allocator, object, &.{"network"}),
         .execution_mode = try jsonOptionalStringDup(allocator, object, &.{ "execution_mode", "executionMode" }),
         .policy_json = try jsonOptionalCompactValue(allocator, object, &.{ "policy", "policy_metadata" }),
+        .delegated_session_json = try jsonOptionalCompactValue(allocator, object, &.{ "delegated_session", "delegatedSession" }),
         .correlation_id = try jsonOptionalStringDup(allocator, object, &.{ "correlation_id", "correlationId" }),
         .valid_after_ms = try jsonOptionalU64(object, &.{ "valid_after_ms", "validAfterMs" }),
         .valid_before_ms = try jsonOptionalU64(object, &.{ "valid_before_ms", "validBeforeMs" }),
@@ -241,8 +244,7 @@ pub fn parseEnvelope(
 test "wallet_intent parseEnvelope reads request and sponsor metadata" {
     const testing = std.testing;
 
-    var parsed = try parseEnvelope(
-        testing.allocator,
+    var parsed = try parseEnvelope(testing.allocator,
         \\{
         \\  "artifact_kind":"wallet_intent",
         \\  "schema_version":1,
@@ -253,6 +255,7 @@ test "wallet_intent parseEnvelope reads request and sponsor metadata" {
         \\  "payment":{"payment_reference":"pay-1","memo":"coffee","invoice_reference":"inv-7","reconciliation_group":"merchant-a"},
         \\  "concurrency":{"execution_lane":"lane-1","gas_lane":"gas-a","conflict_keys":["shared:pool-1","owned:wallet-1"],"conflict_strategy":"serialize_same_lane"},
         \\  "policy":{"session_key":"0x1"},
+        \\  "delegated_session":{"source_kind":"session_registry","selector":"session:wallet-session-1","session_id":"wallet-session-1"},
         \\  "correlation_id":"req-1",
         \\  "valid_after_ms":100,
         \\  "valid_before_ms":200
@@ -276,6 +279,7 @@ test "wallet_intent parseEnvelope reads request and sponsor metadata" {
     try testing.expectEqualStrings("gas-a", parsed.gas_lane.?);
     try testing.expectEqualStrings("[\"shared:pool-1\",\"owned:wallet-1\"]", parsed.conflict_keys_json.?);
     try testing.expectEqualStrings("serialize_same_lane", parsed.conflict_strategy.?);
+    try testing.expectEqualStrings("{\"source_kind\":\"session_registry\",\"selector\":\"session:wallet-session-1\",\"session_id\":\"wallet-session-1\"}", parsed.delegated_session_json.?);
     try testing.expectEqualStrings("req-1", parsed.correlation_id.?);
     try testing.expectEqual(@as(u64, 100), parsed.valid_after_ms.?);
     try testing.expectEqual(@as(u64, 200), parsed.valid_before_ms.?);

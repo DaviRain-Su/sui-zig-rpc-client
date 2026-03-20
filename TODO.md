@@ -392,5 +392,7 @@ what the generic path still needs to finish.
   `wallet fund`.
 - [x] Add wallet-facing sponsor/schedule aliases:
   `wallet sponsor request` and `wallet schedule create`.
+- [x] Let `wallet intent` / `request sponsor` / `request schedule` inherit
+  delegated session metadata and base policy through `--session`.
 - [x] Add deterministic wallet smoke regressions for sponsored transfer,
   sponsored swap, session-limited swap, and scheduled self-transfer.

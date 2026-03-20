@@ -3104,6 +3104,34 @@ const OwnedWalletPolicyInspectSummary = struct {
     }
 };
 
+const OwnedDelegatedSessionArtifactSummary = struct {
+    source_kind: []u8,
+    selector: []u8,
+    label: ?[]u8 = null,
+    wallet_selector: ?[]u8 = null,
+    address: ?[]u8 = null,
+    session_id: []u8,
+    session_kind: ?[]u8 = null,
+    state: []u8,
+    expires_at_ms: ?i64 = null,
+    active_wallet_match: bool = false,
+    registry_path: ?[]u8 = null,
+    policy_json: ?[]u8 = null,
+
+    fn deinit(self: *OwnedDelegatedSessionArtifactSummary, allocator: std.mem.Allocator) void {
+        allocator.free(self.source_kind);
+        allocator.free(self.selector);
+        if (self.label) |value| allocator.free(value);
+        if (self.wallet_selector) |value| allocator.free(value);
+        if (self.address) |value| allocator.free(value);
+        allocator.free(self.session_id);
+        if (self.session_kind) |value| allocator.free(value);
+        allocator.free(self.state);
+        if (self.registry_path) |value| allocator.free(value);
+        if (self.policy_json) |value| allocator.free(value);
+    }
+};
+
 const OwnedResolvedWalletEntrySummary = struct {
     source_kind: []u8,
     selector: ?[]u8 = null,
@@ -3540,6 +3568,114 @@ fn sessionEntryMatchesActiveWalletSelector(
         if (sameWalletSelectorOrAddress(active_selector, wallet_selector, entry.address)) return true;
     }
     return sameWalletSelectorOrAddress(active_selector, entry.selector, entry.address);
+}
+
+fn validateDelegatedSessionEntryUsable(
+    entry: *const wallet_session_registry.OwnedWalletSessionEntry,
+) !void {
+    if (!std.mem.eql(u8, entry.state, "active")) return error.InvalidCli;
+    if (entry.expires_at_ms) |expires_at_ms| {
+        if (expires_at_ms <= std.time.milliTimestamp()) return error.InvalidCli;
+    }
+}
+
+fn resolveDelegatedSessionArtifactSummary(
+    allocator: std.mem.Allocator,
+    args: *const cli.ParsedArgs,
+) !?OwnedDelegatedSessionArtifactSummary {
+    const selector_or_address = args.request_session_selector orelse return null;
+
+    const registry_path = try wallet_session_registry.resolveDefaultWalletSessionRegistryPath(allocator) orelse return error.InvalidCli;
+    defer allocator.free(registry_path);
+
+    var registry = try wallet_session_registry.loadDefaultWalletSessionRegistry(allocator);
+    defer registry.deinit(allocator);
+
+    const index = findWalletSessionIndexAnyState(&registry, selector_or_address) orelse return error.InvalidCli;
+    const entry = &registry.entries[index];
+    try validateDelegatedSessionEntryUsable(entry);
+
+    const active_selector = try wallet_state.resolveActiveSelector(allocator);
+    defer if (active_selector) |value| allocator.free(value);
+
+    return .{
+        .source_kind = try allocator.dupe(u8, "session_registry"),
+        .selector = try allocator.dupe(u8, entry.selector),
+        .label = try duplicateOptionalSlice(allocator, entry.label),
+        .wallet_selector = try duplicateOptionalSlice(allocator, entry.wallet_selector),
+        .address = try duplicateOptionalSlice(allocator, entry.address),
+        .session_id = try allocator.dupe(u8, entry.session_id),
+        .session_kind = try duplicateOptionalSlice(allocator, entry.session_kind),
+        .state = try allocator.dupe(u8, entry.state),
+        .expires_at_ms = entry.expires_at_ms,
+        .active_wallet_match = sessionEntryMatchesActiveWalletSelector(active_selector, entry),
+        .registry_path = try allocator.dupe(u8, registry_path),
+        .policy_json = try duplicateOptionalSlice(allocator, entry.policy_json),
+    };
+}
+
+fn writeDelegatedSessionArtifactMetadata(
+    writer: anytype,
+    session: ?*const OwnedDelegatedSessionArtifactSummary,
+    embedded_json: ?[]const u8,
+) !void {
+    if (session) |value| {
+        try writer.writeAll("{");
+        try writer.writeAll("\"source_kind\":");
+        try writer.print("{f}", .{std.json.fmt(value.source_kind, .{})});
+        try writer.writeAll(",\"selector\":");
+        try writer.print("{f}", .{std.json.fmt(value.selector, .{})});
+        try writer.writeAll(",\"label\":");
+        if (value.label) |label| {
+            try writer.print("{f}", .{std.json.fmt(label, .{})});
+        } else {
+            try writer.writeAll("null");
+        }
+        try writer.writeAll(",\"wallet_selector\":");
+        if (value.wallet_selector) |wallet_selector| {
+            try writer.print("{f}", .{std.json.fmt(wallet_selector, .{})});
+        } else {
+            try writer.writeAll("null");
+        }
+        try writer.writeAll(",\"address\":");
+        if (value.address) |address| {
+            try writer.print("{f}", .{std.json.fmt(address, .{})});
+        } else {
+            try writer.writeAll("null");
+        }
+        try writer.writeAll(",\"session_id\":");
+        try writer.print("{f}", .{std.json.fmt(value.session_id, .{})});
+        try writer.writeAll(",\"session_kind\":");
+        if (value.session_kind) |session_kind| {
+            try writer.print("{f}", .{std.json.fmt(session_kind, .{})});
+        } else {
+            try writer.writeAll("null");
+        }
+        try writer.writeAll(",\"state\":");
+        try writer.print("{f}", .{std.json.fmt(value.state, .{})});
+        try writer.writeAll(",\"expires_at_ms\":");
+        if (value.expires_at_ms) |expires_at_ms| {
+            try writer.print("{d}", .{expires_at_ms});
+        } else {
+            try writer.writeAll("null");
+        }
+        try writer.print(",\"active_wallet_match\":{any}", .{value.active_wallet_match});
+        try writer.writeAll(",\"registry_path\":");
+        if (value.registry_path) |registry_path| {
+            try writer.print("{f}", .{std.json.fmt(registry_path, .{})});
+        } else {
+            try writer.writeAll("null");
+        }
+        try writer.writeAll("}");
+        return;
+    }
+
+    if (embedded_json) |value| {
+        try writer.writeAll(value);
+        return;
+    }
+
+    try writer.writeAll("null");
 }
 
 fn clearActiveWalletSelectorIfMatches(
@@ -5286,6 +5422,16 @@ fn buildWalletIntentJsonFromArgs(
     defer request.deinit();
     if (request.value != .object) return error.InvalidCli;
 
+    var delegated_session = try resolveDelegatedSessionArtifactSummary(allocator, args);
+    defer if (delegated_session) |*value| value.deinit(allocator);
+
+    const effective_policy_json = try buildMergedWalletPolicyJsonWithBase(
+        allocator,
+        if (delegated_session) |value| value.policy_json else null,
+        args,
+    );
+    defer if (effective_policy_json) |value| allocator.free(value);
+
     const network = resolvedWalletIntentNetwork(args);
     const execution_mode = try resolvedWalletIntentExecutionMode(args, default_execution_mode);
     var output = std.ArrayList(u8){};
@@ -5329,11 +5475,21 @@ fn buildWalletIntentJsonFromArgs(
     try writeResolvedRequestPaymentMetadata(writer, args);
     try writer.writeAll(",\"concurrency\":");
     try writeResolvedRequestConcurrencyMetadata(writer, args);
+    try writer.writeAll(",\"delegated_session\":");
+    try writeDelegatedSessionArtifactMetadata(
+        writer,
+        if (delegated_session) |*value| value else null,
+        args.request_delegated_session_json,
+    );
     try writer.writeAll(",\"sponsor\":{");
     try writeResolvedRequestSponsorContract(writer, args);
     try writer.writeAll("}");
     try writer.writeAll(",\"policy\":");
-    try writeMergedWalletPolicy(allocator, writer, args);
+    if (effective_policy_json) |value| {
+        try writer.writeAll(value);
+    } else {
+        try writer.writeAll("null");
+    }
     try writer.writeAll("}");
 
     return try output.toOwnedSlice(allocator);
@@ -5496,6 +5652,16 @@ fn buildRequestSponsorEnvelopeJson(
     defer request.deinit();
     if (request.value != .object) return error.InvalidCli;
 
+    var delegated_session = try resolveDelegatedSessionArtifactSummary(allocator, args);
+    defer if (delegated_session) |*value| value.deinit(allocator);
+
+    const effective_policy_json = try buildMergedWalletPolicyJsonWithBase(
+        allocator,
+        if (delegated_session) |value| value.policy_json else null,
+        args,
+    );
+    defer if (effective_policy_json) |value| allocator.free(value);
+
     var output = std.ArrayList(u8){};
     errdefer output.deinit(allocator);
     const writer = output.writer(allocator);
@@ -5510,6 +5676,18 @@ fn buildRequestSponsorEnvelopeJson(
     try writeResolvedRequestPaymentMetadata(writer, args);
     try writer.writeAll(",\"concurrency\":");
     try writeResolvedRequestConcurrencyMetadata(writer, args);
+    try writer.writeAll(",\"delegated_session\":");
+    try writeDelegatedSessionArtifactMetadata(
+        writer,
+        if (delegated_session) |*value| value else null,
+        args.request_delegated_session_json,
+    );
+    try writer.writeAll(",\"policy\":");
+    if (effective_policy_json) |value| {
+        try writer.writeAll(value);
+    } else {
+        try writer.writeAll("null");
+    }
     try writer.writeAll(",\"sender\":");
     if (request.value.object.get("sender")) |sender| {
         try writer.print("{f}", .{std.json.fmt(sender, .{})});
@@ -5552,6 +5730,16 @@ fn buildRequestScheduleJobJson(
     const sponsor_gas_source_preference = try resolvedRequestSponsorGasSourcePreference(args);
     const sponsor_refusal_fallback = try resolvedRequestSponsorRefusalFallback(args);
 
+    var delegated_session = try resolveDelegatedSessionArtifactSummary(allocator, args);
+    defer if (delegated_session) |*value| value.deinit(allocator);
+
+    const effective_policy_json = try buildMergedWalletPolicyJsonWithBase(
+        allocator,
+        if (delegated_session) |value| value.policy_json else null,
+        args,
+    );
+    defer if (effective_policy_json) |value| allocator.free(value);
+
     var output = std.ArrayList(u8){};
     errdefer output.deinit(allocator);
     const writer = output.writer(allocator);
@@ -5567,6 +5755,18 @@ fn buildRequestScheduleJobJson(
     try writeResolvedRequestPaymentMetadata(writer, args);
     try writer.writeAll(",\"concurrency\":");
     try writeResolvedRequestConcurrencyMetadata(writer, args);
+    try writer.writeAll(",\"delegated_session\":");
+    try writeDelegatedSessionArtifactMetadata(
+        writer,
+        if (delegated_session) |*value| value else null,
+        args.request_delegated_session_json,
+    );
+    try writer.writeAll(",\"policy\":");
+    if (effective_policy_json) |value| {
+        try writer.writeAll(value);
+    } else {
+        try writer.writeAll("null");
+    }
     try writer.writeAll(",\"schedule\":{");
     try writer.writeAll("\"job_id\":");
     try writer.print("{f}", .{std.json.fmt(resolved_schedule_id, .{})});
@@ -5997,15 +6197,15 @@ pub fn runCommandWithProgrammaticProvider(
             const summary = OwnedWalletPublicExportSummary{
                 .source_kind = resolved.source_kind,
                 .selector = resolved.selector,
-        .alias = resolved.alias,
-        .name = resolved.name,
-        .address = resolved.address,
-        .public_key = resolved.public_key,
-        .network = resolved.network,
-        .state = resolved.state,
-        .active_selector = resolved.active_selector,
-        .active_match = resolved.active_match,
-    };
+                .alias = resolved.alias,
+                .name = resolved.name,
+                .address = resolved.address,
+                .public_key = resolved.public_key,
+                .network = resolved.network,
+                .state = resolved.state,
+                .active_selector = resolved.active_selector,
+                .active_match = resolved.active_match,
+            };
             try formatWalletPublicExportSummary(writer, &summary, args.wallet_json, args.pretty);
         },
         .wallet_signer_inspect => {
@@ -24676,6 +24876,113 @@ test "runCommand wallet_intent_build merges recurring and scope policy fields" {
     try testing.expectEqualStrings("cetus::swap", policy.get("protocol_allowlist").?.array.items[0].string);
 }
 
+test "runCommand wallet_intent_build attaches delegated session metadata and inherits session policy" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const registry_path = try std.fmt.allocPrint(allocator, "tmp_wallet_intent_session_registry_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(registry_path);
+    defer std.fs.cwd().deleteFile(registry_path) catch {};
+
+    const state_path = try std.fmt.allocPrint(allocator, "tmp_wallet_intent_session_state_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(state_path);
+    defer std.fs.cwd().deleteFile(state_path) catch {};
+
+    const old_registry_override = wallet_session_registry.test_wallet_session_registry_path_override;
+    wallet_session_registry.test_wallet_session_registry_path_override = registry_path;
+    defer wallet_session_registry.test_wallet_session_registry_path_override = old_registry_override;
+
+    const old_state_override = wallet_state.test_wallet_state_path_override;
+    wallet_state.test_wallet_state_path_override = state_path;
+    defer wallet_state.test_wallet_state_path_override = old_state_override;
+
+    const entries = try allocator.alloc(wallet_session_registry.OwnedWalletSessionEntry, 1);
+    entries[0] = .{
+        .selector = try allocator.dupe(u8, "session:swap"),
+        .label = try allocator.dupe(u8, "swap"),
+        .wallet_selector = try allocator.dupe(u8, "alice"),
+        .address = try allocator.dupe(u8, "0xabc"),
+        .session_id = try allocator.dupe(u8, "session-1"),
+        .session_kind = try allocator.dupe(u8, "local_signer"),
+        .state = try allocator.dupe(u8, "active"),
+        .policy_json = try allocator.dupe(u8, "{\"session_id\":\"session-1\",\"protocol_allowlist\":[\"0x2::router::swap_exact_in\"]}"),
+        .created_at_ms = 100,
+        .updated_at_ms = 101,
+        .expires_at_ms = std.time.milliTimestamp() + 60_000,
+    };
+    var registry = wallet_session_registry.OwnedWalletSessionRegistry{ .entries = entries };
+    defer registry.deinit(allocator);
+    try wallet_session_registry.writeDefaultWalletSessionRegistry(allocator, &registry);
+
+    try wallet_state.writeDefaultWalletState(allocator, "alice");
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "wallet",
+        "intent",
+        "build",
+        "--request",
+        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"router\",\"function\":\"swap_exact_in\",\"typeArguments\":[],\"arguments\":[7,8]}],\"sender\":\"0xabc\",\"gasBudget\":1200}",
+        "--session",
+        "session-1",
+        "--policy-recipient-allowlist",
+        "[\"0xdef\"]",
+    });
+    defer args.deinit(allocator);
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    try testing.expectEqualStrings("wallet_intent", parsed.value.object.get("artifact_kind").?.string);
+    try testing.expectEqualStrings("session-1", parsed.value.object.get("delegated_session").?.object.get("session_id").?.string);
+    try testing.expectEqualStrings("session:swap", parsed.value.object.get("delegated_session").?.object.get("selector").?.string);
+    try testing.expect(parsed.value.object.get("delegated_session").?.object.get("active_wallet_match").?.bool);
+    try testing.expectEqualStrings("session-1", parsed.value.object.get("policy").?.object.get("session_id").?.string);
+    try testing.expectEqualStrings("0x2::router::swap_exact_in", parsed.value.object.get("policy").?.object.get("protocol_allowlist").?.array.items[0].string);
+    try testing.expectEqualStrings("0xdef", parsed.value.object.get("policy").?.object.get("recipient_allowlist").?.array.items[0].string);
+}
+
+test "runCommand wallet_intent_build preserves embedded delegated session metadata" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "wallet",
+        "intent",
+        "build",
+        "--intent",
+        "{\"artifact_kind\":\"wallet_intent\",\"network\":\"sui:testnet\",\"execution_mode\":\"send\",\"request\":{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"router\",\"function\":\"swap_exact_in\",\"typeArguments\":[],\"arguments\":[7,8]}],\"sender\":\"0xabc\",\"gasBudget\":1200},\"policy\":{\"session_id\":\"session-1\"},\"delegated_session\":{\"source_kind\":\"session_registry\",\"selector\":\"session:swap\",\"session_id\":\"session-1\"}}",
+    });
+    defer args.deinit(allocator);
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    try testing.expectEqualStrings("wallet_intent", parsed.value.object.get("artifact_kind").?.string);
+    try testing.expectEqualStrings("session-1", parsed.value.object.get("delegated_session").?.object.get("session_id").?.string);
+    try testing.expectEqualStrings("session:swap", parsed.value.object.get("delegated_session").?.object.get("selector").?.string);
+    try testing.expectEqualStrings("session-1", parsed.value.object.get("policy").?.object.get("session_id").?.string);
+}
+
 test "runCommand wallet_intent_dry_run keeps wallet intents on the local programmable builder path" {
     const testing = std.testing;
 
@@ -25173,11 +25480,51 @@ test "runCommand request_sponsor prints sponsor envelope artifact" {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
+    const registry_path = try std.fmt.allocPrint(allocator, "tmp_request_sponsor_session_registry_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(registry_path);
+    defer std.fs.cwd().deleteFile(registry_path) catch {};
+
+    const state_path = try std.fmt.allocPrint(allocator, "tmp_request_sponsor_session_state_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(state_path);
+    defer std.fs.cwd().deleteFile(state_path) catch {};
+
+    const old_registry_override = wallet_session_registry.test_wallet_session_registry_path_override;
+    wallet_session_registry.test_wallet_session_registry_path_override = registry_path;
+    defer wallet_session_registry.test_wallet_session_registry_path_override = old_registry_override;
+
+    const old_state_override = wallet_state.test_wallet_state_path_override;
+    wallet_state.test_wallet_state_path_override = state_path;
+    defer wallet_state.test_wallet_state_path_override = old_state_override;
+
+    const entries = try allocator.alloc(wallet_session_registry.OwnedWalletSessionEntry, 1);
+    entries[0] = .{
+        .selector = try allocator.dupe(u8, "session:sponsor"),
+        .label = try allocator.dupe(u8, "sponsor-session"),
+        .wallet_selector = try allocator.dupe(u8, "alice"),
+        .address = try allocator.dupe(u8, "0xabc"),
+        .session_id = try allocator.dupe(u8, "session-1"),
+        .session_kind = try allocator.dupe(u8, "local_signer"),
+        .state = try allocator.dupe(u8, "active"),
+        .policy_json = try allocator.dupe(u8, "{\"session_id\":\"session-1\",\"protocol_allowlist\":[\"cetus::swap\"]}"),
+        .created_at_ms = 100,
+        .updated_at_ms = 101,
+        .expires_at_ms = std.time.milliTimestamp() + 60_000,
+    };
+    var registry = wallet_session_registry.OwnedWalletSessionRegistry{ .entries = entries };
+    defer registry.deinit(allocator);
+    try wallet_session_registry.writeDefaultWalletSessionRegistry(allocator, &registry);
+
+    try wallet_state.writeDefaultWalletState(allocator, "alice");
+
     var args = try cli.parseCliArgs(allocator, &.{
         "request",
         "sponsor",
         "--request",
         "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"typeArguments\":[],\"arguments\":[7]}],\"sender\":\"0xabc\",\"gasBudget\":1200}",
+        "--session",
+        "session-1",
+        "--policy-recipient-allowlist",
+        "[\"0xdef\"]",
         "--sponsor-mode",
         "required",
         "--sponsor-policy",
@@ -25231,6 +25578,10 @@ test "runCommand request_sponsor prints sponsor envelope artifact" {
     try testing.expectEqualStrings("serialize_same_lane", parsed.value.object.get("concurrency").?.object.get("conflict_strategy").?.string);
     try testing.expectEqual(@as(usize, 2), parsed.value.object.get("concurrency").?.object.get("conflict_keys").?.array.items.len);
     try testing.expectEqual(true, parsed.value.object.get("concurrency").?.object.get("planner_ready").?.bool);
+    try testing.expectEqualStrings("session-1", parsed.value.object.get("delegated_session").?.object.get("session_id").?.string);
+    try testing.expectEqualStrings("session-1", parsed.value.object.get("policy").?.object.get("session_id").?.string);
+    try testing.expectEqualStrings("cetus::swap", parsed.value.object.get("policy").?.object.get("protocol_allowlist").?.array.items[0].string);
+    try testing.expectEqualStrings("0xdef", parsed.value.object.get("policy").?.object.get("recipient_allowlist").?.array.items[0].string);
     try testing.expectEqualStrings("0xabc", parsed.value.object.get("sender").?.string);
     try testing.expectEqual(@as(i64, 1200), parsed.value.object.get("estimated_gas_budget").?.integer);
     try testing.expectEqual(@as(i64, 100), parsed.value.object.get("valid_after_ms").?.integer);
@@ -25371,11 +25722,51 @@ test "runCommand request_schedule prints scheduler job artifact" {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
+    const registry_path = try std.fmt.allocPrint(allocator, "tmp_request_schedule_session_registry_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(registry_path);
+    defer std.fs.cwd().deleteFile(registry_path) catch {};
+
+    const state_path = try std.fmt.allocPrint(allocator, "tmp_request_schedule_session_state_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(state_path);
+    defer std.fs.cwd().deleteFile(state_path) catch {};
+
+    const old_registry_override = wallet_session_registry.test_wallet_session_registry_path_override;
+    wallet_session_registry.test_wallet_session_registry_path_override = registry_path;
+    defer wallet_session_registry.test_wallet_session_registry_path_override = old_registry_override;
+
+    const old_state_override = wallet_state.test_wallet_state_path_override;
+    wallet_state.test_wallet_state_path_override = state_path;
+    defer wallet_state.test_wallet_state_path_override = old_state_override;
+
+    const entries = try allocator.alloc(wallet_session_registry.OwnedWalletSessionEntry, 1);
+    entries[0] = .{
+        .selector = try allocator.dupe(u8, "session:schedule"),
+        .label = try allocator.dupe(u8, "schedule-session"),
+        .wallet_selector = try allocator.dupe(u8, "alice"),
+        .address = try allocator.dupe(u8, "0xabc"),
+        .session_id = try allocator.dupe(u8, "session-1"),
+        .session_kind = try allocator.dupe(u8, "local_signer"),
+        .state = try allocator.dupe(u8, "active"),
+        .policy_json = try allocator.dupe(u8, "{\"session_id\":\"session-1\",\"protocol_allowlist\":[\"turbos::swap\"]}"),
+        .created_at_ms = 100,
+        .updated_at_ms = 101,
+        .expires_at_ms = std.time.milliTimestamp() + 60_000,
+    };
+    var registry = wallet_session_registry.OwnedWalletSessionRegistry{ .entries = entries };
+    defer registry.deinit(allocator);
+    try wallet_session_registry.writeDefaultWalletSessionRegistry(allocator, &registry);
+
+    try wallet_state.writeDefaultWalletState(allocator, "alice");
+
     var args = try cli.parseCliArgs(allocator, &.{
         "request",
         "schedule",
         "--request",
         "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"typeArguments\":[],\"arguments\":[7]}],\"sender\":\"0xabc\",\"gasBudget\":1200}",
+        "--session",
+        "session-1",
+        "--policy-recipient-allowlist",
+        "[\"0xdef\"]",
         "--schedule-id",
         "job-1",
         "--replace-schedule-id",
@@ -25424,6 +25815,10 @@ test "runCommand request_schedule prints scheduler job artifact" {
     try testing.expectEqualStrings("serialize_same_lane", parsed.value.object.get("concurrency").?.object.get("conflict_strategy").?.string);
     try testing.expectEqual(@as(usize, 2), parsed.value.object.get("concurrency").?.object.get("conflict_keys").?.array.items.len);
     try testing.expectEqual(true, parsed.value.object.get("concurrency").?.object.get("planner_ready").?.bool);
+    try testing.expectEqualStrings("session-1", parsed.value.object.get("delegated_session").?.object.get("session_id").?.string);
+    try testing.expectEqualStrings("session-1", parsed.value.object.get("policy").?.object.get("session_id").?.string);
+    try testing.expectEqualStrings("turbos::swap", parsed.value.object.get("policy").?.object.get("protocol_allowlist").?.array.items[0].string);
+    try testing.expectEqualStrings("0xdef", parsed.value.object.get("policy").?.object.get("recipient_allowlist").?.array.items[0].string);
     try testing.expectEqualStrings("job-1", parsed.value.object.get("schedule").?.object.get("job_id").?.string);
     try testing.expectEqualStrings("job-0", parsed.value.object.get("schedule").?.object.get("replace_job_id").?.string);
     try testing.expectEqualStrings("cancel_previous_job", parsed.value.object.get("schedule").?.object.get("replacement_behavior").?.string);
@@ -26264,10 +26659,8 @@ test "wallet MPP smoke covers session-limited swap and sponsored swap artifacts"
         "sui:testnet",
         "--execution-mode",
         "send",
-        "--policy",
-        "{\"session_id\":\"swap-session-1\"}",
-        "--policy-protocol-allowlist",
-        "[\"0x2::router::swap_exact_in\"]",
+        "--session",
+        "swap-session-1",
         "--payment-reference",
         "swap-pay-1",
         "--payment-memo",
@@ -26291,6 +26684,7 @@ test "wallet MPP smoke covers session-limited swap and sponsored swap artifacts"
     defer intent_parsed.deinit();
     try testing.expectEqualStrings("wallet_intent", intent_parsed.value.object.get("artifact_kind").?.string);
     try testing.expectEqualStrings("sui:testnet", intent_parsed.value.object.get("network").?.string);
+    try testing.expectEqualStrings("swap-session-1", intent_parsed.value.object.get("delegated_session").?.object.get("session_id").?.string);
     try testing.expectEqualStrings("swap-session-1", intent_parsed.value.object.get("policy").?.object.get("session_id").?.string);
     try testing.expectEqualStrings("0x2::router::swap_exact_in", intent_parsed.value.object.get("policy").?.object.get("protocol_allowlist").?.array.items[0].string);
     try testing.expectEqualStrings("swap-pay-1", intent_parsed.value.object.get("payment").?.object.get("payment_reference").?.string);
@@ -26304,6 +26698,8 @@ test "wallet MPP smoke covers session-limited swap and sponsored swap artifacts"
         "sponsor",
         "--request",
         swap_request_json,
+        "--session",
+        "swap-session-1",
         "--sponsor-mode",
         "required",
         "--sponsor-policy",
@@ -26330,6 +26726,8 @@ test "wallet MPP smoke covers session-limited swap and sponsored swap artifacts"
     const sponsor_swap_parsed = try std.json.parseFromSlice(std.json.Value, allocator, sponsor_swap_output.items, .{});
     defer sponsor_swap_parsed.deinit();
     try testing.expectEqualStrings("sponsor_envelope", sponsor_swap_parsed.value.object.get("artifact_kind").?.string);
+    try testing.expectEqualStrings("swap-session-1", sponsor_swap_parsed.value.object.get("delegated_session").?.object.get("session_id").?.string);
+    try testing.expectEqualStrings("swap-session-1", sponsor_swap_parsed.value.object.get("policy").?.object.get("session_id").?.string);
     try testing.expectEqualStrings("required", sponsor_swap_parsed.value.object.get("sponsor").?.object.get("mode").?.string);
     try testing.expectEqualStrings("sponsor", sponsor_swap_parsed.value.object.get("sponsor").?.object.get("gas_source_preference").?.string);
     try testing.expectEqualStrings("fail_closed", sponsor_swap_parsed.value.object.get("sponsor").?.object.get("refusal_fallback").?.string);

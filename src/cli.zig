@@ -145,6 +145,8 @@ pub const ParsedArgs = struct {
     intent_policy_recurring_interval_ms: ?u64 = null,
     intent_policy_recipient_allowlist_json: ?[]const u8 = null,
     intent_policy_protocol_allowlist_json: ?[]const u8 = null,
+    request_session_selector: ?[]const u8 = null,
+    request_delegated_session_json: ?[]const u8 = null,
     request_sponsor_mode: ?[]const u8 = null,
     request_sponsor_policy: ?[]const u8 = null,
     request_sponsor_gas_source_preference: ?[]const u8 = null,
@@ -263,6 +265,8 @@ pub const ParsedArgs = struct {
     owned_intent_policy_json: ?[]const u8 = null,
     owned_intent_policy_recipient_allowlist_json: ?[]const u8 = null,
     owned_intent_policy_protocol_allowlist_json: ?[]const u8 = null,
+    owned_request_session_selector: ?[]const u8 = null,
+    owned_request_delegated_session_json: ?[]const u8 = null,
     owned_request_sponsor_mode: ?[]const u8 = null,
     owned_request_sponsor_policy: ?[]const u8 = null,
     owned_request_sponsor_gas_source_preference: ?[]const u8 = null,
@@ -341,6 +345,8 @@ pub const ParsedArgs = struct {
         if (self.owned_intent_policy_json) |value| allocator.free(value);
         if (self.owned_intent_policy_recipient_allowlist_json) |value| allocator.free(value);
         if (self.owned_intent_policy_protocol_allowlist_json) |value| allocator.free(value);
+        if (self.owned_request_session_selector) |value| allocator.free(value);
+        if (self.owned_request_delegated_session_json) |value| allocator.free(value);
         if (self.owned_request_sponsor_mode) |value| allocator.free(value);
         if (self.owned_request_sponsor_policy) |value| allocator.free(value);
         if (self.owned_request_sponsor_gas_source_preference) |value| allocator.free(value);
@@ -445,8 +451,16 @@ fn isWalletIntentLifecycleCommand(command: Command) bool {
     };
 }
 
+fn usesDelegatedSessionArtifactContract(command: Command) bool {
+    return command == .wallet_intent_build or
+        command == .request_sponsor or
+        command == .request_schedule;
+}
+
 fn usesWalletPolicyContract(command: Command) bool {
     return isWalletIntentLifecycleCommand(command) or
+        command == .request_sponsor or
+        command == .request_schedule or
         command == .wallet_session_create or
         command == .wallet_policy_inspect;
 }
@@ -1159,6 +1173,15 @@ pub fn applyWalletIntentArtifact(
             value,
         );
         envelope.policy_json = null;
+    }
+    if (envelope.delegated_session_json) |value| {
+        replaceOwnedOptionalValue(
+            allocator,
+            &parsed.owned_request_delegated_session_json,
+            &parsed.request_delegated_session_json,
+            value,
+        );
+        envelope.delegated_session_json = null;
     }
     if (envelope.correlation_id) |value| {
         replaceOwnedOptionalValue(
@@ -4739,6 +4762,18 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
                     i += 2;
                     continue;
                 }
+                if (usesDelegatedSessionArtifactContract(parsed.command) and std.mem.eql(u8, token, "--session")) {
+                    if (i + 1 >= args.len) return error.InvalidCli;
+                    try setOptionalStringArg(
+                        allocator,
+                        &parsed,
+                        args[i + 1],
+                        &parsed.owned_request_session_selector,
+                        &parsed.request_session_selector,
+                    );
+                    i += 2;
+                    continue;
+                }
                 if (usesWalletPolicyContract(parsed.command) and (std.mem.eql(u8, token, "--policy") or std.mem.eql(u8, token, "--intent-policy"))) {
                     if (i + 1 >= args.len) return error.InvalidCli;
                     try setOptionalFileBackedArg(
@@ -6719,7 +6754,7 @@ pub fn printUsage(writer: anytype) !void {
         "    --gas-budget/--gas-price          Optional gas overrides; otherwise auto gas is enabled\n" ++
         "    --wait/--summarize/--observe      Reuse request send output modes when executing\n" ++
         "  wallet intent build                 Build a first-class wallet intent envelope around a request artifact\n" ++
-        "    same input options as request build plus --intent/--network/--execution-mode/--policy\n" ++
+        "    same input options as request build plus --intent/--network/--execution-mode/--session/--policy\n" ++
         "    policy helpers: --policy-recurring-limit/--policy-recurring-interval-ms\n" ++
         "      --policy-recipient-allowlist/--policy-protocol-allowlist\n" ++
         "    payment helpers: --payment-reference/--payment-memo/--invoice-reference\n" ++
@@ -6754,13 +6789,15 @@ pub fn printUsage(writer: anytype) !void {
         "    same input options as request build\n" ++
         "    --summarize                        Print structured dry-run summary instead of raw response\n" ++
         "  request sponsor                     Wrap a request artifact in a sponsor-ready envelope\n" ++
-        "    same input options as request build\n" ++
+        "    same input options as request build plus --session/--policy\n" ++
         "    --sponsor-mode <direct|optional|required>\n" ++
         "    --sponsor-policy <json|@file>     Optional sponsor policy metadata JSON\n" ++
         "    --sponsor-gas-source <sender|prefer_sponsor|sponsor>\n" ++
         "                                       Preferred gas source contract for sponsor/direct execution\n" ++
         "    --sponsor-refusal-fallback <fallback_to_sender|fail_closed>\n" ++
         "                                       Behavior when an optional sponsor declines execution\n" ++
+        "    --session <selector|label|session-id|0xaddress>\n" ++
+        "                                       Attach delegated session metadata and inherit its stored policy\n" ++
         "    --payment-reference <text>       Stable payment reference for reconciliation/export\n" ++
         "    --payment-memo <text>            Human-readable payment memo\n" ++
         "    --invoice-reference <text>       Invoice or payment-request identifier\n" ++
@@ -9809,6 +9846,8 @@ test "parseCliArgs parses wallet intent build command" {
         "sui:testnet",
         "--execution-mode",
         "send",
+        "--session",
+        "swap-session-1",
         "--policy",
         "{\"session_key\":\"0x1\"}",
         "--sponsor-mode",
@@ -9842,6 +9881,7 @@ test "parseCliArgs parses wallet intent build command" {
     try testing.expectEqualStrings("0xabc", parsed.tx_build_sender.?);
     try testing.expectEqualStrings("sui:testnet", parsed.intent_network.?);
     try testing.expectEqualStrings("send", parsed.intent_execution_mode.?);
+    try testing.expectEqualStrings("swap-session-1", parsed.request_session_selector.?);
     try testing.expectEqualStrings("{\"session_key\":\"0x1\"}", parsed.intent_policy_json.?);
     try testing.expectEqualStrings("optional", parsed.request_sponsor_mode.?);
     try testing.expectEqualStrings("prefer_sponsor", parsed.request_sponsor_gas_source_preference.?);
@@ -10128,8 +10168,12 @@ test "parseCliArgs parses request sponsor command" {
         "sponsor",
         "--request",
         "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"typeArguments\":[],\"arguments\":[7]}],\"sender\":\"0xabc\",\"gasBudget\":1200}",
+        "--session",
+        "session-1",
         "--sponsor-mode",
         "required",
+        "--policy",
+        "{\"session_key\":\"0x1\"}",
         "--sponsor-policy",
         "{\"tier\":\"vip\"}",
         "--sponsor-gas-source",
@@ -10162,6 +10206,8 @@ test "parseCliArgs parses request sponsor command" {
     defer parsed.deinit(allocator);
 
     try testing.expectEqual(Command.request_sponsor, parsed.command);
+    try testing.expectEqualStrings("session-1", parsed.request_session_selector.?);
+    try testing.expectEqualStrings("{\"session_key\":\"0x1\"}", parsed.intent_policy_json.?);
     try testing.expectEqualStrings("required", parsed.request_sponsor_mode.?);
     try testing.expectEqualStrings("{\"tier\":\"vip\"}", parsed.request_sponsor_policy.?);
     try testing.expectEqualStrings("sponsor", parsed.request_sponsor_gas_source_preference.?);
@@ -10275,18 +10321,24 @@ test "parseCliArgs parses request schedule command" {
         "schedule",
         "--request",
         "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"typeArguments\":[],\"arguments\":[7]}],\"sender\":\"0xabc\",\"gasBudget\":1200}",
+        "--session",
+        "session-1",
         "--schedule-id",
         "job-1",
         "--replace-schedule-id",
         "job-0",
         "--schedule-at-ms",
         "500",
+        "--policy",
+        "{\"session_key\":\"0x1\"}",
         "--sponsor-mode",
         "optional",
     });
     defer parsed.deinit(allocator);
 
     try testing.expectEqual(Command.request_schedule, parsed.command);
+    try testing.expectEqualStrings("session-1", parsed.request_session_selector.?);
+    try testing.expectEqualStrings("{\"session_key\":\"0x1\"}", parsed.intent_policy_json.?);
     try testing.expectEqualStrings("job-1", parsed.request_schedule_id.?);
     try testing.expectEqualStrings("job-0", parsed.request_schedule_replace_id.?);
     try testing.expectEqual(@as(?u64, 500), parsed.request_schedule_at_ms);

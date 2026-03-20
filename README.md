@@ -1007,7 +1007,7 @@ pub fn main() !void {
 - `wallet fund <selector|0xaddress>`: 构建一个一等公民的钱包注资路径；当前先支持 `SUI` 注资，会把命令 lower 成 `SplitCoins(GasCoin) + TransferObjects`。支持 `--amount <mist>`、`--from <selector|0xaddress>`、`--emit-request`、`--dry-run`，执行路径默认继续复用现有 `request send` / local programmable builder，并默认开启 `autoGasPayment + autoGasBudget`。
 - `wallet export-public [selector]`: 导出钱包公开元数据；只输出 selector/alias/address/public key 等公开字段，不回显私钥。
 - `wallet signer inspect [selector]`: 检查 wallet selector 的 sender 解析结果、本地可签名状态、active wallet 命中情况以及 keystore/wallet state 来源。
-- `wallet intent build`: 把 request-shaped 输入包成一等公民 `wallet_intent` artifact；支持 `--intent <json|@file>` 归一化现有 intent，以及 `--network`、`--execution-mode`、`--policy`。现在也支持显式 policy 字段：
+- `wallet intent build`: 把 request-shaped 输入包成一等公民 `wallet_intent` artifact；支持 `--intent <json|@file>` 归一化现有 intent，以及 `--network`、`--execution-mode`、`--session`、`--policy`。`--session <selector|label|session-id|0xaddress>` 会直接读取本地 delegated session registry，把 session metadata 写进 artifact 顶层 `delegated_session`，并把 session 的 stored policy 当成 base policy 再和 inline `--policy*` 字段合并。现在也支持显式 policy 字段：
   - `--policy-recurring-limit <amount>`
   - `--policy-recurring-interval-ms <ms>`
   - `--policy-recipient-allowlist <json|@file>`
@@ -1033,12 +1033,12 @@ pub fn main() !void {
 - `request build`: 把 move-call / programmable 输入规范化成可复用 request artifact。
 - `request inspect`: 输出 request artifact 的结构化摘要，适合在 sponsor/sign/send 前做检查。
 - `request dry-run`: 直接对 request artifact 或 request-shaped 输入执行 dry-run，复用现有本地 programmable builder 路径。
-- `request sponsor`: 把 request artifact 包成 `sponsor-envelope`；支持 `--sponsor-mode`、`--sponsor-policy`、`--sponsor-gas-source`、`--sponsor-refusal-fallback`、`--valid-after-ms`、`--valid-before-ms`、`--correlation-id`，适合交给后续 sponsor service 或 web 流程。artifact 会显式写出 `gas_source_preference` 和 `refusal_fallback`，不再让 sponsor service 自己猜默认值。
+- `request sponsor`: 把 request artifact 包成 `sponsor-envelope`；支持 `--session`、`--policy*`、`--sponsor-mode`、`--sponsor-policy`、`--sponsor-gas-source`、`--sponsor-refusal-fallback`、`--valid-after-ms`、`--valid-before-ms`、`--correlation-id`，适合交给后续 sponsor service 或 web 流程。命中 `--session` 时会把 delegated session metadata 写进 artifact 顶层 `delegated_session`，并把 session stored policy 合并进顶层 `policy`。artifact 也会显式写出 `gas_source_preference` 和 `refusal_fallback`，不再让 sponsor service 自己猜默认值。
 - `request sponsor` / `request schedule` / `wallet intent *` 现在也支持 payment metadata：`--payment-reference`、`--payment-memo`、`--invoice-reference`、`--reconciliation-group`。这些字段会进入 artifact 顶层 `payment` object，供后续 reconciliation/export 使用，而不会混进底层 Sui request body。
 - `request sponsor` / `request schedule` / `wallet intent *` 现在也支持并发 lane metadata：`--execution-lane`、`--gas-lane`、`--conflict-keys`、`--conflict-strategy`。这些字段会进入 artifact 顶层 `concurrency` object，并带出 `planner_ready` / `parallel_safe_hint`，用于后续 queue/scheduler/web UX；同样不会混进底层 Sui request body。
 - `request sign`: 直接对 request artifact 或 request-shaped 输入附加 signer/provider 审批，并输出 execute payload；复用现有本地 programmable builder 和 `tx payload` 路径。
 - `request send`: 直接对 request artifact 或 request-shaped 输入执行发送，复用现有本地 programmable builder 和 signer/provider 路径。
-- `request schedule`: 把 request artifact 包成 `schedule-job`；支持 `--schedule-at-ms`、`--schedule-id`、`--replace-schedule-id`，并显式带上 sponsor mode / validity window / object freshness 要求。artifact 现在也会写出 `replacement_behavior` 和 `stale_object_policy = fail_closed`；本地 state 在 replace 时会保留旧 job，并把它标成 `replaced`。
+- `request schedule`: 把 request artifact 包成 `schedule-job`；支持 `--session`、`--policy*`、`--schedule-at-ms`、`--schedule-id`、`--replace-schedule-id`，并显式带上 sponsor mode / validity window / object freshness 要求。命中 `--session` 时同样会把 delegated session metadata 写进 artifact 顶层 `delegated_session`，并把 session stored policy 合并进顶层 `policy`。artifact 现在也会写出 `replacement_behavior` 和 `stale_object_policy = fail_closed`；本地 state 在 replace 时会保留旧 job，并把它标成 `replaced`。
 - `request list`: 列出本地 `request_state.json` 里跟踪的 request / schedule 条目摘要。
 - `request cancel <id>`: 把本地调度条目标成 `cancelled`，不再保留在“待执行”状态。
 - `request resume <id>`: 把本地调度条目恢复成 `scheduled`。
