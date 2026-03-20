@@ -59,6 +59,8 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
 - [x] Owned event fallback can continue from the parameter type's own
   `package/module` when the current function module exposes no useful
   candidates.
+- [x] Aggregate owned-object event discovery across the current function
+  module and the owned type's own `package/module` when the two differ.
 - [x] Reuse owned module-event discovery results across a single
   `move function` template build instead of rescanning the same module
   fallback in later parameters or fixed-point rounds.
