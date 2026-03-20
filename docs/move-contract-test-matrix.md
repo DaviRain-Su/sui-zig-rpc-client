@@ -232,6 +232,8 @@
   [`scripts/hashi_publish_smoke.sh`](/Users/davirian/dev/zig/sui-zig-rpc-client/scripts/hashi_publish_smoke.sh)
 - 已收第二条可重复 smoke：
   [`scripts/hashi_finish_publish_smoke.sh`](/Users/davirian/dev/zig/sui-zig-rpc-client/scripts/hashi_finish_publish_smoke.sh)
+- 已收第三条可重复 smoke：
+  [`scripts/hashi_deposit_smoke.sh`](/Users/davirian/dev/zig/sui-zig-rpc-client/scripts/hashi_deposit_smoke.sh)
 - 仓库位置：`https://github.com/MystenLabs/hashi`
 - 适合当“本地发布后的重协议样本”，不适合直接替代 `Cetus` 做公共链上 smoke
 

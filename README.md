@@ -83,6 +83,17 @@ bash scripts/hashi_publish_smoke.sh /tmp/hashi_inspect/packages/hashi
 bash scripts/hashi_finish_publish_smoke.sh /tmp/hashi_inspect/packages/hashi
 ```
 
+第三条 smoke 继续往前推进到了真实协议 PTB：
+- 复用 `publish -> finish_publish`
+- 用 `tx send --commands` 串起
+  `utxo_id -> utxo -> deposit_request -> coin::zero<SUI> -> deposit`
+- 验证 `Result` 链接、shared object 输入、`clock` preset、`Option<address>`、
+  以及真实 `DepositRequestedEvent`
+
+```bash
+bash scripts/hashi_deposit_smoke.sh /tmp/hashi_inspect/packages/hashi
+```
+
 当前默认测试图覆盖：
 - `C3 PTBs Introduction`
 - `D4 Transaction submission, Balance Changes, and Gas Profiling`

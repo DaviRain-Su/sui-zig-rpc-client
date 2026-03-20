@@ -321,6 +321,9 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
 - [x] Add a repeatable local `Hashi` smoke that completes
   `publish -> finish_publish` through this CLI's `move function` template
   generation and `tx send --request` execution path, not only raw publish.
+- [x] Add a repeatable local `Hashi` smoke for
+  `utxo_id -> utxo -> deposit_request -> coin::zero<SUI> -> deposit` using
+  `tx send --commands` with PTB result chaining and event extraction.
 
 ## Cetus Readiness Gaps
 
