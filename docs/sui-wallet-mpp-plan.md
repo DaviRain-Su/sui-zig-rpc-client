@@ -348,11 +348,15 @@ The design already includes or strongly implies:
 The design does not yet spell out enough operational wallet commands for a real
 CLI user journey. These should be added explicitly:
 
+The first implementation batch is now in place:
+
+- `wallet address`
+- `wallet balance`
+
 - `wallet create`
 - `wallet import`
 - `wallet export-public`
 - `wallet use`
-- `wallet address`
 - `wallet coins`
 - `wallet objects`
 - `wallet signer inspect`
@@ -381,11 +385,14 @@ What is still missing is an explicit request lifecycle API at the CLI level.
 That should be added as a first-class command group rather than buried inside
 `wallet intent`.
 
-Recommended commands:
+The first implementation batch is now in place:
 
 - `request build`
 - `request inspect`
 - `request dry-run`
+
+Recommended commands:
+
 - `request sponsor`
 - `request sign`
 - `request send`

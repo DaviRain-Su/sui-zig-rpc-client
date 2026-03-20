@@ -12,11 +12,16 @@ pub const Command = enum {
     help,
     version,
     rpc,
+    wallet_address,
+    wallet_balance,
     account_list,
     account_info,
     account_coins,
     account_objects,
     account_resources,
+    request_build,
+    request_inspect,
+    request_dry_run,
     events,
     move_package,
     move_module,
@@ -248,6 +253,13 @@ pub const ParsedArgs = struct {
         self.owned_signers.deinit(allocator);
     }
 };
+
+fn isRequestLifecycleCommand(command: Command) bool {
+    return switch (command) {
+        .request_build, .request_inspect, .request_dry_run => true,
+        else => false,
+    };
+}
 
 const LoadedArg = struct {
     value: []const u8,
@@ -2527,6 +2539,58 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
                 return error.InvalidCli;
             }
 
+            if (std.mem.eql(u8, token, "wallet")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                const sub = args[i + 1];
+                if (std.mem.eql(u8, sub, "address")) {
+                    parsed.command = .wallet_address;
+                    parsed.has_command = true;
+                    i += 2;
+                    if (i < args.len and !std.mem.startsWith(u8, args[i], "--")) {
+                        parsed.account_selector = args[i];
+                        i += 1;
+                    }
+                    continue;
+                }
+                if (std.mem.eql(u8, sub, "balance")) {
+                    parsed.command = .wallet_balance;
+                    parsed.has_command = true;
+                    i += 2;
+                    if (i < args.len and !std.mem.startsWith(u8, args[i], "--")) {
+                        parsed.account_selector = args[i];
+                        i += 1;
+                    }
+                    continue;
+                }
+
+                return error.InvalidCli;
+            }
+
+            if (std.mem.eql(u8, token, "request")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                const sub = args[i + 1];
+                if (std.mem.eql(u8, sub, "build")) {
+                    parsed.command = .request_build;
+                    parsed.has_command = true;
+                    i += 2;
+                    continue;
+                }
+                if (std.mem.eql(u8, sub, "inspect")) {
+                    parsed.command = .request_inspect;
+                    parsed.has_command = true;
+                    i += 2;
+                    continue;
+                }
+                if (std.mem.eql(u8, sub, "dry-run") or std.mem.eql(u8, sub, "dry_run") or std.mem.eql(u8, sub, "dryrun")) {
+                    parsed.command = .request_dry_run;
+                    parsed.has_command = true;
+                    i += 2;
+                    continue;
+                }
+
+                return error.InvalidCli;
+            }
+
             if (std.mem.eql(u8, token, "events")) {
                 parsed.command = .events;
                 parsed.has_command = true;
@@ -3658,6 +3722,198 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
             return error.InvalidCli;
         }
 
+        if (isRequestLifecycleCommand(parsed.command)) {
+            try maybeFlushPendingTypedCommand(allocator, &parsed, &pending_typed_command, &command_aliases, token);
+            if (parsed.command == .request_build or parsed.command == .request_inspect or parsed.command == .request_dry_run) {
+                if (std.mem.eql(u8, token, "--request")) {
+                    if (i + 1 >= args.len) return error.InvalidCli;
+                    try applyProgrammaticRequestArtifact(allocator, &parsed, args[i + 1]);
+                    i += 2;
+                    continue;
+                }
+                if (std.mem.eql(u8, token, "--package")) {
+                    if (i + 1 >= args.len) return error.InvalidCli;
+                    try setOptionalPackageArg(
+                        allocator,
+                        &parsed,
+                        args[i + 1],
+                        &parsed.owned_tx_build_package,
+                        &parsed.tx_build_package,
+                    );
+                    i += 2;
+                    continue;
+                }
+                if (std.mem.eql(u8, token, "--module")) {
+                    if (i + 1 >= args.len) return error.InvalidCli;
+                    try setOptionalStringArg(
+                        allocator,
+                        &parsed,
+                        args[i + 1],
+                        &parsed.owned_tx_build_module,
+                        &parsed.tx_build_module,
+                    );
+                    i += 2;
+                    continue;
+                }
+                if (std.mem.eql(u8, token, "--function")) {
+                    if (i + 1 >= args.len) return error.InvalidCli;
+                    try setOptionalStringArg(
+                        allocator,
+                        &parsed,
+                        args[i + 1],
+                        &parsed.owned_tx_build_function,
+                        &parsed.tx_build_function,
+                    );
+                    i += 2;
+                    continue;
+                }
+                if (std.mem.eql(u8, token, "--type-args")) {
+                    if (i + 1 >= args.len) return error.InvalidCli;
+                    try setOptionalStringArg(
+                        allocator,
+                        &parsed,
+                        args[i + 1],
+                        &parsed.owned_tx_build_type_args,
+                        &parsed.tx_build_type_args,
+                    );
+                    i += 2;
+                    continue;
+                }
+                if (std.mem.eql(u8, token, "--type-arg")) {
+                    if (i + 1 >= args.len) return error.InvalidCli;
+                    try appendRepeatedLoadedValue(
+                        allocator,
+                        &parsed.tx_build_type_arg_items,
+                        &parsed.owned_tx_build_type_arg_items,
+                        args[i + 1],
+                    );
+                    i += 2;
+                    continue;
+                }
+                if (std.mem.eql(u8, token, "--args")) {
+                    if (i + 1 >= args.len) return error.InvalidCli;
+                    try setOptionalStringArg(
+                        allocator,
+                        &parsed,
+                        args[i + 1],
+                        &parsed.owned_tx_build_args,
+                        &parsed.tx_build_args,
+                    );
+                    i += 2;
+                    continue;
+                }
+                if (std.mem.eql(u8, token, "--arg")) {
+                    if (i + 1 >= args.len) return error.InvalidCli;
+                    try appendRepeatedLoadedValue(
+                        allocator,
+                        &parsed.tx_build_arg_items,
+                        &parsed.owned_tx_build_arg_items,
+                        args[i + 1],
+                    );
+                    i += 2;
+                    continue;
+                }
+                if (std.mem.eql(u8, token, "--commands")) {
+                    if (i + 1 >= args.len) return error.InvalidCli;
+                    try appendCommandValue(allocator, &parsed, &command_aliases, args[i + 1]);
+                    i += 2;
+                    continue;
+                }
+                if (std.mem.eql(u8, token, "--command")) {
+                    if (i + 1 >= args.len) return error.InvalidCli;
+                    try appendCommandValue(allocator, &parsed, &command_aliases, args[i + 1]);
+                    i += 2;
+                    continue;
+                }
+                if (try tryParseAssignOption(allocator, &parsed, args, &i, &command_aliases)) {
+                    continue;
+                }
+                if (try tryParseTypedCommandOption(allocator, &parsed, args, &i, &pending_typed_command, &command_aliases)) {
+                    continue;
+                }
+                if (std.mem.eql(u8, token, "--sender")) {
+                    if (i + 1 >= args.len) return error.InvalidCli;
+                    try setOptionalStringArg(
+                        allocator,
+                        &parsed,
+                        args[i + 1],
+                        &parsed.owned_tx_build_sender,
+                        &parsed.tx_build_sender,
+                    );
+                    i += 2;
+                    continue;
+                }
+                if (std.mem.eql(u8, token, "--gas-budget")) {
+                    if (i + 1 >= args.len) return error.InvalidCli;
+                    parsed.tx_build_gas_budget = try parseIntValue(args[i + 1]);
+                    i += 2;
+                    continue;
+                }
+                if (std.mem.eql(u8, token, "--gas-price")) {
+                    if (i + 1 >= args.len) return error.InvalidCli;
+                    parsed.tx_build_gas_price = try parseIntValue(args[i + 1]);
+                    i += 2;
+                    continue;
+                }
+                if (std.mem.eql(u8, token, "--gas-payment")) {
+                    if (i + 1 >= args.len) return error.InvalidCli;
+                    try setOptionalFileBackedArg(allocator, &parsed.owned_tx_build_gas_payment, &parsed.tx_build_gas_payment, args[i + 1]);
+                    i += 2;
+                    continue;
+                }
+                if (std.mem.eql(u8, token, "--auto-gas-payment")) {
+                    parsed.tx_build_auto_gas_payment = true;
+                    i += 1;
+                    continue;
+                }
+                if (std.mem.eql(u8, token, "--auto-gas-budget")) {
+                    parsed.tx_build_auto_gas_budget = true;
+                    i += 1;
+                    continue;
+                }
+                if (std.mem.eql(u8, token, "--gas-payment-min-balance")) {
+                    if (i + 1 >= args.len) return error.InvalidCli;
+                    parsed.tx_build_gas_payment_min_balance = try parseIntValue(args[i + 1]);
+                    i += 2;
+                    continue;
+                }
+                if (std.mem.eql(u8, token, "--signature") or std.mem.eql(u8, token, "--sig") or std.mem.eql(u8, token, "--signature-file")) {
+                    if (i + 1 >= args.len) return error.InvalidCli;
+                    try parseSignatureArgument(allocator, &parsed, args[i + 1], std.mem.eql(u8, token, "--signature-file"));
+                    i += 2;
+                    continue;
+                }
+                if (std.mem.eql(u8, token, "--signer")) {
+                    if (i + 1 >= args.len) return error.InvalidCli;
+                    try appendSignerValue(allocator, &parsed, args[i + 1]);
+                    i += 2;
+                    continue;
+                }
+                if (std.mem.eql(u8, token, "--from-keystore")) {
+                    parsed.from_keystore = true;
+                    i += 1;
+                    continue;
+                }
+                if (std.mem.eql(u8, token, "--options")) {
+                    if (i + 1 >= args.len) return error.InvalidCli;
+                    try setOptionalFileBackedArg(allocator, &parsed.owned_tx_options, &parsed.tx_options, args[i + 1]);
+                    i += 2;
+                    continue;
+                }
+                if (std.mem.eql(u8, token, "--wait")) {
+                    parsed.tx_send_wait = true;
+                    i += 1;
+                    continue;
+                }
+                if (std.mem.eql(u8, token, "--summarize") or std.mem.eql(u8, token, "--summary")) {
+                    parsed.tx_send_summarize = true;
+                    i += 1;
+                    continue;
+                }
+            }
+            return error.InvalidCli;
+        }
+
         if (parsed.command == .account_list) {
             if (std.mem.eql(u8, token, "--json")) {
                 parsed.account_list_json = true;
@@ -3670,6 +3926,27 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
         if (parsed.command == .account_info) {
             if (std.mem.eql(u8, token, "--json")) {
                 parsed.account_info_json = true;
+                i += 1;
+                continue;
+            }
+            return error.InvalidCli;
+        }
+
+        if (parsed.command == .wallet_balance) {
+            if (std.mem.eql(u8, token, "--coin-type")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                parsed.account_coin_type = args[i + 1];
+                i += 2;
+                continue;
+            }
+            if (std.mem.eql(u8, token, "--limit")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                parsed.account_resources_limit = try parseIntValue(args[i + 1]);
+                i += 2;
+                continue;
+            }
+            if (std.mem.eql(u8, token, "--all")) {
+                parsed.account_resources_all = true;
                 i += 1;
                 continue;
             }
@@ -4314,6 +4591,15 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
         try validateProgrammaticTxInput(&parsed);
     }
 
+    if (isRequestLifecycleCommand(parsed.command)) {
+        if (parsed.tx_build_auto_gas_payment and parsed.tx_build_gas_payment != null) return error.InvalidCli;
+        if (parsed.tx_build_gas_payment_min_balance != null and !parsed.tx_build_auto_gas_payment) return error.InvalidCli;
+        if (parsed.tx_send_summarize and parsed.tx_send_observe) return error.InvalidCli;
+        if (hasProgrammaticTxContext(&parsed) and !hasProgrammaticTxInput(&parsed)) return error.InvalidCli;
+        if (!hasProgrammaticTxInput(&parsed)) return error.InvalidCli;
+        try validateProgrammaticTxInput(&parsed);
+    }
+
     if (parsed.command == .tx_build) {
         if (parsed.tx_build_auto_gas_payment and parsed.tx_build_gas_payment != null) return error.InvalidCli;
         if (parsed.tx_build_gas_payment_min_balance != null and !parsed.tx_build_auto_gas_payment) return error.InvalidCli;
@@ -4406,6 +4692,16 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
         if (has_struct_filter and (has_object_id_filter or has_package_filter or has_module_filter)) return error.InvalidCli;
         if (has_object_id_filter and (has_package_filter or has_module_filter)) return error.InvalidCli;
         if (has_module_filter and !has_package_filter) return error.InvalidCli;
+    }
+    if (parsed.command == .wallet_address) {
+        if (parsed.account_selector) |selector| {
+            if (selector.len == 0) return error.InvalidCli;
+        }
+    }
+    if (parsed.command == .wallet_balance) {
+        if (parsed.account_selector) |selector| {
+            if (selector.len == 0) return error.InvalidCli;
+        }
     }
     if (parsed.command == .events) {
         const has_raw_filter = parsed.event_filter != null;
@@ -4532,6 +4828,28 @@ pub fn printUsage(writer: anytype) !void {
         "                      <alias>[.<idx>] vec:[...] vector[...] option:some:<json> some(...) option:none\n" ++
         "    selected request tokens: select:{{\"kind\":\"owned_object_struct_type\",...}} select:{{\"kind\":\"coin_with_min_balance\",...}} select:{{\"kind\":\"object_preset\",\"name\":\"clock\"}} select:{{\"kind\":\"object_input\",\"objectId\":\"0x...\",\"inputKind\":\"shared\",\"mutable\":true,\"initialSharedVersion\":1}}\n" ++
         "                      bare values still fall back to string/JSON parsing\n" ++
+        "  wallet address [selector]           Print the resolved wallet address\n" ++
+        "  wallet balance [selector]           Print aggregated coin balances for a wallet\n" ++
+        "    --coin-type <type>                 Optional coin type filter\n" ++
+        "    --limit <n>                        Page size used while aggregating balances\n" ++
+        "    --all                              Aggregate all coin pages instead of a single page\n" ++
+        "  request build                       Build a normalized request artifact from programmatic tx input\n" ++
+        "    --request <json|@file>             Normalize an existing request artifact\n" ++
+        "    --package/--module/--function      Build from move-call input\n" ++
+        "    --commands/--command               Build from programmable command input\n" ++
+        "    --sender <address|selector>        Optional sender; selectors resolve through the default keystore\n" ++
+        "    --gas-budget/--gas-price           Optional gas settings\n" ++
+        "    --gas-payment <json|@file>         Optional gas payment JSON\n" ++
+        "    --auto-gas-payment|--auto-gas-budget\n" ++
+        "    --gas-payment-min-balance <amount> Optional auto gas minimum balance\n" ++
+        "    --options <json|@file>             Optional request options JSON\n" ++
+        "    --signer <alias|address|key>       Optional signer selector used to infer sender\n" ++
+        "    --from-keystore                    Infer sender from the default keystore when needed\n" ++
+        "  request inspect                     Print a structured summary of a request artifact\n" ++
+        "    same input options as request build\n" ++
+        "  request dry-run                     Dry-run a request artifact or request-shaped tx input\n" ++
+        "    same input options as request build\n" ++
+        "    --summarize                        Print structured dry-run summary instead of raw response\n" ++
         "  account list                        List local keystore accounts\n" ++
         "  tx simulate [params-json]            Call sui_devInspectTransactionBlock\n" ++
         "    --package <package-id-or-alias>     Move package id\n" ++
@@ -7000,6 +7318,131 @@ test "parseCliArgs parses account info command" {
     try testing.expectEqual(Command.account_info, parsed.command);
     try testing.expectEqualStrings("main", parsed.account_selector.?);
     try testing.expect(parsed.account_info_json);
+}
+
+test "parseCliArgs parses wallet address command" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "wallet",
+        "address",
+        "main",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.wallet_address, parsed.command);
+    try testing.expectEqualStrings("main", parsed.account_selector.?);
+}
+
+test "parseCliArgs parses wallet balance command options" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "wallet",
+        "balance",
+        "main",
+        "--coin-type",
+        "0x2::sui::SUI",
+        "--limit",
+        "25",
+        "--all",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.wallet_balance, parsed.command);
+    try testing.expectEqualStrings("main", parsed.account_selector.?);
+    try testing.expectEqualStrings("0x2::sui::SUI", parsed.account_coin_type.?);
+    try testing.expectEqual(@as(?u64, 25), parsed.account_resources_limit);
+    try testing.expect(parsed.account_resources_all);
+}
+
+test "parseCliArgs parses request build move-call input" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "request",
+        "build",
+        "--package",
+        "0x2",
+        "--module",
+        "counter",
+        "--function",
+        "increment",
+        "--args",
+        "[7]",
+        "--sender",
+        "0xabc",
+        "--gas-budget",
+        "1200",
+        "--auto-gas-payment",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.request_build, parsed.command);
+    try testing.expectEqualStrings("0x2", parsed.tx_build_package.?);
+    try testing.expectEqualStrings("counter", parsed.tx_build_module.?);
+    try testing.expectEqualStrings("increment", parsed.tx_build_function.?);
+    try testing.expectEqualStrings("[7]", parsed.tx_build_args.?);
+    try testing.expectEqualStrings("0xabc", parsed.tx_build_sender.?);
+    try testing.expectEqual(@as(?u64, 1200), parsed.tx_build_gas_budget);
+    try testing.expect(parsed.tx_build_auto_gas_payment);
+}
+
+test "parseCliArgs parses request inspect artifact" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "request",
+        "inspect",
+        "--request",
+        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"typeArguments\":[],\"arguments\":[7]}],\"sender\":\"0xabc\",\"gasBudget\":1200}",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.request_inspect, parsed.command);
+    try testing.expectEqualStrings(
+        "[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"typeArguments\":[],\"arguments\":[7]}]",
+        parsed.tx_build_commands.?,
+    );
+    try testing.expectEqualStrings("0xabc", parsed.tx_build_sender.?);
+    try testing.expectEqual(@as(?u64, 1200), parsed.tx_build_gas_budget);
+}
+
+test "parseCliArgs parses request dry-run request artifact" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "request",
+        "dry-run",
+        "--request",
+        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"typeArguments\":[],\"arguments\":[7]}],\"sender\":\"0xabc\",\"gasBudget\":1200,\"summarize\":true}",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.request_dry_run, parsed.command);
+    try testing.expectEqualStrings("0xabc", parsed.tx_build_sender.?);
+    try testing.expectEqual(@as(?u64, 1200), parsed.tx_build_gas_budget);
+    try testing.expect(parsed.tx_send_summarize);
 }
 
 test "parseCliArgs parses account coins command" {

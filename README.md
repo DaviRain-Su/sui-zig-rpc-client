@@ -986,6 +986,11 @@ pub fn main() !void {
 如果 command source 本身已经是本地 programmable builder 支持的形状，CLI 现在也不会再因为 default-keystore / provider 的 signer-resolution 需求，把 `tx payload` / `tx send` 硬路由回 legacy unsafe dispatcher；这类路径会继续留在统一的 programmatic local builder 主线。
 - `tx build programmable`: 提供 `--commands` JSON 数组直接构建任意 PTB `ProgrammableTransaction`。
 - `tx build --signer`: 可复用 keystore 选择器（alias/address/key）；未提供 `--sender` 时优先使用首个可解析出地址的 signer。
+- `wallet address [selector]`: 输出解析后的钱包地址；未给 selector 时默认读取默认 keystore 的首个地址。
+- `wallet balance [selector]`: 聚合钱包 coin 余额；支持 `--coin-type`、`--limit`、`--all`。默认只聚合单页并显式输出 `has_next_page/next_cursor`，`--all` 会扫描全部 coin page。
+- `request build`: 把 move-call / programmable 输入规范化成可复用 request artifact。
+- `request inspect`: 输出 request artifact 的结构化摘要，适合在 sponsor/sign/send 前做检查。
+- `request dry-run`: 直接对 request artifact 或 request-shaped 输入执行 dry-run，复用现有本地 programmable builder 路径。
 - `account list`: 列出 keystore 条目。
 - `account info <selector>`: 按索引或别名/地址/密钥字段查询并展示单条 keystore 记录；`--json` 输出 JSON。
 - `account coins <selector|0xaddress>`: 查询 owner 的 coin page；支持 `--coin-type`、`--limit`、`--all`、`--json`。

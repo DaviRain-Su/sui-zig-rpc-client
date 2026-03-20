@@ -356,10 +356,14 @@ what the generic path still needs to finish.
 
 - [ ] Add a first-class wallet intent schema and artifact contract for web and
   CLI.
-- [ ] Add explicit `wallet` CLI lifecycle commands:
-  create/import/use/address/balance/coins/objects.
-- [ ] Add explicit `request` CLI lifecycle commands:
-  build/inspect/dry-run/sponsor/sign/send/schedule/status.
+- [x] Add initial `wallet` CLI lifecycle commands:
+  `address/balance`.
+- [ ] Add remaining `wallet` CLI lifecycle commands:
+  create/import/use/coins/objects.
+- [x] Add initial `request` CLI lifecycle commands:
+  build/inspect/dry-run.
+- [ ] Add remaining `request` CLI lifecycle commands:
+  sponsor/sign/send/schedule/status.
 - [ ] Design embedded passkey account mode and external wallet mode as equal
   first-class flows.
 - [ ] Add passkey credential registry / device management / revocation design.
