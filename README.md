@@ -1016,7 +1016,7 @@ pub fn main() !void {
 - `request sponsor`: 把 request artifact 包成 `sponsor-envelope`；支持 `--sponsor-mode`、`--sponsor-policy`、`--valid-after-ms`、`--valid-before-ms`、`--correlation-id`，适合交给后续 sponsor service 或 web 流程。
 - `request sign`: 直接对 request artifact 或 request-shaped 输入附加 signer/provider 审批，并输出 execute payload；复用现有本地 programmable builder 和 `tx payload` 路径。
 - `request send`: 直接对 request artifact 或 request-shaped 输入执行发送，复用现有本地 programmable builder 和 signer/provider 路径。
-- `request schedule`: 把 request artifact 包成 `schedule-job`；支持 `--schedule-at-ms`、`--schedule-id`、`--replace-schedule-id`，并显式带上 sponsor mode / validity window / object freshness 要求。
+- `request schedule`: 把 request artifact 包成 `schedule-job`；支持 `--schedule-at-ms`、`--schedule-id`、`--replace-schedule-id`，并显式带上 sponsor mode / validity window / object freshness 要求。artifact 现在也会写出 `replacement_behavior` 和 `stale_object_policy = fail_closed`；本地 state 在 replace 时会保留旧 job，并把它标成 `replaced`。
 - `request list`: 列出本地 `request_state.json` 里跟踪的 request / schedule 条目摘要。
 - `request cancel <id>`: 把本地调度条目标成 `cancelled`，不再保留在“待执行”状态。
 - `request resume <id>`: 把本地调度条目恢复成 `scheduled`。

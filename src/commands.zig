@@ -4782,6 +4782,17 @@ fn buildRequestScheduleJobJson(
     } else {
         try writer.writeAll("null");
     }
+    try writer.writeAll(",\"replacement_behavior\":");
+    try writer.print(
+        "{f}",
+        .{std.json.fmt(
+            if (args.request_schedule_replace_id != null)
+                "cancel_previous_job"
+            else
+                "create_new_job",
+            .{},
+        )},
+    );
     try writer.print(",\"execute_at_ms\":{?d}", .{args.request_schedule_at_ms});
     try writer.print(",\"valid_after_ms\":{?d}", .{args.request_valid_after_ms});
     try writer.print(",\"valid_before_ms\":{?d}", .{args.request_valid_before_ms});
@@ -4802,6 +4813,7 @@ fn buildRequestScheduleJobJson(
     try writer.writeAll("}");
     try writer.writeAll(",\"execution_requirements\":{");
     try writer.writeAll("\"object_freshness\":\"re_resolve_before_send\"");
+    try writer.writeAll(",\"stale_object_policy\":\"fail_closed\"");
     try writer.writeAll(",\"rebuild_before_execute\":true");
     try writer.writeAll("}}");
 
@@ -4871,6 +4883,17 @@ fn replaceRequestStateEntryAt(
 ) void {
     state.entries[index].deinit(allocator);
     state.entries[index] = entry;
+}
+
+fn setRequestStateEntryStateAt(
+    allocator: std.mem.Allocator,
+    entry: *request_state.OwnedRequestEntry,
+    next_state: []const u8,
+    updated_at_ms: i64,
+) !void {
+    allocator.free(entry.state);
+    entry.state = try allocator.dupe(u8, next_state);
+    entry.updated_at_ms = updated_at_ms;
 }
 
 fn optionalRequestStateStringField(
@@ -4951,13 +4974,14 @@ fn storeScheduledRequestEntry(
     var state = try request_state.loadDefaultRequestState(allocator);
     defer state.deinit(allocator);
 
+    const now_ms = std.time.milliTimestamp();
+
     if (args.request_schedule_replace_id) |replace_id| {
         if (findRequestStateEntryIndex(&state, replace_id)) |index| {
-            try removeRequestStateEntryAt(allocator, &state, index);
+            try setRequestStateEntryStateAt(allocator, &state.entries[index], "replaced", now_ms);
         }
     }
 
-    const now_ms = std.time.milliTimestamp();
     const entry = request_state.OwnedRequestEntry{
         .id = try allocator.dupe(u8, schedule_id),
         .kind = try allocator.dupe(u8, "schedule_job"),
@@ -5378,9 +5402,7 @@ pub fn runCommandWithProgrammaticProvider(
             if (!std.mem.eql(u8, state.entries[index].kind, "schedule_job")) return error.InvalidCli;
 
             const now_ms = std.time.milliTimestamp();
-            allocator.free(state.entries[index].state);
-            state.entries[index].state = try allocator.dupe(u8, "cancelled");
-            state.entries[index].updated_at_ms = now_ms;
+            try setRequestStateEntryStateAt(allocator, &state.entries[index], "cancelled", now_ms);
 
             const response_json = try buildRequestStateEntryActionJson(allocator, "cancelled", &state.entries[index]);
             defer allocator.free(response_json);
@@ -5396,11 +5418,10 @@ pub fn runCommandWithProgrammaticProvider(
 
             const index = findRequestStateEntryIndex(&state, entry_id) orelse return error.InvalidCli;
             if (!std.mem.eql(u8, state.entries[index].kind, "schedule_job")) return error.InvalidCli;
+            if (!std.mem.eql(u8, state.entries[index].state, "cancelled")) return error.InvalidCli;
 
             const now_ms = std.time.milliTimestamp();
-            allocator.free(state.entries[index].state);
-            state.entries[index].state = try allocator.dupe(u8, "scheduled");
-            state.entries[index].updated_at_ms = now_ms;
+            try setRequestStateEntryStateAt(allocator, &state.entries[index], "scheduled", now_ms);
 
             const response_json = try buildRequestStateEntryActionJson(allocator, "resumed", &state.entries[index]);
             defer allocator.free(response_json);
@@ -5443,23 +5464,22 @@ pub fn runCommandWithProgrammaticProvider(
                     state.entries[index].digest = try allocator.dupe(u8, digest);
                 }
                 if (jsonFindFirstStringField(parsed.value, "status")) |status| {
-                    allocator.free(state.entries[index].state);
-                    state.entries[index].state = try allocator.dupe(
-                        u8,
+                    try setRequestStateEntryStateAt(
+                        allocator,
+                        &state.entries[index],
                         if (std.mem.eql(u8, status, "success"))
                             "confirmed"
                         else if (std.mem.eql(u8, status, "failure"))
                             "failed"
                         else
                             "submitted",
+                        now_ms,
                     );
                 } else {
-                    allocator.free(state.entries[index].state);
-                    state.entries[index].state = try allocator.dupe(u8, "submitted");
+                    try setRequestStateEntryStateAt(allocator, &state.entries[index], "submitted", now_ms);
                 }
             } else |_| {
-                allocator.free(state.entries[index].state);
-                state.entries[index].state = try allocator.dupe(u8, "submitted");
+                try setRequestStateEntryStateAt(allocator, &state.entries[index], "submitted", now_ms);
             }
 
             try request_state.writeDefaultRequestState(allocator, &state);
@@ -23830,10 +23850,12 @@ test "runCommand request_schedule prints scheduler job artifact" {
     try testing.expectEqualStrings("scheduled", parsed.value.object.get("state").?.string);
     try testing.expectEqualStrings("job-1", parsed.value.object.get("schedule").?.object.get("job_id").?.string);
     try testing.expectEqualStrings("job-0", parsed.value.object.get("schedule").?.object.get("replace_job_id").?.string);
+    try testing.expectEqualStrings("cancel_previous_job", parsed.value.object.get("schedule").?.object.get("replacement_behavior").?.string);
     try testing.expectEqual(@as(i64, 500), parsed.value.object.get("schedule").?.object.get("execute_at_ms").?.integer);
     try testing.expectEqual(@as(i64, 900), parsed.value.object.get("schedule").?.object.get("valid_before_ms").?.integer);
     try testing.expectEqualStrings("optional", parsed.value.object.get("schedule").?.object.get("sponsor_mode").?.string);
     try testing.expectEqualStrings("re_resolve_before_send", parsed.value.object.get("execution_requirements").?.object.get("object_freshness").?.string);
+    try testing.expectEqualStrings("fail_closed", parsed.value.object.get("execution_requirements").?.object.get("stale_object_policy").?.string);
 }
 
 test "runCommand request_schedule stores scheduler jobs in local request state" {
@@ -23883,6 +23905,71 @@ test "runCommand request_schedule stores scheduler jobs in local request state" 
     try testing.expectEqualStrings("req-123", state.entries[0].correlation_id.?);
     try testing.expect(state.entries[0].request_json != null);
     try testing.expect(state.entries[0].artifact_json != null);
+}
+
+test "runCommand request_schedule keeps replaced scheduler jobs in local request state" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const state_path = try std.fmt.allocPrint(allocator, "tmp_request_schedule_replace_state_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(state_path);
+    defer std.fs.cwd().deleteFile(state_path) catch {};
+
+    const old_override = request_state.test_request_state_path_override;
+    request_state.test_request_state_path_override = state_path;
+    defer request_state.test_request_state_path_override = old_override;
+
+    var entries = try allocator.alloc(request_state.OwnedRequestEntry, 1);
+    entries[0] = .{
+        .id = try allocator.dupe(u8, "job-0"),
+        .kind = try allocator.dupe(u8, "schedule_job"),
+        .state = try allocator.dupe(u8, "scheduled"),
+        .request_json = try allocator.dupe(u8, "{\"sender\":\"0xabc\"}"),
+        .artifact_json = try allocator.dupe(u8, "{\"artifact_kind\":\"schedule_job\"}"),
+        .digest = null,
+        .correlation_id = null,
+        .created_at_ms = 100,
+        .updated_at_ms = 100,
+        .submit_count = 0,
+        .last_error = null,
+    };
+    var seeded = request_state.OwnedRequestState{ .entries = entries };
+    defer seeded.deinit(allocator);
+    try request_state.writeDefaultRequestState(allocator, &seeded);
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "request",
+        "schedule",
+        "--request",
+        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"typeArguments\":[],\"arguments\":[7]}],\"sender\":\"0xabc\",\"gasBudget\":1200}",
+        "--schedule-id",
+        "job-1",
+        "--replace-schedule-id",
+        "job-0",
+        "--schedule-at-ms",
+        "500",
+    });
+    defer args.deinit(allocator);
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    var state = try request_state.loadDefaultRequestState(allocator);
+    defer state.deinit(allocator);
+
+    try testing.expectEqual(@as(usize, 2), state.entries.len);
+    const replaced_index = findRequestStateEntryIndex(&state, "job-0") orelse return error.TestExpectedEqual;
+    const new_index = findRequestStateEntryIndex(&state, "job-1") orelse return error.TestExpectedEqual;
+    try testing.expectEqualStrings("replaced", state.entries[replaced_index].state);
+    try testing.expectEqualStrings("scheduled", state.entries[new_index].state);
 }
 
 test "runCommand request_list prints locally tracked request entries" {
@@ -24004,6 +24091,55 @@ test "runCommand request_cancel and request_resume update tracked request state"
     var loaded_after_resume = try request_state.loadDefaultRequestState(allocator);
     defer loaded_after_resume.deinit(allocator);
     try testing.expectEqualStrings("scheduled", loaded_after_resume.entries[0].state);
+}
+
+test "runCommand request_resume rejects replaced scheduler jobs" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const state_path = try std.fmt.allocPrint(allocator, "tmp_request_resume_replaced_state_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(state_path);
+    defer std.fs.cwd().deleteFile(state_path) catch {};
+
+    const old_override = request_state.test_request_state_path_override;
+    request_state.test_request_state_path_override = state_path;
+    defer request_state.test_request_state_path_override = old_override;
+
+    var entries = try allocator.alloc(request_state.OwnedRequestEntry, 1);
+    entries[0] = .{
+        .id = try allocator.dupe(u8, "job-1"),
+        .kind = try allocator.dupe(u8, "schedule_job"),
+        .state = try allocator.dupe(u8, "replaced"),
+        .request_json = try allocator.dupe(u8, "{\"sender\":\"0xabc\"}"),
+        .artifact_json = try allocator.dupe(u8, "{\"artifact_kind\":\"schedule_job\"}"),
+        .digest = null,
+        .correlation_id = null,
+        .created_at_ms = 100,
+        .updated_at_ms = 100,
+        .submit_count = 0,
+        .last_error = null,
+    };
+    var state = request_state.OwnedRequestState{ .entries = entries };
+    defer state.deinit(allocator);
+    try request_state.writeDefaultRequestState(allocator, &state);
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "request",
+        "resume",
+        "job-1",
+    });
+    defer args.deinit(allocator);
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try testing.expectError(error.InvalidCli, runCommand(allocator, &rpc, &args, output.writer(allocator)));
 }
 
 test "runCommand request_status prints structured summaries" {

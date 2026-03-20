@@ -557,6 +557,14 @@ The scheduling design should also cover:
 Scheduled execution in Sui is not just “send later”. It is “re-resolve safely
 under moving object state”.
 
+The CLI implementation now makes that contract explicit:
+
+- `schedule-job` artifacts encode `replacement_behavior`
+- `execution_requirements.stale_object_policy = "fail_closed"`
+- replacing a pending job keeps the superseded local entry and marks it
+  `replaced` instead of deleting it
+- only `cancelled` jobs are resumable back to `scheduled`
+
 ## Sponsorship and Fee Policy
 
 Sui does not need Tempo's exact fee-token model, but the wallet still needs a
