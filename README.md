@@ -165,9 +165,6 @@ zig build run -- tx status 0x... --summarize
 zig build run -- tx confirm 0x... --poll-ms 1000 --confirm-timeout-ms 120000 --observe
 zig build run -- account resources main --coin-type 0x2::sui::SUI --package 0x2 --module coin --limit 25
 zig build run -- tx simulate --package 0x2 --module counter --function increment --sender 0xwallet
-zig build run -- tx simulate --package 0x2 --module counter --function increment --sender 0xwallet --session-response @session-response.json
-zig build run -- tx payload --package 0x2 --module counter --function increment --sender 0xwallet --session-response @session-response.json
-zig build run -- tx send --package 0x2 --module counter --function increment --sender 0xwallet --session-response @session-response.json --wait --summarize
 ```
 
 ## 结构化输出模式
@@ -413,72 +410,147 @@ zig build run -- tx send \
 
 ## Provider challenge prompt / `--session-response`
 
-session-backed wallet / remote signer / passkey 账户现在已经可以直接走同一条 CLI 主路径：
+独立 CLI 现在支持通过 `--provider` 注入 session-backed account provider，并通过 `--session-response` 续跑已批准的 challenge-response 流程。
 
-1. 第一次运行命令，不带 `--session-response`
-   - 如果 provider 需要 challenge，会输出结构化 prompt JSON
-2. 外部 wallet / agent 完成 challenge 后，生成 response JSON
-3. 用同一条命令追加 `--session-response <json|@file>` 继续执行
+最小 provider 配置示例：
 
-当前已接通的 CLI 路径：
-- `tx build --emit-tx-block`
-- `tx simulate`
-- `tx payload`
-- `tx send`
-
-典型 CLI：
-
-```bash
-# 1. 先拿 challenge prompt
-zig build run -- tx send \
-  --package 0x2 \
-  --module counter \
-  --function increment \
-  --args '[7]' \
-  --sender 0xwallet
-
-# 2. wallet / agent 完成 challenge 后继续 send
-zig build run -- tx send \
-  --package 0x2 \
-  --module counter \
-  --function increment \
-  --args '[7]' \
-  --sender 0xwallet \
-  --session-response @session-response.json \
-  --wait \
-  --summarize
-
-# 3. 同样的 continuation 也支持 simulate
-zig build run -- tx simulate \
-  --package 0x2 \
-  --module counter \
-  --function increment \
-  --sender 0xwallet \
-  --session-response @session-response.json \
-  --summarize
-
-# 4. build-only 路径支持 tx block / payload continuation
-zig build run -- tx build programmable \
-  --command '{"kind":"TransferObjects","objects":["0xcoin"],"address":"0xreceiver"}' \
-  --sender 0xwallet \
-  --emit-tx-block \
-  --session-response @session-response.json \
-  --summarize
-
-zig build run -- tx payload \
-  --package 0x2 \
-  --module counter \
-  --function increment \
-  --args '[7]' \
-  --sender 0xwallet \
-  --session-response @session-response.json \
-  --summarize
+```json
+{
+  "kind": "passkey",
+  "address": "0x1111111111111111111111111111111111111111111111111111111111111111",
+  "session": {
+    "kind": "passkey",
+    "sessionId": "wallet-session-id"
+  },
+  "challenge": {
+    "passkey": {
+      "rpId": "wallet.example",
+      "challengeB64url": "challenge-token"
+    }
+  },
+  "authorizer": {
+    "exec": ["wallet-helper", "authorize"]
+  }
+}
 ```
 
-`--session-response` 当前要求：
-- 只能用于 programmatic transaction path
-- `tx build` 只支持 `--emit-tx-block` 路径
-- 如果当前命令不需要 challenge，传 response 也不会额外走第二套 pipeline，而是继续复用同一条 shared client surface
+CLI 行为：
+- 只传 `--provider` 时，`tx simulate|payload|send|build` 和 `move function --dry-run|--send` 会输出 challenge prompt JSON。
+- 同时传 `--provider` 和 `--session-response` 时，会把 continuation request 发给 `authorizer.exec` 指定的外部命令，并继续完成 dry-run / payload / send / tx-block 构造。
+- 如果 `authorizer.exec` 启动失败、非零退出、或返回坏 JSON，CLI 会打印 `request failed`，并在错误消息里附带 `stderr` / `stdout` 摘要。
+
+支持的 provider kind：
+- `passkey`
+  - 典型 challenge: `challenge.passkey`
+- `remote_signer`
+  - 典型 challenge: `challenge.signPersonalMessage`
+- `zklogin`
+  - 典型 challenge: `challenge.zkloginNonce`
+- `multisig`
+  - 最常见是直接 executable authorizer；也可以携带通用 session challenge
+
+其他 kind 最小示例：
+
+```json
+{
+  "kind": "remote_signer",
+  "address": "0x1111111111111111111111111111111111111111111111111111111111111111",
+  "challenge": {
+    "signPersonalMessage": {
+      "domain": "wallet.example",
+      "statement": "Sign in",
+      "nonce": "nonce-1"
+    }
+  },
+  "authorizer": {
+    "exec": ["wallet-helper", "authorize"]
+  }
+}
+```
+
+```json
+{
+  "kind": "zklogin",
+  "address": "0x2222222222222222222222222222222222222222222222222222222222222222",
+  "challenge": {
+    "zkloginNonce": {
+      "nonce": "nonce-zk",
+      "provider": "google",
+      "maxEpoch": 44
+    }
+  },
+  "authorizer": {
+    "exec": ["wallet-helper", "authorize"]
+  }
+}
+```
+
+```json
+{
+  "kind": "multisig",
+  "address": "0x3333333333333333333333333333333333333333333333333333333333333333",
+  "authorizer": {
+    "exec": ["wallet-helper", "authorize"]
+  }
+}
+```
+
+仓库内可复用 fixture：
+- `examples/provider/passkey.json`
+- `examples/provider/remote_signer.json`
+- `examples/provider/zklogin.json`
+- `examples/provider/multisig.json`
+- `examples/provider/passkey-session-response.json`
+- `examples/provider/remote_signer-session-response.json`
+- `examples/provider/zklogin-session-response.json`
+- `examples/provider/mock_authorizer.sh`
+
+直接从仓库根目录试跑：
+
+```bash
+# 1. passkey prompt
+zig build run -- tx send \
+  --package 0x2 \
+  --module counter \
+  --function increment \
+  --arg 7 \
+  --gas-budget 1200 \
+  --provider @examples/provider/passkey.json
+
+# 2. passkey continuation
+zig build run -- tx send \
+  --package 0x2 \
+  --module counter \
+  --function increment \
+  --arg 7 \
+  --gas-budget 1200 \
+  --provider @examples/provider/passkey.json \
+  --session-response @examples/provider/passkey-session-response.json
+
+# 3. remote signer continuation
+zig build run -- tx send \
+  --package 0x2 \
+  --module counter \
+  --function increment \
+  --arg 7 \
+  --gas-budget 1200 \
+  --provider @examples/provider/remote_signer.json \
+  --session-response @examples/provider/remote_signer-session-response.json
+
+# 4. multisig direct execute via mock authorizer
+zig build run -- tx send \
+  --package 0x2 \
+  --module counter \
+  --function increment \
+  --arg 7 \
+  --gas-budget 1200 \
+  --provider @examples/provider/multisig.json
+```
+
+`examples/provider/mock_authorizer.sh` 是最小 mock：
+- 会读取 stdin，但不会真正解析 request JSON
+- 只按 profile 返回一个固定的批准结果
+- 适合联调 CLI 合同，不适合真实签名
 
 response JSON 结构最小形态：
 
@@ -497,6 +569,42 @@ response JSON 结构最小形态：
 - `session.sessionId` / `session.session_id`
 - `session.userId` / `session.user_id`
 - `session.expiresAtMs` / `session.expires_at_ms`
+
+provider JSON 兼容字段：
+- `supportsExecute` / `supports_execute`
+- `challenge.passkey.rpId` / `challenge.passkey.rp_id`
+- `challenge.passkey.challengeB64url` / `challenge.passkey.challenge_b64url`
+- `challenge.signPersonalMessage` / `challenge.sign_personal_message`
+- `challenge.zkloginNonce` / `challenge.zklogin_nonce`
+- `session.sessionId` / `session.session_id`
+- `session.userId` / `session.user_id`
+- `session.expiresAtMs` / `session.expires_at_ms`
+
+`authorizer.exec` stdin/stdout 契约：
+- stdin 是一个 JSON object，字段最关键的是：
+  - `options`: 当前 programmatic request options
+  - `accountAddress`: provider address
+  - `accountSession`: 当前 session 状态
+  - `txBytesBase64`: 需要签名/执行时会带上 tx bytes；纯 prompt / inspect / build 类路径可能为 `null`
+- stdout 必须是一个 JSON object，最关键的返回字段是：
+  - `sender`: 可选；如果返回，必须和当前 sender 一致
+  - `signatures`: execute 路径通常必填
+  - `session`: 可选；用于更新 session id / user id / expiresAtMs
+  - `supportsExecute`: 是否允许当前 continuation 直接执行
+
+最小 stdout 示例：
+
+```json
+{
+  "sender": "0x1111111111111111111111111111111111111111111111111111111111111111",
+  "signatures": ["sig-a"],
+  "session": {
+    "kind": "remote_signer",
+    "sessionId": "approved-session"
+  },
+  "supportsExecute": true
+}
+```
 
 ## 库级 API 示例
 

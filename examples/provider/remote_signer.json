@@ -1,0 +1,14 @@
+{
+  "kind": "remote_signer",
+  "address": "0x4444444444444444444444444444444444444444444444444444444444444444",
+  "challenge": {
+    "signPersonalMessage": {
+      "domain": "wallet.example",
+      "statement": "Sign in to continue",
+      "nonce": "nonce-remote-signer-example"
+    }
+  },
+  "authorizer": {
+    "exec": ["./examples/provider/mock_authorizer.sh", "remote_signer"]
+  }
+}

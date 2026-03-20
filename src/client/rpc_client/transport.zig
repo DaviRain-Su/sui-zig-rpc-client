@@ -1,5 +1,6 @@
 const builtin = @import("builtin");
 const std = @import("std");
+const retryable_transport_attempt_limit: usize = 3;
 
 fn isRetryableTransportError(err: anyerror) bool {
     return switch (err) {
@@ -41,11 +42,20 @@ fn configureConnectionTimeouts(connection: *std.http.Client.Connection, timeout_
     try configureSocketTimeout(handle, value, std.posix.SO.RCVTIMEO);
 }
 
+fn remainingTimeoutMs(start_ms: i64, total_timeout_ms: ?u64) !?u64 {
+    const timeout_ms = total_timeout_ms orelse return null;
+    const timeout_i64 = std.math.cast(i64, timeout_ms) orelse std.math.maxInt(i64);
+    const elapsed_ms = std.time.milliTimestamp() - start_ms;
+    if (elapsed_ms >= timeout_i64) return error.Timeout;
+    return @as(u64, @intCast(timeout_i64 - elapsed_ms));
+}
+
 fn executeRequest(
     self: anytype,
     request_body: []const u8,
     response_writer: *std.io.Writer.Allocating,
     headers: []const std.http.Header,
+    timeout_ms: ?u64,
 ) !std.http.Status {
     const uri = try std.Uri.parse(self.endpoint);
     var request = try self.http_client.request(.POST, uri, .{
@@ -55,7 +65,7 @@ fn executeRequest(
     });
     defer request.deinit();
 
-    try configureConnectionTimeouts(request.connection.?, self.request_timeout_ms);
+    try configureConnectionTimeouts(request.connection.?, timeout_ms);
 
     request.transfer_encoding = .{ .content_length = request_body.len };
     request.sendBodyComplete(@constCast(request_body)) catch |err| return mapTimeoutError(err);
@@ -117,15 +127,18 @@ pub fn sendRequest(self: anytype, method: []const u8, params_json: []const u8) !
 
     var response_status: std.http.Status = undefined;
     var attempts: usize = 0;
+    const request_start_ms = std.time.milliTimestamp();
 
     while (true) {
         attempts += 1;
-        const request_start = std.time.milliTimestamp();
+        const request_timeout_ms = try remainingTimeoutMs(request_start_ms, self.request_timeout_ms);
+        const attempt_start_ms = std.time.milliTimestamp();
 
-        response_status = executeRequest(self, request_body, &response_writer, &headers) catch |err| {
+        response_status = executeRequest(self, request_body, &response_writer, &headers, request_timeout_ms) catch |err| {
             const mapped_err = mapTimeoutError(err);
             if (mapped_err == error.Timeout) return error.Timeout;
-            if (isRetryableTransportError(mapped_err)) {
+            if (isRetryableTransportError(mapped_err) and attempts < retryable_transport_attempt_limit) {
+                _ = remainingTimeoutMs(request_start_ms, self.request_timeout_ms) catch return error.Timeout;
                 response_writer.deinit();
                 response_writer = std.io.Writer.Allocating.init(self.allocator);
 
@@ -136,7 +149,7 @@ pub fn sendRequest(self: anytype, method: []const u8, params_json: []const u8) !
             return mapped_err;
         };
 
-        const elapsed_ms = std.time.milliTimestamp() - request_start;
+        const elapsed_ms = std.time.milliTimestamp() - attempt_start_ms;
         if (elapsed_ms > 0) {
             self.transport_stats.elapsed_time_ms += @intCast(@max(elapsed_ms, 0));
             if (response_status == .too_many_requests) {
@@ -151,6 +164,11 @@ pub fn sendRequest(self: anytype, method: []const u8, params_json: []const u8) !
     self.allocator.free(request_body);
 
     if (response_status != .ok) {
+        const response_body = try response_writer.toOwnedSlice();
+        defer self.allocator.free(response_body);
+        if (@hasDecl(@TypeOf(self.*), "recordHttpErrorResponse")) {
+            self.recordHttpErrorResponse(response_status, response_body) catch {};
+        }
         return switch (response_status) {
             .request_timeout => error.Timeout,
             else => error.HttpError,

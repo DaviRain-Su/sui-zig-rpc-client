@@ -1,0 +1,17 @@
+{
+  "kind": "passkey",
+  "address": "0x1111111111111111111111111111111111111111111111111111111111111111",
+  "session": {
+    "kind": "passkey",
+    "sessionId": "passkey-example-pending"
+  },
+  "challenge": {
+    "passkey": {
+      "rpId": "wallet.example",
+      "challengeB64url": "challenge-passkey-example"
+    }
+  },
+  "authorizer": {
+    "exec": ["./examples/provider/mock_authorizer.sh", "passkey"]
+  }
+}

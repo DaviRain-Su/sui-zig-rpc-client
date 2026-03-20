@@ -1,0 +1,7 @@
+{
+  "kind": "multisig",
+  "address": "0x3333333333333333333333333333333333333333333333333333333333333333",
+  "authorizer": {
+    "exec": ["./examples/provider/mock_authorizer.sh", "multisig"]
+  }
+}

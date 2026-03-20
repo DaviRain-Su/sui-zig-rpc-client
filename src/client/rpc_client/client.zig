@@ -2096,6 +2096,10 @@ pub const SuiRpcClient = struct {
         return self.last_error;
     }
 
+    pub fn recordErrorMessage(self: *SuiRpcClient, message: []const u8) !void {
+        self.setError(try self.allocator.dupe(u8, message), null);
+    }
+
     fn clearError(self: *SuiRpcClient) void {
         if (self.last_error) |error_value| {
             self.allocator.free(error_value.message);
@@ -2128,6 +2132,38 @@ pub const SuiRpcClient = struct {
         }
 
         self.setError(try self.allocator.dupe(u8, "rpc error"), code);
+    }
+
+    fn extractHttpErrorMessage(allocator: std.mem.Allocator, response_body: []const u8) !?[]u8 {
+        const trimmed = std.mem.trim(u8, response_body, " \n\r\t");
+        if (trimmed.len == 0) return null;
+
+        const parsed = std.json.parseFromSlice(std.json.Value, allocator, trimmed, .{}) catch {
+            return try allocator.dupe(u8, trimmed);
+        };
+        defer parsed.deinit();
+
+        if (parsed.value == .object) {
+            if (parsed.value.object.get("error")) |error_value| {
+                if (error_value == .object) {
+                    if (error_value.object.get("message")) |message_value| {
+                        if (message_value == .string and message_value.string.len > 0) {
+                            return try allocator.dupe(u8, message_value.string);
+                        }
+                    }
+                }
+            }
+        }
+
+        return try allocator.dupe(u8, trimmed);
+    }
+
+    pub fn recordHttpErrorResponse(self: *SuiRpcClient, response_status: std.http.Status, response_body: []const u8) !void {
+        const message = if (try extractHttpErrorMessage(self.allocator, response_body)) |value|
+            value
+        else
+            try std.fmt.allocPrint(self.allocator, "http error ({s})", .{@tagName(response_status)});
+        self.setError(message, @as(i64, @intFromEnum(response_status)));
     }
 
     pub fn call(self: *SuiRpcClient, method: []const u8, params_json: []const u8) ![]u8 {
@@ -15875,6 +15911,7 @@ pub const SuiRpcClient = struct {
         timeout_ms: u64,
         poll_ms: u64,
     ) ![]u8 {
+        if (poll_ms == 0) return error.InvalidCli;
         const start_ts = std.time.milliTimestamp();
 
         while (true) {
@@ -32217,6 +32254,56 @@ test "call stores rpc error details when rpc returns error object" {
     const last_error = client_instance.getLastError() orelse return error.TestExpectedError;
     try testing.expectEqual(@as(i64, -32603), last_error.code orelse 0);
     try testing.expectEqualStrings("internal error", last_error.message);
+}
+
+test "recordHttpErrorResponse stores plain-text http error details" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://example.local");
+    defer client_instance.deinit();
+
+    try client_instance.recordHttpErrorResponse(.too_many_requests, "rate limited");
+
+    const last_error = client_instance.getLastError() orelse return error.TestExpectedError;
+    try testing.expectEqual(@as(i64, @intFromEnum(std.http.Status.too_many_requests)), last_error.code orelse 0);
+    try testing.expectEqualStrings("rate limited", last_error.message);
+}
+
+test "recordErrorMessage stores custom error details" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://example.local");
+    defer client_instance.deinit();
+
+    try client_instance.recordErrorMessage("authorizer exploded");
+
+    const last_error = client_instance.getLastError() orelse return error.TestExpectedError;
+    try testing.expect(last_error.code == null);
+    try testing.expectEqualStrings("authorizer exploded", last_error.message);
+}
+
+test "waitForTransactionConfirmation rejects zero poll intervals" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://example.local");
+    defer client_instance.deinit();
+
+    try testing.expectError(
+        error.InvalidCli,
+        client_instance.waitForTransactionConfirmation("0xdigest", 1_000, 0),
+    );
 }
 
 test "inspectCommands builds inspect payload from command source" {
