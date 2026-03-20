@@ -345,10 +345,10 @@ The design already includes or strongly implies:
 - session/access policy management
 - sponsor-aware execution
 
-The design does not yet spell out enough operational wallet commands for a real
-CLI user journey. These should be added explicitly:
+The design did not originally spell out enough operational wallet commands for
+a real CLI user journey. That gap is now partially closed.
 
-The first three implementation batches are now in place:
+Implemented wallet lifecycle commands:
 
 - `wallet address`
 - `wallet balance`
@@ -357,12 +357,13 @@ The first three implementation batches are now in place:
 - `wallet create`
 - `wallet import`
 - `wallet use`
-
 - local active wallet selector state
 - selector-less wallet queries resolve through active state first
-
 - `wallet export-public`
 - `wallet signer inspect`
+
+Still missing from the broader wallet lifecycle:
+
 - `wallet passkey register`
 - `wallet passkey login`
 - `wallet connect`
@@ -384,11 +385,10 @@ The design already includes or strongly implies:
 - scheduled execution metadata
 - shared web/CLI artifact flow
 
-What is still missing is an explicit request lifecycle API at the CLI level.
-That should be added as a first-class command group rather than buried inside
-`wallet intent`.
+What was missing here was an explicit request lifecycle API at the CLI level.
+That core lifecycle is now in place.
 
-The first three implementation batches are now in place:
+Implemented request lifecycle commands:
 
 - `request build`
 - `request inspect`
@@ -399,11 +399,8 @@ The first three implementation batches are now in place:
 - `request sign`
 - `request schedule`
 
-Recommended commands:
+Remaining request lifecycle commands:
 
-- `request sponsor`
-- `request sign`
-- `request schedule`
 - `request list`
 - `request cancel`
 - `request resume`

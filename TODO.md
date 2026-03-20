@@ -330,6 +330,10 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
 - [x] Document the `Tempo / MPP`-style Sui wallet architecture as a Sui-native
   wallet intent, sponsor, policy, and scheduler plan instead of a fake chain
   transaction-type fork. See `docs/sui-wallet-mpp-plan.md`.
+- [x] Add the initial wallet/request lifecycle CLI surface from the Sui wallet
+  MPP plan: `wallet address/balance/coins/objects/create/import/use/
+  export-public/signer inspect` and `request
+  build/inspect/dry-run/send/status/sponsor/sign/schedule`.
 
 ## Cetus Readiness Gaps
 

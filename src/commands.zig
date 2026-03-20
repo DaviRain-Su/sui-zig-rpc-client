@@ -2928,6 +2928,60 @@ const OwnedWalletLifecycleSummary = struct {
     }
 };
 
+const OwnedResolvedWalletEntrySummary = struct {
+    source_kind: []u8,
+    selector: ?[]u8 = null,
+    alias: ?[]u8 = null,
+    name: ?[]u8 = null,
+    address: ?[]u8 = null,
+    public_key: ?[]u8 = null,
+    active_selector: ?[]u8 = null,
+    active_match: bool = false,
+    can_sign_locally: bool = false,
+    keystore_path: ?[]const u8 = null,
+    wallet_state_path: ?[]const u8 = null,
+
+    fn deinit(self: *OwnedResolvedWalletEntrySummary, allocator: std.mem.Allocator) void {
+        allocator.free(self.source_kind);
+        if (self.selector) |value| allocator.free(value);
+        if (self.alias) |value| allocator.free(value);
+        if (self.name) |value| allocator.free(value);
+        if (self.address) |value| allocator.free(value);
+        if (self.public_key) |value| allocator.free(value);
+        if (self.active_selector) |value| allocator.free(value);
+        if (self.keystore_path) |value| allocator.free(value);
+        if (self.wallet_state_path) |value| allocator.free(value);
+    }
+};
+
+const OwnedWalletPublicExportSummary = struct {
+    artifact_kind: []const u8 = "wallet_public_export",
+    source_kind: []const u8,
+    selector: ?[]const u8 = null,
+    alias: ?[]const u8 = null,
+    name: ?[]const u8 = null,
+    address: ?[]const u8 = null,
+    public_key: ?[]const u8 = null,
+    active_selector: ?[]const u8 = null,
+    active_match: bool,
+};
+
+const OwnedWalletSignerInspectSummary = struct {
+    artifact_kind: []const u8 = "wallet_signer_inspect",
+    source_kind: []const u8,
+    selector: ?[]const u8 = null,
+    alias: ?[]const u8 = null,
+    name: ?[]const u8 = null,
+    address: ?[]const u8 = null,
+    public_key: ?[]const u8 = null,
+    active_selector: ?[]const u8 = null,
+    active_match: bool,
+    can_sign_locally: bool,
+    sender_resolution_kind: []const u8,
+    keystore_path: ?[]const u8 = null,
+    wallet_state_path: ?[]const u8 = null,
+};
+
 fn readOptionalFileAtPathAlloc(
     allocator: std.mem.Allocator,
     path: []const u8,
@@ -3154,6 +3208,226 @@ fn runWalletUse(
     defer summary.deinit(allocator);
 
     try formatWalletLifecycleSummary(writer, &summary, args.wallet_json, args.pretty);
+}
+
+fn duplicateOptionalSlice(allocator: std.mem.Allocator, value: ?[]const u8) !?[]u8 {
+    const slice = value orelse return null;
+    return try allocator.dupe(u8, slice);
+}
+
+fn sameWalletSelectorOrAddress(
+    active_selector: ?[]const u8,
+    selector: ?[]const u8,
+    address: ?[]const u8,
+) bool {
+    const active = active_selector orelse return false;
+    if (selector) |value| {
+        if (std.mem.eql(u8, active, value)) return true;
+    }
+    if (address) |value| {
+        if (std.mem.eql(u8, active, value)) return true;
+    }
+    return false;
+}
+
+fn publicSelectorFromEntry(
+    entry: client.keystore.OwnedAccountEntry,
+    fallback_selector: ?[]u8,
+) ?[]const u8 {
+    if (entry.alias) |value| return value;
+    if (entry.name) |value| return value;
+    if (entry.address orelse entry.sui_address) |value| return value;
+    if (entry.public_key) |value| return value;
+    if (fallback_selector) |value| {
+        if (std.mem.startsWith(u8, value, "0x")) return value;
+    }
+    return null;
+}
+
+fn resolveWalletEntrySummary(
+    allocator: std.mem.Allocator,
+    args: *const cli.ParsedArgs,
+) !OwnedResolvedWalletEntrySummary {
+    const keystore_path = try client.keystore.resolveDefaultSuiKeystorePath(allocator);
+    errdefer if (keystore_path) |value| allocator.free(value);
+    const keystore_contents = if (keystore_path) |path|
+        try readOptionalFileAtPathAlloc(allocator, path, 4 * 1024 * 1024)
+    else
+        null;
+    defer if (keystore_contents) |value| allocator.free(value);
+
+    const wallet_state_path = try wallet_state.resolveDefaultWalletStatePath(allocator);
+    errdefer if (wallet_state_path) |value| allocator.free(value);
+    const active_selector = try wallet_state.resolveActiveSelector(allocator);
+    errdefer if (active_selector) |value| allocator.free(value);
+
+    var entry: ?client.keystore.OwnedAccountEntry = null;
+    var source_kind: []const u8 = undefined;
+    var fallback_selector: ?[]u8 = null;
+    errdefer if (fallback_selector) |value| allocator.free(value);
+    var fallback_address: ?[]u8 = null;
+    errdefer if (fallback_address) |value| allocator.free(value);
+    var can_sign_locally = false;
+
+    if (args.account_selector) |selector| {
+        fallback_selector = try allocator.dupe(u8, selector);
+        if (std.mem.startsWith(u8, selector, "0x")) {
+            source_kind = "explicit_address";
+            if (keystore_contents) |contents| {
+                entry = try client.keystore.getAccountEntryFromContents(allocator, contents, selector);
+                const local_key = try client.keystore.parseKeyBySelector(allocator, contents, selector);
+                if (local_key) |value| {
+                    can_sign_locally = true;
+                    allocator.free(value);
+                }
+            }
+            if (entry == null) {
+                fallback_address = try allocator.dupe(u8, selector);
+            }
+        } else {
+            source_kind = "explicit_selector";
+            const contents = keystore_contents orelse return error.InvalidCli;
+            entry = try client.keystore.getAccountEntryFromContents(allocator, contents, selector) orelse return error.InvalidCli;
+            const local_key = try client.keystore.parseKeyBySelector(allocator, contents, selector);
+            if (local_key) |value| {
+                can_sign_locally = true;
+                allocator.free(value);
+            }
+        }
+    } else if (active_selector) |selector| {
+        fallback_selector = try allocator.dupe(u8, selector);
+        source_kind = "active_wallet";
+        if (std.mem.startsWith(u8, selector, "0x")) {
+            if (keystore_contents) |contents| {
+                entry = try client.keystore.getAccountEntryFromContents(allocator, contents, selector);
+                const local_key = try client.keystore.parseKeyBySelector(allocator, contents, selector);
+                if (local_key) |value| {
+                    can_sign_locally = true;
+                    allocator.free(value);
+                }
+            }
+            if (entry == null) {
+                fallback_address = try allocator.dupe(u8, selector);
+            }
+        } else {
+            const contents = keystore_contents orelse return error.InvalidCli;
+            entry = try client.keystore.getAccountEntryFromContents(allocator, contents, selector) orelse return error.InvalidCli;
+            const local_key = try client.keystore.parseKeyBySelector(allocator, contents, selector);
+            if (local_key) |value| {
+                can_sign_locally = true;
+                allocator.free(value);
+            }
+        }
+    } else {
+        source_kind = "default_keystore_first";
+        const contents = keystore_contents orelse return error.InvalidCli;
+        entry = try client.keystore.getFirstAccountEntryFromContents(allocator, contents) orelse return error.InvalidCli;
+        const first_key = try client.keystore.parseFirstKey(allocator, contents);
+        if (first_key) |value| {
+            can_sign_locally = true;
+            allocator.free(value);
+        }
+        if (entry) |resolved_entry| {
+            fallback_selector = try duplicateOptionalSlice(allocator, resolved_entry.selector);
+        }
+    }
+    defer if (entry) |*value| value.deinit(allocator);
+
+    const selector = blk: {
+        if (entry) |value| {
+            if (publicSelectorFromEntry(value, fallback_selector)) |entry_selector| {
+                if (fallback_selector) |owned_fallback| {
+                    if (entry_selector.ptr == owned_fallback.ptr and entry_selector.len == owned_fallback.len) {
+                        fallback_selector = null;
+                        break :blk owned_fallback;
+                    }
+                    allocator.free(owned_fallback);
+                    fallback_selector = null;
+                }
+                break :blk try allocator.dupe(u8, entry_selector);
+            }
+        }
+        const owned_fallback = fallback_selector;
+        fallback_selector = null;
+        break :blk owned_fallback;
+    };
+
+    const alias = if (entry) |value| try duplicateOptionalSlice(allocator, value.alias) else null;
+    const name = if (entry) |value| try duplicateOptionalSlice(allocator, value.name) else null;
+    const address = blk: {
+        if (entry) |value| {
+            if (value.address orelse value.sui_address) |entry_address| {
+                break :blk try allocator.dupe(u8, entry_address);
+            }
+        }
+        break :blk fallback_address;
+    };
+    fallback_address = null;
+    const public_key = if (entry) |value| try duplicateOptionalSlice(allocator, value.public_key) else null;
+    const source_kind_owned = try allocator.dupe(u8, source_kind);
+    const active_selector_owned = active_selector;
+
+    return .{
+        .source_kind = source_kind_owned,
+        .selector = selector,
+        .alias = alias,
+        .name = name,
+        .address = address,
+        .public_key = public_key,
+        .active_selector = active_selector_owned,
+        .active_match = sameWalletSelectorOrAddress(active_selector, selector, address),
+        .can_sign_locally = can_sign_locally,
+        .keystore_path = keystore_path,
+        .wallet_state_path = wallet_state_path,
+    };
+}
+
+fn formatWalletPublicExportSummary(
+    writer: anytype,
+    summary: *const OwnedWalletPublicExportSummary,
+    json_output: bool,
+    pretty: bool,
+) !void {
+    if (json_output or pretty) {
+        try printStructuredJson(writer, summary.*, pretty);
+        return;
+    }
+
+    try writer.writeAll("wallet public export\n");
+    try writer.print("source: {s}\n", .{summary.source_kind});
+    if (summary.selector) |value| try writer.print("selector: {s}\n", .{value});
+    if (summary.alias) |value| try writer.print("alias: {s}\n", .{value});
+    if (summary.name) |value| try writer.print("name: {s}\n", .{value});
+    if (summary.address) |value| try writer.print("address: {s}\n", .{value});
+    if (summary.public_key) |value| try writer.print("public_key: {s}\n", .{value});
+    if (summary.active_selector) |value| try writer.print("active_selector: {s}\n", .{value});
+    try writer.print("active_match: {any}\n", .{summary.active_match});
+}
+
+fn formatWalletSignerInspectSummary(
+    writer: anytype,
+    summary: *const OwnedWalletSignerInspectSummary,
+    json_output: bool,
+    pretty: bool,
+) !void {
+    if (json_output or pretty) {
+        try printStructuredJson(writer, summary.*, pretty);
+        return;
+    }
+
+    try writer.writeAll("wallet signer inspect\n");
+    try writer.print("source: {s}\n", .{summary.source_kind});
+    if (summary.selector) |value| try writer.print("selector: {s}\n", .{value});
+    if (summary.alias) |value| try writer.print("alias: {s}\n", .{value});
+    if (summary.name) |value| try writer.print("name: {s}\n", .{value});
+    if (summary.address) |value| try writer.print("address: {s}\n", .{value});
+    if (summary.public_key) |value| try writer.print("public_key: {s}\n", .{value});
+    if (summary.active_selector) |value| try writer.print("active_selector: {s}\n", .{value});
+    try writer.print("active_match: {any}\n", .{summary.active_match});
+    try writer.print("can_sign_locally: {any}\n", .{summary.can_sign_locally});
+    try writer.print("sender_resolution_kind: {s}\n", .{summary.sender_resolution_kind});
+    if (summary.keystore_path) |value| try writer.print("keystore: {s}\n", .{value});
+    if (summary.wallet_state_path) |value| try writer.print("wallet_state: {s}\n", .{value});
 }
 
 fn resolveWalletOwner(
@@ -3670,6 +3944,40 @@ pub fn runCommandWithProgrammaticProvider(
             try runWalletCreateOrImport(allocator, args, writer, "wallet_imported", raw_key);
         },
         .wallet_use => try runWalletUse(allocator, args, writer),
+        .wallet_export_public => {
+            var resolved = try resolveWalletEntrySummary(allocator, args);
+            defer resolved.deinit(allocator);
+            const summary = OwnedWalletPublicExportSummary{
+                .source_kind = resolved.source_kind,
+                .selector = resolved.selector,
+                .alias = resolved.alias,
+                .name = resolved.name,
+                .address = resolved.address,
+                .public_key = resolved.public_key,
+                .active_selector = resolved.active_selector,
+                .active_match = resolved.active_match,
+            };
+            try formatWalletPublicExportSummary(writer, &summary, args.wallet_json, args.pretty);
+        },
+        .wallet_signer_inspect => {
+            var resolved = try resolveWalletEntrySummary(allocator, args);
+            defer resolved.deinit(allocator);
+            const summary = OwnedWalletSignerInspectSummary{
+                .source_kind = resolved.source_kind,
+                .selector = resolved.selector,
+                .alias = resolved.alias,
+                .name = resolved.name,
+                .address = resolved.address,
+                .public_key = resolved.public_key,
+                .active_selector = resolved.active_selector,
+                .active_match = resolved.active_match,
+                .can_sign_locally = resolved.can_sign_locally,
+                .sender_resolution_kind = if (resolved.address != null) "address" else "missing",
+                .keystore_path = resolved.keystore_path,
+                .wallet_state_path = resolved.wallet_state_path,
+            };
+            try formatWalletSignerInspectSummary(writer, &summary, args.wallet_json, args.pretty);
+        },
         .wallet_address => {
             const resolved = try resolveWalletOwner(allocator, args);
             defer if (resolved.owned) |value| allocator.free(value);
@@ -20927,6 +21235,112 @@ test "runCommand wallet_use updates the active selector used by wallet_address" 
     defer address_output.deinit(allocator);
     try runCommand(allocator, &rpc, &address_args, address_output.writer(allocator));
     try testing.expectEqualStrings("0x222\n", address_output.items);
+}
+
+test "runCommand wallet_export_public uses active wallet selector and omits private keys" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const keystore_path = try std.fmt.allocPrint(allocator, "tmp_commands_wallet_export_public_keystore_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(keystore_path);
+    defer std.fs.cwd().deleteFile(keystore_path) catch {};
+
+    const state_path = try std.fmt.allocPrint(allocator, "tmp_commands_wallet_export_public_state_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(state_path);
+    defer std.fs.cwd().deleteFile(state_path) catch {};
+
+    var keystore_file = try std.fs.cwd().createFile(keystore_path, .{ .truncate = true });
+    defer keystore_file.close();
+    try keystore_file.writeAll(
+        "[{\"alias\":\"main\",\"privateKey\":\"sk-main\",\"address\":\"0x111\",\"publicKey\":\"pub-main\"}]",
+    );
+
+    const old_keystore_override = client.keystore.test_keystore_path_override;
+    client.keystore.test_keystore_path_override = keystore_path;
+    defer client.keystore.test_keystore_path_override = old_keystore_override;
+
+    const old_state_override = wallet_state.test_wallet_state_path_override;
+    wallet_state.test_wallet_state_path_override = state_path;
+    defer wallet_state.test_wallet_state_path_override = old_state_override;
+
+    try wallet_state.writeDefaultWalletState(allocator, "main");
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "wallet",
+        "export-public",
+        "--json",
+    });
+    defer args.deinit(allocator);
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    try testing.expectEqualStrings("wallet_public_export", parsed.value.object.get("artifact_kind").?.string);
+    try testing.expectEqualStrings("active_wallet", parsed.value.object.get("source_kind").?.string);
+    try testing.expectEqualStrings("main", parsed.value.object.get("selector").?.string);
+    try testing.expectEqualStrings("main", parsed.value.object.get("alias").?.string);
+    try testing.expectEqualStrings("0x111", parsed.value.object.get("address").?.string);
+    try testing.expectEqualStrings("pub-main", parsed.value.object.get("public_key").?.string);
+    try testing.expect(parsed.value.object.get("active_match").?.bool);
+    try testing.expect(parsed.value.object.get("privateKey") == null);
+}
+
+test "runCommand wallet_signer_inspect reports address fallback without local signing" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const keystore_path = try std.fmt.allocPrint(allocator, "tmp_commands_wallet_signer_inspect_keystore_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(keystore_path);
+    defer std.fs.cwd().deleteFile(keystore_path) catch {};
+
+    var keystore_file = try std.fs.cwd().createFile(keystore_path, .{ .truncate = true });
+    defer keystore_file.close();
+    try keystore_file.writeAll(
+        "[{\"alias\":\"main\",\"privateKey\":\"sk-main\",\"address\":\"0x111\",\"publicKey\":\"pub-main\"}]",
+    );
+
+    const old_keystore_override = client.keystore.test_keystore_path_override;
+    client.keystore.test_keystore_path_override = keystore_path;
+    defer client.keystore.test_keystore_path_override = old_keystore_override;
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "wallet",
+        "signer",
+        "inspect",
+        "0x999",
+        "--json",
+    });
+    defer args.deinit(allocator);
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    try testing.expectEqualStrings("wallet_signer_inspect", parsed.value.object.get("artifact_kind").?.string);
+    try testing.expectEqualStrings("explicit_address", parsed.value.object.get("source_kind").?.string);
+    try testing.expectEqualStrings("0x999", parsed.value.object.get("selector").?.string);
+    try testing.expectEqualStrings("0x999", parsed.value.object.get("address").?.string);
+    try testing.expectEqualStrings("address", parsed.value.object.get("sender_resolution_kind").?.string);
+    try testing.expect(!parsed.value.object.get("can_sign_locally").?.bool);
 }
 
 test "runCommand request_build move-call prints normalized request artifacts" {

@@ -15,6 +15,8 @@ pub const Command = enum {
     wallet_create,
     wallet_import,
     wallet_use,
+    wallet_export_public,
+    wallet_signer_inspect,
     wallet_address,
     wallet_balance,
     wallet_coins,
@@ -2638,6 +2640,31 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
                     }
                     continue;
                 }
+                if (std.mem.eql(u8, sub, "export-public") or std.mem.eql(u8, sub, "export_public")) {
+                    parsed.command = .wallet_export_public;
+                    parsed.has_command = true;
+                    i += 2;
+                    if (i < args.len and !std.mem.startsWith(u8, args[i], "--")) {
+                        parsed.account_selector = args[i];
+                        i += 1;
+                    }
+                    continue;
+                }
+                if (std.mem.eql(u8, sub, "signer")) {
+                    if (i + 2 >= args.len) return error.InvalidCli;
+                    const signer_sub = args[i + 2];
+                    if (std.mem.eql(u8, signer_sub, "inspect")) {
+                        parsed.command = .wallet_signer_inspect;
+                        parsed.has_command = true;
+                        i += 3;
+                        if (i < args.len and !std.mem.startsWith(u8, args[i], "--")) {
+                            parsed.account_selector = args[i];
+                            i += 1;
+                        }
+                        continue;
+                    }
+                    return error.InvalidCli;
+                }
                 if (std.mem.eql(u8, sub, "address")) {
                     parsed.command = .wallet_address;
                     parsed.has_command = true;
@@ -4190,7 +4217,12 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
             return error.InvalidCli;
         }
 
-        if (parsed.command == .wallet_create or parsed.command == .wallet_import or parsed.command == .wallet_use) {
+        if (parsed.command == .wallet_create or
+            parsed.command == .wallet_import or
+            parsed.command == .wallet_use or
+            parsed.command == .wallet_export_public or
+            parsed.command == .wallet_signer_inspect)
+        {
             if (std.mem.eql(u8, token, "--json")) {
                 parsed.wallet_json = true;
                 i += 1;
@@ -5131,6 +5163,11 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
         const selector = parsed.account_selector orelse return error.InvalidCli;
         if (selector.len == 0) return error.InvalidCli;
     }
+    if (parsed.command == .wallet_export_public or parsed.command == .wallet_signer_inspect) {
+        if (parsed.account_selector) |selector| {
+            if (selector.len == 0) return error.InvalidCli;
+        }
+    }
     if (parsed.command == .wallet_balance) {
         if (parsed.account_selector) |selector| {
             if (selector.len == 0) return error.InvalidCli;
@@ -5323,6 +5360,10 @@ pub fn printUsage(writer: anytype) !void {
         "    --json                            Emit machine-readable wallet metadata\n" ++
         "  wallet use <selector|0xaddress>     Set the active wallet selector for wallet commands\n" ++
         "    --json                            Emit machine-readable wallet metadata\n" ++
+        "  wallet export-public [selector]     Export public wallet metadata without private keys\n" ++
+        "    --json                            Emit machine-readable export metadata\n" ++
+        "  wallet signer inspect [selector]    Inspect signer resolution for a wallet selector or active wallet\n" ++
+        "    --json                            Emit machine-readable signer metadata\n" ++
         "  wallet address [selector]           Print the resolved wallet address\n" ++
         "  wallet balance [selector]           Print aggregated coin balances for a wallet\n" ++
         "    --coin-type <type>                 Optional coin type filter\n" ++
@@ -8003,6 +8044,47 @@ test "parseCliArgs parses wallet use command" {
     defer parsed.deinit(allocator);
 
     try testing.expectEqual(Command.wallet_use, parsed.command);
+    try testing.expectEqualStrings("main", parsed.account_selector.?);
+    try testing.expect(parsed.wallet_json);
+}
+
+test "parseCliArgs parses wallet export-public command" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "wallet",
+        "export-public",
+        "main",
+        "--json",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.wallet_export_public, parsed.command);
+    try testing.expectEqualStrings("main", parsed.account_selector.?);
+    try testing.expect(parsed.wallet_json);
+}
+
+test "parseCliArgs parses wallet signer inspect command" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "wallet",
+        "signer",
+        "inspect",
+        "main",
+        "--json",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.wallet_signer_inspect, parsed.command);
     try testing.expectEqualStrings("main", parsed.account_selector.?);
     try testing.expect(parsed.wallet_json);
 }

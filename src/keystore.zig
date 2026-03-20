@@ -587,6 +587,21 @@ pub fn getAccountEntryFromContents(
     return null;
 }
 
+pub fn getFirstAccountEntryFromContents(
+    allocator: std.mem.Allocator,
+    contents: []const u8,
+) !?OwnedAccountEntry {
+    const trimmed = std.mem.trim(u8, contents, " \n\r\t");
+    if (trimmed.len == 0) return null;
+
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, trimmed, .{}) catch return error.InvalidCli;
+    defer parsed.deinit();
+    if (parsed.value != .array) return error.InvalidCli;
+    if (parsed.value.array.items.len == 0) return null;
+
+    return try summarizeEntry(allocator, 0, parsed.value.array.items[0]);
+}
+
 pub fn getAccountEntryFromDefaultKeystore(
     allocator: std.mem.Allocator,
     selector: []const u8,
@@ -602,6 +617,22 @@ pub fn getAccountEntryFromDefaultKeystore(
     defer allocator.free(contents);
 
     return try getAccountEntryFromContents(allocator, contents, selector);
+}
+
+pub fn getFirstAccountEntryFromDefaultKeystore(
+    allocator: std.mem.Allocator,
+) !?OwnedAccountEntry {
+    const keystore_path = try resolveDefaultSuiKeystorePath(allocator);
+    if (keystore_path == null) return error.InvalidCli;
+    defer allocator.free(keystore_path.?);
+
+    const contents = std.fs.cwd().readFileAlloc(allocator, keystore_path.?, 2 * 1024 * 1024) catch |err| switch (err) {
+        error.FileNotFound => return error.InvalidCli,
+        else => return err,
+    };
+    defer allocator.free(contents);
+
+    return try getFirstAccountEntryFromContents(allocator, contents);
 }
 
 pub fn runAccountQueryFromContents(
