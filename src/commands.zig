@@ -6530,6 +6530,19 @@ fn summarizeRequestLifecycleOutput(
     };
 }
 
+fn ownedRequestLifecycleErrorMessage(
+    allocator: std.mem.Allocator,
+    rpc: *client.SuiRpcClient,
+    err: anyerror,
+) ![]u8 {
+    if (err == client.ClientError.RpcError) {
+        if (rpc.getLastError()) |last_error| {
+            return try allocator.dupe(u8, last_error.message);
+        }
+    }
+    return try allocator.dupe(u8, @errorName(err));
+}
+
 fn storeScheduledRequestEntry(
     allocator: std.mem.Allocator,
     args: *const cli.ParsedArgs,
@@ -6993,13 +7006,31 @@ pub fn runCommandWithProgrammaticProvider(
             derived_args.command = .tx_payload;
             var output = std.ArrayList(u8){};
             defer output.deinit(allocator);
-            try runCommandWithProgrammaticProvider(
+            runCommandWithProgrammaticProvider(
                 allocator,
                 rpc,
                 &derived_args,
                 output.writer(allocator),
                 effective_programmatic_provider,
-            );
+            ) catch |err| {
+                const error_message = try ownedRequestLifecycleErrorMessage(allocator, rpc, err);
+                defer allocator.free(error_message);
+                const entry_id = try resolvedRequestLifecycleEntryId(allocator, args, "request-signed");
+                defer allocator.free(entry_id);
+                try upsertRequestLifecycleEntry(
+                    allocator,
+                    entry_id,
+                    "execute_payload",
+                    "failed",
+                    request_json,
+                    if (output.items.len != 0) output.items else null,
+                    null,
+                    args.request_correlation_id,
+                    0,
+                    error_message,
+                );
+                return err;
+            };
             var summary = try summarizeRequestLifecycleOutput(allocator, output.items, .sign);
             defer summary.deinit(allocator);
             const entry_id = try resolvedRequestLifecycleEntryId(allocator, args, "request-signed");
@@ -7025,13 +7056,31 @@ pub fn runCommandWithProgrammaticProvider(
             derived_args.command = .tx_send;
             var output = std.ArrayList(u8){};
             defer output.deinit(allocator);
-            try runCommandWithProgrammaticProvider(
+            runCommandWithProgrammaticProvider(
                 allocator,
                 rpc,
                 &derived_args,
                 output.writer(allocator),
                 effective_programmatic_provider,
-            );
+            ) catch |err| {
+                const error_message = try ownedRequestLifecycleErrorMessage(allocator, rpc, err);
+                defer allocator.free(error_message);
+                const entry_id = try resolvedRequestLifecycleEntryId(allocator, args, "request-send");
+                defer allocator.free(entry_id);
+                try upsertRequestLifecycleEntry(
+                    allocator,
+                    entry_id,
+                    "request_execution",
+                    "failed",
+                    request_json,
+                    if (output.items.len != 0) output.items else null,
+                    null,
+                    args.request_correlation_id,
+                    0,
+                    error_message,
+                );
+                return err;
+            };
             var summary = try summarizeRequestLifecycleOutput(allocator, output.items, .send);
             defer summary.deinit(allocator);
             const entry_id = try resolvedRequestLifecycleEntryId(allocator, args, "request-send");
@@ -26867,6 +26916,174 @@ test "runCommandWithProgrammaticProvider request_send tracks challenge prompts i
     try testing.expectEqual(@as(u64, 0), loaded.entries[0].submit_count);
     try testing.expect(loaded.entries[0].digest == null);
     try testing.expectEqualStrings("req-send-challenge-1", loaded.entries[0].correlation_id.?);
+}
+
+test "runCommand request_sign records failed lifecycle state on provider authorizer error" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const state_path = try std.fmt.allocPrint(allocator, "tmp_request_sign_failed_state_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(state_path);
+    defer std.fs.cwd().deleteFile(state_path) catch {};
+
+    const old_state_override = request_state.test_request_state_path_override;
+    request_state.test_request_state_path_override = state_path;
+    defer request_state.test_request_state_path_override = old_state_override;
+
+    var args = cli.ParsedArgs{
+        .command = .request_sign,
+        .has_command = true,
+        .tx_build_commands = "[{\"kind\":\"TransferObjects\",\"objects\":[\"0xabc\"],\"address\":\"0xdef\"}]",
+        .tx_build_sender = "0x1111111111111111111111111111111111111111111111111111111111111111",
+        .tx_build_gas_budget = 1200,
+        .tx_build_gas_price = 8,
+        .tx_build_gas_payment = "[{\"objectId\":\"0x999\",\"version\":\"3\",\"digest\":\"0x3333333333333333333333333333333333333333333333333333333333333333\"}]",
+        .tx_provider_config = "{\"kind\":\"passkey\",\"address\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"session\":{\"kind\":\"passkey\",\"sessionId\":\"request-sign-session\"},\"authorizer\":{\"exec\":[\"/bin/sh\",\"-c\",\"echo request-sign-authorizer-failed >&2; exit 7\"]}}",
+        .tx_session_response = "{\"supportsExecute\":true,\"session\":{\"kind\":\"passkey\",\"sessionId\":\"request-sign-approved\"}}",
+        .request_correlation_id = "req-sign-failed-1",
+    };
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    const State = struct {
+        object_calls: usize = 0,
+        execute_calls: usize = 0,
+        unsafe_calls: usize = 0,
+    };
+    var state = State{};
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const ctx = @as(*State, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "sui_getObject")) {
+                ctx.object_calls += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":{\"objectId\":\"0xabc\",\"version\":\"9\",\"digest\":\"0x4444444444444444444444444444444444444444444444444444444444444444\",\"owner\":{\"AddressOwner\":\"0x1111111111111111111111111111111111111111111111111111111111111111\"}}}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_executeTransactionBlock")) {
+                ctx.execute_calls += 1;
+                return alloc.dupe(u8, "{\"result\":{\"digest\":\"0xshouldnotexecute\"}}");
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall") or std.mem.eql(u8, req.method, "unsafe_batchTransaction")) {
+                ctx.unsafe_calls += 1;
+                return alloc.dupe(u8, "{\"result\":{\"txBytes\":\"AQIDBA==\"}}");
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+    rpc.request_sender = .{
+        .context = &state,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try testing.expectError(client.ClientError.RpcError, runCommand(allocator, &rpc, &args, output.writer(allocator)));
+    try testing.expectEqual(@as(usize, 1), state.object_calls);
+    try testing.expectEqual(@as(usize, 0), state.execute_calls);
+    try testing.expectEqual(@as(usize, 0), state.unsafe_calls);
+
+    var loaded = try request_state.loadDefaultRequestState(allocator);
+    defer loaded.deinit(allocator);
+    try testing.expectEqual(@as(usize, 1), loaded.entries.len);
+    try testing.expectEqualStrings("req-sign-failed-1", loaded.entries[0].id);
+    try testing.expectEqualStrings("execute_payload", loaded.entries[0].kind);
+    try testing.expectEqualStrings("failed", loaded.entries[0].state);
+    try testing.expect(loaded.entries[0].request_json != null);
+    try testing.expect(loaded.entries[0].last_error != null);
+    try testing.expect(std.mem.indexOf(u8, loaded.entries[0].last_error.?, "exited with code 7") != null);
+    try testing.expect(std.mem.indexOf(u8, loaded.entries[0].last_error.?, "request-sign-authorizer-failed") != null);
+    try testing.expectEqual(@as(u64, 0), loaded.entries[0].submit_count);
+}
+
+test "runCommand request_send records failed lifecycle state on provider authorizer error" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const state_path = try std.fmt.allocPrint(allocator, "tmp_request_send_failed_state_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(state_path);
+    defer std.fs.cwd().deleteFile(state_path) catch {};
+
+    const old_state_override = request_state.test_request_state_path_override;
+    request_state.test_request_state_path_override = state_path;
+    defer request_state.test_request_state_path_override = old_state_override;
+
+    var args = cli.ParsedArgs{
+        .command = .request_send,
+        .has_command = true,
+        .tx_build_commands = "[{\"kind\":\"TransferObjects\",\"objects\":[\"0xabc\"],\"address\":\"0xdef\"}]",
+        .tx_build_sender = "0x1111111111111111111111111111111111111111111111111111111111111111",
+        .tx_build_gas_budget = 1200,
+        .tx_build_gas_price = 8,
+        .tx_build_gas_payment = "[{\"objectId\":\"0x999\",\"version\":\"3\",\"digest\":\"0x3333333333333333333333333333333333333333333333333333333333333333\"}]",
+        .tx_provider_config = "{\"kind\":\"passkey\",\"address\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"session\":{\"kind\":\"passkey\",\"sessionId\":\"request-send-session\"},\"authorizer\":{\"exec\":[\"/bin/sh\",\"-c\",\"echo request-send-authorizer-failed >&2; exit 7\"]}}",
+        .tx_session_response = "{\"supportsExecute\":true,\"session\":{\"kind\":\"passkey\",\"sessionId\":\"request-send-approved\"}}",
+        .request_correlation_id = "req-send-failed-1",
+    };
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    const State = struct {
+        object_calls: usize = 0,
+        execute_calls: usize = 0,
+        unsafe_calls: usize = 0,
+    };
+    var state = State{};
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const ctx = @as(*State, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "sui_getObject")) {
+                ctx.object_calls += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":{\"objectId\":\"0xabc\",\"version\":\"9\",\"digest\":\"0x4444444444444444444444444444444444444444444444444444444444444444\",\"owner\":{\"AddressOwner\":\"0x1111111111111111111111111111111111111111111111111111111111111111\"}}}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_executeTransactionBlock")) {
+                ctx.execute_calls += 1;
+                return alloc.dupe(u8, "{\"result\":{\"digest\":\"0xshouldnotexecute\"}}");
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall") or std.mem.eql(u8, req.method, "unsafe_batchTransaction")) {
+                ctx.unsafe_calls += 1;
+                return alloc.dupe(u8, "{\"result\":{\"txBytes\":\"AQIDBA==\"}}");
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+    rpc.request_sender = .{
+        .context = &state,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try testing.expectError(client.ClientError.RpcError, runCommand(allocator, &rpc, &args, output.writer(allocator)));
+    try testing.expectEqual(@as(usize, 1), state.object_calls);
+    try testing.expectEqual(@as(usize, 0), state.execute_calls);
+    try testing.expectEqual(@as(usize, 0), state.unsafe_calls);
+
+    var loaded = try request_state.loadDefaultRequestState(allocator);
+    defer loaded.deinit(allocator);
+    try testing.expectEqual(@as(usize, 1), loaded.entries.len);
+    try testing.expectEqualStrings("req-send-failed-1", loaded.entries[0].id);
+    try testing.expectEqualStrings("request_execution", loaded.entries[0].kind);
+    try testing.expectEqualStrings("failed", loaded.entries[0].state);
+    try testing.expect(loaded.entries[0].request_json != null);
+    try testing.expect(loaded.entries[0].last_error != null);
+    try testing.expect(std.mem.indexOf(u8, loaded.entries[0].last_error.?, "exited with code 7") != null);
+    try testing.expect(std.mem.indexOf(u8, loaded.entries[0].last_error.?, "request-send-authorizer-failed") != null);
+    try testing.expectEqual(@as(u64, 0), loaded.entries[0].submit_count);
 }
 
 test "runCommand wallet sponsor request alias prints sponsor envelope artifact" {

@@ -61,6 +61,8 @@ These items should be true before calling the current core "v1 ok".
 - delegated session metadata reaches execution-side provider authorizers
 - sponsor and non-sponsor flows do not fork into unrelated execution stacks
 - request lifecycle state is persisted and updated through `request_state.json`
+- request lifecycle persists challenge prompts and execution failures, not only
+  successful transitions
 
 ### State Layers
 
