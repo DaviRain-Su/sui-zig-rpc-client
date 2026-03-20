@@ -1575,7 +1575,10 @@ fn ownLocalCommandSourceBuildContext(
     allow_session_response: bool,
     implicit_auto_gas_payment_min_balance: ?u64,
 ) !?OwnedLocalCommandSourceBuildContext {
-    if (args.tx_session_response != null and !allow_session_response) return null;
+    // Non-execute local artifact builders do not consume session approvals, so
+    // an unrelated `tx_session_response` should not force them off the local
+    // programmable builder path.
+    if (args.tx_session_response != null and !allow_session_response) {}
     if (require_signer_source and !hasRealBuilderSignerSource(args) and provider == null) return null;
     if (!cli.supportsProgrammableInput(args)) return null;
 
@@ -18432,6 +18435,122 @@ test "runCommand tx_dry_run move-call with omitted gas payment keeps local progr
     defer output.deinit(allocator);
 
     try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    try testing.expectEqual(@as(usize, 1), counts.coin);
+    try testing.expectEqual(@as(usize, 1), counts.normalized);
+    try testing.expectEqual(@as(usize, 1), counts.object);
+    try testing.expectEqual(@as(usize, 1), counts.dry_run);
+    try testing.expectEqual(@as(usize, 0), counts.unsafe);
+}
+
+test "runCommandWithProgrammaticProvider tx_dry_run ignores session response and keeps local builder path" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const Counts = struct {
+        coin: usize = 0,
+        normalized: usize = 0,
+        object: usize = 0,
+        dry_run: usize = 0,
+        unsafe: usize = 0,
+    };
+    var counts = Counts{};
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const state = @as(*Counts, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "suix_getCoins")) {
+                state.coin += 1;
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0x123\"") != null);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0x901\",\"version\":\"14\",\"digest\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"balance\":\"5000\"}],\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                state.normalized += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"parameters\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"counter\",\"name\":\"Counter\"}},\"U64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\"}}}]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_getObject")) {
+                state.object += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":{\"objectId\":\"0xabc\",\"version\":\"9\",\"digest\":\"0x4444444444444444444444444444444444444444444444444444444444444444\",\"owner\":{\"AddressOwner\":\"0x123\"}}}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_dryRunTransactionBlock")) {
+                state.dry_run += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"effects\":{\"status\":{\"status\":\"success\"}},\"balanceChanges\":[]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall") or std.mem.eql(u8, req.method, "unsafe_batchTransaction")) {
+                state.unsafe += 1;
+                return alloc.dupe(u8, "{\"result\":{\"txBytes\":\"AQIDBA==\"}}");
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+
+    var args = cli.ParsedArgs{
+        .command = .tx_dry_run,
+        .has_command = true,
+        .tx_build_package = "0x2",
+        .tx_build_module = "counter",
+        .tx_build_function = "increment",
+        .tx_build_type_args = "[]",
+        .tx_build_args = "[\"0xabc\",7]",
+        .tx_build_gas_budget = 1200,
+        .tx_build_gas_price = 8,
+        .tx_send_summarize = true,
+        .tx_session_response = "{\"supportsExecute\":true,\"session\":{\"kind\":\"passkey\",\"sessionId\":\"ignored-dry-run-session\"}}",
+    };
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = &counts,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommandWithProgrammaticProvider(
+        allocator,
+        &rpc,
+        &args,
+        output.writer(allocator),
+        .{
+            .passkey = .{
+                .address = "0x123",
+                .session = .{ .kind = .passkey, .session_id = "ignored-dry-run-provider-session" },
+                .authorizer = .{
+                    .context = undefined,
+                    .callback = struct {
+                        fn call(_: *anyopaque, _: std.mem.Allocator, _: client.tx_request_builder.RemoteAuthorizationRequest) !client.tx_request_builder.RemoteAuthorizationResult {
+                            return error.TestUnexpectedResult;
+                        }
+                    }.call,
+                },
+                .session_challenge = .{
+                    .passkey = .{
+                        .rp_id = "wallet.example",
+                        .challenge_b64url = "challenge-ignored-dry-run",
+                    },
+                },
+                .session_action = .execute,
+                .session_supports_execute = false,
+            },
+        },
+    );
 
     try testing.expectEqual(@as(usize, 1), counts.coin);
     try testing.expectEqual(@as(usize, 1), counts.normalized);

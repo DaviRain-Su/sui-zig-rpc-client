@@ -276,6 +276,9 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
   supports the local programmable builder, even if default-keystore or
   provider-backed signer resolution would previously have forced the unsafe
   path.
+- [x] Ignore unrelated `tx_session_response` values on non-execute local
+  build/simulate/dry-run artifact paths so provider-backed local builders do
+  not fall back to legacy unsafe tx-bytes helpers.
 - [ ] Continue shrinking `unsafe_moveCall` usage.
 - [ ] Continue shrinking `unsafe_batchTransaction` usage.
 - [ ] Keep construction, simulation, and execution aligned to the same local
