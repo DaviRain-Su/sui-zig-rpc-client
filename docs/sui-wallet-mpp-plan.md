@@ -660,6 +660,18 @@ This should become both:
 - auditable previews showing why an action is allowed
 - recurring limits / recipient and protocol scoping
 
+Current status:
+
+- `wallet intent build` already supports first-class policy fields for
+  `recurring_limit`, `recipient_allowlist`, and `protocol_allowlist`
+- CLI flags:
+  - `--policy-recurring-limit`
+  - `--policy-recurring-interval-ms`
+  - `--policy-recipient-allowlist`
+  - `--policy-protocol-allowlist`
+- these fields merge into the existing `policy` JSON object instead of creating
+  a second policy format
+
 ### Phase 4: Scheduling
 
 - scheduler request schema
@@ -688,8 +700,8 @@ These are the next concrete steps that fit this repo.
 4. Make request artifacts explicitly sponsor-friendly.
 5. Add a passkey/session signer abstraction boundary.
 6. Add an explicit embedded/external account-mode model to the design and CLI.
-7. Add policy schema fields for recurring limits, recipient scoping, and
-   protocol scoping.
+7. Extend policy fields beyond recurring limits / recipient scoping / protocol
+   scoping into enforceable session lifecycle flows.
 8. Add scheduler-friendly artifact metadata:
    - validity window
    - sender

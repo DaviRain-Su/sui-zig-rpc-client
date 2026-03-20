@@ -4510,6 +4510,106 @@ fn resolvedWalletIntentExecutionMode(
     return mode;
 }
 
+fn anyExtraIntentPolicyFields(args: *const cli.ParsedArgs) bool {
+    return args.intent_policy_recurring_limit != null or
+        args.intent_policy_recurring_interval_ms != null or
+        args.intent_policy_recipient_allowlist_json != null or
+        args.intent_policy_protocol_allowlist_json != null;
+}
+
+fn parsePolicyArrayJson(
+    allocator: std.mem.Allocator,
+    raw_json: []const u8,
+) !std.json.Parsed(std.json.Value) {
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, raw_json, .{});
+    if (parsed.value != .array) {
+        parsed.deinit();
+        return error.InvalidCli;
+    }
+    return parsed;
+}
+
+fn writeMergedWalletIntentPolicy(
+    allocator: std.mem.Allocator,
+    writer: anytype,
+    args: *const cli.ParsedArgs,
+) !void {
+    const has_extra_fields = anyExtraIntentPolicyFields(args);
+
+    if (!has_extra_fields) {
+        if (args.intent_policy_json) |value| {
+            try writer.writeAll(value);
+        } else {
+            try writer.writeAll("null");
+        }
+        return;
+    }
+
+    var parsed_base: ?std.json.Parsed(std.json.Value) = null;
+    defer if (parsed_base) |*value| value.deinit();
+
+    if (args.intent_policy_json) |value| {
+        parsed_base = try std.json.parseFromSlice(std.json.Value, allocator, value, .{});
+        if (parsed_base.?.value != .object) return error.InvalidCli;
+    }
+
+    var parsed_recipients: ?std.json.Parsed(std.json.Value) = null;
+    defer if (parsed_recipients) |*value| value.deinit();
+    if (args.intent_policy_recipient_allowlist_json) |value| {
+        parsed_recipients = try parsePolicyArrayJson(allocator, value);
+    }
+
+    var parsed_protocols: ?std.json.Parsed(std.json.Value) = null;
+    defer if (parsed_protocols) |*value| value.deinit();
+    if (args.intent_policy_protocol_allowlist_json) |value| {
+        parsed_protocols = try parsePolicyArrayJson(allocator, value);
+    }
+
+    try writer.writeAll("{");
+    var wrote_any_field = false;
+
+    if (parsed_base) |base| {
+        var iterator = base.value.object.iterator();
+        while (iterator.next()) |entry| {
+            if (std.mem.eql(u8, entry.key_ptr.*, "recurring_limit") or
+                std.mem.eql(u8, entry.key_ptr.*, "recurringLimit") or
+                std.mem.eql(u8, entry.key_ptr.*, "recipient_allowlist") or
+                std.mem.eql(u8, entry.key_ptr.*, "recipientAllowlist") or
+                std.mem.eql(u8, entry.key_ptr.*, "protocol_allowlist") or
+                std.mem.eql(u8, entry.key_ptr.*, "protocolAllowlist"))
+            {
+                continue;
+            }
+            if (wrote_any_field) try writer.writeAll(",");
+            try writer.print("{f}:", .{std.json.fmt(entry.key_ptr.*, .{})});
+            try writer.print("{f}", .{std.json.fmt(entry.value_ptr.*, .{})});
+            wrote_any_field = true;
+        }
+    }
+
+    if (args.intent_policy_recurring_limit) |amount| {
+        if (wrote_any_field) try writer.writeAll(",");
+        try writer.print("\"recurring_limit\":{{\"amount\":{d},\"interval_ms\":{d}}}", .{
+            amount,
+            args.intent_policy_recurring_interval_ms.?,
+        });
+        wrote_any_field = true;
+    }
+    if (parsed_recipients) |value| {
+        if (wrote_any_field) try writer.writeAll(",");
+        try writer.writeAll("\"recipient_allowlist\":");
+        try writer.print("{f}", .{std.json.fmt(value.value, .{})});
+        wrote_any_field = true;
+    }
+    if (parsed_protocols) |value| {
+        if (wrote_any_field) try writer.writeAll(",");
+        try writer.writeAll("\"protocol_allowlist\":");
+        try writer.print("{f}", .{std.json.fmt(value.value, .{})});
+        wrote_any_field = true;
+    }
+    try writer.writeAll("}");
+}
+
 fn buildWalletIntentJsonFromArgs(
     allocator: std.mem.Allocator,
     args: *const cli.ParsedArgs,
@@ -4576,11 +4676,7 @@ fn buildWalletIntentJsonFromArgs(
     }
     try writer.writeAll("}");
     try writer.writeAll(",\"policy\":");
-    if (args.intent_policy_json) |value| {
-        try writer.writeAll(value);
-    } else {
-        try writer.writeAll("null");
-    }
+    try writeMergedWalletIntentPolicy(allocator, writer, args);
     try writer.writeAll("}");
 
     return try output.toOwnedSlice(allocator);
@@ -23120,6 +23216,50 @@ test "runCommand wallet_intent_build prints first-class wallet intent artifacts"
     try testing.expectEqualStrings("required", parsed.value.object.get("sponsor").?.object.get("mode").?.string);
     try testing.expectEqualStrings("vip", parsed.value.object.get("sponsor").?.object.get("policy_metadata").?.object.get("tier").?.string);
     try testing.expectEqualStrings("0x1", parsed.value.object.get("policy").?.object.get("session_key").?.string);
+}
+
+test "runCommand wallet_intent_build merges recurring and scope policy fields" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "wallet",
+        "intent",
+        "build",
+        "--request",
+        "{\"commands\":[{\"kind\":\"TransferObjects\",\"objects\":[\"0xabc\"],\"address\":\"0xdef\"}],\"sender\":\"0xabc\",\"gasBudget\":1200}",
+        "--policy",
+        "{\"session_key\":\"0x1\",\"recipient_allowlist\":[\"0xold\"]}",
+        "--policy-recurring-limit",
+        "1000000",
+        "--policy-recurring-interval-ms",
+        "86400000",
+        "--policy-recipient-allowlist",
+        "[\"0xabc\",\"0xdef\"]",
+        "--policy-protocol-allowlist",
+        "[\"cetus::swap\",\"turbos::swap\"]",
+    });
+    defer args.deinit(allocator);
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    const policy = parsed.value.object.get("policy").?.object;
+    try testing.expectEqualStrings("0x1", policy.get("session_key").?.string);
+    try testing.expectEqual(@as(i64, 1_000_000), policy.get("recurring_limit").?.object.get("amount").?.integer);
+    try testing.expectEqual(@as(i64, 86_400_000), policy.get("recurring_limit").?.object.get("interval_ms").?.integer);
+    try testing.expectEqualStrings("0xabc", policy.get("recipient_allowlist").?.array.items[0].string);
+    try testing.expectEqualStrings("cetus::swap", policy.get("protocol_allowlist").?.array.items[0].string);
 }
 
 test "runCommand wallet_intent_dry_run keeps wallet intents on the local programmable builder path" {

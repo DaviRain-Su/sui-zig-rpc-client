@@ -130,6 +130,10 @@ pub const ParsedArgs = struct {
     intent_network: ?[]const u8 = null,
     intent_execution_mode: ?[]const u8 = null,
     intent_policy_json: ?[]const u8 = null,
+    intent_policy_recurring_limit: ?u64 = null,
+    intent_policy_recurring_interval_ms: ?u64 = null,
+    intent_policy_recipient_allowlist_json: ?[]const u8 = null,
+    intent_policy_protocol_allowlist_json: ?[]const u8 = null,
     request_sponsor_mode: ?[]const u8 = null,
     request_sponsor_policy: ?[]const u8 = null,
     request_valid_after_ms: ?u64 = null,
@@ -234,6 +238,8 @@ pub const ParsedArgs = struct {
     owned_intent_network: ?[]const u8 = null,
     owned_intent_execution_mode: ?[]const u8 = null,
     owned_intent_policy_json: ?[]const u8 = null,
+    owned_intent_policy_recipient_allowlist_json: ?[]const u8 = null,
+    owned_intent_policy_protocol_allowlist_json: ?[]const u8 = null,
     owned_request_sponsor_mode: ?[]const u8 = null,
     owned_request_sponsor_policy: ?[]const u8 = null,
     owned_request_correlation_id: ?[]const u8 = null,
@@ -298,6 +304,8 @@ pub const ParsedArgs = struct {
         if (self.owned_intent_network) |value| allocator.free(value);
         if (self.owned_intent_execution_mode) |value| allocator.free(value);
         if (self.owned_intent_policy_json) |value| allocator.free(value);
+        if (self.owned_intent_policy_recipient_allowlist_json) |value| allocator.free(value);
+        if (self.owned_intent_policy_protocol_allowlist_json) |value| allocator.free(value);
         if (self.owned_request_sponsor_mode) |value| allocator.free(value);
         if (self.owned_request_sponsor_policy) |value| allocator.free(value);
         if (self.owned_request_correlation_id) |value| allocator.free(value);
@@ -4398,6 +4406,40 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
                     i += 2;
                     continue;
                 }
+                if (isWalletIntentLifecycleCommand(parsed.command) and std.mem.eql(u8, token, "--policy-recurring-limit")) {
+                    if (i + 1 >= args.len) return error.InvalidCli;
+                    parsed.intent_policy_recurring_limit = try parseIntValue(args[i + 1]);
+                    i += 2;
+                    continue;
+                }
+                if (isWalletIntentLifecycleCommand(parsed.command) and std.mem.eql(u8, token, "--policy-recurring-interval-ms")) {
+                    if (i + 1 >= args.len) return error.InvalidCli;
+                    parsed.intent_policy_recurring_interval_ms = try parseIntValue(args[i + 1]);
+                    i += 2;
+                    continue;
+                }
+                if (isWalletIntentLifecycleCommand(parsed.command) and std.mem.eql(u8, token, "--policy-recipient-allowlist")) {
+                    if (i + 1 >= args.len) return error.InvalidCli;
+                    try setOptionalFileBackedArg(
+                        allocator,
+                        &parsed.owned_intent_policy_recipient_allowlist_json,
+                        &parsed.intent_policy_recipient_allowlist_json,
+                        args[i + 1],
+                    );
+                    i += 2;
+                    continue;
+                }
+                if (isWalletIntentLifecycleCommand(parsed.command) and std.mem.eql(u8, token, "--policy-protocol-allowlist")) {
+                    if (i + 1 >= args.len) return error.InvalidCli;
+                    try setOptionalFileBackedArg(
+                        allocator,
+                        &parsed.owned_intent_policy_protocol_allowlist_json,
+                        &parsed.intent_policy_protocol_allowlist_json,
+                        args[i + 1],
+                    );
+                    i += 2;
+                    continue;
+                }
                 if (parsed.command == .request_sponsor or
                     parsed.command == .request_schedule or
                     isWalletIntentLifecycleCommand(parsed.command))
@@ -5603,6 +5645,12 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
         if (parsed.wallet_credential_id == null or parsed.wallet_public_key_value == null) return error.InvalidCli;
     }
 
+    if (isWalletIntentLifecycleCommand(parsed.command)) {
+        const has_recurring_limit = parsed.intent_policy_recurring_limit != null;
+        const has_recurring_interval = parsed.intent_policy_recurring_interval_ms != null;
+        if (has_recurring_limit != has_recurring_interval) return error.InvalidCli;
+    }
+
     if (parsed.tx_session_response != null and parsed.tx_provider_config == null) return error.InvalidCli;
 
     if (parsed.command == .move_package and parsed.move_package == null) return error.InvalidCli;
@@ -5941,10 +5989,14 @@ pub fn printUsage(writer: anytype) !void {
         "    same options as account objects, including typed filters and --json\n" ++
         "  wallet intent build                 Build a first-class wallet intent envelope around a request artifact\n" ++
         "    same input options as request build plus --intent/--network/--execution-mode/--policy\n" ++
+        "    policy helpers: --policy-recurring-limit/--policy-recurring-interval-ms\n" ++
+        "      --policy-recipient-allowlist/--policy-protocol-allowlist\n" ++
         "  wallet intent dry-run               Dry-run a wallet intent or request-shaped tx input\n" ++
         "    same input options as request dry-run plus --intent/--network/--execution-mode/--policy\n" ++
+        "      and the same policy helper flags as wallet intent build\n" ++
         "  wallet intent send                  Send a wallet intent or request-shaped tx input\n" ++
         "    same input options as request send plus --intent/--network/--execution-mode/--policy\n" ++
+        "      and the same policy helper flags as wallet intent build\n" ++
         "  request build                       Build a normalized request artifact from programmatic tx input\n" ++
         "    --request <json|@file>             Normalize an existing request artifact\n" ++
         "    --package/--module/--function      Build from move-call input\n" ++
@@ -8845,6 +8897,54 @@ test "parseCliArgs parses wallet intent build command" {
     try testing.expectEqualStrings("send", parsed.intent_execution_mode.?);
     try testing.expectEqualStrings("{\"session_key\":\"0x1\"}", parsed.intent_policy_json.?);
     try testing.expectEqualStrings("req-1", parsed.request_correlation_id.?);
+}
+
+test "parseCliArgs parses wallet intent policy scope flags" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "wallet",
+        "intent",
+        "build",
+        "--request",
+        "{\"commands\":[{\"kind\":\"TransferObjects\",\"objects\":[\"0xabc\"],\"address\":\"0xdef\"}],\"sender\":\"0xabc\",\"gasBudget\":1200}",
+        "--policy-recurring-limit",
+        "1000000",
+        "--policy-recurring-interval-ms",
+        "86400000",
+        "--policy-recipient-allowlist",
+        "[\"0xabc\",\"0xdef\"]",
+        "--policy-protocol-allowlist",
+        "[\"cetus::swap\",\"turbos::swap\"]",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(@as(?u64, 1_000_000), parsed.intent_policy_recurring_limit);
+    try testing.expectEqual(@as(?u64, 86_400_000), parsed.intent_policy_recurring_interval_ms);
+    try testing.expectEqualStrings("[\"0xabc\",\"0xdef\"]", parsed.intent_policy_recipient_allowlist_json.?);
+    try testing.expectEqualStrings("[\"cetus::swap\",\"turbos::swap\"]", parsed.intent_policy_protocol_allowlist_json.?);
+}
+
+test "parseCliArgs rejects partial recurring wallet intent policy" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    try testing.expectError(error.InvalidCli, parseCliArgs(allocator, &.{
+        "wallet",
+        "intent",
+        "build",
+        "--request",
+        "{\"commands\":[{\"kind\":\"TransferObjects\",\"objects\":[\"0xabc\"],\"address\":\"0xdef\"}],\"sender\":\"0xabc\",\"gasBudget\":1200}",
+        "--policy-recurring-limit",
+        "1000000",
+    }));
 }
 
 test "parseCliArgs parses wallet intent dry-run command" {
