@@ -4,6 +4,7 @@ const cli = @import("./cli.zig");
 const request_state = @import("./request_state.zig");
 const wallet_intent = @import("./wallet_intent.zig");
 const wallet_registry = @import("./wallet_registry.zig");
+const wallet_session_registry = @import("./wallet_session_registry.zig");
 const wallet_state = @import("./wallet_state.zig");
 const tx_builder = client.tx_builder;
 const RpcRequest = @typeInfo(@typeInfo(@typeInfo(client.rpc_client.RequestSender).@"struct".fields[1].type).pointer.child).@"fn".params[2].type.?;
@@ -3002,6 +3003,79 @@ const OwnedWalletAccountsSummary = struct {
     }
 };
 
+const OwnedWalletSessionListEntry = struct {
+    selector: []u8,
+    label: ?[]u8 = null,
+    wallet_selector: ?[]u8 = null,
+    address: ?[]u8 = null,
+    session_id: []u8,
+    session_kind: ?[]u8 = null,
+    state: []u8,
+    policy_json: ?[]u8 = null,
+    created_at_ms: i64,
+    updated_at_ms: i64,
+    expires_at_ms: ?i64 = null,
+    active_wallet_match: bool = false,
+
+    fn deinit(self: *OwnedWalletSessionListEntry, allocator: std.mem.Allocator) void {
+        allocator.free(self.selector);
+        if (self.label) |value| allocator.free(value);
+        if (self.wallet_selector) |value| allocator.free(value);
+        if (self.address) |value| allocator.free(value);
+        allocator.free(self.session_id);
+        if (self.session_kind) |value| allocator.free(value);
+        allocator.free(self.state);
+        if (self.policy_json) |value| allocator.free(value);
+    }
+};
+
+const OwnedWalletSessionListSummary = struct {
+    artifact_kind: []const u8 = "wallet_session_list",
+    active_selector: ?[]u8 = null,
+    registry_path: ?[]const u8 = null,
+    entries: []OwnedWalletSessionListEntry,
+
+    fn deinit(self: *OwnedWalletSessionListSummary, allocator: std.mem.Allocator) void {
+        if (self.active_selector) |value| allocator.free(value);
+        if (self.registry_path) |value| allocator.free(value);
+        for (self.entries) |*entry| entry.deinit(allocator);
+        allocator.free(self.entries);
+    }
+};
+
+const OwnedWalletSessionLifecycleSummary = struct {
+    artifact_kind: []const u8 = "wallet_session_entry",
+    action: []u8,
+    selector: []u8,
+    label: ?[]u8 = null,
+    wallet_selector: ?[]u8 = null,
+    address: ?[]u8 = null,
+    session_id: []u8,
+    session_kind: ?[]u8 = null,
+    state: []u8,
+    policy_json: ?[]u8 = null,
+    created_at_ms: i64,
+    updated_at_ms: i64,
+    expires_at_ms: ?i64 = null,
+    active_selector: ?[]u8 = null,
+    active_wallet_match: bool = false,
+    registry_path: ?[]const u8 = null,
+
+    fn deinit(self: *OwnedWalletSessionLifecycleSummary, allocator: std.mem.Allocator) void {
+        allocator.free(self.action);
+        allocator.free(self.selector);
+        if (self.label) |value| allocator.free(value);
+        if (self.wallet_selector) |value| allocator.free(value);
+        if (self.address) |value| allocator.free(value);
+        allocator.free(self.session_id);
+        if (self.session_kind) |value| allocator.free(value);
+        allocator.free(self.state);
+        if (self.policy_json) |value| allocator.free(value);
+        if (self.active_selector) |value| allocator.free(value);
+        if (self.registry_path) |value| allocator.free(value);
+    }
+};
+
 const OwnedResolvedWalletEntrySummary = struct {
     source_kind: []u8,
     selector: ?[]u8 = null,
@@ -3248,6 +3322,62 @@ fn formatWalletAccountsSummary(
     try printStructuredJson(writer, summary.*, pretty);
 }
 
+fn formatWalletSessionListSummary(
+    writer: anytype,
+    summary: *const OwnedWalletSessionListSummary,
+    json_output: bool,
+    pretty: bool,
+) !void {
+    if (json_output or pretty) {
+        try printStructuredJson(writer, summary.*, pretty);
+        return;
+    }
+
+    try writer.print("wallet_sessions: {d}\n", .{summary.entries.len});
+    if (summary.registry_path) |value| try writer.print("wallet_sessions_path: {s}\n", .{value});
+    if (summary.active_selector) |value| try writer.print("active_wallet: {s}\n", .{value});
+    if (summary.entries.len == 0) return;
+    try writer.writeAll("\n");
+
+    for (summary.entries, 0..) |entry, index| {
+        if (index != 0) try writer.writeAll("\n");
+        try writer.print("selector: {s}\n", .{entry.selector});
+        try writer.print("session_id: {s}\n", .{entry.session_id});
+        try writer.print("state: {s}\n", .{entry.state});
+        if (entry.label) |value| try writer.print("label: {s}\n", .{value});
+        if (entry.wallet_selector) |value| try writer.print("wallet_selector: {s}\n", .{value});
+        if (entry.address) |value| try writer.print("address: {s}\n", .{value});
+        if (entry.session_kind) |value| try writer.print("session_kind: {s}\n", .{value});
+        try writer.print("created_at_ms: {d}\n", .{entry.created_at_ms});
+        try writer.print("updated_at_ms: {d}\n", .{entry.updated_at_ms});
+        if (entry.expires_at_ms) |value| try writer.print("expires_at_ms: {d}\n", .{value});
+        try writer.print("active_wallet_match: {any}\n", .{entry.active_wallet_match});
+    }
+}
+
+fn formatWalletSessionLifecycleSummary(
+    writer: anytype,
+    summary: *const OwnedWalletSessionLifecycleSummary,
+    json_output: bool,
+    pretty: bool,
+) !void {
+    if (json_output or pretty) {
+        try printStructuredJson(writer, summary.*, pretty);
+        return;
+    }
+
+    try writer.print("{s}: {s}\n", .{ summary.action, summary.selector });
+    try writer.print("session_id: {s}\n", .{summary.session_id});
+    try writer.print("state: {s}\n", .{summary.state});
+    if (summary.label) |value| try writer.print("label: {s}\n", .{value});
+    if (summary.wallet_selector) |value| try writer.print("wallet_selector: {s}\n", .{value});
+    if (summary.address) |value| try writer.print("address: {s}\n", .{value});
+    if (summary.session_kind) |value| try writer.print("session_kind: {s}\n", .{value});
+    if (summary.registry_path) |value| try writer.print("wallet_sessions_path: {s}\n", .{value});
+    if (summary.active_selector) |value| try writer.print("active_wallet: {s}\n", .{value});
+    try writer.print("active_wallet_match: {any}\n", .{summary.active_wallet_match});
+}
+
 fn duplicateOptionalOwned(allocator: std.mem.Allocator, value: ?[]const u8) !?[]u8 {
     const slice = value orelse return null;
     return try allocator.dupe(u8, slice);
@@ -3319,6 +3449,40 @@ fn findPasskeyIndexAnyState(
         }
     }
     return null;
+}
+
+fn walletSessionMatchesSelectorOrAddressOrId(
+    entry: *const wallet_session_registry.OwnedWalletSessionEntry,
+    selector_or_address: []const u8,
+) bool {
+    if (std.mem.eql(u8, selector_or_address, entry.selector)) return true;
+    if (entry.label) |label| {
+        if (std.mem.eql(u8, selector_or_address, label)) return true;
+    }
+    if (entry.address) |address| {
+        if (std.mem.eql(u8, selector_or_address, address)) return true;
+    }
+    return std.mem.eql(u8, selector_or_address, entry.session_id);
+}
+
+fn findWalletSessionIndexAnyState(
+    registry: *const wallet_session_registry.OwnedWalletSessionRegistry,
+    selector_or_address: []const u8,
+) ?usize {
+    for (registry.entries, 0..) |entry, index| {
+        if (walletSessionMatchesSelectorOrAddressOrId(&entry, selector_or_address)) return index;
+    }
+    return null;
+}
+
+fn sessionEntryMatchesActiveWalletSelector(
+    active_selector: ?[]const u8,
+    entry: *const wallet_session_registry.OwnedWalletSessionEntry,
+) bool {
+    if (entry.wallet_selector) |wallet_selector| {
+        if (sameWalletSelectorOrAddress(active_selector, wallet_selector, entry.address)) return true;
+    }
+    return sameWalletSelectorOrAddress(active_selector, entry.selector, entry.address);
 }
 
 fn clearActiveWalletSelectorIfMatches(
@@ -3888,6 +4052,101 @@ fn runWalletPasskeyRevoke(
     defer summary.deinit(allocator);
 
     try formatWalletRegistryLifecycleSummary(writer, &summary, args.wallet_json, args.pretty);
+}
+
+fn buildWalletSessionListSummary(
+    allocator: std.mem.Allocator,
+) !OwnedWalletSessionListSummary {
+    const active_selector = try wallet_state.resolveActiveSelector(allocator);
+    errdefer if (active_selector) |value| allocator.free(value);
+
+    const registry_path = try wallet_session_registry.resolveDefaultWalletSessionRegistryPath(allocator);
+    errdefer if (registry_path) |value| allocator.free(value);
+
+    var registry = try wallet_session_registry.loadDefaultWalletSessionRegistry(allocator);
+    defer registry.deinit(allocator);
+
+    const entries = try allocator.alloc(OwnedWalletSessionListEntry, registry.entries.len);
+    errdefer allocator.free(entries);
+
+    for (registry.entries, 0..) |entry, index| {
+        entries[index] = .{
+            .selector = try allocator.dupe(u8, entry.selector),
+            .label = try duplicateOptionalSlice(allocator, entry.label),
+            .wallet_selector = try duplicateOptionalSlice(allocator, entry.wallet_selector),
+            .address = try duplicateOptionalSlice(allocator, entry.address),
+            .session_id = try allocator.dupe(u8, entry.session_id),
+            .session_kind = try duplicateOptionalSlice(allocator, entry.session_kind),
+            .state = try allocator.dupe(u8, entry.state),
+            .policy_json = try duplicateOptionalSlice(allocator, entry.policy_json),
+            .created_at_ms = entry.created_at_ms,
+            .updated_at_ms = entry.updated_at_ms,
+            .expires_at_ms = entry.expires_at_ms,
+            .active_wallet_match = sessionEntryMatchesActiveWalletSelector(active_selector, &entry),
+        };
+    }
+
+    return .{
+        .active_selector = active_selector,
+        .registry_path = registry_path,
+        .entries = entries,
+    };
+}
+
+fn runWalletSessionList(
+    allocator: std.mem.Allocator,
+    args: *const cli.ParsedArgs,
+    writer: anytype,
+) !void {
+    var summary = try buildWalletSessionListSummary(allocator);
+    defer summary.deinit(allocator);
+    try formatWalletSessionListSummary(writer, &summary, args.wallet_json, args.pretty);
+}
+
+fn runWalletSessionRevoke(
+    allocator: std.mem.Allocator,
+    args: *const cli.ParsedArgs,
+    writer: anytype,
+) !void {
+    const selector_or_address = args.account_selector orelse return error.InvalidCli;
+
+    const registry_path = try wallet_session_registry.resolveDefaultWalletSessionRegistryPath(allocator) orelse return error.InvalidCli;
+    defer allocator.free(registry_path);
+
+    var registry = try wallet_session_registry.loadDefaultWalletSessionRegistry(allocator);
+    defer registry.deinit(allocator);
+
+    const index = findWalletSessionIndexAnyState(&registry, selector_or_address) orelse return error.InvalidCli;
+    const entry = &registry.entries[index];
+
+    allocator.free(entry.state);
+    entry.state = try allocator.dupe(u8, "revoked");
+    entry.updated_at_ms = std.time.milliTimestamp();
+
+    try wallet_session_registry.writeDefaultWalletSessionRegistry(allocator, &registry);
+
+    const active_selector = try wallet_state.resolveActiveSelector(allocator);
+
+    var summary = OwnedWalletSessionLifecycleSummary{
+        .action = try allocator.dupe(u8, "session_revoked"),
+        .selector = try allocator.dupe(u8, entry.selector),
+        .label = try duplicateOptionalSlice(allocator, entry.label),
+        .wallet_selector = try duplicateOptionalSlice(allocator, entry.wallet_selector),
+        .address = try duplicateOptionalSlice(allocator, entry.address),
+        .session_id = try allocator.dupe(u8, entry.session_id),
+        .session_kind = try duplicateOptionalSlice(allocator, entry.session_kind),
+        .state = try allocator.dupe(u8, entry.state),
+        .policy_json = try duplicateOptionalSlice(allocator, entry.policy_json),
+        .created_at_ms = entry.created_at_ms,
+        .updated_at_ms = entry.updated_at_ms,
+        .expires_at_ms = entry.expires_at_ms,
+        .active_selector = active_selector,
+        .active_wallet_match = sessionEntryMatchesActiveWalletSelector(active_selector, entry),
+        .registry_path = try allocator.dupe(u8, registry_path),
+    };
+    defer summary.deinit(allocator);
+
+    try formatWalletSessionLifecycleSummary(writer, &summary, args.wallet_json, args.pretty);
 }
 
 fn sameWalletSelectorOrAddress(
@@ -5326,6 +5585,8 @@ pub fn runCommandWithProgrammaticProvider(
         .wallet_passkey_register => try runWalletPasskeyRegister(allocator, args, writer),
         .wallet_passkey_login => try runWalletPasskeyLogin(allocator, args, writer),
         .wallet_passkey_revoke => try runWalletPasskeyRevoke(allocator, args, writer),
+        .wallet_session_list => try runWalletSessionList(allocator, args, writer),
+        .wallet_session_revoke => try runWalletSessionRevoke(allocator, args, writer),
         .wallet_export_public => {
             var resolved = try resolveWalletEntrySummary(allocator, args);
             defer resolved.deinit(allocator);
@@ -23226,6 +23487,152 @@ test "runCommand wallet_passkey_revoke marks credentials revoked and clears acti
 
     const active_selector = try wallet_state.resolveActiveSelector(allocator);
     try testing.expect(active_selector == null);
+}
+
+test "runCommand wallet_session_list prints locally tracked session entries" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const registry_path = try std.fmt.allocPrint(allocator, "tmp_commands_wallet_session_list_registry_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(registry_path);
+    defer std.fs.cwd().deleteFile(registry_path) catch {};
+
+    const state_path = try std.fmt.allocPrint(allocator, "tmp_commands_wallet_session_list_state_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(state_path);
+    defer std.fs.cwd().deleteFile(state_path) catch {};
+
+    const old_registry_override = wallet_session_registry.test_wallet_session_registry_path_override;
+    wallet_session_registry.test_wallet_session_registry_path_override = registry_path;
+    defer wallet_session_registry.test_wallet_session_registry_path_override = old_registry_override;
+
+    const old_state_override = wallet_state.test_wallet_state_path_override;
+    wallet_state.test_wallet_state_path_override = state_path;
+    defer wallet_state.test_wallet_state_path_override = old_state_override;
+
+    const entries = try allocator.alloc(wallet_session_registry.OwnedWalletSessionEntry, 1);
+    entries[0] = .{
+        .selector = try allocator.dupe(u8, "session:swap"),
+        .label = try allocator.dupe(u8, "swap"),
+        .wallet_selector = try allocator.dupe(u8, "passkey:iphone"),
+        .address = try allocator.dupe(u8, "0xabc"),
+        .session_id = try allocator.dupe(u8, "session-1"),
+        .session_kind = try allocator.dupe(u8, "passkey"),
+        .state = try allocator.dupe(u8, "active"),
+        .policy_json = try allocator.dupe(u8, "{\"recipient_allowlist\":[\"0xdef\"]}"),
+        .created_at_ms = 100,
+        .updated_at_ms = 101,
+        .expires_at_ms = 200,
+    };
+    var registry = wallet_session_registry.OwnedWalletSessionRegistry{ .entries = entries };
+    defer registry.deinit(allocator);
+    try wallet_session_registry.writeDefaultWalletSessionRegistry(allocator, &registry);
+
+    try wallet_state.writeDefaultWalletState(allocator, "passkey:iphone");
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "wallet",
+        "session",
+        "list",
+        "--json",
+    });
+    defer args.deinit(allocator);
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    try testing.expectEqualStrings("wallet_session_list", parsed.value.object.get("artifact_kind").?.string);
+    try testing.expectEqualStrings("passkey:iphone", parsed.value.object.get("active_selector").?.string);
+    const entries_value = parsed.value.object.get("entries").?.array.items;
+    try testing.expectEqual(@as(usize, 1), entries_value.len);
+    try testing.expectEqualStrings("session:swap", entries_value[0].object.get("selector").?.string);
+    try testing.expectEqualStrings("session-1", entries_value[0].object.get("session_id").?.string);
+    try testing.expectEqualStrings("active", entries_value[0].object.get("state").?.string);
+    try testing.expect(entries_value[0].object.get("active_wallet_match").?.bool);
+}
+
+test "runCommand wallet_session_revoke marks sessions revoked without clearing active wallet selector" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const registry_path = try std.fmt.allocPrint(allocator, "tmp_commands_wallet_session_revoke_registry_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(registry_path);
+    defer std.fs.cwd().deleteFile(registry_path) catch {};
+
+    const state_path = try std.fmt.allocPrint(allocator, "tmp_commands_wallet_session_revoke_state_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(state_path);
+    defer std.fs.cwd().deleteFile(state_path) catch {};
+
+    const old_registry_override = wallet_session_registry.test_wallet_session_registry_path_override;
+    wallet_session_registry.test_wallet_session_registry_path_override = registry_path;
+    defer wallet_session_registry.test_wallet_session_registry_path_override = old_registry_override;
+
+    const old_state_override = wallet_state.test_wallet_state_path_override;
+    wallet_state.test_wallet_state_path_override = state_path;
+    defer wallet_state.test_wallet_state_path_override = old_state_override;
+
+    const entries = try allocator.alloc(wallet_session_registry.OwnedWalletSessionEntry, 1);
+    entries[0] = .{
+        .selector = try allocator.dupe(u8, "session:swap"),
+        .label = try allocator.dupe(u8, "swap"),
+        .wallet_selector = try allocator.dupe(u8, "passkey:iphone"),
+        .address = try allocator.dupe(u8, "0xabc"),
+        .session_id = try allocator.dupe(u8, "session-1"),
+        .session_kind = try allocator.dupe(u8, "passkey"),
+        .state = try allocator.dupe(u8, "active"),
+        .policy_json = null,
+        .created_at_ms = 100,
+        .updated_at_ms = 101,
+        .expires_at_ms = null,
+    };
+    var registry = wallet_session_registry.OwnedWalletSessionRegistry{ .entries = entries };
+    defer registry.deinit(allocator);
+    try wallet_session_registry.writeDefaultWalletSessionRegistry(allocator, &registry);
+
+    try wallet_state.writeDefaultWalletState(allocator, "passkey:iphone");
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "wallet",
+        "session",
+        "revoke",
+        "session-1",
+        "--json",
+    });
+    defer args.deinit(allocator);
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    try testing.expectEqualStrings("wallet_session_entry", parsed.value.object.get("artifact_kind").?.string);
+    try testing.expectEqualStrings("session_revoked", parsed.value.object.get("action").?.string);
+    try testing.expectEqualStrings("revoked", parsed.value.object.get("state").?.string);
+    try testing.expect(parsed.value.object.get("active_wallet_match").?.bool);
+
+    var loaded = try wallet_session_registry.loadDefaultWalletSessionRegistry(allocator);
+    defer loaded.deinit(allocator);
+    try testing.expectEqualStrings("revoked", loaded.entries[0].state);
+
+    const active_selector = try wallet_state.resolveActiveSelector(allocator);
+    try testing.expect(active_selector != null);
+    defer allocator.free(active_selector.?);
+    try testing.expectEqualStrings("passkey:iphone", active_selector.?);
 }
 
 test "runCommand wallet_accounts combines keystore and wallet registry entries" {

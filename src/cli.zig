@@ -23,6 +23,8 @@ pub const Command = enum {
     wallet_passkey_register,
     wallet_passkey_login,
     wallet_passkey_revoke,
+    wallet_session_list,
+    wallet_session_revoke,
     wallet_export_public,
     wallet_signer_inspect,
     wallet_address,
@@ -2968,6 +2970,27 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
                     }
                     return error.InvalidCli;
                 }
+                if (std.mem.eql(u8, sub, "session")) {
+                    if (i + 2 >= args.len) return error.InvalidCli;
+                    const session_sub = args[i + 2];
+                    if (std.mem.eql(u8, session_sub, "list")) {
+                        parsed.command = .wallet_session_list;
+                        parsed.has_command = true;
+                        i += 3;
+                        continue;
+                    }
+                    if (std.mem.eql(u8, session_sub, "revoke")) {
+                        parsed.command = .wallet_session_revoke;
+                        parsed.has_command = true;
+                        i += 3;
+                        if (i < args.len and !std.mem.startsWith(u8, args[i], "--")) {
+                            parsed.account_selector = args[i];
+                            i += 1;
+                        }
+                        continue;
+                    }
+                    return error.InvalidCli;
+                }
                 if (std.mem.eql(u8, sub, "import")) {
                     parsed.command = .wallet_import;
                     parsed.has_command = true;
@@ -4887,6 +4910,8 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
             parsed.command == .wallet_passkey_register or
             parsed.command == .wallet_passkey_login or
             parsed.command == .wallet_passkey_revoke or
+            parsed.command == .wallet_session_list or
+            parsed.command == .wallet_session_revoke or
             parsed.command == .wallet_use or
             parsed.command == .wallet_export_public or
             parsed.command == .wallet_signer_inspect)
@@ -5873,7 +5898,8 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
     }
     if (parsed.command == .wallet_disconnect or
         parsed.command == .wallet_passkey_login or
-        parsed.command == .wallet_passkey_revoke)
+        parsed.command == .wallet_passkey_revoke or
+        parsed.command == .wallet_session_revoke)
     {
         const selector = parsed.account_selector orelse return error.InvalidCli;
         if (selector.len == 0) return error.InvalidCli;
@@ -6262,6 +6288,11 @@ pub fn printUsage(writer: anytype) !void {
         "  wallet passkey revoke <selector|credential-id|0xaddress>\n" ++
         "                                       Revoke a locally registered passkey credential\n" ++
         "    --json                            Emit machine-readable wallet metadata\n" ++
+        "  wallet session list                List locally tracked delegated session entries\n" ++
+        "    --json                            Emit machine-readable session inventory\n" ++
+        "  wallet session revoke <selector|label|session-id|0xaddress>\n" ++
+        "                                       Mark a locally tracked delegated session as revoked\n" ++
+        "    --json                            Emit machine-readable session metadata\n" ++
         "  wallet use <selector|0xaddress>     Set the active wallet selector for wallet commands\n" ++
         "    --json                            Emit machine-readable wallet metadata\n" ++
         "  wallet export-public [selector]     Export public wallet metadata without private keys\n" ++
@@ -9171,6 +9202,46 @@ test "parseCliArgs parses wallet passkey revoke command" {
 
     try testing.expectEqual(Command.wallet_passkey_revoke, parsed.command);
     try testing.expectEqualStrings("passkey:iphone", parsed.account_selector.?);
+    try testing.expect(parsed.wallet_json);
+}
+
+test "parseCliArgs parses wallet session list command" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "wallet",
+        "session",
+        "list",
+        "--json",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.wallet_session_list, parsed.command);
+    try testing.expect(parsed.wallet_json);
+}
+
+test "parseCliArgs parses wallet session revoke command" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "wallet",
+        "session",
+        "revoke",
+        "session-1",
+        "--json",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.wallet_session_revoke, parsed.command);
+    try testing.expectEqualStrings("session-1", parsed.account_selector.?);
     try testing.expect(parsed.wallet_json);
 }
 
