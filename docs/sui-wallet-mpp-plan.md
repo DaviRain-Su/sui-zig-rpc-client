@@ -585,8 +585,24 @@ The sponsor contract between CLI/web and service should include:
 - requested action summary
 - estimated gas
 - sponsor policy metadata
+- gas source preference
+- refusal fallback semantics
 - validity window
 - replay protection / correlation id
+
+The CLI implementation now encodes this directly in both `wallet_intent` and
+`sponsor_envelope` artifacts:
+
+- `sponsor.mode`
+- `sponsor.policy_metadata`
+- `sponsor.gas_source_preference`
+- `sponsor.refusal_fallback`
+
+Defaults are deterministic instead of service-defined:
+
+- `direct` -> `sender` + `fallback_to_sender`
+- `optional` -> `prefer_sponsor` + `fallback_to_sender`
+- `required` -> `sponsor` + `fail_closed`
 
 ## Payments and Reconciliation
 

@@ -136,6 +136,8 @@ pub const ParsedArgs = struct {
     intent_policy_protocol_allowlist_json: ?[]const u8 = null,
     request_sponsor_mode: ?[]const u8 = null,
     request_sponsor_policy: ?[]const u8 = null,
+    request_sponsor_gas_source_preference: ?[]const u8 = null,
+    request_sponsor_refusal_fallback: ?[]const u8 = null,
     request_valid_after_ms: ?u64 = null,
     request_valid_before_ms: ?u64 = null,
     request_correlation_id: ?[]const u8 = null,
@@ -242,6 +244,8 @@ pub const ParsedArgs = struct {
     owned_intent_policy_protocol_allowlist_json: ?[]const u8 = null,
     owned_request_sponsor_mode: ?[]const u8 = null,
     owned_request_sponsor_policy: ?[]const u8 = null,
+    owned_request_sponsor_gas_source_preference: ?[]const u8 = null,
+    owned_request_sponsor_refusal_fallback: ?[]const u8 = null,
     owned_request_correlation_id: ?[]const u8 = null,
     owned_request_entry_id: ?[]const u8 = null,
     owned_request_schedule_id: ?[]const u8 = null,
@@ -308,6 +312,8 @@ pub const ParsedArgs = struct {
         if (self.owned_intent_policy_protocol_allowlist_json) |value| allocator.free(value);
         if (self.owned_request_sponsor_mode) |value| allocator.free(value);
         if (self.owned_request_sponsor_policy) |value| allocator.free(value);
+        if (self.owned_request_sponsor_gas_source_preference) |value| allocator.free(value);
+        if (self.owned_request_sponsor_refusal_fallback) |value| allocator.free(value);
         if (self.owned_request_correlation_id) |value| allocator.free(value);
         if (self.owned_request_entry_id) |value| allocator.free(value);
         if (self.owned_request_schedule_id) |value| allocator.free(value);
@@ -1012,6 +1018,24 @@ pub fn applyWalletIntentArtifact(
             value,
         );
         envelope.sponsor_policy_json = null;
+    }
+    if (envelope.sponsor_gas_source_preference) |value| {
+        replaceOwnedOptionalValue(
+            allocator,
+            &parsed.owned_request_sponsor_gas_source_preference,
+            &parsed.request_sponsor_gas_source_preference,
+            value,
+        );
+        envelope.sponsor_gas_source_preference = null;
+    }
+    if (envelope.sponsor_refusal_fallback) |value| {
+        replaceOwnedOptionalValue(
+            allocator,
+            &parsed.owned_request_sponsor_refusal_fallback,
+            &parsed.request_sponsor_refusal_fallback,
+            value,
+        );
+        envelope.sponsor_refusal_fallback = null;
     }
 }
 
@@ -4467,6 +4491,30 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
                         i += 2;
                         continue;
                     }
+                    if (std.mem.eql(u8, token, "--sponsor-gas-source")) {
+                        if (i + 1 >= args.len) return error.InvalidCli;
+                        try setOptionalStringArg(
+                            allocator,
+                            &parsed,
+                            args[i + 1],
+                            &parsed.owned_request_sponsor_gas_source_preference,
+                            &parsed.request_sponsor_gas_source_preference,
+                        );
+                        i += 2;
+                        continue;
+                    }
+                    if (std.mem.eql(u8, token, "--sponsor-refusal-fallback")) {
+                        if (i + 1 >= args.len) return error.InvalidCli;
+                        try setOptionalStringArg(
+                            allocator,
+                            &parsed,
+                            args[i + 1],
+                            &parsed.owned_request_sponsor_refusal_fallback,
+                            &parsed.request_sponsor_refusal_fallback,
+                        );
+                        i += 2;
+                        continue;
+                    }
                     if (std.mem.eql(u8, token, "--valid-after-ms")) {
                         if (i + 1 >= args.len) return error.InvalidCli;
                         parsed.request_valid_after_ms = try parseIntValue(args[i + 1]);
@@ -5783,7 +5831,9 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
         const entry_id = parsed.request_entry_id orelse return error.InvalidCli;
         if (entry_id.len == 0) return error.InvalidCli;
     }
-    if (parsed.command == .request_sponsor or parsed.command == .request_schedule) {
+    if (parsed.command == .request_sponsor or parsed.command == .request_schedule or
+        isWalletIntentLifecycleCommand(parsed.command))
+    {
         if (parsed.request_valid_after_ms != null and parsed.request_valid_before_ms != null and
             parsed.request_valid_after_ms.? > parsed.request_valid_before_ms.?)
         {
@@ -5792,6 +5842,32 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
         if (parsed.request_sponsor_mode) |mode| {
             if (!(std.mem.eql(u8, mode, "direct") or std.mem.eql(u8, mode, "optional") or std.mem.eql(u8, mode, "required"))) {
                 return error.InvalidCli;
+            }
+        }
+        if (parsed.request_sponsor_gas_source_preference) |value| {
+            if (!(std.mem.eql(u8, value, "sender") or std.mem.eql(u8, value, "prefer_sponsor") or std.mem.eql(u8, value, "sponsor"))) {
+                return error.InvalidCli;
+            }
+        }
+        if (parsed.request_sponsor_refusal_fallback) |value| {
+            if (!(std.mem.eql(u8, value, "fallback_to_sender") or std.mem.eql(u8, value, "fail_closed"))) {
+                return error.InvalidCli;
+            }
+        }
+        const sponsor_mode = parsed.request_sponsor_mode orelse "optional";
+        if (std.mem.eql(u8, sponsor_mode, "direct")) {
+            if (parsed.request_sponsor_gas_source_preference) |value| {
+                if (!std.mem.eql(u8, value, "sender")) return error.InvalidCli;
+            }
+            if (parsed.request_sponsor_refusal_fallback) |value| {
+                if (!std.mem.eql(u8, value, "fallback_to_sender")) return error.InvalidCli;
+            }
+        } else if (std.mem.eql(u8, sponsor_mode, "required")) {
+            if (parsed.request_sponsor_gas_source_preference) |value| {
+                if (!std.mem.eql(u8, value, "sponsor")) return error.InvalidCli;
+            }
+            if (parsed.request_sponsor_refusal_fallback) |value| {
+                if (!std.mem.eql(u8, value, "fail_closed")) return error.InvalidCli;
             }
         }
         if (parsed.request_correlation_id) |value| {
@@ -6018,6 +6094,10 @@ pub fn printUsage(writer: anytype) !void {
         "    same input options as request build\n" ++
         "    --sponsor-mode <direct|optional|required>\n" ++
         "    --sponsor-policy <json|@file>     Optional sponsor policy metadata JSON\n" ++
+        "    --sponsor-gas-source <sender|prefer_sponsor|sponsor>\n" ++
+        "                                       Preferred gas source contract for sponsor/direct execution\n" ++
+        "    --sponsor-refusal-fallback <fallback_to_sender|fail_closed>\n" ++
+        "                                       Behavior when an optional sponsor declines execution\n" ++
         "    --valid-after-ms/--valid-before-ms Optional validity window metadata\n" ++
         "    --correlation-id <text>           Optional replay/correlation id\n" ++
         "  request sign                        Attach signer/provider approvals and print an execute payload\n" ++
@@ -8886,6 +8966,12 @@ test "parseCliArgs parses wallet intent build command" {
         "send",
         "--policy",
         "{\"session_key\":\"0x1\"}",
+        "--sponsor-mode",
+        "optional",
+        "--sponsor-gas-source",
+        "prefer_sponsor",
+        "--sponsor-refusal-fallback",
+        "fallback_to_sender",
         "--correlation-id",
         "req-1",
     });
@@ -8896,6 +8982,9 @@ test "parseCliArgs parses wallet intent build command" {
     try testing.expectEqualStrings("sui:testnet", parsed.intent_network.?);
     try testing.expectEqualStrings("send", parsed.intent_execution_mode.?);
     try testing.expectEqualStrings("{\"session_key\":\"0x1\"}", parsed.intent_policy_json.?);
+    try testing.expectEqualStrings("optional", parsed.request_sponsor_mode.?);
+    try testing.expectEqualStrings("prefer_sponsor", parsed.request_sponsor_gas_source_preference.?);
+    try testing.expectEqualStrings("fallback_to_sender", parsed.request_sponsor_refusal_fallback.?);
     try testing.expectEqualStrings("req-1", parsed.request_correlation_id.?);
 }
 
@@ -9121,6 +9210,10 @@ test "parseCliArgs parses request sponsor command" {
         "required",
         "--sponsor-policy",
         "{\"tier\":\"vip\"}",
+        "--sponsor-gas-source",
+        "sponsor",
+        "--sponsor-refusal-fallback",
+        "fail_closed",
         "--valid-after-ms",
         "100",
         "--valid-before-ms",
@@ -9133,9 +9226,30 @@ test "parseCliArgs parses request sponsor command" {
     try testing.expectEqual(Command.request_sponsor, parsed.command);
     try testing.expectEqualStrings("required", parsed.request_sponsor_mode.?);
     try testing.expectEqualStrings("{\"tier\":\"vip\"}", parsed.request_sponsor_policy.?);
+    try testing.expectEqualStrings("sponsor", parsed.request_sponsor_gas_source_preference.?);
+    try testing.expectEqualStrings("fail_closed", parsed.request_sponsor_refusal_fallback.?);
     try testing.expectEqual(@as(?u64, 100), parsed.request_valid_after_ms);
     try testing.expectEqual(@as(?u64, 200), parsed.request_valid_before_ms);
     try testing.expectEqualStrings("req-123", parsed.request_correlation_id.?);
+}
+
+test "parseCliArgs rejects incompatible sponsor fallback semantics" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    try testing.expectError(error.InvalidCli, parseCliArgs(allocator, &.{
+        "request",
+        "sponsor",
+        "--request",
+        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"typeArguments\":[],\"arguments\":[7]}],\"sender\":\"0xabc\",\"gasBudget\":1200}",
+        "--sponsor-mode",
+        "required",
+        "--sponsor-refusal-fallback",
+        "fallback_to_sender",
+    }));
 }
 
 test "parseCliArgs parses request sign command" {

@@ -13,6 +13,8 @@ pub const ParsedEnvelope = struct {
     valid_before_ms: ?u64 = null,
     sponsor_mode: ?[]u8 = null,
     sponsor_policy_json: ?[]u8 = null,
+    sponsor_gas_source_preference: ?[]u8 = null,
+    sponsor_refusal_fallback: ?[]u8 = null,
 
     pub fn deinit(self: *ParsedEnvelope, allocator: std.mem.Allocator) void {
         allocator.free(self.request_json);
@@ -22,6 +24,8 @@ pub const ParsedEnvelope = struct {
         if (self.correlation_id) |value| allocator.free(value);
         if (self.sponsor_mode) |value| allocator.free(value);
         if (self.sponsor_policy_json) |value| allocator.free(value);
+        if (self.sponsor_gas_source_preference) |value| allocator.free(value);
+        if (self.sponsor_refusal_fallback) |value| allocator.free(value);
     }
 };
 
@@ -148,6 +152,16 @@ pub fn parseEnvelope(
             sponsor_value.object,
             &.{ "policy_metadata", "policyMetadata" },
         );
+        envelope.sponsor_gas_source_preference = try jsonOptionalStringDup(
+            allocator,
+            sponsor_value.object,
+            &.{ "gas_source_preference", "gasSourcePreference" },
+        );
+        envelope.sponsor_refusal_fallback = try jsonOptionalStringDup(
+            allocator,
+            sponsor_value.object,
+            &.{ "refusal_fallback", "refusalFallback" },
+        );
         if (envelope.valid_after_ms == null) {
             envelope.valid_after_ms = try jsonOptionalU64(sponsor_value.object, &.{ "valid_after_ms", "validAfterMs" });
         }
@@ -171,7 +185,7 @@ test "wallet_intent parseEnvelope reads request and sponsor metadata" {
         \\  "network":"sui:mainnet",
         \\  "execution_mode":"send",
         \\  "request":{"commands":[{"kind":"MoveCall","package":"0x2","module":"counter","function":"increment","typeArguments":[],"arguments":[7]}],"sender":"0xabc","gasBudget":1200},
-        \\  "sponsor":{"mode":"required","policy_metadata":{"tier":"vip"}},
+        \\  "sponsor":{"mode":"required","policy_metadata":{"tier":"vip"},"gas_source_preference":"sponsor","refusal_fallback":"fail_closed"},
         \\  "policy":{"session_key":"0x1"},
         \\  "correlation_id":"req-1",
         \\  "valid_after_ms":100,
@@ -186,6 +200,8 @@ test "wallet_intent parseEnvelope reads request and sponsor metadata" {
     try testing.expectEqualStrings("{\"session_key\":\"0x1\"}", parsed.policy_json.?);
     try testing.expectEqualStrings("required", parsed.sponsor_mode.?);
     try testing.expectEqualStrings("{\"tier\":\"vip\"}", parsed.sponsor_policy_json.?);
+    try testing.expectEqualStrings("sponsor", parsed.sponsor_gas_source_preference.?);
+    try testing.expectEqualStrings("fail_closed", parsed.sponsor_refusal_fallback.?);
     try testing.expectEqualStrings("req-1", parsed.correlation_id.?);
     try testing.expectEqual(@as(u64, 100), parsed.valid_after_ms.?);
     try testing.expectEqual(@as(u64, 200), parsed.valid_before_ms.?);

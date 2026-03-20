@@ -4627,8 +4627,6 @@ fn buildWalletIntentJsonFromArgs(
 
     const network = resolvedWalletIntentNetwork(args);
     const execution_mode = try resolvedWalletIntentExecutionMode(args, default_execution_mode);
-    const sponsor_mode = args.request_sponsor_mode orelse "optional";
-
     var output = std.ArrayList(u8){};
     errdefer output.deinit(allocator);
     const writer = output.writer(allocator);
@@ -4667,13 +4665,7 @@ fn buildWalletIntentJsonFromArgs(
     try writer.writeAll(",\"request_summary\":");
     try writer.writeAll(summary_json);
     try writer.writeAll(",\"sponsor\":{");
-    try writer.print("\"mode\":{f}", .{std.json.fmt(sponsor_mode, .{})});
-    try writer.writeAll(",\"policy_metadata\":");
-    if (args.request_sponsor_policy) |value| {
-        try writer.writeAll(value);
-    } else {
-        try writer.writeAll("null");
-    }
+    try writeResolvedRequestSponsorContract(writer, args);
     try writer.writeAll("}");
     try writer.writeAll(",\"policy\":");
     try writeMergedWalletIntentPolicy(allocator, writer, args);
@@ -4690,6 +4682,45 @@ fn resolvedRequestSponsorMode(args: *const cli.ParsedArgs) ![]const u8 {
     return error.InvalidCli;
 }
 
+fn resolvedRequestSponsorGasSourcePreference(args: *const cli.ParsedArgs) ![]const u8 {
+    if (args.request_sponsor_gas_source_preference) |value| return value;
+
+    const sponsor_mode = try resolvedRequestSponsorMode(args);
+    if (std.mem.eql(u8, sponsor_mode, "direct")) return "sender";
+    if (std.mem.eql(u8, sponsor_mode, "required")) return "sponsor";
+    return "prefer_sponsor";
+}
+
+fn resolvedRequestSponsorRefusalFallback(args: *const cli.ParsedArgs) ![]const u8 {
+    if (args.request_sponsor_refusal_fallback) |value| return value;
+
+    const sponsor_mode = try resolvedRequestSponsorMode(args);
+    if (std.mem.eql(u8, sponsor_mode, "required")) return "fail_closed";
+    return "fallback_to_sender";
+}
+
+fn writeResolvedRequestSponsorContract(
+    writer: anytype,
+    args: *const cli.ParsedArgs,
+) !void {
+    const sponsor_mode = try resolvedRequestSponsorMode(args);
+    const gas_source_preference = try resolvedRequestSponsorGasSourcePreference(args);
+    const refusal_fallback = try resolvedRequestSponsorRefusalFallback(args);
+
+    try writer.writeAll("\"mode\":");
+    try writer.print("{f}", .{std.json.fmt(sponsor_mode, .{})});
+    try writer.writeAll(",\"policy_metadata\":");
+    if (args.request_sponsor_policy) |value| {
+        try writer.writeAll(value);
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll(",\"gas_source_preference\":");
+    try writer.print("{f}", .{std.json.fmt(gas_source_preference, .{})});
+    try writer.writeAll(",\"refusal_fallback\":");
+    try writer.print("{f}", .{std.json.fmt(refusal_fallback, .{})});
+}
+
 fn buildRequestSponsorEnvelopeJson(
     allocator: std.mem.Allocator,
     args: *const cli.ParsedArgs,
@@ -4703,8 +4734,6 @@ fn buildRequestSponsorEnvelopeJson(
     const request = try std.json.parseFromSlice(std.json.Value, allocator, request_json, .{});
     defer request.deinit();
     if (request.value != .object) return error.InvalidCli;
-
-    const sponsor_mode = try resolvedRequestSponsorMode(args);
 
     var output = std.ArrayList(u8){};
     errdefer output.deinit(allocator);
@@ -4737,13 +4766,7 @@ fn buildRequestSponsorEnvelopeJson(
         try writer.writeAll("null");
     }
     try writer.writeAll(",\"sponsor\":{");
-    try writer.print("\"mode\":{f}", .{std.json.fmt(sponsor_mode, .{})});
-    try writer.writeAll(",\"policy_metadata\":");
-    if (args.request_sponsor_policy) |value| {
-        try writer.writeAll(value);
-    } else {
-        try writer.writeAll("null");
-    }
+    try writeResolvedRequestSponsorContract(writer, args);
     try writer.writeAll("}}");
 
     return try output.toOwnedSlice(allocator);
@@ -4761,6 +4784,8 @@ fn buildRequestScheduleJobJson(
     defer allocator.free(summary_json);
 
     const sponsor_mode = try resolvedRequestSponsorMode(args);
+    const sponsor_gas_source_preference = try resolvedRequestSponsorGasSourcePreference(args);
+    const sponsor_refusal_fallback = try resolvedRequestSponsorRefusalFallback(args);
 
     var output = std.ArrayList(u8){};
     errdefer output.deinit(allocator);
@@ -4810,6 +4835,10 @@ fn buildRequestScheduleJobJson(
     } else {
         try writer.writeAll("null");
     }
+    try writer.writeAll(",\"gas_source_preference\":");
+    try writer.print("{f}", .{std.json.fmt(sponsor_gas_source_preference, .{})});
+    try writer.writeAll(",\"refusal_fallback\":");
+    try writer.print("{f}", .{std.json.fmt(sponsor_refusal_fallback, .{})});
     try writer.writeAll("}");
     try writer.writeAll(",\"execution_requirements\":{");
     try writer.writeAll("\"object_freshness\":\"re_resolve_before_send\"");
@@ -23206,6 +23235,10 @@ test "runCommand wallet_intent_build prints first-class wallet intent artifacts"
         "required",
         "--sponsor-policy",
         "{\"tier\":\"vip\"}",
+        "--sponsor-gas-source",
+        "sponsor",
+        "--sponsor-refusal-fallback",
+        "fail_closed",
         "--correlation-id",
         "req-1",
         "--valid-after-ms",
@@ -23235,6 +23268,8 @@ test "runCommand wallet_intent_build prints first-class wallet intent artifacts"
     try testing.expectEqualStrings("req-1", parsed.value.object.get("correlation_id").?.string);
     try testing.expectEqualStrings("required", parsed.value.object.get("sponsor").?.object.get("mode").?.string);
     try testing.expectEqualStrings("vip", parsed.value.object.get("sponsor").?.object.get("policy_metadata").?.object.get("tier").?.string);
+    try testing.expectEqualStrings("sponsor", parsed.value.object.get("sponsor").?.object.get("gas_source_preference").?.string);
+    try testing.expectEqualStrings("fail_closed", parsed.value.object.get("sponsor").?.object.get("refusal_fallback").?.string);
     try testing.expectEqualStrings("0x1", parsed.value.object.get("policy").?.object.get("session_key").?.string);
 }
 
@@ -23692,6 +23727,10 @@ test "runCommand request_sponsor prints sponsor envelope artifact" {
         "required",
         "--sponsor-policy",
         "{\"tier\":\"vip\"}",
+        "--sponsor-gas-source",
+        "sponsor",
+        "--sponsor-refusal-fallback",
+        "fail_closed",
         "--valid-after-ms",
         "100",
         "--valid-before-ms",
@@ -23719,6 +23758,8 @@ test "runCommand request_sponsor prints sponsor envelope artifact" {
     try testing.expectEqualStrings("req-123", parsed.value.object.get("correlation_id").?.string);
     try testing.expectEqualStrings("required", parsed.value.object.get("sponsor").?.object.get("mode").?.string);
     try testing.expectEqualStrings("vip", parsed.value.object.get("sponsor").?.object.get("policy_metadata").?.object.get("tier").?.string);
+    try testing.expectEqualStrings("sponsor", parsed.value.object.get("sponsor").?.object.get("gas_source_preference").?.string);
+    try testing.expectEqualStrings("fail_closed", parsed.value.object.get("sponsor").?.object.get("refusal_fallback").?.string);
 }
 
 test "runCommand request_sign request artifact uses local programmable builder path" {
@@ -23833,6 +23874,10 @@ test "runCommand request_schedule prints scheduler job artifact" {
         "900",
         "--sponsor-mode",
         "optional",
+        "--sponsor-gas-source",
+        "prefer_sponsor",
+        "--sponsor-refusal-fallback",
+        "fallback_to_sender",
     });
     defer args.deinit(allocator);
 
@@ -23854,6 +23899,8 @@ test "runCommand request_schedule prints scheduler job artifact" {
     try testing.expectEqual(@as(i64, 500), parsed.value.object.get("schedule").?.object.get("execute_at_ms").?.integer);
     try testing.expectEqual(@as(i64, 900), parsed.value.object.get("schedule").?.object.get("valid_before_ms").?.integer);
     try testing.expectEqualStrings("optional", parsed.value.object.get("schedule").?.object.get("sponsor_mode").?.string);
+    try testing.expectEqualStrings("prefer_sponsor", parsed.value.object.get("schedule").?.object.get("gas_source_preference").?.string);
+    try testing.expectEqualStrings("fallback_to_sender", parsed.value.object.get("schedule").?.object.get("refusal_fallback").?.string);
     try testing.expectEqualStrings("re_resolve_before_send", parsed.value.object.get("execution_requirements").?.object.get("object_freshness").?.string);
     try testing.expectEqualStrings("fail_closed", parsed.value.object.get("execution_requirements").?.object.get("stale_object_policy").?.string);
 }
