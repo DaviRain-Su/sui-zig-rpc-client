@@ -1,6 +1,7 @@
 const std = @import("std");
 const client = @import("sui_client_zig");
 const cli = @import("./cli.zig");
+const request_state = @import("./request_state.zig");
 const wallet_state = @import("./wallet_state.zig");
 const tx_builder = client.tx_builder;
 const RpcRequest = @typeInfo(@typeInfo(@typeInfo(client.rpc_client.RequestSender).@"struct".fields[1].type).pointer.child).@"fn".params[2].type.?;
@@ -3784,6 +3785,7 @@ fn buildRequestSponsorEnvelopeJson(
 fn buildRequestScheduleJobJson(
     allocator: std.mem.Allocator,
     args: *const cli.ParsedArgs,
+    resolved_schedule_id: []const u8,
 ) ![]u8 {
     const request_json = try buildRequestArtifactJsonFromArgs(allocator, args);
     defer allocator.free(request_json);
@@ -3806,11 +3808,7 @@ fn buildRequestScheduleJobJson(
     try writer.writeAll(summary_json);
     try writer.writeAll(",\"schedule\":{");
     try writer.writeAll("\"job_id\":");
-    if (args.request_schedule_id) |value| {
-        try writer.print("{f}", .{std.json.fmt(value, .{})});
-    } else {
-        try writer.writeAll("null");
-    }
+    try writer.print("{f}", .{std.json.fmt(resolved_schedule_id, .{})});
     try writer.writeAll(",\"replace_job_id\":");
     if (args.request_schedule_replace_id) |value| {
         try writer.print("{f}", .{std.json.fmt(value, .{})});
@@ -3841,6 +3839,255 @@ fn buildRequestScheduleJobJson(
     try writer.writeAll("}}");
 
     return try output.toOwnedSlice(allocator);
+}
+
+fn resolvedRequestScheduleId(
+    allocator: std.mem.Allocator,
+    args: *const cli.ParsedArgs,
+) ![]u8 {
+    if (args.request_schedule_id) |value| return try allocator.dupe(u8, value);
+    if (args.request_correlation_id) |value| return try allocator.dupe(u8, value);
+    return try std.fmt.allocPrint(allocator, "schedule-{d}", .{std.time.milliTimestamp()});
+}
+
+fn findRequestStateEntryIndex(
+    state: *const request_state.OwnedRequestState,
+    entry_id: []const u8,
+) ?usize {
+    for (state.entries, 0..) |entry, index| {
+        if (std.mem.eql(u8, entry.id, entry_id)) return index;
+        if (entry.digest) |digest| {
+            if (std.mem.eql(u8, digest, entry_id)) return index;
+        }
+    }
+    return null;
+}
+
+fn appendRequestStateEntry(
+    allocator: std.mem.Allocator,
+    state: *request_state.OwnedRequestState,
+    entry: request_state.OwnedRequestEntry,
+) !void {
+    const old_entries = state.entries;
+    const new_entries = try allocator.alloc(request_state.OwnedRequestEntry, old_entries.len + 1);
+    for (old_entries, 0..) |old_entry, index| new_entries[index] = old_entry;
+    new_entries[old_entries.len] = entry;
+    allocator.free(old_entries);
+    state.entries = new_entries;
+}
+
+fn removeRequestStateEntryAt(
+    allocator: std.mem.Allocator,
+    state: *request_state.OwnedRequestState,
+    index: usize,
+) !void {
+    var old_entries = state.entries;
+    old_entries[index].deinit(allocator);
+
+    const new_entries = try allocator.alloc(request_state.OwnedRequestEntry, old_entries.len - 1);
+    var dest_index: usize = 0;
+    for (old_entries, 0..) |old_entry, source_index| {
+        if (source_index == index) continue;
+        new_entries[dest_index] = old_entry;
+        dest_index += 1;
+    }
+
+    allocator.free(old_entries);
+    state.entries = new_entries;
+}
+
+fn replaceRequestStateEntryAt(
+    allocator: std.mem.Allocator,
+    state: *request_state.OwnedRequestState,
+    index: usize,
+    entry: request_state.OwnedRequestEntry,
+) void {
+    state.entries[index].deinit(allocator);
+    state.entries[index] = entry;
+}
+
+fn optionalRequestStateStringField(
+    writer: anytype,
+    value: ?[]const u8,
+) !void {
+    if (value) |text| {
+        try writer.print("{f}", .{std.json.fmt(text, .{})});
+    } else {
+        try writer.writeAll("null");
+    }
+}
+
+fn writeRequestStateEntrySummaryObject(
+    writer: anytype,
+    entry: *const request_state.OwnedRequestEntry,
+) !void {
+    try writer.writeAll("{");
+    try writer.writeAll("\"id\":");
+    try writer.print("{f}", .{std.json.fmt(entry.id, .{})});
+    try writer.writeAll(",\"kind\":");
+    try writer.print("{f}", .{std.json.fmt(entry.kind, .{})});
+    try writer.writeAll(",\"state\":");
+    try writer.print("{f}", .{std.json.fmt(entry.state, .{})});
+    try writer.writeAll(",\"digest\":");
+    try optionalRequestStateStringField(writer, entry.digest);
+    try writer.writeAll(",\"correlation_id\":");
+    try optionalRequestStateStringField(writer, entry.correlation_id);
+    try writer.print(",\"created_at_ms\":{d}", .{entry.created_at_ms});
+    try writer.print(",\"updated_at_ms\":{d}", .{entry.updated_at_ms});
+    try writer.print(",\"submit_count\":{d}", .{entry.submit_count});
+    try writer.print(",\"has_request\":{any}", .{entry.request_json != null});
+    try writer.print(",\"has_artifact\":{any}", .{entry.artifact_json != null});
+    try writer.writeAll("}");
+}
+
+fn buildRequestStateListJson(
+    allocator: std.mem.Allocator,
+    state: *const request_state.OwnedRequestState,
+) ![]u8 {
+    var output = std.ArrayList(u8){};
+    errdefer output.deinit(allocator);
+    const writer = output.writer(allocator);
+
+    try writer.writeAll("{\"artifact_kind\":\"request_state_list\",\"entries\":[");
+    for (state.entries, 0..) |entry, index| {
+        if (index != 0) try writer.writeAll(",");
+        try writeRequestStateEntrySummaryObject(writer, &entry);
+    }
+    try writer.writeAll("]}");
+    return try output.toOwnedSlice(allocator);
+}
+
+fn buildRequestStateEntryActionJson(
+    allocator: std.mem.Allocator,
+    action: []const u8,
+    entry: *const request_state.OwnedRequestEntry,
+) ![]u8 {
+    var output = std.ArrayList(u8){};
+    errdefer output.deinit(allocator);
+    const writer = output.writer(allocator);
+
+    try writer.writeAll("{\"artifact_kind\":\"request_state_entry\",\"action\":");
+    try writer.print("{f}", .{std.json.fmt(action, .{})});
+    try writer.writeAll(",\"entry\":");
+    try writeRequestStateEntrySummaryObject(writer, entry);
+    try writer.writeAll("}");
+    return try output.toOwnedSlice(allocator);
+}
+
+fn storeScheduledRequestEntry(
+    allocator: std.mem.Allocator,
+    args: *const cli.ParsedArgs,
+    schedule_id: []const u8,
+    request_json: []const u8,
+    schedule_json: []const u8,
+) !void {
+    var state = try request_state.loadDefaultRequestState(allocator);
+    defer state.deinit(allocator);
+
+    if (args.request_schedule_replace_id) |replace_id| {
+        if (findRequestStateEntryIndex(&state, replace_id)) |index| {
+            try removeRequestStateEntryAt(allocator, &state, index);
+        }
+    }
+
+    const now_ms = std.time.milliTimestamp();
+    const entry = request_state.OwnedRequestEntry{
+        .id = try allocator.dupe(u8, schedule_id),
+        .kind = try allocator.dupe(u8, "schedule_job"),
+        .state = try allocator.dupe(u8, "scheduled"),
+        .request_json = try allocator.dupe(u8, request_json),
+        .artifact_json = try allocator.dupe(u8, schedule_json),
+        .digest = null,
+        .correlation_id = try duplicateOptionalSlice(allocator, args.request_correlation_id),
+        .created_at_ms = now_ms,
+        .updated_at_ms = now_ms,
+        .submit_count = 0,
+        .last_error = null,
+    };
+
+    if (findRequestStateEntryIndex(&state, schedule_id)) |index| {
+        replaceRequestStateEntryAt(allocator, &state, index, entry);
+    } else {
+        try appendRequestStateEntry(allocator, &state, entry);
+    }
+
+    try request_state.writeDefaultRequestState(allocator, &state);
+}
+
+fn buildDerivedRequestCommandArgs(
+    allocator: std.mem.Allocator,
+    args: *const cli.ParsedArgs,
+    command: cli.Command,
+    request_json: []const u8,
+) !cli.ParsedArgs {
+    var derived = cli.ParsedArgs{
+        .command = command,
+        .has_command = true,
+        .pretty = args.pretty,
+        .confirm_timeout_ms = args.confirm_timeout_ms,
+        .confirm_poll_ms = args.confirm_poll_ms,
+        .tx_send_wait = args.tx_send_wait,
+        .tx_send_summarize = args.tx_send_summarize,
+        .tx_send_observe = args.tx_send_observe,
+    };
+    errdefer derived.deinit(allocator);
+
+    try cli.applyProgrammaticRequestArtifact(allocator, &derived, request_json);
+
+    derived.pretty = args.pretty;
+    derived.confirm_timeout_ms = args.confirm_timeout_ms;
+    derived.confirm_poll_ms = args.confirm_poll_ms;
+    if (args.tx_send_wait) derived.tx_send_wait = true;
+    if (args.tx_send_summarize) derived.tx_send_summarize = true;
+    if (args.tx_send_observe) {
+        derived.tx_send_observe = true;
+        derived.tx_send_summarize = false;
+    }
+    if (args.from_keystore) derived.from_keystore = true;
+    if (args.tx_session_response) |raw| {
+        const owned = try allocator.dupe(u8, raw);
+        derived.owned_tx_session_response = owned;
+        derived.tx_session_response = owned;
+    }
+    if (args.tx_provider_config) |raw| {
+        const owned = try allocator.dupe(u8, raw);
+        derived.owned_tx_provider_config = owned;
+        derived.tx_provider_config = owned;
+    }
+    for (args.signatures.items) |signature| {
+        const owned = try allocator.dupe(u8, signature);
+        try derived.signatures.append(allocator, owned);
+        try derived.owned_signatures.append(allocator, owned);
+    }
+    for (args.signers.items) |signer| {
+        const owned = try allocator.dupe(u8, signer);
+        try derived.signers.append(allocator, owned);
+        try derived.owned_signers.append(allocator, owned);
+    }
+
+    return derived;
+}
+
+fn jsonFindFirstStringField(value: std.json.Value, field_name: []const u8) ?[]const u8 {
+    switch (value) {
+        .string => return null,
+        .array => |array| {
+            for (array.items) |item| {
+                if (jsonFindFirstStringField(item, field_name)) |found| return found;
+            }
+        },
+        .object => |object| {
+            if (object.get(field_name)) |field_value| {
+                if (field_value == .string) return field_value.string;
+            }
+            var iterator = object.iterator();
+            while (iterator.next()) |entry| {
+                if (jsonFindFirstStringField(entry.value_ptr.*, field_name)) |found| return found;
+            }
+        },
+        else => {},
+    }
+    return null;
 }
 
 fn printReadQuerySummary(
@@ -4095,9 +4342,122 @@ pub fn runCommandWithProgrammaticProvider(
             );
         },
         .request_schedule => {
-            const schedule_json = try buildRequestScheduleJobJson(allocator, args);
+            const schedule_id = try resolvedRequestScheduleId(allocator, args);
+            defer allocator.free(schedule_id);
+
+            const request_json = try buildRequestArtifactJsonFromArgs(allocator, args);
+            defer allocator.free(request_json);
+
+            const schedule_json = try buildRequestScheduleJobJson(allocator, args, schedule_id);
             defer allocator.free(schedule_json);
+
+            try storeScheduledRequestEntry(allocator, args, schedule_id, request_json, schedule_json);
             try printResponse(allocator, writer, schedule_json, args.pretty);
+        },
+        .request_list => {
+            var state = try request_state.loadDefaultRequestState(allocator);
+            defer state.deinit(allocator);
+
+            const list_json = try buildRequestStateListJson(allocator, &state);
+            defer allocator.free(list_json);
+            try printResponse(allocator, writer, list_json, args.pretty);
+        },
+        .request_cancel => {
+            const entry_id = args.request_entry_id orelse return error.InvalidCli;
+
+            var state = try request_state.loadDefaultRequestState(allocator);
+            defer state.deinit(allocator);
+
+            const index = findRequestStateEntryIndex(&state, entry_id) orelse return error.InvalidCli;
+            if (!std.mem.eql(u8, state.entries[index].kind, "schedule_job")) return error.InvalidCli;
+
+            const now_ms = std.time.milliTimestamp();
+            allocator.free(state.entries[index].state);
+            state.entries[index].state = try allocator.dupe(u8, "cancelled");
+            state.entries[index].updated_at_ms = now_ms;
+
+            const response_json = try buildRequestStateEntryActionJson(allocator, "cancelled", &state.entries[index]);
+            defer allocator.free(response_json);
+
+            try request_state.writeDefaultRequestState(allocator, &state);
+            try printResponse(allocator, writer, response_json, args.pretty);
+        },
+        .request_resume => {
+            const entry_id = args.request_entry_id orelse return error.InvalidCli;
+
+            var state = try request_state.loadDefaultRequestState(allocator);
+            defer state.deinit(allocator);
+
+            const index = findRequestStateEntryIndex(&state, entry_id) orelse return error.InvalidCli;
+            if (!std.mem.eql(u8, state.entries[index].kind, "schedule_job")) return error.InvalidCli;
+
+            const now_ms = std.time.milliTimestamp();
+            allocator.free(state.entries[index].state);
+            state.entries[index].state = try allocator.dupe(u8, "scheduled");
+            state.entries[index].updated_at_ms = now_ms;
+
+            const response_json = try buildRequestStateEntryActionJson(allocator, "resumed", &state.entries[index]);
+            defer allocator.free(response_json);
+
+            try request_state.writeDefaultRequestState(allocator, &state);
+            try printResponse(allocator, writer, response_json, args.pretty);
+        },
+        .request_rebroadcast => {
+            const entry_id = args.request_entry_id orelse return error.InvalidCli;
+
+            var state = try request_state.loadDefaultRequestState(allocator);
+            defer state.deinit(allocator);
+
+            const index = findRequestStateEntryIndex(&state, entry_id) orelse return error.InvalidCli;
+            const stored_request_json = state.entries[index].request_json orelse return error.InvalidCli;
+
+            var derived_args = try buildDerivedRequestCommandArgs(allocator, args, .tx_send, stored_request_json);
+            defer derived_args.deinit(allocator);
+
+            var execute_output = std.ArrayList(u8){};
+            defer execute_output.deinit(allocator);
+
+            try runCommandWithProgrammaticProvider(
+                allocator,
+                rpc,
+                &derived_args,
+                execute_output.writer(allocator),
+                effective_programmatic_provider,
+            );
+
+            const now_ms = std.time.milliTimestamp();
+            state.entries[index].submit_count += 1;
+            state.entries[index].updated_at_ms = now_ms;
+
+            if (std.json.parseFromSlice(std.json.Value, allocator, execute_output.items, .{})) |parsed| {
+                defer parsed.deinit();
+
+                if (jsonFindFirstStringField(parsed.value, "digest")) |digest| {
+                    if (state.entries[index].digest) |existing| allocator.free(existing);
+                    state.entries[index].digest = try allocator.dupe(u8, digest);
+                }
+                if (jsonFindFirstStringField(parsed.value, "status")) |status| {
+                    allocator.free(state.entries[index].state);
+                    state.entries[index].state = try allocator.dupe(
+                        u8,
+                        if (std.mem.eql(u8, status, "success"))
+                            "confirmed"
+                        else if (std.mem.eql(u8, status, "failure"))
+                            "failed"
+                        else
+                            "submitted",
+                    );
+                } else {
+                    allocator.free(state.entries[index].state);
+                    state.entries[index].state = try allocator.dupe(u8, "submitted");
+                }
+            } else |_| {
+                allocator.free(state.entries[index].state);
+                state.entries[index].state = try allocator.dupe(u8, "submitted");
+            }
+
+            try request_state.writeDefaultRequestState(allocator, &state);
+            try writer.writeAll(execute_output.items);
         },
         .request_status => {
             var derived_args = args.*;
@@ -21759,6 +22119,176 @@ test "runCommand request_schedule prints scheduler job artifact" {
     try testing.expectEqualStrings("re_resolve_before_send", parsed.value.object.get("execution_requirements").?.object.get("object_freshness").?.string);
 }
 
+test "runCommand request_schedule stores scheduler jobs in local request state" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const state_path = try std.fmt.allocPrint(allocator, "tmp_request_schedule_state_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(state_path);
+    defer std.fs.cwd().deleteFile(state_path) catch {};
+
+    const old_override = request_state.test_request_state_path_override;
+    request_state.test_request_state_path_override = state_path;
+    defer request_state.test_request_state_path_override = old_override;
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "request",
+        "schedule",
+        "--request",
+        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"typeArguments\":[],\"arguments\":[7]}],\"sender\":\"0xabc\",\"gasBudget\":1200}",
+        "--schedule-id",
+        "job-1",
+        "--schedule-at-ms",
+        "500",
+        "--correlation-id",
+        "req-123",
+    });
+    defer args.deinit(allocator);
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    var state = try request_state.loadDefaultRequestState(allocator);
+    defer state.deinit(allocator);
+
+    try testing.expectEqual(@as(usize, 1), state.entries.len);
+    try testing.expectEqualStrings("job-1", state.entries[0].id);
+    try testing.expectEqualStrings("schedule_job", state.entries[0].kind);
+    try testing.expectEqualStrings("scheduled", state.entries[0].state);
+    try testing.expectEqualStrings("req-123", state.entries[0].correlation_id.?);
+    try testing.expect(state.entries[0].request_json != null);
+    try testing.expect(state.entries[0].artifact_json != null);
+}
+
+test "runCommand request_list prints locally tracked request entries" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const state_path = try std.fmt.allocPrint(allocator, "tmp_request_list_state_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(state_path);
+    defer std.fs.cwd().deleteFile(state_path) catch {};
+
+    const old_override = request_state.test_request_state_path_override;
+    request_state.test_request_state_path_override = state_path;
+    defer request_state.test_request_state_path_override = old_override;
+
+    var entries = try allocator.alloc(request_state.OwnedRequestEntry, 1);
+    entries[0] = .{
+        .id = try allocator.dupe(u8, "job-1"),
+        .kind = try allocator.dupe(u8, "schedule_job"),
+        .state = try allocator.dupe(u8, "scheduled"),
+        .request_json = try allocator.dupe(u8, "{\"sender\":\"0xabc\"}"),
+        .artifact_json = try allocator.dupe(u8, "{\"artifact_kind\":\"schedule_job\"}"),
+        .digest = null,
+        .correlation_id = try allocator.dupe(u8, "req-123"),
+        .created_at_ms = 100,
+        .updated_at_ms = 100,
+        .submit_count = 0,
+        .last_error = null,
+    };
+    var state = request_state.OwnedRequestState{ .entries = entries };
+    defer state.deinit(allocator);
+    try request_state.writeDefaultRequestState(allocator, &state);
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "request",
+        "list",
+    });
+    defer args.deinit(allocator);
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    try testing.expectEqualStrings("request_state_list", parsed.value.object.get("artifact_kind").?.string);
+    try testing.expectEqual(@as(usize, 1), parsed.value.object.get("entries").?.array.items.len);
+    try testing.expectEqualStrings("job-1", parsed.value.object.get("entries").?.array.items[0].object.get("id").?.string);
+}
+
+test "runCommand request_cancel and request_resume update tracked request state" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const state_path = try std.fmt.allocPrint(allocator, "tmp_request_cancel_resume_state_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(state_path);
+    defer std.fs.cwd().deleteFile(state_path) catch {};
+
+    const old_override = request_state.test_request_state_path_override;
+    request_state.test_request_state_path_override = state_path;
+    defer request_state.test_request_state_path_override = old_override;
+
+    var entries = try allocator.alloc(request_state.OwnedRequestEntry, 1);
+    entries[0] = .{
+        .id = try allocator.dupe(u8, "job-1"),
+        .kind = try allocator.dupe(u8, "schedule_job"),
+        .state = try allocator.dupe(u8, "scheduled"),
+        .request_json = try allocator.dupe(u8, "{\"sender\":\"0xabc\"}"),
+        .artifact_json = try allocator.dupe(u8, "{\"artifact_kind\":\"schedule_job\"}"),
+        .digest = null,
+        .correlation_id = null,
+        .created_at_ms = 100,
+        .updated_at_ms = 100,
+        .submit_count = 0,
+        .last_error = null,
+    };
+    var state = request_state.OwnedRequestState{ .entries = entries };
+    defer state.deinit(allocator);
+    try request_state.writeDefaultRequestState(allocator, &state);
+
+    var cancel_args = try cli.parseCliArgs(allocator, &.{
+        "request",
+        "cancel",
+        "job-1",
+    });
+    defer cancel_args.deinit(allocator);
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    var cancel_output = std.ArrayList(u8){};
+    defer cancel_output.deinit(allocator);
+    try runCommand(allocator, &rpc, &cancel_args, cancel_output.writer(allocator));
+
+    var loaded_after_cancel = try request_state.loadDefaultRequestState(allocator);
+    defer loaded_after_cancel.deinit(allocator);
+    try testing.expectEqualStrings("cancelled", loaded_after_cancel.entries[0].state);
+
+    var resume_args = try cli.parseCliArgs(allocator, &.{
+        "request",
+        "resume",
+        "job-1",
+    });
+    defer resume_args.deinit(allocator);
+
+    var resume_output = std.ArrayList(u8){};
+    defer resume_output.deinit(allocator);
+    try runCommand(allocator, &rpc, &resume_args, resume_output.writer(allocator));
+
+    var loaded_after_resume = try request_state.loadDefaultRequestState(allocator);
+    defer loaded_after_resume.deinit(allocator);
+    try testing.expectEqualStrings("scheduled", loaded_after_resume.entries[0].state);
+}
+
 test "runCommand request_status prints structured summaries" {
     const testing = std.testing;
 
@@ -21803,6 +22333,131 @@ test "runCommand request_status prints structured summaries" {
     try testing.expectEqualStrings("success", parsed.value.object.get("status").?.string);
     try testing.expect(parsed.value.object.get("gas_summary") != null);
     try testing.expect(parsed.value.object.get("balance_changes") != null);
+}
+
+test "runCommand request_rebroadcast sends stored requests and updates tracked digests" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const seed = [_]u8{0x52} ** 32;
+    var encoded_key_bytes: [33]u8 = undefined;
+    encoded_key_bytes[0] = 0;
+    encoded_key_bytes[1..].* = seed;
+    const encoded_len = std.base64.standard.Encoder.calcSize(encoded_key_bytes.len);
+    const encoded_key = try allocator.alloc(u8, encoded_len);
+    defer allocator.free(encoded_key);
+    _ = std.base64.standard.Encoder.encode(encoded_key, &encoded_key_bytes);
+
+    const keystore_contents = try std.fmt.allocPrint(allocator, "[\"{s}\"]", .{encoded_key});
+    defer allocator.free(keystore_contents);
+
+    const keystore_path = "tmp_request_rebroadcast_keystore.json";
+    try std.fs.cwd().writeFile(.{
+        .sub_path = keystore_path,
+        .data = keystore_contents,
+    });
+    defer std.fs.cwd().deleteFile(keystore_path) catch {};
+
+    const old_keystore_override = client.keystore.test_keystore_path_override;
+    client.keystore.test_keystore_path_override = keystore_path;
+    defer client.keystore.test_keystore_path_override = old_keystore_override;
+
+    const state_path = try std.fmt.allocPrint(allocator, "tmp_request_rebroadcast_state_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(state_path);
+    defer std.fs.cwd().deleteFile(state_path) catch {};
+
+    const old_state_override = request_state.test_request_state_path_override;
+    request_state.test_request_state_path_override = state_path;
+    defer request_state.test_request_state_path_override = old_state_override;
+
+    var entries = try allocator.alloc(request_state.OwnedRequestEntry, 1);
+    entries[0] = .{
+        .id = try allocator.dupe(u8, "job-1"),
+        .kind = try allocator.dupe(u8, "schedule_job"),
+        .state = try allocator.dupe(u8, "scheduled"),
+        .request_json = try allocator.dupe(
+            u8,
+            "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"typeArguments\":[],\"arguments\":[7]}],\"fromKeystore\":true,\"signer\":\"0\",\"gasBudget\":1200,\"gasPayment\":[{\"objectId\":\"0x9999999999999999999999999999999999999999999999999999999999999999\",\"version\":\"1\",\"digest\":\"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}]}",
+        ),
+        .artifact_json = try allocator.dupe(u8, "{\"artifact_kind\":\"schedule_job\"}"),
+        .digest = null,
+        .correlation_id = try allocator.dupe(u8, "req-123"),
+        .created_at_ms = 100,
+        .updated_at_ms = 100,
+        .submit_count = 0,
+        .last_error = null,
+    };
+    var state = request_state.OwnedRequestState{ .entries = entries };
+    defer state.deinit(allocator);
+    try request_state.writeDefaultRequestState(allocator, &state);
+
+    const State = struct {
+        gas_price: usize = 0,
+        normalized: usize = 0,
+        execute_calls: usize = 0,
+        unsafe_calls: usize = 0,
+    };
+    var mock = State{};
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const ctx = @as(*State, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "suix_getReferenceGasPrice")) {
+                ctx.gas_price += 1;
+                return alloc.dupe(u8, "{\"result\":\"8\"}");
+            }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                ctx.normalized += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"parameters\":[\"U64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\"}}}]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_executeTransactionBlock")) {
+                ctx.execute_calls += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"digest\":\"0xrebroadcast\",\"effects\":{\"status\":{\"status\":\"success\"}},\"balanceChanges\":[]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall") or std.mem.eql(u8, req.method, "unsafe_batchTransaction")) {
+                ctx.unsafe_calls += 1;
+                return alloc.dupe(u8, "{\"result\":{\"txBytes\":\"AQIDBA==\"}}");
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "request",
+        "rebroadcast",
+        "job-1",
+    });
+    defer args.deinit(allocator);
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = &mock,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    try testing.expectEqual(@as(usize, 1), mock.gas_price);
+    try testing.expectEqual(@as(usize, 1), mock.normalized);
+    try testing.expectEqual(@as(usize, 1), mock.execute_calls);
+    try testing.expectEqual(@as(usize, 0), mock.unsafe_calls);
+
+    var loaded = try request_state.loadDefaultRequestState(allocator);
+    defer loaded.deinit(allocator);
+    try testing.expectEqualStrings("0xrebroadcast", loaded.entries[0].digest.?);
+    try testing.expectEqualStrings("confirmed", loaded.entries[0].state);
+    try testing.expectEqual(@as(u64, 1), loaded.entries[0].submit_count);
 }
 
 test "runCommand tx_build move-call with --summarize prints instruction summaries" {

@@ -398,9 +398,6 @@ Implemented request lifecycle commands:
 - `request sponsor`
 - `request sign`
 - `request schedule`
-
-Remaining request lifecycle commands:
-
 - `request list`
 - `request cancel`
 - `request resume`
@@ -412,6 +409,7 @@ Recommended artifacts:
 - `request-artifact.json`
 - `sponsor-envelope.json`
 - `schedule-job.json`
+- local `request_state.json` for resumable scheduled/rebroadcastable artifacts
 
 ### Concrete Gap Summary
 

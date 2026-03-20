@@ -33,6 +33,10 @@ pub const Command = enum {
     request_sign,
     request_send,
     request_schedule,
+    request_list,
+    request_cancel,
+    request_resume,
+    request_rebroadcast,
     request_status,
     events,
     move_package,
@@ -110,6 +114,7 @@ pub const ParsedArgs = struct {
     request_valid_after_ms: ?u64 = null,
     request_valid_before_ms: ?u64 = null,
     request_correlation_id: ?[]const u8 = null,
+    request_entry_id: ?[]const u8 = null,
     request_schedule_id: ?[]const u8 = null,
     request_schedule_replace_id: ?[]const u8 = null,
     request_schedule_at_ms: ?u64 = null,
@@ -201,6 +206,7 @@ pub const ParsedArgs = struct {
     owned_request_sponsor_mode: ?[]const u8 = null,
     owned_request_sponsor_policy: ?[]const u8 = null,
     owned_request_correlation_id: ?[]const u8 = null,
+    owned_request_entry_id: ?[]const u8 = null,
     owned_request_schedule_id: ?[]const u8 = null,
     owned_request_schedule_replace_id: ?[]const u8 = null,
     owned_account_objects_filter: ?[]const u8 = null,
@@ -254,6 +260,7 @@ pub const ParsedArgs = struct {
         if (self.owned_request_sponsor_mode) |value| allocator.free(value);
         if (self.owned_request_sponsor_policy) |value| allocator.free(value);
         if (self.owned_request_correlation_id) |value| allocator.free(value);
+        if (self.owned_request_entry_id) |value| allocator.free(value);
         if (self.owned_request_schedule_id) |value| allocator.free(value);
         if (self.owned_request_schedule_replace_id) |value| allocator.free(value);
         if (self.owned_account_objects_filter) |value| allocator.free(value);
@@ -301,6 +308,7 @@ fn isRequestLifecycleCommand(command: Command) bool {
         .request_sign,
         .request_send,
         .request_schedule,
+        .request_rebroadcast,
         => true,
         else => false,
     };
@@ -322,7 +330,7 @@ fn requestLifecycleConsumesRequestArtifact(command: Command) bool {
 
 fn requestLifecycleUsesProviderFlow(command: Command) bool {
     return switch (command) {
-        .request_sign, .request_send => true,
+        .request_sign, .request_send, .request_rebroadcast => true,
         else => false,
     };
 }
@@ -2754,6 +2762,60 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
                     i += 2;
                     continue;
                 }
+                if (std.mem.eql(u8, sub, "list")) {
+                    parsed.command = .request_list;
+                    parsed.has_command = true;
+                    i += 2;
+                    continue;
+                }
+                if (std.mem.eql(u8, sub, "cancel")) {
+                    parsed.command = .request_cancel;
+                    parsed.has_command = true;
+                    i += 2;
+                    if (i < args.len and !std.mem.startsWith(u8, args[i], "--")) {
+                        try setOptionalStringArg(
+                            allocator,
+                            &parsed,
+                            args[i],
+                            &parsed.owned_request_entry_id,
+                            &parsed.request_entry_id,
+                        );
+                        i += 1;
+                    }
+                    continue;
+                }
+                if (std.mem.eql(u8, sub, "resume")) {
+                    parsed.command = .request_resume;
+                    parsed.has_command = true;
+                    i += 2;
+                    if (i < args.len and !std.mem.startsWith(u8, args[i], "--")) {
+                        try setOptionalStringArg(
+                            allocator,
+                            &parsed,
+                            args[i],
+                            &parsed.owned_request_entry_id,
+                            &parsed.request_entry_id,
+                        );
+                        i += 1;
+                    }
+                    continue;
+                }
+                if (std.mem.eql(u8, sub, "rebroadcast")) {
+                    parsed.command = .request_rebroadcast;
+                    parsed.has_command = true;
+                    i += 2;
+                    if (i < args.len and !std.mem.startsWith(u8, args[i], "--")) {
+                        try setOptionalStringArg(
+                            allocator,
+                            &parsed,
+                            args[i],
+                            &parsed.owned_request_entry_id,
+                            &parsed.request_entry_id,
+                        );
+                        i += 1;
+                    }
+                    continue;
+                }
                 if (std.mem.eql(u8, sub, "status")) {
                     parsed.command = .request_status;
                     parsed.has_command = true;
@@ -4168,7 +4230,7 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
                     i += 1;
                     continue;
                 }
-                if (parsed.command == .request_send and std.mem.eql(u8, token, "--observe")) {
+                if ((parsed.command == .request_send or parsed.command == .request_rebroadcast) and std.mem.eql(u8, token, "--observe")) {
                     parsed.tx_send_observe = true;
                     i += 1;
                     continue;
@@ -4185,6 +4247,62 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
                     continue;
                 }
                 if (requestLifecycleUsesProviderFlow(parsed.command) and std.mem.eql(u8, token, "--provider")) {
+                    if (i + 1 >= args.len) return error.InvalidCli;
+                    try setOptionalFileBackedArg(
+                        allocator,
+                        &parsed.owned_tx_provider_config,
+                        &parsed.tx_provider_config,
+                        args[i + 1],
+                    );
+                    i += 2;
+                    continue;
+                }
+            }
+            if (parsed.command == .request_rebroadcast) {
+                if (std.mem.eql(u8, token, "--signature") or std.mem.eql(u8, token, "--sig") or std.mem.eql(u8, token, "--signature-file")) {
+                    if (i + 1 >= args.len) return error.InvalidCli;
+                    try parseSignatureArgument(allocator, &parsed, args[i + 1], std.mem.eql(u8, token, "--signature-file"));
+                    i += 2;
+                    continue;
+                }
+                if (std.mem.eql(u8, token, "--signer")) {
+                    if (i + 1 >= args.len) return error.InvalidCli;
+                    try appendSignerValue(allocator, &parsed, args[i + 1]);
+                    i += 2;
+                    continue;
+                }
+                if (std.mem.eql(u8, token, "--from-keystore")) {
+                    parsed.from_keystore = true;
+                    i += 1;
+                    continue;
+                }
+                if (std.mem.eql(u8, token, "--wait")) {
+                    parsed.tx_send_wait = true;
+                    i += 1;
+                    continue;
+                }
+                if (std.mem.eql(u8, token, "--summarize") or std.mem.eql(u8, token, "--summary")) {
+                    parsed.tx_send_summarize = true;
+                    i += 1;
+                    continue;
+                }
+                if (std.mem.eql(u8, token, "--observe")) {
+                    parsed.tx_send_observe = true;
+                    i += 1;
+                    continue;
+                }
+                if (std.mem.eql(u8, token, "--session-response")) {
+                    if (i + 1 >= args.len) return error.InvalidCli;
+                    try setOptionalFileBackedArg(
+                        allocator,
+                        &parsed.owned_tx_session_response,
+                        &parsed.tx_session_response,
+                        args[i + 1],
+                    );
+                    i += 2;
+                    continue;
+                }
+                if (std.mem.eql(u8, token, "--provider")) {
                     if (i + 1 >= args.len) return error.InvalidCli;
                     try setOptionalFileBackedArg(
                         allocator,
@@ -5013,6 +5131,15 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
         try validateProgrammaticTxInput(&parsed);
     }
 
+    if (parsed.command == .request_rebroadcast) {
+        const entry_id = parsed.request_entry_id orelse return error.InvalidCli;
+        if (entry_id.len == 0) return error.InvalidCli;
+        if (parsed.tx_build_auto_gas_payment and parsed.tx_build_gas_payment != null) return error.InvalidCli;
+        if (parsed.tx_build_gas_payment_min_balance != null and !parsed.tx_build_auto_gas_payment) return error.InvalidCli;
+        if (parsed.tx_send_summarize and parsed.tx_send_observe) return error.InvalidCli;
+        if (hasProgrammaticTxInput(&parsed)) return error.InvalidCli;
+    }
+
     if (parsed.command == .request_sign) {
         if (parsed.tx_build_auto_gas_payment and parsed.tx_build_gas_payment != null) return error.InvalidCli;
         if (parsed.tx_build_gas_payment_min_balance != null and !parsed.tx_build_auto_gas_payment) return error.InvalidCli;
@@ -5043,7 +5170,7 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
         try validateProgrammaticTxInput(&parsed);
     }
 
-    if (isRequestLifecycleCommand(parsed.command)) {
+    if (requestLifecycleConsumesRequestArtifact(parsed.command)) {
         if (parsed.tx_build_auto_gas_payment and parsed.tx_build_gas_payment != null) return error.InvalidCli;
         if (parsed.tx_build_gas_payment_min_balance != null and !parsed.tx_build_auto_gas_payment) return error.InvalidCli;
         if (parsed.tx_send_summarize and parsed.tx_send_observe) return error.InvalidCli;
@@ -5197,6 +5324,10 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
     if (parsed.command == .request_status) {
         const digest = parsed.tx_digest orelse return error.InvalidCli;
         if (digest.len == 0) return error.InvalidCli;
+    }
+    if (parsed.command == .request_cancel or parsed.command == .request_resume) {
+        const entry_id = parsed.request_entry_id orelse return error.InvalidCli;
+        if (entry_id.len == 0) return error.InvalidCli;
     }
     if (parsed.command == .request_sponsor or parsed.command == .request_schedule) {
         if (parsed.request_valid_after_ms != null and parsed.request_valid_before_ms != null and
@@ -5407,6 +5538,11 @@ pub fn printUsage(writer: anytype) !void {
         "    --schedule-at-ms <unix-ms>        Desired execution time\n" ++
         "    --schedule-id <text>              Optional scheduler job id\n" ++
         "    --replace-schedule-id <text>      Optional previous job id to replace\n" ++
+        "  request list                        List locally tracked request and schedule entries\n" ++
+        "  request cancel <id>                 Mark a locally tracked scheduled request as cancelled\n" ++
+        "  request resume <id>                 Return a locally tracked scheduled request to scheduled state\n" ++
+        "  request rebroadcast <id>            Re-send a locally tracked request through the standard request send path\n" ++
+        "    same signer/provider output flags as request send\n" ++
         "  request status <digest>             Query the execution status of a previously sent request\n" ++
         "    same options as tx status, including --summarize/--observe/--poll-ms/--confirm-timeout-ms\n" ++
         "  account list                        List local keystore accounts\n" ++
@@ -8286,6 +8422,80 @@ test "parseCliArgs parses request schedule command" {
     try testing.expectEqualStrings("job-0", parsed.request_schedule_replace_id.?);
     try testing.expectEqual(@as(?u64, 500), parsed.request_schedule_at_ms);
     try testing.expectEqualStrings("optional", parsed.request_sponsor_mode.?);
+}
+
+test "parseCliArgs parses request list command" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "request",
+        "list",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.request_list, parsed.command);
+}
+
+test "parseCliArgs parses request cancel command" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "request",
+        "cancel",
+        "job-1",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.request_cancel, parsed.command);
+    try testing.expectEqualStrings("job-1", parsed.request_entry_id.?);
+}
+
+test "parseCliArgs parses request resume command" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "request",
+        "resume",
+        "job-1",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.request_resume, parsed.command);
+    try testing.expectEqualStrings("job-1", parsed.request_entry_id.?);
+}
+
+test "parseCliArgs parses request rebroadcast command" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "request",
+        "rebroadcast",
+        "job-1",
+        "--from-keystore",
+        "--wait",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.request_rebroadcast, parsed.command);
+    try testing.expectEqualStrings("job-1", parsed.request_entry_id.?);
+    try testing.expect(parsed.from_keystore);
+    try testing.expect(parsed.tx_send_wait);
 }
 
 test "parseCliArgs parses request status command" {

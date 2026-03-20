@@ -1002,6 +1002,10 @@ pub fn main() !void {
 - `request sign`: 直接对 request artifact 或 request-shaped 输入附加 signer/provider 审批，并输出 execute payload；复用现有本地 programmable builder 和 `tx payload` 路径。
 - `request send`: 直接对 request artifact 或 request-shaped 输入执行发送，复用现有本地 programmable builder 和 signer/provider 路径。
 - `request schedule`: 把 request artifact 包成 `schedule-job`；支持 `--schedule-at-ms`、`--schedule-id`、`--replace-schedule-id`，并显式带上 sponsor mode / validity window / object freshness 要求。
+- `request list`: 列出本地 `request_state.json` 里跟踪的 request / schedule 条目摘要。
+- `request cancel <id>`: 把本地调度条目标成 `cancelled`，不再保留在“待执行”状态。
+- `request resume <id>`: 把本地调度条目恢复成 `scheduled`。
+- `request rebroadcast <id>`: 从本地 `request_state.json` 读取已保存的 request artifact，再走标准 `request send` 主线路重新发送，并回写最新 digest / state。
 - `request status <digest>`: 复用交易状态读取路径查询 request 执行结果；支持 `--summarize`、`--observe`、`--poll-ms`、`--confirm-timeout-ms`。
 - `account list`: 列出 keystore 条目。
 - `account info <selector>`: 按索引或别名/地址/密钥字段查询并展示单条 keystore 记录；`--json` 输出 JSON。

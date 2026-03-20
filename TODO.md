@@ -334,6 +334,8 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
   MPP plan: `wallet address/balance/coins/objects/create/import/use/
   export-public/signer inspect` and `request
   build/inspect/dry-run/send/status/sponsor/sign/schedule`.
+- [x] Add the next request lifecycle batch from the Sui wallet MPP plan:
+  local `request_state.json` plus `request list/cancel/resume/rebroadcast`.
 
 ## Cetus Readiness Gaps
 
