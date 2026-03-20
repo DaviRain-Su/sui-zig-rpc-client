@@ -608,7 +608,6 @@ fn shouldUseUnsafeTransactionBuilderPath(
     if (!supports_real_builder) return false;
 
     if (hasKeystoreBackedSignerSource(args)) return true;
-    if (args.tx_build_sender != null) return true;
 
     return (try hasSelectedMoveCallArgumentRequests(allocator, args)) or
         programmaticCommandsContainSelectedRequestTokens(args) or
@@ -1527,8 +1526,6 @@ fn shouldUseUnsafeTransactionBuilderPathWithProvider(
         commandSourceFromArgs(args),
     );
     if (!supports_real_builder) return false;
-
-    if (args.tx_build_sender != null) return true;
 
     const needs_real_builder_resolution = args.tx_build_auto_gas_payment or
         (try hasSelectedMoveCallArgumentRequests(allocator, args)) or

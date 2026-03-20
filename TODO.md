@@ -269,6 +269,9 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
   is already known.
 - [x] Keep low-level tx-bytes helpers on the local programmable builder when a
   sender is known and gas can be auto-selected locally.
+- [x] Keep explicit-sender direct-signature and provider command-source
+  payload/send flows on the standard programmatic local builder path instead
+  of routing them through the legacy unsafe dispatcher first.
 - [ ] Continue shrinking `unsafe_moveCall` usage.
 - [ ] Continue shrinking `unsafe_batchTransaction` usage.
 - [ ] Keep construction, simulation, and execution aligned to the same local
