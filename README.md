@@ -1328,6 +1328,17 @@ zig build run -- move function cetus_clmm_mainnet pool add_liquidity \
 - `send-request`
 - `preferred-send-request`
 
+如果你已经拿到完整的 `move function --summarize` JSON，不想再手工从里面拷
+`call_template.*_request_json` 字段，`request build/inspect/dry-run/send/sponsor/sign/schedule`
+以及 `wallet intent build/dry-run/send` 现在也可以直接吃这份 summary 作为
+`--request` 输入。CLI 会按命令类型自动抽取更合适的模板：
+- `request build/inspect/dry-run` 和 `wallet intent build/dry-run` 优先取
+  `call_template.preferred_tx_dry_run_request_json`
+- 发送型的 `request sponsor/sign/send/schedule` 和 `wallet intent send` 优先取
+  `call_template.preferred_tx_send_from_keystore_request_json`
+- 如果 preferred 模板还残留 unresolved placeholder，则自动回退到对应的基础
+  `tx_*_request_json`
+
 其中 `preferred-*` 会在存在 auto-selected candidate 时优先输出 preferred 版本；如果当前还没有唯一候选，就会自动回退到基础模板，不会输出空值。
 
 如果你在 `move function --summarize` 时已经给了 `--sender` 或 `--signer`，这些值现在会直接回填到 `call_template.tx_dry_run_*` 和 `call_template.tx_send_from_keystore_*`。当只有 `--sender` 时，`tx send --from-keystore` 模板会回退用这个 sender 地址作为 address-compatible signer selector。

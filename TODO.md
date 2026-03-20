@@ -293,7 +293,7 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
 
 ### 8. Discovery and execution ergonomics
 
-- [ ] Keep reducing manual copying from summaries into execution commands.
+- [x] Keep reducing manual copying from summaries into execution commands.
 - [ ] Preserve reusable artifact flows while simplifying the default CLI path.
 
 ### 9. Local Move contract coverage matrix

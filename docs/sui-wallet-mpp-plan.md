@@ -768,6 +768,11 @@ This is now covered by deterministic command-level regressions in
 `src/commands.zig`, so the wallet/request lifecycle has an executable smoke
 layer in addition to the lower-level parser and artifact tests.
 
+The wallet/request lifecycle now also accepts full `move function --summarize`
+artifacts as `--request` input, extracting the preferred or base request
+template automatically. That keeps the reusable artifact flow intact while
+removing another layer of manual `call_template.*` copy/paste.
+
 ## Risks
 
 ### Over-Abstracting Too Early

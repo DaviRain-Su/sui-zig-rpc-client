@@ -24616,6 +24616,38 @@ test "runCommand request_inspect summarizes request artifacts" {
     try testing.expectEqual(@as(i64, 1200), parsed.value.object.get("gas_budget").?.integer);
 }
 
+test "runCommand request_inspect accepts move function summary artifacts" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "request",
+        "inspect",
+        "--request",
+        "{\"call_template\":{\"preferred_tx_dry_run_request_json\":\"{\\\"commands\\\":[{\\\"kind\\\":\\\"MoveCall\\\",\\\"package\\\":\\\"0x2\\\",\\\"module\\\":\\\"counter\\\",\\\"function\\\":\\\"increment\\\",\\\"typeArguments\\\":[],\\\"arguments\\\":[7]}],\\\"sender\\\":\\\"0xabc\\\",\\\"gasBudget\\\":1200,\\\"summarize\\\":true}\",\"tx_dry_run_request_json\":\"{\\\"commands\\\":[{\\\"kind\\\":\\\"MoveCall\\\",\\\"package\\\":\\\"0x2\\\",\\\"module\\\":\\\"counter\\\",\\\"function\\\":\\\"increment\\\",\\\"typeArguments\\\":[],\\\"arguments\\\":[\\\"<arg0-u64>\\\"]}],\\\"sender\\\":\\\"0xabc\\\",\\\"gasBudget\\\":1200,\\\"summarize\\\":true}\"}}",
+    });
+    defer args.deinit(allocator);
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+
+    try testing.expectEqualStrings("request_artifact", parsed.value.object.get("data_kind").?.string);
+    try testing.expectEqual(@as(i64, 1), parsed.value.object.get("command_count").?.integer);
+    try testing.expect(parsed.value.object.get("has_sender").?.bool);
+    try testing.expectEqualStrings("0xabc", parsed.value.object.get("sender").?.string);
+    try testing.expectEqual(@as(i64, 1200), parsed.value.object.get("gas_budget").?.integer);
+}
+
 test "runCommand request_dry_run request artifact uses local programmable builder path" {
     const testing = std.testing;
 
@@ -24660,6 +24692,70 @@ test "runCommand request_dry_run request artifact uses local programmable builde
         "dry-run",
         "--request",
         "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"typeArguments\":[],\"arguments\":[7]}],\"sender\":\"0x123\",\"gasBudget\":1200,\"gasPrice\":8,\"gasPayment\":[{\"objectId\":\"0x999\",\"version\":\"3\",\"digest\":\"0x3333333333333333333333333333333333333333333333333333333333333333\"}],\"summarize\":true}",
+    });
+    defer args.deinit(allocator);
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = &counts,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    try testing.expectEqual(@as(usize, 1), counts.normalized);
+    try testing.expectEqual(@as(usize, 1), counts.dry_run);
+    try testing.expectEqual(@as(usize, 0), counts.unsafe);
+}
+
+test "runCommand request_dry_run move function summary uses local programmable builder path" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const Counts = struct {
+        normalized: usize = 0,
+        dry_run: usize = 0,
+        unsafe: usize = 0,
+    };
+    var counts = Counts{};
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const state = @as(*Counts, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                state.normalized += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"parameters\":[\"U64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\"}}}]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_dryRunTransactionBlock")) {
+                state.dry_run += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"effects\":{\"status\":{\"status\":\"success\"}},\"balanceChanges\":[]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall") or std.mem.eql(u8, req.method, "unsafe_batchTransaction")) {
+                state.unsafe += 1;
+                return alloc.dupe(u8, "{\"result\":{\"txBytes\":\"AQIDBA==\"}}");
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "request",
+        "dry-run",
+        "--request",
+        "{\"call_template\":{\"preferred_tx_dry_run_request_json\":\"{\\\"commands\\\":[{\\\"kind\\\":\\\"MoveCall\\\",\\\"package\\\":\\\"0x2\\\",\\\"module\\\":\\\"counter\\\",\\\"function\\\":\\\"increment\\\",\\\"typeArguments\\\":[],\\\"arguments\\\":[7]}],\\\"sender\\\":\\\"0x123\\\",\\\"gasBudget\\\":1200,\\\"gasPrice\\\":8,\\\"gasPayment\\\":[{\\\"objectId\\\":\\\"0x999\\\",\\\"version\\\":\\\"3\\\",\\\"digest\\\":\\\"0x3333333333333333333333333333333333333333333333333333333333333333\\\"}],\\\"summarize\\\":true}\",\"tx_dry_run_request_json\":\"{\\\"commands\\\":[{\\\"kind\\\":\\\"MoveCall\\\",\\\"package\\\":\\\"0x2\\\",\\\"module\\\":\\\"counter\\\",\\\"function\\\":\\\"increment\\\",\\\"typeArguments\\\":[],\\\"arguments\\\":[\\\"<arg0-u64>\\\"]}],\\\"sender\\\":\\\"0x123\\\",\\\"gasBudget\\\":1200,\\\"gasPrice\\\":8,\\\"gasPayment\\\":[{\\\"objectId\\\":\\\"0x999\\\",\\\"version\\\":\\\"3\\\",\\\"digest\\\":\\\"0x3333333333333333333333333333333333333333333333333333333333333333\\\"}],\\\"summarize\\\":true}\"}}",
     });
     defer args.deinit(allocator);
 

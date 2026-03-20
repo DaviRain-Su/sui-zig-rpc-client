@@ -851,6 +851,117 @@ fn parseOptionalRequestJsonText(
     };
 }
 
+const EmbeddedMoveFunctionRequestPreference = enum {
+    dry_run,
+    send,
+};
+
+fn embeddedMoveFunctionRequestPreference(command: Command) EmbeddedMoveFunctionRequestPreference {
+    return switch (command) {
+        .tx_send,
+        .request_sponsor,
+        .request_sign,
+        .request_send,
+        .request_schedule,
+        .wallet_intent_send,
+        => .send,
+        else => .dry_run,
+    };
+}
+
+fn stringContainsMoveFunctionPlaceholder(text: []const u8) bool {
+    return std.mem.indexOf(u8, text, "<arg") != null or
+        std.mem.indexOf(u8, text, "0x<") != null or
+        std.mem.eql(u8, text, "<alias-or-address>");
+}
+
+fn jsonValueContainsMoveFunctionPlaceholder(value: std.json.Value) bool {
+    return switch (value) {
+        .string => |text| stringContainsMoveFunctionPlaceholder(text),
+        .array => |array| blk: {
+            for (array.items) |item| {
+                if (jsonValueContainsMoveFunctionPlaceholder(item)) break :blk true;
+            }
+            break :blk false;
+        },
+        .object => |object| blk: {
+            var iterator = object.iterator();
+            while (iterator.next()) |entry| {
+                if (std.mem.eql(u8, entry.key_ptr.*, "preferredResolution")) continue;
+                if (jsonValueContainsMoveFunctionPlaceholder(entry.value_ptr.*)) break :blk true;
+            }
+            break :blk false;
+        },
+        else => false,
+    };
+}
+
+fn requestArtifactJsonIsExecutable(
+    allocator: std.mem.Allocator,
+    request_json: []const u8,
+) !bool {
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, request_json, .{});
+    defer parsed.deinit();
+    return !jsonValueContainsMoveFunctionPlaceholder(parsed.value);
+}
+
+fn selectRequestJsonFromMoveFunctionSummary(
+    allocator: std.mem.Allocator,
+    command: Command,
+    summary_object: std.json.ObjectMap,
+) !?[]u8 {
+    const template_value = jsonObjectFieldAny(summary_object, &.{ "call_template", "callTemplate" }) orelse return null;
+    if (template_value != .object) return error.InvalidCli;
+
+    const preference = embeddedMoveFunctionRequestPreference(command);
+    const preferred_request = switch (preference) {
+        .dry_run => try parseOptionalRequestJsonString(
+            allocator,
+            template_value.object,
+            &.{ "preferred_tx_dry_run_request_json", "preferredTxDryRunRequestJson" },
+        ),
+        .send => try parseOptionalRequestJsonString(
+            allocator,
+            template_value.object,
+            &.{ "preferred_tx_send_from_keystore_request_json", "preferredTxSendFromKeystoreRequestJson" },
+        ),
+    };
+    errdefer if (preferred_request) |value| allocator.free(value);
+
+    const base_request = switch (preference) {
+        .dry_run => try parseOptionalRequestJsonString(
+            allocator,
+            template_value.object,
+            &.{ "tx_dry_run_request_json", "txDryRunRequestJson" },
+        ),
+        .send => try parseOptionalRequestJsonString(
+            allocator,
+            template_value.object,
+            &.{ "tx_send_from_keystore_request_json", "txSendFromKeystoreRequestJson" },
+        ),
+    };
+    errdefer if (base_request) |value| allocator.free(value);
+
+    if (preferred_request) |value| {
+        if (try requestArtifactJsonIsExecutable(allocator, value)) {
+            if (base_request) |fallback| allocator.free(fallback);
+            return value;
+        }
+    }
+    if (base_request) |value| {
+        if (try requestArtifactJsonIsExecutable(allocator, value)) {
+            if (preferred_request) |preferred| allocator.free(preferred);
+            return value;
+        }
+    }
+
+    if (preferred_request) |value| {
+        if (base_request) |fallback| allocator.free(fallback);
+        return value;
+    }
+    return base_request;
+}
+
 fn validateProgrammaticCommandsJsonValue(value: std.json.Value) !void {
     switch (value) {
         .array => {
@@ -904,6 +1015,13 @@ pub fn applyProgrammaticRequestArtifact(
     const request = try std.json.parseFromSlice(std.json.Value, allocator, request_json, .{});
     defer request.deinit();
     if (request.value != .object) return error.InvalidCli;
+
+    if (jsonObjectFieldAny(request.value.object, &.{ "commands", "command" }) == null) {
+        if (try selectRequestJsonFromMoveFunctionSummary(allocator, parsed.command, request.value.object)) |embedded_request_json| {
+            defer allocator.free(embedded_request_json);
+            return try applyProgrammaticRequestArtifact(allocator, parsed, embedded_request_json);
+        }
+    }
 
     if (jsonObjectFieldAny(request.value.object, &.{ "commands", "command" })) |commands_value| {
         try validateProgrammaticCommandsJsonValue(commands_value);
@@ -9795,6 +9913,31 @@ test "parseCliArgs parses request inspect artifact" {
     try testing.expectEqual(@as(?u64, 1200), parsed.tx_build_gas_budget);
 }
 
+test "parseCliArgs request dry-run accepts move function summaries as request input" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "request",
+        "dry-run",
+        "--request",
+        "{\"call_template\":{\"preferred_tx_dry_run_request_json\":\"{\\\"commands\\\":[{\\\"kind\\\":\\\"MoveCall\\\",\\\"package\\\":\\\"0x2\\\",\\\"module\\\":\\\"counter\\\",\\\"function\\\":\\\"increment\\\",\\\"typeArguments\\\":[],\\\"arguments\\\":[7]}],\\\"sender\\\":\\\"0xabc\\\",\\\"gasBudget\\\":1200,\\\"summarize\\\":true}\",\"tx_dry_run_request_json\":\"{\\\"commands\\\":[{\\\"kind\\\":\\\"MoveCall\\\",\\\"package\\\":\\\"0x2\\\",\\\"module\\\":\\\"counter\\\",\\\"function\\\":\\\"increment\\\",\\\"typeArguments\\\":[],\\\"arguments\\\":[\\\"<arg0-u64>\\\"]}],\\\"sender\\\":\\\"0xabc\\\",\\\"gasBudget\\\":1200,\\\"summarize\\\":true}\"}}",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.request_dry_run, parsed.command);
+    try testing.expectEqualStrings("0xabc", parsed.tx_build_sender.?);
+    try testing.expectEqual(@as(?u64, 1200), parsed.tx_build_gas_budget);
+    try testing.expect(parsed.tx_send_summarize);
+    try testing.expectEqualStrings(
+        "[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"typeArguments\":[],\"arguments\":[7]}]",
+        parsed.tx_build_commands.?,
+    );
+}
+
 test "parseCliArgs parses request dry-run request artifact" {
     const testing = std.testing;
 
@@ -9843,6 +9986,34 @@ test "parseCliArgs parses request send request artifact" {
     try testing.expect(parsed.tx_send_wait);
     try testing.expect(parsed.tx_send_observe);
     try testing.expectEqualStrings("{\"kind\":\"remote_signer\"}", parsed.tx_provider_config.?);
+}
+
+test "parseCliArgs wallet intent build accepts move function summaries as request input" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "wallet",
+        "intent",
+        "build",
+        "--request",
+        "{\"call_template\":{\"preferred_tx_dry_run_request_json\":\"{\\\"commands\\\":[{\\\"kind\\\":\\\"MoveCall\\\",\\\"package\\\":\\\"0x2\\\",\\\"module\\\":\\\"counter\\\",\\\"function\\\":\\\"increment\\\",\\\"typeArguments\\\":[],\\\"arguments\\\":[9]}],\\\"sender\\\":\\\"0xabc\\\",\\\"gasBudget\\\":2200,\\\"summarize\\\":true}\",\"tx_dry_run_request_json\":\"{\\\"commands\\\":[{\\\"kind\\\":\\\"MoveCall\\\",\\\"package\\\":\\\"0x2\\\",\\\"module\\\":\\\"counter\\\",\\\"function\\\":\\\"increment\\\",\\\"typeArguments\\\":[],\\\"arguments\\\":[\\\"<arg0-u64>\\\"]}],\\\"sender\\\":\\\"0xabc\\\",\\\"gasBudget\\\":2200,\\\"summarize\\\":true}\"}}",
+        "--network",
+        "sui:testnet",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.wallet_intent_build, parsed.command);
+    try testing.expectEqualStrings("sui:testnet", parsed.intent_network.?);
+    try testing.expectEqualStrings("0xabc", parsed.tx_build_sender.?);
+    try testing.expectEqual(@as(?u64, 2200), parsed.tx_build_gas_budget);
+    try testing.expectEqualStrings(
+        "[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"typeArguments\":[],\"arguments\":[9]}]",
+        parsed.tx_build_commands.?,
+    );
 }
 
 test "parseCliArgs parses request sponsor command" {
