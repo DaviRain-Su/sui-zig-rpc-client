@@ -486,6 +486,21 @@ At minimum, requests should be able to move through:
 - `scheduled`
 - `cancelled`
 
+The local CLI now persists a concrete first pass of that state machine in
+`request_state.json`:
+
+- `request build` -> `built`
+- `request dry-run` -> `resolved`
+- `request sponsor` -> `sponsored`
+- `request sign` -> `signed`
+- `request send` -> `submitted` / `confirmed` / `failed`
+- `request schedule` / `request cancel` / `request resume` keep driving the
+  scheduler-specific states on the same store
+
+Challenge-prompt outputs are intentionally not auto-promoted into terminal
+request states; they remain transient approval artifacts until the user
+continues the flow.
+
 ### Request Operations
 
 The CLI and frontend should both support:

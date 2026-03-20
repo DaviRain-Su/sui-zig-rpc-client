@@ -398,5 +398,8 @@ what the generic path still needs to finish.
   `wallet intent send`, not only artifact metadata.
 - [x] Pass merged delegated-session policy and delegated-session metadata into
   execution-side provider authorizers, not only wallet artifacts.
+- [x] Persist request lifecycle states for `build/dry-run/sponsor/sign/send`
+  into the local `request_state.json` store, keyed by `--correlation-id` when
+  available.
 - [x] Add deterministic wallet smoke regressions for sponsored transfer,
   sponsored swap, session-limited swap, and scheduled self-transfer.

@@ -6393,6 +6393,143 @@ fn buildRequestStateEntryActionJson(
     return try output.toOwnedSlice(allocator);
 }
 
+fn replaceOptionalRequestStateField(
+    allocator: std.mem.Allocator,
+    field: *?[]u8,
+    value: ?[]const u8,
+) !void {
+    if (field.*) |existing| allocator.free(existing);
+    field.* = try duplicateOptionalSlice(allocator, value);
+}
+
+fn resolvedRequestLifecycleEntryId(
+    allocator: std.mem.Allocator,
+    args: *const cli.ParsedArgs,
+    prefix: []const u8,
+) ![]u8 {
+    if (args.request_correlation_id) |value| return try allocator.dupe(u8, value);
+    return try std.fmt.allocPrint(allocator, "{s}-{d}", .{ prefix, std.time.milliTimestamp() });
+}
+
+fn upsertRequestLifecycleEntry(
+    allocator: std.mem.Allocator,
+    entry_id: []const u8,
+    kind: []const u8,
+    next_state: []const u8,
+    request_json: ?[]const u8,
+    artifact_json: ?[]const u8,
+    digest: ?[]const u8,
+    correlation_id: ?[]const u8,
+    submit_count_delta: u64,
+    last_error: ?[]const u8,
+) !void {
+    const state_path = try request_state.resolveDefaultRequestStatePath(allocator);
+    defer if (state_path) |value| allocator.free(value);
+    if (state_path == null) return;
+
+    var state = try request_state.loadDefaultRequestState(allocator);
+    defer state.deinit(allocator);
+
+    const now_ms = std.time.milliTimestamp();
+    if (findRequestStateEntryIndex(&state, entry_id)) |index| {
+        var entry = &state.entries[index];
+        allocator.free(entry.kind);
+        entry.kind = try allocator.dupe(u8, kind);
+        try setRequestStateEntryStateAt(allocator, entry, next_state, now_ms);
+        try replaceOptionalRequestStateField(allocator, &entry.request_json, request_json);
+        try replaceOptionalRequestStateField(allocator, &entry.artifact_json, artifact_json);
+        try replaceOptionalRequestStateField(allocator, &entry.digest, digest);
+        try replaceOptionalRequestStateField(allocator, &entry.correlation_id, correlation_id);
+        try replaceOptionalRequestStateField(allocator, &entry.last_error, last_error);
+        entry.submit_count += submit_count_delta;
+    } else {
+        const entry = request_state.OwnedRequestEntry{
+            .id = try allocator.dupe(u8, entry_id),
+            .kind = try allocator.dupe(u8, kind),
+            .state = try allocator.dupe(u8, next_state),
+            .request_json = try duplicateOptionalSlice(allocator, request_json),
+            .artifact_json = try duplicateOptionalSlice(allocator, artifact_json),
+            .digest = try duplicateOptionalSlice(allocator, digest),
+            .correlation_id = try duplicateOptionalSlice(allocator, correlation_id),
+            .created_at_ms = now_ms,
+            .updated_at_ms = now_ms,
+            .submit_count = submit_count_delta,
+            .last_error = try duplicateOptionalSlice(allocator, last_error),
+        };
+        try appendRequestStateEntry(allocator, &state, entry);
+    }
+
+    try request_state.writeDefaultRequestState(allocator, &state);
+}
+
+fn isRequestChallengePromptValue(value: std.json.Value) bool {
+    if (value != .object) return false;
+    return value.object.get("challenge") != null and
+        (value.object.get("account_address") != null or value.object.get("accountAddress") != null);
+}
+
+const RequestLifecycleOutputMode = enum {
+    dry_run,
+    sign,
+    send,
+};
+
+const OwnedRequestLifecycleOutputSummary = struct {
+    is_challenge_prompt: bool = false,
+    next_state: ?[]const u8 = null,
+    digest: ?[]u8 = null,
+
+    fn deinit(self: *OwnedRequestLifecycleOutputSummary, allocator: std.mem.Allocator) void {
+        if (self.digest) |value| allocator.free(value);
+    }
+};
+
+fn summarizeRequestLifecycleOutput(
+    allocator: std.mem.Allocator,
+    output_json: []const u8,
+    mode: RequestLifecycleOutputMode,
+) !OwnedRequestLifecycleOutputSummary {
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, output_json, .{}) catch {
+        return .{
+            .is_challenge_prompt = false,
+            .next_state = switch (mode) {
+                .dry_run => "resolved",
+                .sign => "signed",
+                .send => "submitted",
+            },
+            .digest = null,
+        };
+    };
+    defer parsed.deinit();
+
+    if (isRequestChallengePromptValue(parsed.value)) {
+        return .{ .is_challenge_prompt = true };
+    }
+
+    const digest = if (jsonFindFirstStringField(parsed.value, "digest")) |value|
+        try allocator.dupe(u8, value)
+    else
+        null;
+
+    return .{
+        .is_challenge_prompt = false,
+        .next_state = switch (mode) {
+            .dry_run => "resolved",
+            .sign => "signed",
+            .send => if (jsonFindFirstStringField(parsed.value, "status")) |status|
+                if (std.mem.eql(u8, status, "success"))
+                    "confirmed"
+                else if (std.mem.eql(u8, status, "failure"))
+                    "failed"
+                else
+                    "submitted"
+            else
+                "submitted",
+        },
+        .digest = digest,
+    };
+}
+
 fn storeScheduledRequestEntry(
     allocator: std.mem.Allocator,
     args: *const cli.ParsedArgs,
@@ -6773,6 +6910,20 @@ pub fn runCommandWithProgrammaticProvider(
         .request_build => {
             const request_json = try buildRequestArtifactJsonFromArgs(allocator, args);
             defer allocator.free(request_json);
+            const entry_id = try resolvedRequestLifecycleEntryId(allocator, args, "request-built");
+            defer allocator.free(entry_id);
+            try upsertRequestLifecycleEntry(
+                allocator,
+                entry_id,
+                "request_artifact",
+                "built",
+                request_json,
+                null,
+                null,
+                args.request_correlation_id,
+                0,
+                null,
+            );
             try printResponse(allocator, writer, request_json, args.pretty);
         },
         .request_inspect => {
@@ -6781,42 +6932,127 @@ pub fn runCommandWithProgrammaticProvider(
             try printResponse(allocator, writer, summary_json, args.pretty);
         },
         .request_dry_run => {
+            const request_json = try buildRequestArtifactJsonFromArgs(allocator, args);
+            defer allocator.free(request_json);
             var derived_args = args.*;
             derived_args.command = .tx_dry_run;
-            return try runCommandWithProgrammaticProvider(
+            var output = std.ArrayList(u8){};
+            defer output.deinit(allocator);
+            try runCommandWithProgrammaticProvider(
                 allocator,
                 rpc,
                 &derived_args,
-                writer,
+                output.writer(allocator),
                 effective_programmatic_provider,
             );
+            var summary = try summarizeRequestLifecycleOutput(allocator, output.items, .dry_run);
+            defer summary.deinit(allocator);
+            if (!summary.is_challenge_prompt) {
+                const entry_id = try resolvedRequestLifecycleEntryId(allocator, args, "request-resolved");
+                defer allocator.free(entry_id);
+                try upsertRequestLifecycleEntry(
+                    allocator,
+                    entry_id,
+                    "dry_run_result",
+                    summary.next_state.?,
+                    request_json,
+                    output.items,
+                    summary.digest,
+                    args.request_correlation_id,
+                    0,
+                    null,
+                );
+            }
+            try writer.writeAll(output.items);
         },
         .request_sponsor => {
+            const request_json = try buildRequestArtifactJsonFromArgs(allocator, args);
+            defer allocator.free(request_json);
             const envelope_json = try buildRequestSponsorEnvelopeJson(allocator, args);
             defer allocator.free(envelope_json);
+            const entry_id = try resolvedRequestLifecycleEntryId(allocator, args, "request-sponsored");
+            defer allocator.free(entry_id);
+            try upsertRequestLifecycleEntry(
+                allocator,
+                entry_id,
+                "sponsor_envelope",
+                "sponsored",
+                request_json,
+                envelope_json,
+                null,
+                args.request_correlation_id,
+                0,
+                null,
+            );
             try printResponse(allocator, writer, envelope_json, args.pretty);
         },
         .request_sign => {
+            const request_json = try buildRequestArtifactJsonFromArgs(allocator, args);
+            defer allocator.free(request_json);
             var derived_args = args.*;
             derived_args.command = .tx_payload;
-            return try runCommandWithProgrammaticProvider(
+            var output = std.ArrayList(u8){};
+            defer output.deinit(allocator);
+            try runCommandWithProgrammaticProvider(
                 allocator,
                 rpc,
                 &derived_args,
-                writer,
+                output.writer(allocator),
                 effective_programmatic_provider,
             );
+            var summary = try summarizeRequestLifecycleOutput(allocator, output.items, .sign);
+            defer summary.deinit(allocator);
+            if (!summary.is_challenge_prompt) {
+                const entry_id = try resolvedRequestLifecycleEntryId(allocator, args, "request-signed");
+                defer allocator.free(entry_id);
+                try upsertRequestLifecycleEntry(
+                    allocator,
+                    entry_id,
+                    "execute_payload",
+                    summary.next_state.?,
+                    request_json,
+                    output.items,
+                    summary.digest,
+                    args.request_correlation_id,
+                    0,
+                    null,
+                );
+            }
+            try writer.writeAll(output.items);
         },
         .request_send => {
+            const request_json = try buildRequestArtifactJsonFromArgs(allocator, args);
+            defer allocator.free(request_json);
             var derived_args = args.*;
             derived_args.command = .tx_send;
-            return try runCommandWithProgrammaticProvider(
+            var output = std.ArrayList(u8){};
+            defer output.deinit(allocator);
+            try runCommandWithProgrammaticProvider(
                 allocator,
                 rpc,
                 &derived_args,
-                writer,
+                output.writer(allocator),
                 effective_programmatic_provider,
             );
+            var summary = try summarizeRequestLifecycleOutput(allocator, output.items, .send);
+            defer summary.deinit(allocator);
+            if (!summary.is_challenge_prompt) {
+                const entry_id = try resolvedRequestLifecycleEntryId(allocator, args, "request-send");
+                defer allocator.free(entry_id);
+                try upsertRequestLifecycleEntry(
+                    allocator,
+                    entry_id,
+                    "request_execution",
+                    summary.next_state.?,
+                    request_json,
+                    output.items,
+                    summary.digest,
+                    args.request_correlation_id,
+                    1,
+                    null,
+                );
+            }
+            try writer.writeAll(output.items);
         },
         .request_schedule => {
             const schedule_id = try resolvedRequestScheduleId(allocator, args);
@@ -25626,6 +25862,51 @@ test "runCommand request_build move-call prints normalized request artifacts" {
     try testing.expectEqualStrings("main", parsed.value.object.get("signers").?.array.items[0].string);
 }
 
+test "runCommand request_build tracks built request lifecycle state" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const state_path = try std.fmt.allocPrint(allocator, "tmp_request_build_state_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(state_path);
+    defer std.fs.cwd().deleteFile(state_path) catch {};
+
+    const old_override = request_state.test_request_state_path_override;
+    request_state.test_request_state_path_override = state_path;
+    defer request_state.test_request_state_path_override = old_override;
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "request",
+        "build",
+        "--request",
+        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"typeArguments\":[],\"arguments\":[7]}],\"sender\":\"0xabc\",\"gasBudget\":1200}",
+        "--correlation-id",
+        "req-built-1",
+    });
+    defer args.deinit(allocator);
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    var state = try request_state.loadDefaultRequestState(allocator);
+    defer state.deinit(allocator);
+
+    try testing.expectEqual(@as(usize, 1), state.entries.len);
+    try testing.expectEqualStrings("req-built-1", state.entries[0].id);
+    try testing.expectEqualStrings("request_artifact", state.entries[0].kind);
+    try testing.expectEqualStrings("built", state.entries[0].state);
+    try testing.expect(state.entries[0].request_json != null);
+    try testing.expect(state.entries[0].artifact_json == null);
+    try testing.expectEqualStrings("req-built-1", state.entries[0].correlation_id.?);
+}
+
 test "runCommand request_inspect summarizes request artifacts" {
     const testing = std.testing;
 
@@ -25911,6 +26192,133 @@ test "runCommand request_send request artifact uses local programmable builder p
     try testing.expectEqual(@as(usize, 0), state.unsafe_calls);
 }
 
+test "runCommand request_send updates tracked request lifecycle state" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const seed = [_]u8{0x52} ** 32;
+    var encoded_key_bytes: [33]u8 = undefined;
+    encoded_key_bytes[0] = 0;
+    encoded_key_bytes[1..].* = seed;
+    const encoded_len = std.base64.standard.Encoder.calcSize(encoded_key_bytes.len);
+    const encoded_key = try allocator.alloc(u8, encoded_len);
+    defer allocator.free(encoded_key);
+    _ = std.base64.standard.Encoder.encode(encoded_key, &encoded_key_bytes);
+
+    const keystore_contents = try std.fmt.allocPrint(allocator, "[\"{s}\"]", .{encoded_key});
+    defer allocator.free(keystore_contents);
+
+    const keystore_path = "tmp_request_send_state_keystore.json";
+    try std.fs.cwd().writeFile(.{
+        .sub_path = keystore_path,
+        .data = keystore_contents,
+    });
+    defer std.fs.cwd().deleteFile(keystore_path) catch {};
+
+    const state_path = try std.fmt.allocPrint(allocator, "tmp_request_send_state_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(state_path);
+    defer std.fs.cwd().deleteFile(state_path) catch {};
+
+    const old_keystore_override = client.keystore.test_keystore_path_override;
+    client.keystore.test_keystore_path_override = keystore_path;
+    defer client.keystore.test_keystore_path_override = old_keystore_override;
+
+    const old_state_override = request_state.test_request_state_path_override;
+    request_state.test_request_state_path_override = state_path;
+    defer request_state.test_request_state_path_override = old_state_override;
+
+    var entries = try allocator.alloc(request_state.OwnedRequestEntry, 1);
+    entries[0] = .{
+        .id = try allocator.dupe(u8, "req-send-1"),
+        .kind = try allocator.dupe(u8, "sponsor_envelope"),
+        .state = try allocator.dupe(u8, "sponsored"),
+        .request_json = try allocator.dupe(u8, "{\"commands\":[],\"sender\":\"0xabc\"}"),
+        .artifact_json = try allocator.dupe(u8, "{\"artifact_kind\":\"sponsor_envelope\"}"),
+        .digest = null,
+        .correlation_id = try allocator.dupe(u8, "req-send-1"),
+        .created_at_ms = 1,
+        .updated_at_ms = 1,
+        .submit_count = 0,
+        .last_error = null,
+    };
+    var seeded = request_state.OwnedRequestState{ .entries = entries };
+    defer seeded.deinit(allocator);
+    try request_state.writeDefaultRequestState(allocator, &seeded);
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "request",
+        "send",
+        "--request",
+        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"typeArguments\":[],\"arguments\":[7]}],\"fromKeystore\":true,\"signer\":\"0\",\"gasBudget\":1200,\"gasPayment\":[{\"objectId\":\"0x9999999999999999999999999999999999999999999999999999999999999999\",\"version\":\"1\",\"digest\":\"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}]}",
+        "--correlation-id",
+        "req-send-1",
+    });
+    defer args.deinit(allocator);
+
+    const State = struct {
+        gas_price: usize = 0,
+        normalized: usize = 0,
+        execute_calls: usize = 0,
+        unsafe_calls: usize = 0,
+    };
+    var rpc_state = State{};
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const ctx = @as(*State, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "suix_getReferenceGasPrice")) {
+                ctx.gas_price += 1;
+                return alloc.dupe(u8, "{\"result\":\"8\"}");
+            }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                ctx.normalized += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"parameters\":[\"U64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\"}}}]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_executeTransactionBlock")) {
+                ctx.execute_calls += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"digest\":\"0xrequestsendtracked\",\"effects\":{\"status\":{\"status\":\"success\"}},\"balanceChanges\":[]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall") or std.mem.eql(u8, req.method, "unsafe_batchTransaction")) {
+                ctx.unsafe_calls += 1;
+                return alloc.dupe(u8, "{\"result\":{\"txBytes\":\"AQIDBA==\"}}");
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = &rpc_state,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    var loaded = try request_state.loadDefaultRequestState(allocator);
+    defer loaded.deinit(allocator);
+
+    try testing.expectEqual(@as(usize, 1), loaded.entries.len);
+    try testing.expectEqualStrings("req-send-1", loaded.entries[0].id);
+    try testing.expectEqualStrings("request_execution", loaded.entries[0].kind);
+    try testing.expectEqualStrings("confirmed", loaded.entries[0].state);
+    try testing.expectEqualStrings("0xrequestsendtracked", loaded.entries[0].digest.?);
+    try testing.expectEqual(@as(u64, 1), loaded.entries[0].submit_count);
+    try testing.expect(loaded.entries[0].request_json != null);
+    try testing.expect(loaded.entries[0].artifact_json != null);
+}
+
 test "runCommand request_send request artifact can derive local signer execution from delegated session" {
     const testing = std.testing;
 
@@ -26155,6 +26563,53 @@ test "runCommand request_sponsor prints sponsor envelope artifact" {
     try testing.expectEqualStrings("vip", parsed.value.object.get("sponsor").?.object.get("policy_metadata").?.object.get("tier").?.string);
     try testing.expectEqualStrings("sponsor", parsed.value.object.get("sponsor").?.object.get("gas_source_preference").?.string);
     try testing.expectEqualStrings("fail_closed", parsed.value.object.get("sponsor").?.object.get("refusal_fallback").?.string);
+}
+
+test "runCommand request_sponsor tracks sponsored request lifecycle state" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const state_path = try std.fmt.allocPrint(allocator, "tmp_request_sponsor_state_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(state_path);
+    defer std.fs.cwd().deleteFile(state_path) catch {};
+
+    const old_override = request_state.test_request_state_path_override;
+    request_state.test_request_state_path_override = state_path;
+    defer request_state.test_request_state_path_override = old_override;
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "request",
+        "sponsor",
+        "--request",
+        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"typeArguments\":[],\"arguments\":[7]}],\"sender\":\"0xabc\",\"gasBudget\":1200}",
+        "--correlation-id",
+        "req-sponsored-1",
+        "--sponsor-mode",
+        "optional",
+    });
+    defer args.deinit(allocator);
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    var state = try request_state.loadDefaultRequestState(allocator);
+    defer state.deinit(allocator);
+
+    try testing.expectEqual(@as(usize, 1), state.entries.len);
+    try testing.expectEqualStrings("req-sponsored-1", state.entries[0].id);
+    try testing.expectEqualStrings("sponsor_envelope", state.entries[0].kind);
+    try testing.expectEqualStrings("sponsored", state.entries[0].state);
+    try testing.expect(state.entries[0].request_json != null);
+    try testing.expect(state.entries[0].artifact_json != null);
+    try testing.expectEqualStrings("req-sponsored-1", state.entries[0].correlation_id.?);
 }
 
 test "runCommand wallet sponsor request alias prints sponsor envelope artifact" {
@@ -27214,10 +27669,9 @@ test "wallet MPP smoke covers sponsored transfer and scheduled self-transfer flo
 
     var stored_requests = try request_state.loadDefaultRequestState(allocator);
     defer stored_requests.deinit(allocator);
-    try testing.expectEqual(@as(usize, 1), stored_requests.entries.len);
-    try testing.expectEqualStrings("self-transfer-1", stored_requests.entries[0].id);
-    try testing.expectEqualStrings("schedule_job", stored_requests.entries[0].kind);
-    try testing.expectEqualStrings("scheduled", stored_requests.entries[0].state);
+    const scheduled_index = findRequestStateEntryIndex(&stored_requests, "self-transfer-1") orelse return error.TestExpectedEqual;
+    try testing.expectEqualStrings("schedule_job", stored_requests.entries[scheduled_index].kind);
+    try testing.expectEqualStrings("scheduled", stored_requests.entries[scheduled_index].state);
 
     var list_args = try cli.parseCliArgs(allocator, &.{
         "request",
@@ -27232,10 +27686,16 @@ test "wallet MPP smoke covers sponsored transfer and scheduled self-transfer flo
     const list_parsed = try std.json.parseFromSlice(std.json.Value, allocator, list_output.items, .{});
     defer list_parsed.deinit();
     try testing.expectEqualStrings("request_state_list", list_parsed.value.object.get("artifact_kind").?.string);
-    try testing.expectEqual(@as(usize, 1), list_parsed.value.object.get("entries").?.array.items.len);
-    try testing.expectEqualStrings("self-transfer-1", list_parsed.value.object.get("entries").?.array.items[0].object.get("id").?.string);
-    try testing.expectEqualStrings("schedule_job", list_parsed.value.object.get("entries").?.array.items[0].object.get("kind").?.string);
-    try testing.expectEqualStrings("scheduled", list_parsed.value.object.get("entries").?.array.items[0].object.get("state").?.string);
+    var found_scheduled = false;
+    for (list_parsed.value.object.get("entries").?.array.items) |entry| {
+        if (std.mem.eql(u8, entry.object.get("id").?.string, "self-transfer-1")) {
+            found_scheduled = true;
+            try testing.expectEqualStrings("schedule_job", entry.object.get("kind").?.string);
+            try testing.expectEqualStrings("scheduled", entry.object.get("state").?.string);
+            break;
+        }
+    }
+    try testing.expect(found_scheduled);
 }
 
 test "wallet MPP smoke covers session-limited swap and sponsored swap artifacts" {

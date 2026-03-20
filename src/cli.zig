@@ -5039,6 +5039,23 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
                         continue;
                     }
                 }
+                if ((parsed.command == .request_build or
+                    parsed.command == .request_dry_run or
+                    parsed.command == .request_sign or
+                    parsed.command == .request_send) and
+                    std.mem.eql(u8, token, "--correlation-id"))
+                {
+                    if (i + 1 >= args.len) return error.InvalidCli;
+                    try setOptionalStringArg(
+                        allocator,
+                        &parsed,
+                        args[i + 1],
+                        &parsed.owned_request_correlation_id,
+                        &parsed.request_correlation_id,
+                    );
+                    i += 2;
+                    continue;
+                }
                 if (std.mem.eql(u8, token, "--wait")) {
                     parsed.tx_send_wait = true;
                     i += 1;
