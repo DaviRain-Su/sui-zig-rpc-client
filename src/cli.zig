@@ -475,6 +475,8 @@ fn hasDelegatedSessionExecutionInput(parsed: *const ParsedArgs) bool {
 fn usesWalletPolicyContract(command: Command) bool {
     return isWalletIntentLifecycleCommand(command) or
         command == .request_sponsor or
+        command == .request_sign or
+        command == .request_send or
         command == .request_schedule or
         command == .wallet_session_create or
         command == .wallet_policy_inspect;
@@ -6835,10 +6837,10 @@ pub fn printUsage(writer: anytype) !void {
         "    --valid-after-ms/--valid-before-ms Optional validity window metadata\n" ++
         "    --correlation-id <text>           Optional replay/correlation id\n" ++
         "  request sign                        Attach signer/provider approvals and print an execute payload\n" ++
-        "    same input options as request build plus tx-payload signer/provider flags\n" ++
+        "    same input options as request build plus tx-payload signer/provider flags and --session/--policy*\n" ++
         "    --summarize                        Print structured execute-payload summary instead of raw payload\n" ++
         "  request send                        Send a request artifact or request-shaped tx input\n" ++
-        "    same input options as request build plus tx-send signer/provider flags\n" ++
+        "    same input options as request build plus tx-send signer/provider flags and --session/--policy*\n" ++
         "    --wait/--summarize/--observe       Reuse tx send confirmation and output modes\n" ++
         "  request schedule                    Wrap a request artifact in a scheduler-friendly job envelope\n" ++
         "    same input options as request sponsor\n" ++
@@ -10141,6 +10143,8 @@ test "parseCliArgs parses request send request artifact" {
         "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"typeArguments\":[],\"arguments\":[7]}],\"sender\":\"0xabc\",\"gasBudget\":1200}",
         "--session",
         "session-1",
+        "--policy",
+        "{\"session_key\":\"0x1\"}",
         "--from-keystore",
         "--wait",
         "--observe",
@@ -10153,6 +10157,7 @@ test "parseCliArgs parses request send request artifact" {
     try testing.expectEqualStrings("0xabc", parsed.tx_build_sender.?);
     try testing.expectEqual(@as(?u64, 1200), parsed.tx_build_gas_budget);
     try testing.expectEqualStrings("session-1", parsed.request_session_selector.?);
+    try testing.expectEqualStrings("{\"session_key\":\"0x1\"}", parsed.intent_policy_json.?);
     try testing.expect(parsed.from_keystore);
     try testing.expect(parsed.tx_send_wait);
     try testing.expect(parsed.tx_send_observe);
@@ -10328,6 +10333,8 @@ test "parseCliArgs parses request sign command" {
         "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"typeArguments\":[],\"arguments\":[7]}],\"sender\":\"0xabc\",\"gasBudget\":1200}",
         "--session",
         "session-1",
+        "--policy-recipient-allowlist",
+        "[\"0xdef\"]",
         "--provider",
         "{\"kind\":\"remote_signer\"}",
         "--session-response",
@@ -10338,6 +10345,7 @@ test "parseCliArgs parses request sign command" {
 
     try testing.expectEqual(Command.request_sign, parsed.command);
     try testing.expectEqualStrings("session-1", parsed.request_session_selector.?);
+    try testing.expectEqualStrings("[\"0xdef\"]", parsed.intent_policy_recipient_allowlist_json.?);
     try testing.expectEqualStrings("{\"kind\":\"remote_signer\"}", parsed.tx_provider_config.?);
     try testing.expectEqualStrings("{\"supportsExecute\":true}", parsed.tx_session_response.?);
     try testing.expect(parsed.tx_send_summarize);

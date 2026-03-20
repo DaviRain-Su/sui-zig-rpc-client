@@ -402,7 +402,9 @@ Those commands no longer treat delegated sessions as passive artifact metadata.
 `local_signer` sessions can synthesize a compatible default-keystore execution
 provider, while `passkey`, `external_wallet`, `zklogin`, and `multisig`
 sessions require a matching provider flow so the execution-side authorizer sees
-the same session contract.
+the same session contract. Execution-side authorizers also receive the merged
+session/base-policy contract (`policy_json` + `delegated_session_json`) instead
+of reconstructing policy from raw request flags.
 
 ### `tempo request` Style Capabilities
 

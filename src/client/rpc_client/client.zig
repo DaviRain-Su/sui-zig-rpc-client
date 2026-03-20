@@ -12381,6 +12381,8 @@ pub const SuiRpcClient = struct {
         gas_price: u64,
         gas_budget: u64,
         expiration_json: ?[]const u8,
+        policy_json: ?[]const u8,
+        delegated_session_json: ?[]const u8,
         options_json: ?[]const u8,
         provider: tx_request_builder.AccountProvider,
     ) ![]u8 {
@@ -12407,6 +12409,8 @@ pub const SuiRpcClient = struct {
                 .gas_price = gas_price,
                 .gas_payment_json = gas_payment_json,
                 .expiration_json = parts.expiration_json,
+                .policy_json = policy_json,
+                .delegated_session_json = delegated_session_json,
                 .options_json = options_json,
             });
             var plan = owned.authorizationPlan(provider);
@@ -12433,6 +12437,8 @@ pub const SuiRpcClient = struct {
                 .gas_price = gas_price,
                 .gas_payment_json = gas_payment_json,
                 .expiration_json = parts.expiration_json,
+                .policy_json = policy_json,
+                .delegated_session_json = delegated_session_json,
                 .options_json = options_json,
             },
             provider,
@@ -12448,6 +12454,8 @@ pub const SuiRpcClient = struct {
         gas_price: u64,
         gas_budget: u64,
         expiration_json: ?[]const u8,
+        policy_json: ?[]const u8,
+        delegated_session_json: ?[]const u8,
         options_json: ?[]const u8,
         provider: tx_request_builder.AccountProvider,
         action: ProgrammaticClientAction,
@@ -12475,6 +12483,8 @@ pub const SuiRpcClient = struct {
                 .gas_price = gas_price,
                 .gas_payment_json = gas_payment_json,
                 .expiration_json = parts.expiration_json,
+                .policy_json = policy_json,
+                .delegated_session_json = delegated_session_json,
                 .options_json = options_json,
             });
             var plan = owned.authorizationPlan(provider);
@@ -12489,6 +12499,8 @@ pub const SuiRpcClient = struct {
             .gas_price = gas_price,
             .gas_payment_json = gas_payment_json,
             .expiration_json = parts.expiration_json,
+            .policy_json = policy_json,
+            .delegated_session_json = delegated_session_json,
             .options_json = options_json,
         };
         if (try self.getOwnedSessionChallengePrompt(allocator, options, provider)) |prompt| {
@@ -12524,6 +12536,8 @@ pub const SuiRpcClient = struct {
         gas_price: u64,
         gas_budget: u64,
         expiration_json: ?[]const u8,
+        policy_json: ?[]const u8,
+        delegated_session_json: ?[]const u8,
         options_json: ?[]const u8,
         provider: tx_request_builder.AccountProvider,
         response: tx_request_builder.SessionChallengeResponse,
@@ -12553,6 +12567,8 @@ pub const SuiRpcClient = struct {
                 .gas_price = gas_price,
                 .gas_payment_json = gas_payment_json,
                 .expiration_json = parts.expiration_json,
+                .policy_json = policy_json,
+                .delegated_session_json = delegated_session_json,
                 .options_json = options_json,
             });
             var plan = owned.authorizationPlan(updated_provider);
@@ -12568,6 +12584,8 @@ pub const SuiRpcClient = struct {
             gas_price,
             gas_budget,
             expiration_json,
+            policy_json,
+            delegated_session_json,
             options_json,
             updated_provider,
         );

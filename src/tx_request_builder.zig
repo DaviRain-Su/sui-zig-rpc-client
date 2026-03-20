@@ -166,6 +166,8 @@ pub const ProgrammaticRequestOptions = struct {
     gas_price: ?u64 = null,
     gas_payment_json: ?[]const u8 = null,
     expiration_json: ?[]const u8 = null,
+    policy_json: ?[]const u8 = null,
+    delegated_session_json: ?[]const u8 = null,
     signatures: []const []const u8 = &.{},
     options_json: ?[]const u8 = null,
     wait_for_confirmation: bool = false,
@@ -179,6 +181,8 @@ pub const CommandRequestConfig = struct {
     gas_price: ?u64 = null,
     gas_payment_json: ?[]const u8 = null,
     expiration_json: ?[]const u8 = null,
+    policy_json: ?[]const u8 = null,
+    delegated_session_json: ?[]const u8 = null,
     signatures: []const []const u8 = &.{},
     options_json: ?[]const u8 = null,
     wait_for_confirmation: bool = false,
@@ -285,6 +289,8 @@ pub const RemoteAuthorizationRequest = struct {
     options: ProgrammaticRequestOptions,
     account_address: ?[]const u8 = null,
     account_session: AccountSession = .{},
+    policy_json: ?[]const u8 = null,
+    delegated_session_json: ?[]const u8 = null,
     tx_bytes_base64: ?[]const u8 = null,
 };
 
@@ -563,6 +569,8 @@ pub const OwnedProgrammaticRequestOptions = struct {
     owned_sender: ?[]u8 = null,
     owned_gas_payment_json: ?[]u8 = null,
     owned_expiration_json: ?[]u8 = null,
+    owned_policy_json: ?[]u8 = null,
+    owned_delegated_session_json: ?[]u8 = null,
     owned_options_json: ?[]u8 = null,
     owned_signatures: std.ArrayListUnmanaged([]const u8) = .{},
 
@@ -575,6 +583,10 @@ pub const OwnedProgrammaticRequestOptions = struct {
         self.owned_gas_payment_json = null;
         if (self.owned_expiration_json) |value| allocator.free(value);
         self.owned_expiration_json = null;
+        if (self.owned_policy_json) |value| allocator.free(value);
+        self.owned_policy_json = null;
+        if (self.owned_delegated_session_json) |value| allocator.free(value);
+        self.owned_delegated_session_json = null;
         if (self.owned_options_json) |value| allocator.free(value);
         self.owned_options_json = null;
         for (self.owned_signatures.items) |value| allocator.free(value);
@@ -643,6 +655,8 @@ pub fn ownOptions(
             .gas_price = prepared.request.gas_price,
             .gas_payment_json = null,
             .expiration_json = null,
+            .policy_json = null,
+            .delegated_session_json = null,
             .signatures = &.{},
             .options_json = null,
             .wait_for_confirmation = prepared.request.wait_for_confirmation,
@@ -668,6 +682,16 @@ pub fn ownOptions(
     if (prepared.request.expiration_json) |value| {
         owned.owned_expiration_json = try allocator.dupe(u8, value);
         owned.options.expiration_json = owned.owned_expiration_json;
+    }
+
+    if (options.policy_json) |value| {
+        owned.owned_policy_json = try allocator.dupe(u8, value);
+        owned.options.policy_json = owned.owned_policy_json;
+    }
+
+    if (options.delegated_session_json) |value| {
+        owned.owned_delegated_session_json = try allocator.dupe(u8, value);
+        owned.options.delegated_session_json = owned.owned_delegated_session_json;
     }
 
     if (prepared.request.options_json) |value| {
@@ -3147,6 +3171,8 @@ pub fn optionsFromCommandSource(
         .gas_price = config.gas_price,
         .gas_payment_json = config.gas_payment_json,
         .expiration_json = config.expiration_json,
+        .policy_json = config.policy_json,
+        .delegated_session_json = config.delegated_session_json,
         .signatures = config.signatures,
         .options_json = config.options_json,
         .wait_for_confirmation = config.wait_for_confirmation,
@@ -3478,6 +3504,8 @@ pub fn prepareAuthorizedRequest(
                     .options = options,
                     .account_address = account.address,
                     .account_session = session,
+                    .policy_json = options.policy_json,
+                    .delegated_session_json = options.delegated_session_json,
                 },
             );
 
@@ -3499,6 +3527,8 @@ pub fn prepareAuthorizedRequest(
                         .options = options,
                         .account_address = account.address,
                         .account_session = account.session,
+                        .policy_json = options.policy_json,
+                        .delegated_session_json = options.delegated_session_json,
                     },
                 );
                 return .{
@@ -3525,6 +3555,8 @@ pub fn prepareAuthorizedRequest(
                         .options = options,
                         .account_address = account.address,
                         .account_session = account.session,
+                        .policy_json = options.policy_json,
+                        .delegated_session_json = options.delegated_session_json,
                     },
                 );
                 return .{
@@ -3551,6 +3583,8 @@ pub fn prepareAuthorizedRequest(
                         .options = options,
                         .account_address = account.address,
                         .account_session = account.session,
+                        .policy_json = options.policy_json,
+                        .delegated_session_json = options.delegated_session_json,
                     },
                 );
                 return .{
@@ -5274,11 +5308,11 @@ test "ProgrammaticRequestOptionsBuilder supports cli-like fragment values" {
         "counter",
         "increment",
         &.{"0x2::sui::SUI"},
-        &.{"ptb:gas", "ptb:result:0", "true"},
+        &.{ "ptb:gas", "ptb:result:0", "true" },
     );
     try builder.appendMakeMoveVecFromCliValues("0x2::sui::SUI", &.{"ptb:input:0"});
     try builder.appendTransferObjectsFromCliValues(&.{"ptb:gas"}, "0xreceiver");
-    try builder.appendSplitCoinsFromCliValues("ptb:gas", &.{"7", "8"});
+    try builder.appendSplitCoinsFromCliValues("ptb:gas", &.{ "7", "8" });
     try builder.appendMergeCoinsFromCliValues("ptb:result:1", &.{"ptb:nested:2:0"});
     try builder.appendPublishFromCliValues("[\"AQID\"]", "[\"0x2\"]");
     try builder.appendUpgradeFromCliValues("[\"BAUG\"]", "[\"0x2\",\"0x3\"]", "0x42", "ptb:result:0");
@@ -6625,7 +6659,6 @@ test "buildExecutePayload builds payloads from generic request options" {
     const parsed_tx_block = try std.json.parseFromSlice(std.json.Value, allocator, tx_block.string, .{});
     defer parsed_tx_block.deinit();
     try testing.expectEqualStrings("0xgas", parsed_tx_block.value.object.get("gasPayment").?.array.items[0].object.get("objectId").?.string);
-
 }
 
 test "ownOptions preserves explicit gas payment fields in normalized request options" {

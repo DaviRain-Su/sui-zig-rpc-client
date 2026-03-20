@@ -396,5 +396,7 @@ what the generic path still needs to finish.
   delegated session metadata and base policy through `--session`.
 - [x] Let delegated sessions flow into execution-side `request sign/send` and
   `wallet intent send`, not only artifact metadata.
+- [x] Pass merged delegated-session policy and delegated-session metadata into
+  execution-side provider authorizers, not only wallet artifacts.
 - [x] Add deterministic wallet smoke regressions for sponsored transfer,
   sponsored swap, session-limited swap, and scheduled self-transfer.

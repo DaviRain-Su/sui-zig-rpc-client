@@ -937,12 +937,49 @@ fn commandRequestConfigFromOptions(
         .gas_price = options.gas_price,
         .gas_payment_json = options.gas_payment_json,
         .expiration_json = options.expiration_json,
+        .policy_json = options.policy_json,
+        .delegated_session_json = options.delegated_session_json,
         .signatures = options.signatures,
         .options_json = options.options_json,
         .wait_for_confirmation = options.wait_for_confirmation,
         .confirm_timeout_ms = options.confirm_timeout_ms,
         .confirm_poll_ms = options.confirm_poll_ms,
     };
+}
+
+fn ownProgrammaticExecutionOptionsFromArgs(
+    allocator: std.mem.Allocator,
+    args: *const cli.ParsedArgs,
+    signatures: []const []const u8,
+) !OwnedProgrammaticExecutionOptions {
+    var owned = OwnedProgrammaticExecutionOptions{
+        .options = @import("./tx_pipeline.zig").programmaticRequestOptionsFromArgs(args, signatures),
+    };
+    errdefer owned.deinit(allocator);
+
+    var delegated_session = try resolveDelegatedSessionArtifactSummary(allocator, args);
+    defer if (delegated_session) |*value| value.deinit(allocator);
+
+    owned.policy_json = try buildMergedWalletPolicyJsonWithBase(
+        allocator,
+        if (delegated_session) |value| value.policy_json else null,
+        args,
+    );
+    owned.options.policy_json = owned.policy_json;
+
+    if (delegated_session != null or args.request_delegated_session_json != null) {
+        var output = std.ArrayList(u8){};
+        errdefer output.deinit(allocator);
+        try writeDelegatedSessionArtifactMetadata(
+            output.writer(allocator),
+            if (delegated_session) |*value| value else null,
+            args.request_delegated_session_json,
+        );
+        owned.delegated_session_json = try output.toOwnedSlice(allocator);
+        owned.options.delegated_session_json = owned.delegated_session_json;
+    }
+
+    return owned;
 }
 
 fn runSelectedProgrammaticAction(
@@ -953,7 +990,9 @@ fn runSelectedProgrammaticAction(
     provider: ?client.tx_request_builder.AccountProvider,
     action: client.rpc_client.ProgrammaticClientAction,
 ) !client.rpc_client.ProgrammaticClientActionResult {
-    const options = programmaticRequestOptionsFromArgs(args, signatures);
+    var owned_options = try ownProgrammaticExecutionOptionsFromArgs(allocator, args, signatures);
+    defer owned_options.deinit(allocator);
+    const options = owned_options.options;
     const resolved_sender = try resolvedTxBuildSenderFromArgsOrProgrammaticProvider(
         allocator,
         args,
@@ -1457,7 +1496,9 @@ fn buildUnsafeCommandSourceExecutePayload(
     const sender = try resolvedUnsafeMoveCallSender(allocator, rpc, args) orelse return error.InvalidCli;
     defer allocator.free(sender);
 
-    const options = programmaticRequestOptionsFromArgs(args, args.signatures.items);
+    var owned_options = try ownProgrammaticExecutionOptionsFromArgs(allocator, args, args.signatures.items);
+    defer owned_options.deinit(allocator);
+    const options = owned_options.options;
     const config = commandRequestConfigFromOptions(options, sender);
 
     if (args.signatures.items.len != 0) {
@@ -1531,6 +1572,10 @@ fn buildLocalCommandSourceExecutePayload(
     args: *const cli.ParsedArgs,
     provider: ?client.tx_request_builder.AccountProvider,
 ) !?[]u8 {
+    var owned_options = try ownProgrammaticExecutionOptionsFromArgs(allocator, args, args.signatures.items);
+    defer owned_options.deinit(allocator);
+    const options = owned_options.options;
+
     const implicit_auto_gas_payment_min_balance = implicitLocalGasPaymentFallbackMinBalance(args, provider);
 
     const allow_reference_gas_price_fallback = if (provider) |value|
@@ -1560,7 +1605,7 @@ fn buildLocalCommandSourceExecutePayload(
             local.gas_budget,
             null,
             args.signatures.items,
-            args.tx_options,
+            options.options_json,
         );
     }
 
@@ -1573,7 +1618,9 @@ fn buildLocalCommandSourceExecutePayload(
             local.gas_price,
             local.gas_budget,
             null,
-            args.tx_options,
+            options.policy_json,
+            options.delegated_session_json,
+            options.options_json,
             value,
         ) catch |err| switch (err) {
             error.UnsupportedAccountProvider => null,
@@ -1589,7 +1636,7 @@ fn buildLocalCommandSourceExecutePayload(
         local.gas_price,
         local.gas_budget,
         null,
-        args.tx_options,
+        options.options_json,
         .{
             .signer_selectors = args.signers.items,
             .from_keystore = args.from_keystore,
@@ -1839,6 +1886,10 @@ fn runLocalCommandSourceAction(
     allow_reference_gas_price_fallback: bool,
     action: client.rpc_client.ProgrammaticClientAction,
 ) !?client.rpc_client.ProgrammaticClientActionOrChallengePromptResult {
+    var owned_options = try ownProgrammaticExecutionOptionsFromArgs(allocator, args, args.signatures.items);
+    defer owned_options.deinit(allocator);
+    const options = owned_options.options;
+
     const implicit_auto_gas_payment_min_balance = implicitLocalGasPaymentFallbackMinBalance(args, provider);
     var local = ownLocalCommandSourceBuildContext(
         allocator,
@@ -1870,7 +1921,9 @@ fn runLocalCommandSourceAction(
             local.gas_price,
             local.gas_budget,
             null,
-            args.tx_options,
+            options.policy_json,
+            options.delegated_session_json,
+            options.options_json,
             provider,
             challenge_response.response,
             action,
@@ -1888,7 +1941,9 @@ fn runLocalCommandSourceAction(
         local.gas_price,
         local.gas_budget,
         null,
-        args.tx_options,
+        options.policy_json,
+        options.delegated_session_json,
+        options.options_json,
         provider,
         action,
     ) catch |err| switch (err) {
@@ -1921,7 +1976,9 @@ fn runUnsafeCommandSourceAction(
     };
     defer allocator.free(sender);
 
-    const options = programmaticRequestOptionsFromArgs(args, args.signatures.items);
+    var owned_options = try ownProgrammaticExecutionOptionsFromArgs(allocator, args, args.signatures.items);
+    defer owned_options.deinit(allocator);
+    const options = owned_options.options;
     const config = commandRequestConfigFromOptions(options, sender);
 
     if (parsed_session_response) |challenge_response| {
@@ -2133,17 +2190,23 @@ fn runProgrammaticActionMaybeAutoGasPayment(
         return try runSelectedProgrammaticAction(allocator, rpc, args, signatures, provider, action);
     }
     if (args.tx_build_auto_gas_payment) {
+        var owned_options = try ownProgrammaticExecutionOptionsFromArgs(allocator, args, signatures);
+        defer owned_options.deinit(allocator);
         return try rpc.runOptionsWithAutoGasPaymentWithAccountProvider(
             allocator,
-            programmaticRequestOptionsFromArgs(args, signatures),
+            owned_options.options,
             provider orelse .none,
             args.tx_build_gas_payment_min_balance,
             action,
         );
     }
+    var owned_options = try ownProgrammaticExecutionOptionsFromArgs(allocator, args, signatures);
+    defer owned_options.deinit(allocator);
+    var owned_request_options = try client.tx_request_builder.ownOptions(allocator, owned_options.options);
+    defer owned_request_options.deinit(allocator);
     return try rpc.runPlan(
         allocator,
-        programmaticAuthorizationPlanFromArgsWithAccountProvider(args, signatures, provider),
+        owned_request_options.authorizationPlan(provider orelse .none).plan(),
         action,
     );
 }
@@ -2179,7 +2242,9 @@ fn runProgrammaticActionMaybeAutoGasPaymentOrChallengePrompt(
         gasPaymentContainsSelectedRequestToken(args);
 
     if (has_selected_requests) {
-        const options = programmaticRequestOptionsFromArgs(args, signatures);
+        var owned_options = try ownProgrammaticExecutionOptionsFromArgs(allocator, args, signatures);
+        defer owned_options.deinit(allocator);
+        const options = owned_options.options;
         const resolved_sender = try resolvedTxBuildSenderFromArgsOrProgrammaticProvider(
             allocator,
             args,
@@ -2233,9 +2298,11 @@ fn runProgrammaticActionMaybeAutoGasPaymentOrChallengePrompt(
 
     if (args.tx_build_auto_gas_payment) {
         if (parsed_session_response) |challenge_response| {
+            var owned_options = try ownProgrammaticExecutionOptionsFromArgs(allocator, args, signatures);
+            defer owned_options.deinit(allocator);
             return .{ .completed = try rpc.runOptionsWithAutoGasPaymentWithChallengeResponseWithAccountProvider(
                 allocator,
-                programmaticRequestOptionsFromArgs(args, signatures),
+                owned_options.options,
                 effective_provider,
                 args.tx_build_gas_payment_min_balance,
                 challenge_response.response,
@@ -2243,9 +2310,11 @@ fn runProgrammaticActionMaybeAutoGasPaymentOrChallengePrompt(
             ) };
         }
 
+        var owned_options = try ownProgrammaticExecutionOptionsFromArgs(allocator, args, signatures);
+        defer owned_options.deinit(allocator);
         return try rpc.runOptionsWithAutoGasPaymentOrChallengePromptWithAccountProvider(
             allocator,
-            programmaticRequestOptionsFromArgs(args, signatures),
+            owned_options.options,
             effective_provider,
             args.tx_build_gas_payment_min_balance,
             action,
@@ -2253,17 +2322,25 @@ fn runProgrammaticActionMaybeAutoGasPaymentOrChallengePrompt(
     }
 
     if (parsed_session_response) |challenge_response| {
+        var owned_options = try ownProgrammaticExecutionOptionsFromArgs(allocator, args, signatures);
+        defer owned_options.deinit(allocator);
+        var owned_request_options = try client.tx_request_builder.ownOptions(allocator, owned_options.options);
+        defer owned_request_options.deinit(allocator);
         return .{ .completed = try rpc.runPlanWithChallengeResponse(
             allocator,
-            programmaticAuthorizationPlanFromArgsWithAccountProvider(args, signatures, effective_provider),
+            owned_request_options.authorizationPlan(effective_provider).plan(),
             challenge_response.response,
             action,
         ) };
     }
 
+    var owned_options = try ownProgrammaticExecutionOptionsFromArgs(allocator, args, signatures);
+    defer owned_options.deinit(allocator);
+    var owned_request_options = try client.tx_request_builder.ownOptions(allocator, owned_options.options);
+    defer owned_request_options.deinit(allocator);
     return try rpc.runPlanOrChallengePrompt(
         allocator,
-        programmaticAuthorizationPlanFromArgsWithAccountProvider(args, signatures, effective_provider),
+        owned_request_options.authorizationPlan(effective_provider).plan(),
         action,
     );
 }
@@ -3213,6 +3290,17 @@ const OwnedProgrammaticProviderWithDelegatedSession = struct {
     fn deinit(self: *OwnedProgrammaticProviderWithDelegatedSession, allocator: std.mem.Allocator) void {
         if (self.delegated_session) |*value| value.deinit(allocator);
         if (self.local_signer_selectors) |value| allocator.free(value);
+    }
+};
+
+const OwnedProgrammaticExecutionOptions = struct {
+    options: client.tx_request_builder.ProgrammaticRequestOptions,
+    policy_json: ?[]u8 = null,
+    delegated_session_json: ?[]u8 = null,
+
+    fn deinit(self: *OwnedProgrammaticExecutionOptions, allocator: std.mem.Allocator) void {
+        if (self.policy_json) |value| allocator.free(value);
+        if (self.delegated_session_json) |value| allocator.free(value);
     }
 };
 
@@ -26215,7 +26303,7 @@ test "runCommandWithProgrammaticProvider request_sign request artifact injects d
         .session_id = try allocator.dupe(u8, "session-1"),
         .session_kind = try allocator.dupe(u8, "passkey"),
         .state = try allocator.dupe(u8, "active"),
-        .policy_json = null,
+        .policy_json = try allocator.dupe(u8, "{\"session_id\":\"session-1\",\"protocol_allowlist\":[\"cetus::swap\"]}"),
         .created_at_ms = 100,
         .updated_at_ms = 101,
         .expires_at_ms = std.time.milliTimestamp() + 60_000,
@@ -26231,6 +26319,8 @@ test "runCommandWithProgrammaticProvider request_sign request artifact injects d
         "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"typeArguments\":[],\"arguments\":[7]}],\"sender\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"gasBudget\":1200,\"gasPayment\":[{\"objectId\":\"0x9999999999999999999999999999999999999999999999999999999999999999\",\"version\":\"1\",\"digest\":\"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}]}",
         "--session",
         "session-1",
+        "--policy-recipient-allowlist",
+        "[\"0xdef\"]",
     });
     defer args.deinit(allocator);
 
@@ -26288,11 +26378,25 @@ test "runCommandWithProgrammaticProvider request_sign request artifact injects d
                 .authorizer = .{
                     .context = &authorizer_called,
                     .callback = struct {
-                        fn call(context: *anyopaque, _: std.mem.Allocator, req: client.tx_request_builder.RemoteAuthorizationRequest) !client.tx_request_builder.RemoteAuthorizationResult {
+                        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: client.tx_request_builder.RemoteAuthorizationRequest) !client.tx_request_builder.RemoteAuthorizationResult {
                             const seen = @as(*bool, @ptrCast(@alignCast(context)));
                             seen.* = true;
                             try testing.expectEqual(client.tx_request_builder.AccountSessionKind.passkey, req.account_session.kind);
                             try testing.expectEqualStrings("session-1", req.account_session.session_id.?);
+                            try testing.expect(req.policy_json != null);
+                            try testing.expect(req.delegated_session_json != null);
+
+                            const policy = try std.json.parseFromSlice(std.json.Value, alloc, req.policy_json.?, .{});
+                            defer policy.deinit();
+                            try testing.expectEqualStrings("session-1", policy.value.object.get("session_id").?.string);
+                            try testing.expectEqualStrings("cetus::swap", policy.value.object.get("protocol_allowlist").?.array.items[0].string);
+                            try testing.expectEqualStrings("0xdef", policy.value.object.get("recipient_allowlist").?.array.items[0].string);
+
+                            const delegated_session = try std.json.parseFromSlice(std.json.Value, alloc, req.delegated_session_json.?, .{});
+                            defer delegated_session.deinit();
+                            try testing.expectEqualStrings("session:provider-sign", delegated_session.value.object.get("selector").?.string);
+                            try testing.expectEqualStrings("session-1", delegated_session.value.object.get("session_id").?.string);
+                            try testing.expectEqualStrings("session_registry", delegated_session.value.object.get("source_kind").?.string);
                             return .{
                                 .sender = "0x1111111111111111111111111111111111111111111111111111111111111111",
                                 .signatures = &.{"sig-provider-session-1"},
