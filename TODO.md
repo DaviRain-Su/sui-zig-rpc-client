@@ -360,8 +360,8 @@ what the generic path still needs to finish.
 
 ## Sui Wallet MPP Plan
 
-- [ ] Add a first-class wallet intent schema and artifact contract for web and
-  CLI.
+- [x] Add a first-class wallet intent schema and artifact contract for web and
+  CLI, including `wallet intent build/dry-run/send`.
 - [x] Add initial `wallet` CLI lifecycle commands:
   `address/balance`.
 - [x] Add remaining core `wallet` CLI lifecycle commands:

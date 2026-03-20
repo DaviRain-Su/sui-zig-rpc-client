@@ -361,6 +361,9 @@ Implemented wallet lifecycle commands:
 - selector-less wallet queries resolve through active state first
 - `wallet export-public`
 - `wallet signer inspect`
+- `wallet intent build`
+- `wallet intent dry-run`
+- `wallet intent send`
 
 Still missing from the broader wallet lifecycle:
 
@@ -410,6 +413,20 @@ Recommended artifacts:
 - `sponsor-envelope.json`
 - `schedule-job.json`
 - local `request_state.json` for resumable scheduled/rebroadcastable artifacts
+
+The repo now ships a concrete `wallet_intent` artifact contract:
+
+- `artifact_kind = "wallet_intent"`
+- `schema_version = 1`
+- `network`
+- `execution_mode`
+- `request`
+- `request_summary`
+- `sponsor`
+- `policy`
+- `correlation_id`
+- `valid_after_ms`
+- `valid_before_ms`
 
 ### Concrete Gap Summary
 

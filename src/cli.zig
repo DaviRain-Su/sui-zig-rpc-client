@@ -4,6 +4,7 @@ const object_preset = sui.object_preset;
 const package_preset = sui.package_preset;
 const tx_builder = sui.tx_builder;
 const tx_request_builder = sui.tx_request_builder;
+const wallet_intent = @import("./wallet_intent.zig");
 
 pub const default_rpc_url = "https://fullnode.mainnet.sui.io:443";
 pub var test_stdin_value_override: ?[]const u8 = null;
@@ -21,6 +22,9 @@ pub const Command = enum {
     wallet_balance,
     wallet_coins,
     wallet_objects,
+    wallet_intent_build,
+    wallet_intent_dry_run,
+    wallet_intent_send,
     account_list,
     account_info,
     account_coins,
@@ -109,6 +113,9 @@ pub const ParsedArgs = struct {
     wallet_alias: ?[]const u8 = null,
     wallet_private_key: ?[]const u8 = null,
     wallet_activate: bool = true,
+    intent_network: ?[]const u8 = null,
+    intent_execution_mode: ?[]const u8 = null,
+    intent_policy_json: ?[]const u8 = null,
     request_sponsor_mode: ?[]const u8 = null,
     request_sponsor_policy: ?[]const u8 = null,
     request_valid_after_ms: ?u64 = null,
@@ -203,6 +210,9 @@ pub const ParsedArgs = struct {
     owned_tx_provider_config: ?[]const u8 = null,
     owned_wallet_alias: ?[]const u8 = null,
     owned_wallet_private_key: ?[]const u8 = null,
+    owned_intent_network: ?[]const u8 = null,
+    owned_intent_execution_mode: ?[]const u8 = null,
+    owned_intent_policy_json: ?[]const u8 = null,
     owned_request_sponsor_mode: ?[]const u8 = null,
     owned_request_sponsor_policy: ?[]const u8 = null,
     owned_request_correlation_id: ?[]const u8 = null,
@@ -257,6 +267,9 @@ pub const ParsedArgs = struct {
         if (self.owned_tx_provider_config) |value| allocator.free(value);
         if (self.owned_wallet_alias) |value| allocator.free(value);
         if (self.owned_wallet_private_key) |value| allocator.free(value);
+        if (self.owned_intent_network) |value| allocator.free(value);
+        if (self.owned_intent_execution_mode) |value| allocator.free(value);
+        if (self.owned_intent_policy_json) |value| allocator.free(value);
         if (self.owned_request_sponsor_mode) |value| allocator.free(value);
         if (self.owned_request_sponsor_policy) |value| allocator.free(value);
         if (self.owned_request_correlation_id) |value| allocator.free(value);
@@ -301,6 +314,9 @@ pub const ParsedArgs = struct {
 
 fn isRequestLifecycleCommand(command: Command) bool {
     return switch (command) {
+        .wallet_intent_build,
+        .wallet_intent_dry_run,
+        .wallet_intent_send,
         .request_build,
         .request_inspect,
         .request_dry_run,
@@ -316,6 +332,9 @@ fn isRequestLifecycleCommand(command: Command) bool {
 
 fn requestLifecycleConsumesRequestArtifact(command: Command) bool {
     return switch (command) {
+        .wallet_intent_build,
+        .wallet_intent_dry_run,
+        .wallet_intent_send,
         .request_build,
         .request_inspect,
         .request_dry_run,
@@ -330,7 +349,17 @@ fn requestLifecycleConsumesRequestArtifact(command: Command) bool {
 
 fn requestLifecycleUsesProviderFlow(command: Command) bool {
     return switch (command) {
-        .request_sign, .request_send, .request_rebroadcast => true,
+        .wallet_intent_send, .request_sign, .request_send, .request_rebroadcast => true,
+        else => false,
+    };
+}
+
+fn isWalletIntentLifecycleCommand(command: Command) bool {
+    return switch (command) {
+        .wallet_intent_build,
+        .wallet_intent_dry_run,
+        .wallet_intent_send,
+        => true,
         else => false,
     };
 }
@@ -877,6 +906,77 @@ pub fn applyProgrammaticRequestArtifact(
         &parsed.signatures,
         &parsed.owned_signatures,
     );
+}
+
+pub fn applyWalletIntentArtifact(
+    allocator: std.mem.Allocator,
+    parsed: *ParsedArgs,
+    raw: []const u8,
+) !void {
+    const loaded = try maybeLoadFileValue(allocator, raw);
+    defer if (loaded.owned) allocator.free(loaded.value);
+
+    var envelope = try wallet_intent.parseEnvelope(allocator, std.mem.trim(u8, loaded.value, " \n\r\t"));
+    defer envelope.deinit(allocator);
+
+    try applyProgrammaticRequestArtifact(allocator, parsed, envelope.request_json);
+
+    if (envelope.network) |value| {
+        replaceOwnedOptionalValue(
+            allocator,
+            &parsed.owned_intent_network,
+            &parsed.intent_network,
+            value,
+        );
+        envelope.network = null;
+    }
+    if (envelope.execution_mode) |value| {
+        replaceOwnedOptionalValue(
+            allocator,
+            &parsed.owned_intent_execution_mode,
+            &parsed.intent_execution_mode,
+            value,
+        );
+        envelope.execution_mode = null;
+    }
+    if (envelope.policy_json) |value| {
+        replaceOwnedOptionalValue(
+            allocator,
+            &parsed.owned_intent_policy_json,
+            &parsed.intent_policy_json,
+            value,
+        );
+        envelope.policy_json = null;
+    }
+    if (envelope.correlation_id) |value| {
+        replaceOwnedOptionalValue(
+            allocator,
+            &parsed.owned_request_correlation_id,
+            &parsed.request_correlation_id,
+            value,
+        );
+        envelope.correlation_id = null;
+    }
+    if (envelope.valid_after_ms) |value| parsed.request_valid_after_ms = value;
+    if (envelope.valid_before_ms) |value| parsed.request_valid_before_ms = value;
+    if (envelope.sponsor_mode) |value| {
+        replaceOwnedOptionalValue(
+            allocator,
+            &parsed.owned_request_sponsor_mode,
+            &parsed.request_sponsor_mode,
+            value,
+        );
+        envelope.sponsor_mode = null;
+    }
+    if (envelope.sponsor_policy_json) |value| {
+        replaceOwnedOptionalValue(
+            allocator,
+            &parsed.owned_request_sponsor_policy,
+            &parsed.request_sponsor_policy,
+            value,
+        );
+        envelope.sponsor_policy_json = null;
+    }
 }
 
 fn deinitCommandAliases(allocator: std.mem.Allocator, aliases: *CommandAliasMap) void {
@@ -2622,6 +2722,29 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
                     i += 2;
                     continue;
                 }
+                if (std.mem.eql(u8, sub, "intent")) {
+                    if (i + 2 >= args.len) return error.InvalidCli;
+                    const intent_sub = args[i + 2];
+                    if (std.mem.eql(u8, intent_sub, "build")) {
+                        parsed.command = .wallet_intent_build;
+                        parsed.has_command = true;
+                        i += 3;
+                        continue;
+                    }
+                    if (std.mem.eql(u8, intent_sub, "dry-run") or std.mem.eql(u8, intent_sub, "dry_run") or std.mem.eql(u8, intent_sub, "dryrun")) {
+                        parsed.command = .wallet_intent_dry_run;
+                        parsed.has_command = true;
+                        i += 3;
+                        continue;
+                    }
+                    if (std.mem.eql(u8, intent_sub, "send")) {
+                        parsed.command = .wallet_intent_send;
+                        parsed.has_command = true;
+                        i += 3;
+                        continue;
+                    }
+                    return error.InvalidCli;
+                }
                 if (std.mem.eql(u8, sub, "import")) {
                     parsed.command = .wallet_import;
                     parsed.has_command = true;
@@ -3963,6 +4086,12 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
 
         if (isRequestLifecycleCommand(parsed.command)) {
             try maybeFlushPendingTypedCommand(allocator, &parsed, &pending_typed_command, &command_aliases, token);
+            if (isWalletIntentLifecycleCommand(parsed.command) and std.mem.eql(u8, token, "--intent")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                try applyWalletIntentArtifact(allocator, &parsed, args[i + 1]);
+                i += 2;
+                continue;
+            }
             if (requestLifecycleConsumesRequestArtifact(parsed.command)) {
                 if (std.mem.eql(u8, token, "--request")) {
                     if (i + 1 >= args.len) return error.InvalidCli;
@@ -4139,7 +4268,45 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
                     i += 2;
                     continue;
                 }
-                if (parsed.command == .request_sponsor or parsed.command == .request_schedule) {
+                if (isWalletIntentLifecycleCommand(parsed.command) and std.mem.eql(u8, token, "--network")) {
+                    if (i + 1 >= args.len) return error.InvalidCli;
+                    try setOptionalStringArg(
+                        allocator,
+                        &parsed,
+                        args[i + 1],
+                        &parsed.owned_intent_network,
+                        &parsed.intent_network,
+                    );
+                    i += 2;
+                    continue;
+                }
+                if (isWalletIntentLifecycleCommand(parsed.command) and std.mem.eql(u8, token, "--execution-mode")) {
+                    if (i + 1 >= args.len) return error.InvalidCli;
+                    try setOptionalStringArg(
+                        allocator,
+                        &parsed,
+                        args[i + 1],
+                        &parsed.owned_intent_execution_mode,
+                        &parsed.intent_execution_mode,
+                    );
+                    i += 2;
+                    continue;
+                }
+                if (isWalletIntentLifecycleCommand(parsed.command) and (std.mem.eql(u8, token, "--policy") or std.mem.eql(u8, token, "--intent-policy"))) {
+                    if (i + 1 >= args.len) return error.InvalidCli;
+                    try setOptionalFileBackedArg(
+                        allocator,
+                        &parsed.owned_intent_policy_json,
+                        &parsed.intent_policy_json,
+                        args[i + 1],
+                    );
+                    i += 2;
+                    continue;
+                }
+                if (parsed.command == .request_sponsor or
+                    parsed.command == .request_schedule or
+                    isWalletIntentLifecycleCommand(parsed.command))
+                {
                     if (std.mem.eql(u8, token, "--sponsor-mode")) {
                         if (i + 1 >= args.len) return error.InvalidCli;
                         try setOptionalStringArg(
@@ -4230,7 +4397,7 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
                     i += 1;
                     continue;
                 }
-                if ((parsed.command == .request_send or parsed.command == .request_rebroadcast) and std.mem.eql(u8, token, "--observe")) {
+                if ((parsed.command == .request_send or parsed.command == .request_rebroadcast or parsed.command == .wallet_intent_send) and std.mem.eql(u8, token, "--observe")) {
                     parsed.tx_send_observe = true;
                     i += 1;
                     continue;
@@ -5131,6 +5298,23 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
         try validateProgrammaticTxInput(&parsed);
     }
 
+    if (parsed.command == .wallet_intent_send) {
+        if (parsed.intent_execution_mode) |value| try wallet_intent.validateExecutionMode(value);
+        if (parsed.tx_build_auto_gas_payment and parsed.tx_build_gas_payment != null) return error.InvalidCli;
+        if (parsed.tx_build_gas_payment_min_balance != null and !parsed.tx_build_auto_gas_payment) return error.InvalidCli;
+        if (parsed.signatures.items.len == 0 and !parsed.from_keystore and parsed.signers.items.len == 0 and parsed.tx_provider_config == null) {
+            return error.InvalidCli;
+        }
+        if (!hasProgrammaticTxInput(&parsed)) {
+            return error.InvalidCli;
+        }
+        if (parsed.tx_session_response != null and !hasProgrammaticTxInput(&parsed)) return error.InvalidCli;
+        if (parsed.tx_provider_config != null and !hasProgrammaticTxInput(&parsed)) return error.InvalidCli;
+        if (hasProgrammaticTxContext(&parsed) and !hasProgrammaticTxInput(&parsed)) return error.InvalidCli;
+        if (parsed.tx_send_summarize and parsed.tx_send_observe) return error.InvalidCli;
+        try validateProgrammaticTxInput(&parsed);
+    }
+
     if (parsed.command == .request_rebroadcast) {
         const entry_id = parsed.request_entry_id orelse return error.InvalidCli;
         if (entry_id.len == 0) return error.InvalidCli;
@@ -5146,6 +5330,15 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
         if (!hasProgrammaticTxInput(&parsed)) return error.InvalidCli;
         if (parsed.tx_session_response != null and !hasProgrammaticTxInput(&parsed)) return error.InvalidCli;
         if (parsed.tx_provider_config != null and !hasProgrammaticTxInput(&parsed)) return error.InvalidCli;
+        if (hasProgrammaticTxContext(&parsed) and !hasProgrammaticTxInput(&parsed)) return error.InvalidCli;
+        try validateProgrammaticTxInput(&parsed);
+    }
+
+    if (parsed.command == .wallet_intent_dry_run) {
+        if (parsed.intent_execution_mode) |value| try wallet_intent.validateExecutionMode(value);
+        if (parsed.tx_build_auto_gas_payment and parsed.tx_build_gas_payment != null) return error.InvalidCli;
+        if (parsed.tx_build_gas_payment_min_balance != null and !parsed.tx_build_auto_gas_payment) return error.InvalidCli;
+        if (!hasProgrammaticTxInput(&parsed)) return error.InvalidCli;
         if (hasProgrammaticTxContext(&parsed) and !hasProgrammaticTxInput(&parsed)) return error.InvalidCli;
         try validateProgrammaticTxInput(&parsed);
     }
@@ -5171,6 +5364,7 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
     }
 
     if (requestLifecycleConsumesRequestArtifact(parsed.command)) {
+        if (parsed.intent_execution_mode) |value| try wallet_intent.validateExecutionMode(value);
         if (parsed.tx_build_auto_gas_payment and parsed.tx_build_gas_payment != null) return error.InvalidCli;
         if (parsed.tx_build_gas_payment_min_balance != null and !parsed.tx_build_auto_gas_payment) return error.InvalidCli;
         if (parsed.tx_send_summarize and parsed.tx_send_observe) return error.InvalidCli;
@@ -5504,6 +5698,12 @@ pub fn printUsage(writer: anytype) !void {
         "    same options as account coins, including --json/--coin-type/--cursor/--limit/--all\n" ++
         "  wallet objects [selector]           Query wallet-owned objects with default-wallet fallback\n" ++
         "    same options as account objects, including typed filters and --json\n" ++
+        "  wallet intent build                 Build a first-class wallet intent envelope around a request artifact\n" ++
+        "    same input options as request build plus --intent/--network/--execution-mode/--policy\n" ++
+        "  wallet intent dry-run               Dry-run a wallet intent or request-shaped tx input\n" ++
+        "    same input options as request dry-run plus --intent/--network/--execution-mode/--policy\n" ++
+        "  wallet intent send                  Send a wallet intent or request-shaped tx input\n" ++
+        "    same input options as request send plus --intent/--network/--execution-mode/--policy\n" ++
         "  request build                       Build a normalized request artifact from programmatic tx input\n" ++
         "    --request <json|@file>             Normalize an existing request artifact\n" ++
         "    --package/--module/--function      Build from move-call input\n" ++
@@ -8223,6 +8423,86 @@ test "parseCliArgs parses wallet signer inspect command" {
     try testing.expectEqual(Command.wallet_signer_inspect, parsed.command);
     try testing.expectEqualStrings("main", parsed.account_selector.?);
     try testing.expect(parsed.wallet_json);
+}
+
+test "parseCliArgs parses wallet intent build command" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "wallet",
+        "intent",
+        "build",
+        "--request",
+        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"typeArguments\":[],\"arguments\":[7]}],\"sender\":\"0xabc\",\"gasBudget\":1200}",
+        "--network",
+        "sui:testnet",
+        "--execution-mode",
+        "send",
+        "--policy",
+        "{\"session_key\":\"0x1\"}",
+        "--correlation-id",
+        "req-1",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.wallet_intent_build, parsed.command);
+    try testing.expectEqualStrings("0xabc", parsed.tx_build_sender.?);
+    try testing.expectEqualStrings("sui:testnet", parsed.intent_network.?);
+    try testing.expectEqualStrings("send", parsed.intent_execution_mode.?);
+    try testing.expectEqualStrings("{\"session_key\":\"0x1\"}", parsed.intent_policy_json.?);
+    try testing.expectEqualStrings("req-1", parsed.request_correlation_id.?);
+}
+
+test "parseCliArgs parses wallet intent dry-run command" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "wallet",
+        "intent",
+        "dry-run",
+        "--intent",
+        "{\"artifact_kind\":\"wallet_intent\",\"network\":\"sui:mainnet\",\"execution_mode\":\"dry_run\",\"request\":{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"typeArguments\":[],\"arguments\":[7]}],\"sender\":\"0x123\",\"gasBudget\":1200}}",
+        "--summarize",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.wallet_intent_dry_run, parsed.command);
+    try testing.expectEqualStrings("0x123", parsed.tx_build_sender.?);
+    try testing.expectEqualStrings("sui:mainnet", parsed.intent_network.?);
+    try testing.expectEqualStrings("dry_run", parsed.intent_execution_mode.?);
+    try testing.expect(parsed.tx_send_summarize);
+}
+
+test "parseCliArgs parses wallet intent send command" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "wallet",
+        "intent",
+        "send",
+        "--intent",
+        "{\"artifact_kind\":\"wallet_intent\",\"network\":\"sui:mainnet\",\"request\":{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"typeArguments\":[],\"arguments\":[7]}],\"fromKeystore\":true,\"signer\":\"0\",\"gasBudget\":1200}}",
+        "--observe",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.wallet_intent_send, parsed.command);
+    try testing.expectEqualStrings("sui:mainnet", parsed.intent_network.?);
+    try testing.expect(parsed.from_keystore);
+    try testing.expectEqualStrings("0", parsed.signers.items[0]);
+    try testing.expect(parsed.tx_send_observe);
 }
 
 test "parseCliArgs parses request build move-call input" {

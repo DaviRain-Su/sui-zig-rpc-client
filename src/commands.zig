@@ -2,6 +2,7 @@ const std = @import("std");
 const client = @import("sui_client_zig");
 const cli = @import("./cli.zig");
 const request_state = @import("./request_state.zig");
+const wallet_intent = @import("./wallet_intent.zig");
 const wallet_state = @import("./wallet_state.zig");
 const tx_builder = client.tx_builder;
 const RpcRequest = @typeInfo(@typeInfo(@typeInfo(client.rpc_client.RequestSender).@"struct".fields[1].type).pointer.child).@"fn".params[2].type.?;
@@ -3715,6 +3716,95 @@ fn buildRequestInspectSummaryJson(
     return try output.toOwnedSlice(allocator);
 }
 
+fn resolvedWalletIntentNetwork(args: *const cli.ParsedArgs) []const u8 {
+    return args.intent_network orelse wallet_intent.defaultNetworkLabelForRpcUrl(args.rpc_url);
+}
+
+fn resolvedWalletIntentExecutionMode(
+    args: *const cli.ParsedArgs,
+    default_mode: []const u8,
+) ![]const u8 {
+    const mode = args.intent_execution_mode orelse default_mode;
+    try wallet_intent.validateExecutionMode(mode);
+    return mode;
+}
+
+fn buildWalletIntentJsonFromArgs(
+    allocator: std.mem.Allocator,
+    args: *const cli.ParsedArgs,
+    default_execution_mode: []const u8,
+) ![]u8 {
+    const request_json = try buildRequestArtifactJsonFromArgs(allocator, args);
+    defer allocator.free(request_json);
+
+    const summary_json = try buildRequestInspectSummaryJson(allocator, args);
+    defer allocator.free(summary_json);
+
+    const request = try std.json.parseFromSlice(std.json.Value, allocator, request_json, .{});
+    defer request.deinit();
+    if (request.value != .object) return error.InvalidCli;
+
+    const network = resolvedWalletIntentNetwork(args);
+    const execution_mode = try resolvedWalletIntentExecutionMode(args, default_execution_mode);
+    const sponsor_mode = args.request_sponsor_mode orelse "optional";
+
+    var output = std.ArrayList(u8){};
+    errdefer output.deinit(allocator);
+    const writer = output.writer(allocator);
+
+    try writer.writeAll("{");
+    try writer.writeAll("\"artifact_kind\":\"wallet_intent\"");
+    try writer.print(",\"schema_version\":{d}", .{wallet_intent.schema_version});
+    try writer.print(",\"network\":{f}", .{std.json.fmt(network, .{})});
+    try writer.print(",\"execution_mode\":{f}", .{std.json.fmt(execution_mode, .{})});
+    try writer.writeAll(",\"sender\":");
+    if (request.value.object.get("sender")) |sender| {
+        try writer.print("{f}", .{std.json.fmt(sender, .{})});
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll(",\"valid_after_ms\":");
+    if (args.request_valid_after_ms) |value| {
+        try writer.print("{d}", .{value});
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll(",\"valid_before_ms\":");
+    if (args.request_valid_before_ms) |value| {
+        try writer.print("{d}", .{value});
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll(",\"correlation_id\":");
+    if (args.request_correlation_id) |value| {
+        try writer.print("{f}", .{std.json.fmt(value, .{})});
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll(",\"request\":");
+    try writer.writeAll(request_json);
+    try writer.writeAll(",\"request_summary\":");
+    try writer.writeAll(summary_json);
+    try writer.writeAll(",\"sponsor\":{");
+    try writer.print("\"mode\":{f}", .{std.json.fmt(sponsor_mode, .{})});
+    try writer.writeAll(",\"policy_metadata\":");
+    if (args.request_sponsor_policy) |value| {
+        try writer.writeAll(value);
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll("}");
+    try writer.writeAll(",\"policy\":");
+    if (args.intent_policy_json) |value| {
+        try writer.writeAll(value);
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll("}");
+
+    return try output.toOwnedSlice(allocator);
+}
+
 fn resolvedRequestSponsorMode(args: *const cli.ParsedArgs) ![]const u8 {
     const mode = args.request_sponsor_mode orelse "optional";
     if (std.mem.eql(u8, mode, "direct") or std.mem.eql(u8, mode, "optional") or std.mem.eql(u8, mode, "required")) {
@@ -4292,6 +4382,33 @@ pub fn runCommandWithProgrammaticProvider(
             );
             defer result.deinit(allocator);
             try printResourceQueryActionResult(allocator, writer, result, args.pretty);
+        },
+        .wallet_intent_build => {
+            const intent_json = try buildWalletIntentJsonFromArgs(allocator, args, "send");
+            defer allocator.free(intent_json);
+            try printResponse(allocator, writer, intent_json, args.pretty);
+        },
+        .wallet_intent_dry_run => {
+            var derived_args = args.*;
+            derived_args.command = .request_dry_run;
+            return try runCommandWithProgrammaticProvider(
+                allocator,
+                rpc,
+                &derived_args,
+                writer,
+                effective_programmatic_provider,
+            );
+        },
+        .wallet_intent_send => {
+            var derived_args = args.*;
+            derived_args.command = .request_send;
+            return try runCommandWithProgrammaticProvider(
+                allocator,
+                rpc,
+                &derived_args,
+                writer,
+                effective_programmatic_provider,
+            );
         },
         .request_build => {
             const request_json = try buildRequestArtifactJsonFromArgs(allocator, args);
@@ -21701,6 +21818,219 @@ test "runCommand wallet_signer_inspect reports address fallback without local si
     try testing.expectEqualStrings("0x999", parsed.value.object.get("address").?.string);
     try testing.expectEqualStrings("address", parsed.value.object.get("sender_resolution_kind").?.string);
     try testing.expect(!parsed.value.object.get("can_sign_locally").?.bool);
+}
+
+test "runCommand wallet_intent_build prints first-class wallet intent artifacts" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "wallet",
+        "intent",
+        "build",
+        "--request",
+        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"typeArguments\":[],\"arguments\":[7]}],\"sender\":\"0xabc\",\"gasBudget\":1200}",
+        "--network",
+        "sui:testnet",
+        "--execution-mode",
+        "dry_run",
+        "--policy",
+        "{\"session_key\":\"0x1\"}",
+        "--sponsor-mode",
+        "required",
+        "--sponsor-policy",
+        "{\"tier\":\"vip\"}",
+        "--correlation-id",
+        "req-1",
+        "--valid-after-ms",
+        "100",
+        "--valid-before-ms",
+        "200",
+    });
+    defer args.deinit(allocator);
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    try testing.expectEqualStrings("wallet_intent", parsed.value.object.get("artifact_kind").?.string);
+    try testing.expectEqual(@as(i64, 1), parsed.value.object.get("schema_version").?.integer);
+    try testing.expectEqualStrings("sui:testnet", parsed.value.object.get("network").?.string);
+    try testing.expectEqualStrings("dry_run", parsed.value.object.get("execution_mode").?.string);
+    try testing.expectEqualStrings("0xabc", parsed.value.object.get("sender").?.string);
+    try testing.expectEqual(@as(i64, 100), parsed.value.object.get("valid_after_ms").?.integer);
+    try testing.expectEqual(@as(i64, 200), parsed.value.object.get("valid_before_ms").?.integer);
+    try testing.expectEqualStrings("req-1", parsed.value.object.get("correlation_id").?.string);
+    try testing.expectEqualStrings("required", parsed.value.object.get("sponsor").?.object.get("mode").?.string);
+    try testing.expectEqualStrings("vip", parsed.value.object.get("sponsor").?.object.get("policy_metadata").?.object.get("tier").?.string);
+    try testing.expectEqualStrings("0x1", parsed.value.object.get("policy").?.object.get("session_key").?.string);
+}
+
+test "runCommand wallet_intent_dry_run keeps wallet intents on the local programmable builder path" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const Counts = struct {
+        normalized: usize = 0,
+        dry_run: usize = 0,
+        unsafe: usize = 0,
+    };
+    var counts = Counts{};
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const state = @as(*Counts, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                state.normalized += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"parameters\":[\"U64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\"}}}]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_dryRunTransactionBlock")) {
+                state.dry_run += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"effects\":{\"status\":{\"status\":\"success\"}},\"balanceChanges\":[]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall") or std.mem.eql(u8, req.method, "unsafe_batchTransaction")) {
+                state.unsafe += 1;
+                return alloc.dupe(u8, "{\"result\":{\"txBytes\":\"AQIDBA==\"}}");
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "wallet",
+        "intent",
+        "dry-run",
+        "--intent",
+        "{\"artifact_kind\":\"wallet_intent\",\"network\":\"sui:mainnet\",\"execution_mode\":\"dry_run\",\"request\":{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"typeArguments\":[],\"arguments\":[7]}],\"sender\":\"0x123\",\"gasBudget\":1200,\"gasPrice\":8,\"gasPayment\":[{\"objectId\":\"0x999\",\"version\":\"3\",\"digest\":\"0x3333333333333333333333333333333333333333333333333333333333333333\"}],\"summarize\":true}}",
+    });
+    defer args.deinit(allocator);
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = &counts,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    try testing.expectEqual(@as(usize, 1), counts.normalized);
+    try testing.expectEqual(@as(usize, 1), counts.dry_run);
+    try testing.expectEqual(@as(usize, 0), counts.unsafe);
+}
+
+test "runCommand wallet_intent_send keeps wallet intents on the local programmable builder path" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const seed = [_]u8{0x52} ** 32;
+    var encoded_key_bytes: [33]u8 = undefined;
+    encoded_key_bytes[0] = 0;
+    encoded_key_bytes[1..].* = seed;
+    const encoded_len = std.base64.standard.Encoder.calcSize(encoded_key_bytes.len);
+    const encoded_key = try allocator.alloc(u8, encoded_len);
+    defer allocator.free(encoded_key);
+    _ = std.base64.standard.Encoder.encode(encoded_key, &encoded_key_bytes);
+
+    const keystore_contents = try std.fmt.allocPrint(allocator, "[\"{s}\"]", .{encoded_key});
+    defer allocator.free(keystore_contents);
+
+    const keystore_path = "tmp_wallet_intent_send_wallet_keystore.json";
+    try std.fs.cwd().writeFile(.{
+        .sub_path = keystore_path,
+        .data = keystore_contents,
+    });
+    defer std.fs.cwd().deleteFile(keystore_path) catch {};
+
+    const old_override = client.keystore.test_keystore_path_override;
+    client.keystore.test_keystore_path_override = keystore_path;
+    defer client.keystore.test_keystore_path_override = old_override;
+
+    const State = struct {
+        gas_price: usize = 0,
+        normalized: usize = 0,
+        execute_calls: usize = 0,
+        unsafe_calls: usize = 0,
+    };
+    var state = State{};
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const ctx = @as(*State, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "suix_getReferenceGasPrice")) {
+                ctx.gas_price += 1;
+                return alloc.dupe(u8, "{\"result\":\"8\"}");
+            }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                ctx.normalized += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"parameters\":[\"U64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\"}}}]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_executeTransactionBlock")) {
+                ctx.execute_calls += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"digest\":\"0xwalletintent\",\"effects\":{\"status\":{\"status\":\"success\"}},\"balanceChanges\":[]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall") or std.mem.eql(u8, req.method, "unsafe_batchTransaction")) {
+                ctx.unsafe_calls += 1;
+                return alloc.dupe(u8, "{\"result\":{\"txBytes\":\"AQIDBA==\"}}");
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "wallet",
+        "intent",
+        "send",
+        "--intent",
+        "{\"artifact_kind\":\"wallet_intent\",\"network\":\"sui:mainnet\",\"execution_mode\":\"send\",\"request\":{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"typeArguments\":[],\"arguments\":[7]}],\"fromKeystore\":true,\"signer\":\"0\",\"gasBudget\":1200,\"gasPayment\":[{\"objectId\":\"0x9999999999999999999999999999999999999999999999999999999999999999\",\"version\":\"1\",\"digest\":\"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}],\"summarize\":true}}",
+    });
+    defer args.deinit(allocator);
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = &state,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    try testing.expectEqual(@as(usize, 1), state.gas_price);
+    try testing.expectEqual(@as(usize, 1), state.normalized);
+    try testing.expectEqual(@as(usize, 1), state.execute_calls);
+    try testing.expectEqual(@as(usize, 0), state.unsafe_calls);
 }
 
 test "runCommand request_build move-call prints normalized request artifacts" {
