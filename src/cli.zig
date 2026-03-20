@@ -27,7 +27,10 @@ pub const Command = enum {
     request_build,
     request_inspect,
     request_dry_run,
+    request_sponsor,
+    request_sign,
     request_send,
+    request_schedule,
     request_status,
     events,
     move_package,
@@ -100,6 +103,14 @@ pub const ParsedArgs = struct {
     wallet_alias: ?[]const u8 = null,
     wallet_private_key: ?[]const u8 = null,
     wallet_activate: bool = true,
+    request_sponsor_mode: ?[]const u8 = null,
+    request_sponsor_policy: ?[]const u8 = null,
+    request_valid_after_ms: ?u64 = null,
+    request_valid_before_ms: ?u64 = null,
+    request_correlation_id: ?[]const u8 = null,
+    request_schedule_id: ?[]const u8 = null,
+    request_schedule_replace_id: ?[]const u8 = null,
+    request_schedule_at_ms: ?u64 = null,
     account_coin_type: ?[]const u8 = null,
     account_coins_cursor: ?[]const u8 = null,
     account_coins_limit: ?u64 = null,
@@ -185,6 +196,11 @@ pub const ParsedArgs = struct {
     owned_tx_provider_config: ?[]const u8 = null,
     owned_wallet_alias: ?[]const u8 = null,
     owned_wallet_private_key: ?[]const u8 = null,
+    owned_request_sponsor_mode: ?[]const u8 = null,
+    owned_request_sponsor_policy: ?[]const u8 = null,
+    owned_request_correlation_id: ?[]const u8 = null,
+    owned_request_schedule_id: ?[]const u8 = null,
+    owned_request_schedule_replace_id: ?[]const u8 = null,
     owned_account_objects_filter: ?[]const u8 = null,
     owned_account_objects_package: ?[]const u8 = null,
     owned_event_filter: ?[]const u8 = null,
@@ -233,6 +249,11 @@ pub const ParsedArgs = struct {
         if (self.owned_tx_provider_config) |value| allocator.free(value);
         if (self.owned_wallet_alias) |value| allocator.free(value);
         if (self.owned_wallet_private_key) |value| allocator.free(value);
+        if (self.owned_request_sponsor_mode) |value| allocator.free(value);
+        if (self.owned_request_sponsor_policy) |value| allocator.free(value);
+        if (self.owned_request_correlation_id) |value| allocator.free(value);
+        if (self.owned_request_schedule_id) |value| allocator.free(value);
+        if (self.owned_request_schedule_replace_id) |value| allocator.free(value);
         if (self.owned_account_objects_filter) |value| allocator.free(value);
         if (self.owned_account_objects_package) |value| allocator.free(value);
         if (self.owned_event_filter) |value| allocator.free(value);
@@ -271,7 +292,35 @@ pub const ParsedArgs = struct {
 
 fn isRequestLifecycleCommand(command: Command) bool {
     return switch (command) {
-        .request_build, .request_inspect, .request_dry_run, .request_send => true,
+        .request_build,
+        .request_inspect,
+        .request_dry_run,
+        .request_sponsor,
+        .request_sign,
+        .request_send,
+        .request_schedule,
+        => true,
+        else => false,
+    };
+}
+
+fn requestLifecycleConsumesRequestArtifact(command: Command) bool {
+    return switch (command) {
+        .request_build,
+        .request_inspect,
+        .request_dry_run,
+        .request_sponsor,
+        .request_sign,
+        .request_send,
+        .request_schedule,
+        => true,
+        else => false,
+    };
+}
+
+fn requestLifecycleUsesProviderFlow(command: Command) bool {
+    return switch (command) {
+        .request_sign, .request_send => true,
         else => false,
     };
 }
@@ -2654,8 +2703,26 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
                     i += 2;
                     continue;
                 }
+                if (std.mem.eql(u8, sub, "sponsor")) {
+                    parsed.command = .request_sponsor;
+                    parsed.has_command = true;
+                    i += 2;
+                    continue;
+                }
+                if (std.mem.eql(u8, sub, "sign")) {
+                    parsed.command = .request_sign;
+                    parsed.has_command = true;
+                    i += 2;
+                    continue;
+                }
                 if (std.mem.eql(u8, sub, "send")) {
                     parsed.command = .request_send;
+                    parsed.has_command = true;
+                    i += 2;
+                    continue;
+                }
+                if (std.mem.eql(u8, sub, "schedule")) {
+                    parsed.command = .request_schedule;
                     parsed.has_command = true;
                     i += 2;
                     continue;
@@ -3807,7 +3874,7 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
 
         if (isRequestLifecycleCommand(parsed.command)) {
             try maybeFlushPendingTypedCommand(allocator, &parsed, &pending_typed_command, &command_aliases, token);
-            if (parsed.command == .request_build or parsed.command == .request_inspect or parsed.command == .request_dry_run or parsed.command == .request_send) {
+            if (requestLifecycleConsumesRequestArtifact(parsed.command)) {
                 if (std.mem.eql(u8, token, "--request")) {
                     if (i + 1 >= args.len) return error.InvalidCli;
                     try applyProgrammaticRequestArtifact(allocator, &parsed, args[i + 1]);
@@ -3983,6 +4050,87 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
                     i += 2;
                     continue;
                 }
+                if (parsed.command == .request_sponsor or parsed.command == .request_schedule) {
+                    if (std.mem.eql(u8, token, "--sponsor-mode")) {
+                        if (i + 1 >= args.len) return error.InvalidCli;
+                        try setOptionalStringArg(
+                            allocator,
+                            &parsed,
+                            args[i + 1],
+                            &parsed.owned_request_sponsor_mode,
+                            &parsed.request_sponsor_mode,
+                        );
+                        i += 2;
+                        continue;
+                    }
+                    if (std.mem.eql(u8, token, "--sponsor-policy")) {
+                        if (i + 1 >= args.len) return error.InvalidCli;
+                        try setOptionalFileBackedArg(
+                            allocator,
+                            &parsed.owned_request_sponsor_policy,
+                            &parsed.request_sponsor_policy,
+                            args[i + 1],
+                        );
+                        i += 2;
+                        continue;
+                    }
+                    if (std.mem.eql(u8, token, "--valid-after-ms")) {
+                        if (i + 1 >= args.len) return error.InvalidCli;
+                        parsed.request_valid_after_ms = try parseIntValue(args[i + 1]);
+                        i += 2;
+                        continue;
+                    }
+                    if (std.mem.eql(u8, token, "--valid-before-ms")) {
+                        if (i + 1 >= args.len) return error.InvalidCli;
+                        parsed.request_valid_before_ms = try parseIntValue(args[i + 1]);
+                        i += 2;
+                        continue;
+                    }
+                    if (std.mem.eql(u8, token, "--correlation-id")) {
+                        if (i + 1 >= args.len) return error.InvalidCli;
+                        try setOptionalStringArg(
+                            allocator,
+                            &parsed,
+                            args[i + 1],
+                            &parsed.owned_request_correlation_id,
+                            &parsed.request_correlation_id,
+                        );
+                        i += 2;
+                        continue;
+                    }
+                }
+                if (parsed.command == .request_schedule) {
+                    if (std.mem.eql(u8, token, "--schedule-id")) {
+                        if (i + 1 >= args.len) return error.InvalidCli;
+                        try setOptionalStringArg(
+                            allocator,
+                            &parsed,
+                            args[i + 1],
+                            &parsed.owned_request_schedule_id,
+                            &parsed.request_schedule_id,
+                        );
+                        i += 2;
+                        continue;
+                    }
+                    if (std.mem.eql(u8, token, "--replace-schedule-id")) {
+                        if (i + 1 >= args.len) return error.InvalidCli;
+                        try setOptionalStringArg(
+                            allocator,
+                            &parsed,
+                            args[i + 1],
+                            &parsed.owned_request_schedule_replace_id,
+                            &parsed.request_schedule_replace_id,
+                        );
+                        i += 2;
+                        continue;
+                    }
+                    if (std.mem.eql(u8, token, "--schedule-at-ms")) {
+                        if (i + 1 >= args.len) return error.InvalidCli;
+                        parsed.request_schedule_at_ms = try parseIntValue(args[i + 1]);
+                        i += 2;
+                        continue;
+                    }
+                }
                 if (std.mem.eql(u8, token, "--wait")) {
                     parsed.tx_send_wait = true;
                     i += 1;
@@ -3998,7 +4146,7 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
                     i += 1;
                     continue;
                 }
-                if (parsed.command == .request_send and std.mem.eql(u8, token, "--session-response")) {
+                if (requestLifecycleUsesProviderFlow(parsed.command) and std.mem.eql(u8, token, "--session-response")) {
                     if (i + 1 >= args.len) return error.InvalidCli;
                     try setOptionalFileBackedArg(
                         allocator,
@@ -4009,7 +4157,7 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
                     i += 2;
                     continue;
                 }
-                if (parsed.command == .request_send and std.mem.eql(u8, token, "--provider")) {
+                if (requestLifecycleUsesProviderFlow(parsed.command) and std.mem.eql(u8, token, "--provider")) {
                     if (i + 1 >= args.len) return error.InvalidCli;
                     try setOptionalFileBackedArg(
                         allocator,
@@ -4833,6 +4981,16 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
         try validateProgrammaticTxInput(&parsed);
     }
 
+    if (parsed.command == .request_sign) {
+        if (parsed.tx_build_auto_gas_payment and parsed.tx_build_gas_payment != null) return error.InvalidCli;
+        if (parsed.tx_build_gas_payment_min_balance != null and !parsed.tx_build_auto_gas_payment) return error.InvalidCli;
+        if (!hasProgrammaticTxInput(&parsed)) return error.InvalidCli;
+        if (parsed.tx_session_response != null and !hasProgrammaticTxInput(&parsed)) return error.InvalidCli;
+        if (parsed.tx_provider_config != null and !hasProgrammaticTxInput(&parsed)) return error.InvalidCli;
+        if (hasProgrammaticTxContext(&parsed) and !hasProgrammaticTxInput(&parsed)) return error.InvalidCli;
+        try validateProgrammaticTxInput(&parsed);
+    }
+
     if ((parsed.command == .tx_status or parsed.command == .tx_confirm or parsed.command == .request_status) and
         parsed.tx_send_summarize and parsed.tx_send_observe)
     {
@@ -5003,6 +5161,32 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
         const digest = parsed.tx_digest orelse return error.InvalidCli;
         if (digest.len == 0) return error.InvalidCli;
     }
+    if (parsed.command == .request_sponsor or parsed.command == .request_schedule) {
+        if (parsed.request_valid_after_ms != null and parsed.request_valid_before_ms != null and
+            parsed.request_valid_after_ms.? > parsed.request_valid_before_ms.?)
+        {
+            return error.InvalidCli;
+        }
+        if (parsed.request_sponsor_mode) |mode| {
+            if (!(std.mem.eql(u8, mode, "direct") or std.mem.eql(u8, mode, "optional") or std.mem.eql(u8, mode, "required"))) {
+                return error.InvalidCli;
+            }
+        }
+        if (parsed.request_correlation_id) |value| {
+            if (value.len == 0) return error.InvalidCli;
+        }
+    }
+    if (parsed.command == .request_schedule) {
+        if (parsed.request_schedule_at_ms == null and parsed.request_valid_after_ms == null and parsed.request_valid_before_ms == null) {
+            return error.InvalidCli;
+        }
+        if (parsed.request_schedule_id) |value| {
+            if (value.len == 0) return error.InvalidCli;
+        }
+        if (parsed.request_schedule_replace_id) |value| {
+            if (value.len == 0) return error.InvalidCli;
+        }
+    }
     if (parsed.command == .events) {
         const has_raw_filter = parsed.event_filter != null;
         const has_module_filter = parsed.event_package != null or parsed.event_module != null;
@@ -5165,9 +5349,23 @@ pub fn printUsage(writer: anytype) !void {
         "  request dry-run                     Dry-run a request artifact or request-shaped tx input\n" ++
         "    same input options as request build\n" ++
         "    --summarize                        Print structured dry-run summary instead of raw response\n" ++
+        "  request sponsor                     Wrap a request artifact in a sponsor-ready envelope\n" ++
+        "    same input options as request build\n" ++
+        "    --sponsor-mode <direct|optional|required>\n" ++
+        "    --sponsor-policy <json|@file>     Optional sponsor policy metadata JSON\n" ++
+        "    --valid-after-ms/--valid-before-ms Optional validity window metadata\n" ++
+        "    --correlation-id <text>           Optional replay/correlation id\n" ++
+        "  request sign                        Attach signer/provider approvals and print an execute payload\n" ++
+        "    same input options as request build plus tx-payload signer/provider flags\n" ++
+        "    --summarize                        Print structured execute-payload summary instead of raw payload\n" ++
         "  request send                        Send a request artifact or request-shaped tx input\n" ++
         "    same input options as request build plus tx-send signer/provider flags\n" ++
         "    --wait/--summarize/--observe       Reuse tx send confirmation and output modes\n" ++
+        "  request schedule                    Wrap a request artifact in a scheduler-friendly job envelope\n" ++
+        "    same input options as request sponsor\n" ++
+        "    --schedule-at-ms <unix-ms>        Desired execution time\n" ++
+        "    --schedule-id <text>              Optional scheduler job id\n" ++
+        "    --replace-schedule-id <text>      Optional previous job id to replace\n" ++
         "  request status <digest>             Query the execution status of a previously sent request\n" ++
         "    same options as tx status, including --summarize/--observe/--poll-ms/--confirm-timeout-ms\n" ++
         "  account list                        List local keystore accounts\n" ++
@@ -7917,6 +8115,95 @@ test "parseCliArgs parses request send request artifact" {
     try testing.expect(parsed.tx_send_wait);
     try testing.expect(parsed.tx_send_observe);
     try testing.expectEqualStrings("{\"kind\":\"remote_signer\"}", parsed.tx_provider_config.?);
+}
+
+test "parseCliArgs parses request sponsor command" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "request",
+        "sponsor",
+        "--request",
+        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"typeArguments\":[],\"arguments\":[7]}],\"sender\":\"0xabc\",\"gasBudget\":1200}",
+        "--sponsor-mode",
+        "required",
+        "--sponsor-policy",
+        "{\"tier\":\"vip\"}",
+        "--valid-after-ms",
+        "100",
+        "--valid-before-ms",
+        "200",
+        "--correlation-id",
+        "req-123",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.request_sponsor, parsed.command);
+    try testing.expectEqualStrings("required", parsed.request_sponsor_mode.?);
+    try testing.expectEqualStrings("{\"tier\":\"vip\"}", parsed.request_sponsor_policy.?);
+    try testing.expectEqual(@as(?u64, 100), parsed.request_valid_after_ms);
+    try testing.expectEqual(@as(?u64, 200), parsed.request_valid_before_ms);
+    try testing.expectEqualStrings("req-123", parsed.request_correlation_id.?);
+}
+
+test "parseCliArgs parses request sign command" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "request",
+        "sign",
+        "--request",
+        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"typeArguments\":[],\"arguments\":[7]}],\"sender\":\"0xabc\",\"gasBudget\":1200}",
+        "--provider",
+        "{\"kind\":\"remote_signer\"}",
+        "--session-response",
+        "{\"supportsExecute\":true}",
+        "--summarize",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.request_sign, parsed.command);
+    try testing.expectEqualStrings("{\"kind\":\"remote_signer\"}", parsed.tx_provider_config.?);
+    try testing.expectEqualStrings("{\"supportsExecute\":true}", parsed.tx_session_response.?);
+    try testing.expect(parsed.tx_send_summarize);
+}
+
+test "parseCliArgs parses request schedule command" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "request",
+        "schedule",
+        "--request",
+        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"typeArguments\":[],\"arguments\":[7]}],\"sender\":\"0xabc\",\"gasBudget\":1200}",
+        "--schedule-id",
+        "job-1",
+        "--replace-schedule-id",
+        "job-0",
+        "--schedule-at-ms",
+        "500",
+        "--sponsor-mode",
+        "optional",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.request_schedule, parsed.command);
+    try testing.expectEqualStrings("job-1", parsed.request_schedule_id.?);
+    try testing.expectEqualStrings("job-0", parsed.request_schedule_replace_id.?);
+    try testing.expectEqual(@as(?u64, 500), parsed.request_schedule_at_ms);
+    try testing.expectEqualStrings("optional", parsed.request_sponsor_mode.?);
 }
 
 test "parseCliArgs parses request status command" {

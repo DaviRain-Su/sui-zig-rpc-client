@@ -996,7 +996,10 @@ pub fn main() !void {
 - `request build`: 把 move-call / programmable 输入规范化成可复用 request artifact。
 - `request inspect`: 输出 request artifact 的结构化摘要，适合在 sponsor/sign/send 前做检查。
 - `request dry-run`: 直接对 request artifact 或 request-shaped 输入执行 dry-run，复用现有本地 programmable builder 路径。
+- `request sponsor`: 把 request artifact 包成 `sponsor-envelope`；支持 `--sponsor-mode`、`--sponsor-policy`、`--valid-after-ms`、`--valid-before-ms`、`--correlation-id`，适合交给后续 sponsor service 或 web 流程。
+- `request sign`: 直接对 request artifact 或 request-shaped 输入附加 signer/provider 审批，并输出 execute payload；复用现有本地 programmable builder 和 `tx payload` 路径。
 - `request send`: 直接对 request artifact 或 request-shaped 输入执行发送，复用现有本地 programmable builder 和 signer/provider 路径。
+- `request schedule`: 把 request artifact 包成 `schedule-job`；支持 `--schedule-at-ms`、`--schedule-id`、`--replace-schedule-id`，并显式带上 sponsor mode / validity window / object freshness 要求。
 - `request status <digest>`: 复用交易状态读取路径查询 request 执行结果；支持 `--summarize`、`--observe`、`--poll-ms`、`--confirm-timeout-ms`。
 - `account list`: 列出 keystore 条目。
 - `account info <selector>`: 按索引或别名/地址/密钥字段查询并展示单条 keystore 记录；`--json` 输出 JSON。

@@ -388,13 +388,16 @@ What is still missing is an explicit request lifecycle API at the CLI level.
 That should be added as a first-class command group rather than buried inside
 `wallet intent`.
 
-The first two implementation batches are now in place:
+The first three implementation batches are now in place:
 
 - `request build`
 - `request inspect`
 - `request dry-run`
 - `request send`
 - `request status`
+- `request sponsor`
+- `request sign`
+- `request schedule`
 
 Recommended commands:
 

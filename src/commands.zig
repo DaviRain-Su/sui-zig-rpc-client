@@ -3440,6 +3440,135 @@ fn buildRequestInspectSummaryJson(
     return try output.toOwnedSlice(allocator);
 }
 
+fn resolvedRequestSponsorMode(args: *const cli.ParsedArgs) ![]const u8 {
+    const mode = args.request_sponsor_mode orelse "optional";
+    if (std.mem.eql(u8, mode, "direct") or std.mem.eql(u8, mode, "optional") or std.mem.eql(u8, mode, "required")) {
+        return mode;
+    }
+    return error.InvalidCli;
+}
+
+fn buildRequestSponsorEnvelopeJson(
+    allocator: std.mem.Allocator,
+    args: *const cli.ParsedArgs,
+) ![]u8 {
+    const request_json = try buildRequestArtifactJsonFromArgs(allocator, args);
+    defer allocator.free(request_json);
+
+    const summary_json = try buildRequestInspectSummaryJson(allocator, args);
+    defer allocator.free(summary_json);
+
+    const request = try std.json.parseFromSlice(std.json.Value, allocator, request_json, .{});
+    defer request.deinit();
+    if (request.value != .object) return error.InvalidCli;
+
+    const sponsor_mode = try resolvedRequestSponsorMode(args);
+
+    var output = std.ArrayList(u8){};
+    errdefer output.deinit(allocator);
+    const writer = output.writer(allocator);
+
+    try writer.writeAll("{");
+    try writer.writeAll("\"artifact_kind\":\"sponsor_envelope\"");
+    try writer.writeAll(",\"request\":");
+    try writer.writeAll(request_json);
+    try writer.writeAll(",\"request_summary\":");
+    try writer.writeAll(summary_json);
+    try writer.writeAll(",\"sender\":");
+    if (request.value.object.get("sender")) |sender| {
+        try writer.print("{f}", .{std.json.fmt(sender, .{})});
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll(",\"estimated_gas_budget\":");
+    if (request.value.object.get("gasBudget")) |gas_budget| {
+        try writer.print("{f}", .{std.json.fmt(gas_budget, .{})});
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.print(",\"valid_after_ms\":{?d}", .{args.request_valid_after_ms});
+    try writer.print(",\"valid_before_ms\":{?d}", .{args.request_valid_before_ms});
+    try writer.writeAll(",\"correlation_id\":");
+    if (args.request_correlation_id) |value| {
+        try writer.print("{f}", .{std.json.fmt(value, .{})});
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll(",\"sponsor\":{");
+    try writer.print("\"mode\":{f}", .{std.json.fmt(sponsor_mode, .{})});
+    try writer.writeAll(",\"policy_metadata\":");
+    if (args.request_sponsor_policy) |value| {
+        try writer.writeAll(value);
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll("}}");
+
+    return try output.toOwnedSlice(allocator);
+}
+
+fn buildRequestScheduleJobJson(
+    allocator: std.mem.Allocator,
+    args: *const cli.ParsedArgs,
+) ![]u8 {
+    const request_json = try buildRequestArtifactJsonFromArgs(allocator, args);
+    defer allocator.free(request_json);
+
+    const summary_json = try buildRequestInspectSummaryJson(allocator, args);
+    defer allocator.free(summary_json);
+
+    const sponsor_mode = try resolvedRequestSponsorMode(args);
+
+    var output = std.ArrayList(u8){};
+    errdefer output.deinit(allocator);
+    const writer = output.writer(allocator);
+
+    try writer.writeAll("{");
+    try writer.writeAll("\"artifact_kind\":\"schedule_job\"");
+    try writer.writeAll(",\"state\":\"scheduled\"");
+    try writer.writeAll(",\"request\":");
+    try writer.writeAll(request_json);
+    try writer.writeAll(",\"request_summary\":");
+    try writer.writeAll(summary_json);
+    try writer.writeAll(",\"schedule\":{");
+    try writer.writeAll("\"job_id\":");
+    if (args.request_schedule_id) |value| {
+        try writer.print("{f}", .{std.json.fmt(value, .{})});
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll(",\"replace_job_id\":");
+    if (args.request_schedule_replace_id) |value| {
+        try writer.print("{f}", .{std.json.fmt(value, .{})});
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.print(",\"execute_at_ms\":{?d}", .{args.request_schedule_at_ms});
+    try writer.print(",\"valid_after_ms\":{?d}", .{args.request_valid_after_ms});
+    try writer.print(",\"valid_before_ms\":{?d}", .{args.request_valid_before_ms});
+    try writer.writeAll(",\"correlation_id\":");
+    if (args.request_correlation_id) |value| {
+        try writer.print("{f}", .{std.json.fmt(value, .{})});
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll(",\"sponsor_mode\":");
+    try writer.print("{f}", .{std.json.fmt(sponsor_mode, .{})});
+    try writer.writeAll(",\"sponsor_policy_metadata\":");
+    if (args.request_sponsor_policy) |value| {
+        try writer.writeAll(value);
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll("}");
+    try writer.writeAll(",\"execution_requirements\":{");
+    try writer.writeAll("\"object_freshness\":\"re_resolve_before_send\"");
+    try writer.writeAll(",\"rebuild_before_execute\":true");
+    try writer.writeAll("}}");
+
+    return try output.toOwnedSlice(allocator);
+}
+
 fn printReadQuerySummary(
     writer: anytype,
     summary: client.rpc_client.ReadQuerySummary,
@@ -3630,6 +3759,22 @@ pub fn runCommandWithProgrammaticProvider(
                 effective_programmatic_provider,
             );
         },
+        .request_sponsor => {
+            const envelope_json = try buildRequestSponsorEnvelopeJson(allocator, args);
+            defer allocator.free(envelope_json);
+            try printResponse(allocator, writer, envelope_json, args.pretty);
+        },
+        .request_sign => {
+            var derived_args = args.*;
+            derived_args.command = .tx_payload;
+            return try runCommandWithProgrammaticProvider(
+                allocator,
+                rpc,
+                &derived_args,
+                writer,
+                effective_programmatic_provider,
+            );
+        },
         .request_send => {
             var derived_args = args.*;
             derived_args.command = .tx_send;
@@ -3640,6 +3785,11 @@ pub fn runCommandWithProgrammaticProvider(
                 writer,
                 effective_programmatic_provider,
             );
+        },
+        .request_schedule => {
+            const schedule_json = try buildRequestScheduleJobJson(allocator, args);
+            defer allocator.free(schedule_json);
+            try printResponse(allocator, writer, schedule_json, args.pretty);
         },
         .request_status => {
             var derived_args = args.*;
@@ -21013,6 +21163,186 @@ test "runCommand request_send request artifact uses local programmable builder p
     try testing.expectEqual(@as(usize, 1), state.normalized);
     try testing.expectEqual(@as(usize, 1), state.execute_calls);
     try testing.expectEqual(@as(usize, 0), state.unsafe_calls);
+}
+
+test "runCommand request_sponsor prints sponsor envelope artifact" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "request",
+        "sponsor",
+        "--request",
+        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"typeArguments\":[],\"arguments\":[7]}],\"sender\":\"0xabc\",\"gasBudget\":1200}",
+        "--sponsor-mode",
+        "required",
+        "--sponsor-policy",
+        "{\"tier\":\"vip\"}",
+        "--valid-after-ms",
+        "100",
+        "--valid-before-ms",
+        "200",
+        "--correlation-id",
+        "req-123",
+    });
+    defer args.deinit(allocator);
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    try testing.expectEqualStrings("sponsor_envelope", parsed.value.object.get("artifact_kind").?.string);
+    try testing.expectEqualStrings("0xabc", parsed.value.object.get("sender").?.string);
+    try testing.expectEqual(@as(i64, 1200), parsed.value.object.get("estimated_gas_budget").?.integer);
+    try testing.expectEqual(@as(i64, 100), parsed.value.object.get("valid_after_ms").?.integer);
+    try testing.expectEqual(@as(i64, 200), parsed.value.object.get("valid_before_ms").?.integer);
+    try testing.expectEqualStrings("req-123", parsed.value.object.get("correlation_id").?.string);
+    try testing.expectEqualStrings("required", parsed.value.object.get("sponsor").?.object.get("mode").?.string);
+    try testing.expectEqualStrings("vip", parsed.value.object.get("sponsor").?.object.get("policy_metadata").?.object.get("tier").?.string);
+}
+
+test "runCommand request_sign request artifact uses local programmable builder path" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const seed = [_]u8{0x52} ** 32;
+    var encoded_key_bytes: [33]u8 = undefined;
+    encoded_key_bytes[0] = 0;
+    encoded_key_bytes[1..].* = seed;
+    const encoded_len = std.base64.standard.Encoder.calcSize(encoded_key_bytes.len);
+    const encoded_key = try allocator.alloc(u8, encoded_len);
+    defer allocator.free(encoded_key);
+    _ = std.base64.standard.Encoder.encode(encoded_key, &encoded_key_bytes);
+
+    const keystore_contents = try std.fmt.allocPrint(allocator, "[\"{s}\"]", .{encoded_key});
+    defer allocator.free(keystore_contents);
+
+    const keystore_path = "tmp_request_sign_wallet_keystore.json";
+    try std.fs.cwd().writeFile(.{
+        .sub_path = keystore_path,
+        .data = keystore_contents,
+    });
+    defer std.fs.cwd().deleteFile(keystore_path) catch {};
+
+    const old_override = client.keystore.test_keystore_path_override;
+    client.keystore.test_keystore_path_override = keystore_path;
+    defer client.keystore.test_keystore_path_override = old_override;
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "request",
+        "sign",
+        "--request",
+        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"typeArguments\":[],\"arguments\":[7]}],\"fromKeystore\":true,\"signer\":\"0\",\"gasBudget\":1200,\"gasPayment\":[{\"objectId\":\"0x9999999999999999999999999999999999999999999999999999999999999999\",\"version\":\"1\",\"digest\":\"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}]}",
+    });
+    defer args.deinit(allocator);
+
+    const State = struct {
+        gas_price: usize = 0,
+        normalized: usize = 0,
+        unsafe_calls: usize = 0,
+    };
+    var state = State{};
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const ctx = @as(*State, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "suix_getReferenceGasPrice")) {
+                ctx.gas_price += 1;
+                return alloc.dupe(u8, "{\"result\":\"8\"}");
+            }
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                ctx.normalized += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"parameters\":[\"U64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\"}}}]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall") or std.mem.eql(u8, req.method, "unsafe_batchTransaction")) {
+                ctx.unsafe_calls += 1;
+                return alloc.dupe(u8, "{\"result\":{\"txBytes\":\"AQIDBA==\"}}");
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = &state,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    try testing.expectEqual(@as(usize, 1), state.gas_price);
+    try testing.expectEqual(@as(usize, 1), state.normalized);
+    try testing.expectEqual(@as(usize, 0), state.unsafe_calls);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    try testing.expect(parsed.value == .array);
+    try testing.expect(parsed.value.array.items.len >= 2);
+    try testing.expect(parsed.value.array.items[0].string.len > 0);
+    try testing.expectEqual(@as(usize, 1), parsed.value.array.items[1].array.items.len);
+}
+
+test "runCommand request_schedule prints scheduler job artifact" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "request",
+        "schedule",
+        "--request",
+        "{\"commands\":[{\"kind\":\"MoveCall\",\"package\":\"0x2\",\"module\":\"counter\",\"function\":\"increment\",\"typeArguments\":[],\"arguments\":[7]}],\"sender\":\"0xabc\",\"gasBudget\":1200}",
+        "--schedule-id",
+        "job-1",
+        "--replace-schedule-id",
+        "job-0",
+        "--schedule-at-ms",
+        "500",
+        "--valid-before-ms",
+        "900",
+        "--sponsor-mode",
+        "optional",
+    });
+    defer args.deinit(allocator);
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    try testing.expectEqualStrings("schedule_job", parsed.value.object.get("artifact_kind").?.string);
+    try testing.expectEqualStrings("scheduled", parsed.value.object.get("state").?.string);
+    try testing.expectEqualStrings("job-1", parsed.value.object.get("schedule").?.object.get("job_id").?.string);
+    try testing.expectEqualStrings("job-0", parsed.value.object.get("schedule").?.object.get("replace_job_id").?.string);
+    try testing.expectEqual(@as(i64, 500), parsed.value.object.get("schedule").?.object.get("execute_at_ms").?.integer);
+    try testing.expectEqual(@as(i64, 900), parsed.value.object.get("schedule").?.object.get("valid_before_ms").?.integer);
+    try testing.expectEqualStrings("optional", parsed.value.object.get("schedule").?.object.get("sponsor_mode").?.string);
+    try testing.expectEqualStrings("re_resolve_before_send", parsed.value.object.get("execution_requirements").?.object.get("object_freshness").?.string);
 }
 
 test "runCommand request_status prints structured summaries" {

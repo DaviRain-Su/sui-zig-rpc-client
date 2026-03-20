@@ -368,7 +368,7 @@ what the generic path still needs to finish.
   `coins/objects`.
 - [x] Extend initial `request` CLI lifecycle commands with execution/status:
   `send/status`.
-- [ ] Add remaining `request` CLI lifecycle commands:
+- [x] Add remaining `request` CLI lifecycle commands:
   sponsor/sign/schedule.
 - [ ] Design embedded passkey account mode and external wallet mode as equal
   first-class flows.
