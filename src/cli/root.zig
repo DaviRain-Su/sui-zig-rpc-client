@@ -8,6 +8,9 @@ const std = @import("std");
 pub const types = @import("types.zig");
 pub const parsed_args = @import("parsed_args.zig");
 pub const parser = @import("parser.zig");
+pub const help = @import("help.zig");
+pub const validator = @import("validator.zig");
+pub const utils = @import("utils.zig");
 
 // Re-export commonly used types
 pub const Command = types.Command;
@@ -28,6 +31,19 @@ pub const hasProgrammaticTxInput = parsed_args.hasProgrammaticTxInput;
 pub const validateProgrammaticTxInput = parsed_args.validateProgrammaticTxInput;
 pub const supportsProgrammableInput = parsed_args.supportsProgrammableInput;
 pub const parseCliArgs = parser.parseCliArgs;
+pub const printUsage = help.printUsage;
+pub const printVersion = help.printVersion;
+pub const printCommandHelp = help.printCommandHelp;
+pub const printCategoryHelp = help.printCategoryHelp;
+pub const validateArgs = validator.validateArgs;
+pub const isValidAddress = validator.isValidAddress;
+pub const isValidObjectId = validator.isValidObjectId;
+pub const isValidPackageId = validator.isValidPackageId;
+pub const isValidJson = validator.isValidJson;
+pub const setOptionalStringArg = utils.setOptionalStringArg;
+pub const parseBool = utils.parseBool;
+pub const formatBalance = utils.formatBalance;
+pub const expandTilde = utils.expandTilde;
 
 // ============================================================
 // Tests
@@ -37,6 +53,9 @@ test "cli module imports successfully" {
     _ = types;
     _ = parsed_args;
     _ = parser;
+    _ = help;
+    _ = validator;
+    _ = utils;
 }
 
 test "re-exports work correctly" {
