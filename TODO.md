@@ -382,6 +382,8 @@ what the generic path still needs to finish.
 - [ ] Dual-coin automatic merge/split planning for liquidity flows.
   - [x] Reuse one large exact split source across repeated scalar coin
     parameters when later splits still fit the remaining balance.
+  - [x] Reuse a merged split destination across later exact coin parameters
+    when the earlier merge leaves enough remaining balance.
 - [ ] Fewer unresolved placeholders in real `add_liquidity` / `swap`
   executions.
 
