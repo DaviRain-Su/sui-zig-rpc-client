@@ -7,6 +7,7 @@ const std = @import("std");
 // Import sub-modules
 pub const types = @import("types.zig");
 pub const parsed_args = @import("parsed_args.zig");
+pub const parser = @import("parser.zig");
 
 // Re-export commonly used types
 pub const Command = types.Command;
@@ -26,6 +27,7 @@ pub const hasCompleteMoveCallArgs = parsed_args.hasCompleteMoveCallArgs;
 pub const hasProgrammaticTxInput = parsed_args.hasProgrammaticTxInput;
 pub const validateProgrammaticTxInput = parsed_args.validateProgrammaticTxInput;
 pub const supportsProgrammableInput = parsed_args.supportsProgrammableInput;
+pub const parseCliArgs = parser.parseCliArgs;
 
 // ============================================================
 // Tests
@@ -34,6 +36,7 @@ pub const supportsProgrammableInput = parsed_args.supportsProgrammableInput;
 test "cli module imports successfully" {
     _ = types;
     _ = parsed_args;
+    _ = parser;
 }
 
 test "re-exports work correctly" {
