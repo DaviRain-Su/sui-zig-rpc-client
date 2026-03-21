@@ -7717,8 +7717,54 @@ pub fn runCommandWithProgrammaticProvider(
                     return;
                 },
                 .swap => |swap_intent| {
-                    _ = swap_intent;
-                    return error.InvalidCli;
+                    if (!std.ascii.eqlIgnoreCase(swap_intent.from_token, "SUI") or !std.ascii.eqlIgnoreCase(swap_intent.to_token, "USDC")) {
+                        return error.InvalidCli;
+                    }
+
+                    var move_args = cli.ParsedArgs{
+                        .command = .move_function,
+                        .has_command = true,
+                        .pretty = args.pretty,
+                        .move_package = client.package_preset.cetus_clmm_mainnet,
+                        .move_module = "pool",
+                        .move_function = "swap",
+                        .tx_send_summarize = true,
+                    };
+                    defer move_args.deinit(allocator);
+
+                    var result = try rpc.runReadQueryAction(
+                        allocator,
+                        .{ .move = try moveQueryFromArgs(allocator, &move_args) },
+                        .summarize,
+                    );
+                    defer result.deinit(allocator);
+
+                    const request_selection = moveFunctionExecutionRequestArtifact(
+                        allocator,
+                        result,
+                        .tx_dry_run,
+                    ) catch |err| switch (err) {
+                        error.UnresolvedMoveFunctionExecutionTemplate => {
+                            try recordUnresolvedMoveFunctionExecutionError(allocator, rpc, result);
+                            return err;
+                        },
+                        else => return err,
+                    };
+
+                    var derived_args = try buildDerivedMoveFunctionRequestBuildArgs(
+                        allocator,
+                        args,
+                        request_selection.request_json,
+                    );
+                    defer derived_args.deinit(allocator);
+                    try runCommandWithProgrammaticProvider(
+                        allocator,
+                        rpc,
+                        &derived_args,
+                        writer,
+                        effective_programmatic_provider,
+                    );
+                    return;
                 },
                 .unsupported => |unsupported| {
                     try writer.print("Unsupported intent: {s}\n", .{unsupported});

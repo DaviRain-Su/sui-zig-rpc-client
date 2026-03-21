@@ -306,7 +306,7 @@ test "EventPage structure" {
 }
 
 test "subscribeToEvents returns NotImplemented" {
-    const testing = std.testing;
+    _ = std.testing;
 
     // This would require a mock client
     // For now, just verify the error type exists

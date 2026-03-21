@@ -317,7 +317,7 @@ test "RpcRequest structure" {
 }
 
 test "RequestSender callback type" {
-    const testing = std.testing;
+    _ = std.testing;
 
     // Just verify the type compiles
     const Callback = RequestSenderCallback;

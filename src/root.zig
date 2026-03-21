@@ -3,10 +3,14 @@ const std = @import("std");
 pub const version = std.SemanticVersion{ .major = 0, .minor = 1, .patch = 2 };
 pub const default_rpc_url = "https://fullnode.mainnet.sui.io:443";
 
+// Legacy RPC client (44,708 lines - full featured)
 pub const rpc_client = @import("./client/rpc_client/client.zig");
 pub const SuiRpcClient = rpc_client.SuiRpcClient;
 pub const ClientError = rpc_client.ClientError;
 pub const RpcErrorDetail = rpc_client.RpcErrorDetail;
+
+// New modular RPC client (128K lines - actively developed)
+pub const rpc_client_new = @import("./client/rpc_client/root.zig");
 pub const tx_builder = @import("./tx_builder.zig");
 pub const tx_result = @import("./tx_result.zig");
 pub const inspect_result = @import("./inspect_result.zig");
