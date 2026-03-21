@@ -10726,6 +10726,22 @@ pub const SuiRpcClient = struct {
         return selected_candidates.items.len != 0;
     }
 
+    fn collectVectorOwnedObjectCandidateIndicesExcluding(
+        allocator: std.mem.Allocator,
+        candidates: []const move_result.OwnedMoveObjectCandidate,
+        excluded_object_ids: []const []const u8,
+    ) ![]usize {
+        var indices = std.ArrayList(usize).empty;
+        defer indices.deinit(allocator);
+
+        for (candidates, 0..) |candidate, candidate_index| {
+            if (moveObjectIdIsExcluded(excluded_object_ids, candidate.object_id)) continue;
+            try indices.append(allocator, candidate_index);
+        }
+
+        return try indices.toOwnedSlice(allocator);
+    }
+
     const PlannedOwnedObjectParameterSelection = struct {
         scalar: ?SelectedOwnedObjectCandidate = null,
     };
@@ -10780,17 +10796,47 @@ pub const SuiRpcClient = struct {
         return try indices.toOwnedSlice(allocator);
     }
 
-    fn appendPlannedVectorOwnedObjectSelectionScoreKey(
-        writer: anytype,
+    fn appendPlannedVectorOwnedObjectSelectionToTotalScore(
+        allocator: std.mem.Allocator,
+        total_selection_score: *usize,
         parameter: move_result.OwnedMoveParameterSummary,
-        reserved_object_ids: []const []const u8,
+        reserved_object_ids: *std.ArrayList([]const u8),
     ) !bool {
         const candidates = parameter.vector_item_owned_object_candidates orelse return false;
+        const candidate_indices = try collectVectorOwnedObjectCandidateIndicesExcluding(
+            allocator,
+            candidates,
+            reserved_object_ids.items,
+        );
+        defer allocator.free(candidate_indices);
+        if (candidate_indices.len == 0) return false;
+
+        for (candidate_indices) |candidate_index| {
+            const candidate = candidates[candidate_index];
+            total_selection_score.* +|= candidate.selection_score;
+            try reserved_object_ids.append(allocator, candidate.object_id);
+        }
+        return true;
+    }
+
+    fn appendPlannedVectorOwnedObjectSelectionScoreKey(
+        allocator: std.mem.Allocator,
+        writer: anytype,
+        parameter: move_result.OwnedMoveParameterSummary,
+        reserved_object_ids: *std.ArrayList([]const u8),
+    ) !bool {
+        const candidates = parameter.vector_item_owned_object_candidates orelse return false;
+        const candidate_indices = try collectVectorOwnedObjectCandidateIndicesExcluding(
+            allocator,
+            candidates,
+            reserved_object_ids.items,
+        );
+        defer allocator.free(candidate_indices);
 
         var source_count: u64 = 0;
         var total_selection_score: usize = 0;
-        for (candidates) |candidate| {
-            if (moveObjectIdIsExcluded(reserved_object_ids, candidate.object_id)) continue;
+        for (candidate_indices) |candidate_index| {
+            const candidate = candidates[candidate_index];
             source_count += 1;
             total_selection_score +|= candidate.selection_score;
         }
@@ -10799,10 +10845,13 @@ pub const SuiRpcClient = struct {
         try writer.writeByte(0x02);
         try writer.writeInt(u64, source_count, .big);
         try writer.writeInt(usize, std.math.maxInt(usize) - total_selection_score, .big);
-        for (candidates) |candidate| {
-            if (moveObjectIdIsExcluded(reserved_object_ids, candidate.object_id)) continue;
+        for (candidate_indices) |candidate_index| {
+            const candidate = candidates[candidate_index];
             try writer.writeAll(candidate.object_id);
             try writer.writeByte(0);
+        }
+        for (candidate_indices) |candidate_index| {
+            try reserved_object_ids.append(allocator, candidates[candidate_index].object_id);
         }
         return true;
     }
@@ -10819,6 +10868,9 @@ pub const SuiRpcClient = struct {
         const writer = output.writer(allocator);
 
         var total_selection_score: usize = 0;
+        var total_score_reserved_object_ids = std.ArrayList([]const u8).empty;
+        defer total_score_reserved_object_ids.deinit(allocator);
+        try total_score_reserved_object_ids.appendSlice(allocator, reserved_object_ids);
         for (parameters, 0..) |parameter, index| {
             if (parameter.omitted_from_explicit_args or parameter.explicit_arg_json != null) continue;
             if (moveParameterHasStableNonCoinOwnedAutoSelection(
@@ -10836,18 +10888,19 @@ pub const SuiRpcClient = struct {
                 continue;
             }
             if (isNonCoinVectorOwnedMoveParameter(parameter)) {
-                const candidates = parameter.vector_item_owned_object_candidates orelse continue;
-                var found_any = false;
-                for (candidates) |candidate| {
-                    if (moveObjectIdIsExcluded(reserved_object_ids, candidate.object_id)) continue;
-                    total_selection_score +|= candidate.selection_score;
-                    found_any = true;
-                }
-                if (!found_any) return null;
+                if (!try appendPlannedVectorOwnedObjectSelectionToTotalScore(
+                    allocator,
+                    &total_selection_score,
+                    parameter,
+                    &total_score_reserved_object_ids,
+                )) return null;
             }
         }
 
         try writer.writeInt(usize, std.math.maxInt(usize) - total_selection_score, .big);
+        var key_reserved_object_ids = std.ArrayList([]const u8).empty;
+        defer key_reserved_object_ids.deinit(allocator);
+        try key_reserved_object_ids.appendSlice(allocator, reserved_object_ids);
         for (parameters, 0..) |parameter, index| {
             if (parameter.omitted_from_explicit_args or parameter.explicit_arg_json != null) continue;
             if (moveParameterHasStableNonCoinOwnedAutoSelection(
@@ -10874,9 +10927,10 @@ pub const SuiRpcClient = struct {
 
             if (isNonCoinVectorOwnedMoveParameter(parameter)) {
                 if (!try appendPlannedVectorOwnedObjectSelectionScoreKey(
+                    allocator,
                     writer,
                     parameter,
-                    reserved_object_ids,
+                    &key_reserved_object_ids,
                 )) return null;
             }
         }
@@ -26411,6 +26465,106 @@ test "applyCrossParameterOwnedObjectSelectionHints lets vector-owned demand infl
     try testing.expectEqualStrings(
         "[\"select:anchor-shared\",\"select:vector-sidecar\"]",
         parameters[1].auto_selected_arg_json.?,
+    );
+}
+
+test "applyCrossParameterOwnedObjectSelectionHints scores later vector params after earlier vector reservations" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const scalar_candidates = try allocator.alloc(move_result.OwnedMoveObjectCandidate, 2);
+    errdefer allocator.free(scalar_candidates);
+    scalar_candidates[0] = .{
+        .object_id = try allocator.dupe(u8, "0xanchor-shared"),
+        .version = 1,
+        .digest = try allocator.dupe(u8, "digest-anchor-shared"),
+        .selection_score = 10,
+        .object_input_select_token = try allocator.dupe(u8, "select:anchor-shared"),
+    };
+    scalar_candidates[1] = .{
+        .object_id = try allocator.dupe(u8, "0xscalar-fallback"),
+        .version = 2,
+        .digest = try allocator.dupe(u8, "digest-scalar-fallback"),
+        .selection_score = 1,
+        .object_input_select_token = try allocator.dupe(u8, "select:scalar-fallback"),
+    };
+    errdefer {
+        for (scalar_candidates) |*candidate| candidate.deinit(allocator);
+    }
+
+    const first_vector_candidates = try allocator.alloc(move_result.OwnedMoveObjectCandidate, 2);
+    errdefer allocator.free(first_vector_candidates);
+    first_vector_candidates[0] = .{
+        .object_id = try allocator.dupe(u8, "0xanchor-shared"),
+        .version = 3,
+        .digest = try allocator.dupe(u8, "digest-first-vector-anchor"),
+        .selection_score = 10,
+        .object_input_select_token = try allocator.dupe(u8, "select:anchor-shared"),
+    };
+    first_vector_candidates[1] = .{
+        .object_id = try allocator.dupe(u8, "0xvector-sidecar"),
+        .version = 4,
+        .digest = try allocator.dupe(u8, "digest-first-vector-sidecar"),
+        .selection_score = 1,
+        .object_input_select_token = try allocator.dupe(u8, "select:vector-sidecar"),
+    };
+    errdefer {
+        for (first_vector_candidates) |*candidate| candidate.deinit(allocator);
+    }
+
+    const second_vector_candidates = try allocator.alloc(move_result.OwnedMoveObjectCandidate, 2);
+    errdefer allocator.free(second_vector_candidates);
+    second_vector_candidates[0] = .{
+        .object_id = try allocator.dupe(u8, "0xanchor-shared"),
+        .version = 5,
+        .digest = try allocator.dupe(u8, "digest-second-vector-anchor"),
+        .selection_score = 10,
+        .object_input_select_token = try allocator.dupe(u8, "select:anchor-shared"),
+    };
+    second_vector_candidates[1] = .{
+        .object_id = try allocator.dupe(u8, "0xscalar-fallback"),
+        .version = 6,
+        .digest = try allocator.dupe(u8, "digest-second-vector-fallback"),
+        .selection_score = 9,
+        .object_input_select_token = try allocator.dupe(u8, "select:scalar-fallback"),
+    };
+    errdefer {
+        for (second_vector_candidates) |*candidate| candidate.deinit(allocator);
+    }
+
+    const parameters = try allocator.alloc(move_result.OwnedMoveParameterSummary, 3);
+    defer {
+        for (parameters) |*parameter| parameter.deinit(allocator);
+        allocator.free(parameters);
+    }
+    parameters[0] = .{
+        .signature = try allocator.dupe(u8, "0x2a::position::Position"),
+        .owned_object_candidates = scalar_candidates,
+    };
+    parameters[1] = .{
+        .signature = try allocator.dupe(u8, "vector<0x2a::receipt::Receipt>"),
+        .vector_item_owned_object_candidates = first_vector_candidates,
+    };
+    parameters[2] = .{
+        .signature = try allocator.dupe(u8, "vector<0x2a::receipt::Receipt>"),
+        .vector_item_owned_object_candidates = second_vector_candidates,
+    };
+
+    try SuiRpcClient.applyCrossParameterOwnedObjectSelectionHints(allocator, parameters);
+
+    try testing.expectEqualStrings(
+        "\"select:anchor-shared\"",
+        parameters[0].auto_selected_arg_json.?,
+    );
+    try testing.expectEqualStrings(
+        "[\"select:vector-sidecar\"]",
+        parameters[1].auto_selected_arg_json.?,
+    );
+    try testing.expectEqualStrings(
+        "[\"select:scalar-fallback\"]",
+        parameters[2].auto_selected_arg_json.?,
     );
 }
 
