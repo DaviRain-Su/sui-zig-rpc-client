@@ -5,7 +5,7 @@
 const std = @import("std");
 
 // Import sub-modules
-pub const error = @import("error.zig");
+const errors = @import("error.zig");
 pub const constants = @import("constants.zig");
 pub const utils = @import("utils.zig");
 pub const client_core = @import("client_core.zig");
@@ -16,11 +16,11 @@ pub const event = @import("event.zig");
 pub const move_module = @import("move.zig");
 
 // Re-export commonly used types
-pub const ClientError = error.ClientError;
-pub const RpcErrorDetail = error.RpcErrorDetail;
-pub const TransportStats = error.TransportStats;
-pub const ResultWithError = error.ResultWithError;
-pub const parseErrorFromJson = error.parseErrorFromJson;
+pub const ClientError = errors.ClientError;
+pub const RpcErrorDetail = errors.RpcErrorDetail;
+pub const TransportStats = errors.TransportStats;
+pub const ResultWithError = errors.ResultWithError;
+pub const parseErrorFromJson = errors.parseErrorFromJson;
 
 // Re-export constants
 pub const default_sui_coin_type = constants.default_sui_coin_type;
@@ -40,8 +40,6 @@ pub const RequestSenderCallback = client_core.RequestSenderCallback;
 
 // Re-export query types and functions
 pub const Balance = query.Balance;
-pub const Object = query.Object;
-pub const ObjectDataOptions = query.ObjectDataOptions;
 pub const DynamicField = query.DynamicField;
 pub const DynamicFieldPage = query.DynamicFieldPage;
 pub const getBalance = query.getBalance;
@@ -109,7 +107,7 @@ pub const isValidObjectId = utils.isValidObjectId;
 // ============================================================
 
 test "rpc_client module imports successfully" {
-    _ = error;
+    _ = errors;
     _ = constants;
     _ = utils;
     _ = client_core;
@@ -129,8 +127,8 @@ test "re-exports work correctly" {
     const testing = std.testing;
 
     // Test error type
-    const err: ClientError = error.Timeout;
-    try testing.expectEqual(error.Timeout, err);
+    const err: ClientError = errors.ClientError.Timeout;
+    try testing.expectEqual(errors.ClientError.Timeout, err);
 
     // Test constant
     try testing.expectEqual(@as(u64, 1_000_000_000), mist_per_sui);

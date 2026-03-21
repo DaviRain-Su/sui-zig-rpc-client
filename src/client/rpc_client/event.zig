@@ -49,8 +49,8 @@ pub const EventFilter = union(enum) {
     move_event_type: []const u8,
     sender: []const u8,
     time_range: struct { start_time: u64, end_time: u64 },
-    and: []const EventFilter,
-    or: []const EventFilter,
+    all_of: []const EventFilter,
+    any_of: []const EventFilter,
 
     pub fn toJson(self: EventFilter) []const u8 {
         var buf: [1024]u8 = undefined;

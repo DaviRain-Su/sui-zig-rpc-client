@@ -3,9 +3,14 @@ const std = @import("std");
 const client_core = @import("client_core.zig");
 const utils = @import("utils.zig");
 const constants = @import("constants.zig");
+const object_module = @import("object.zig");
 
 const SuiRpcClient = client_core.SuiRpcClient;
 const ClientError = @import("error.zig").ClientError;
+
+// Re-export object types from object.zig
+pub const Object = object_module.Object;
+pub const ObjectDataOptions = object_module.ObjectDataOptions;
 
 /// Get balance for address
 pub fn getBalance(
@@ -151,52 +156,6 @@ pub fn getObject(
     return ClientError.InvalidResponse;
 }
 
-/// Object data options
-pub const ObjectDataOptions = struct {
-    show_type: bool = false,
-    show_owner: bool = false,
-    show_previous_transaction: bool = false,
-    show_display: bool = false,
-    show_content: bool = false,
-    show_bcs: bool = false,
-    show_storage_rebate: bool = false,
-
-    pub fn toJson(self: ObjectDataOptions) []const u8 {
-        var buf: [256]u8 = undefined;
-        return std.fmt.bufPrint(
-            &buf,
-            "{{\"showType\":{},\"showOwner\":{},\"showPreviousTransaction\":{},\"showDisplay\":{},\"showContent\":{},\"showBcs\":{},\"showStorageRebate\":{}}}",
-            .{
-                self.show_type,
-                self.show_owner,
-                self.show_previous_transaction,
-                self.show_display,
-                self.show_content,
-                self.show_bcs,
-                self.show_storage_rebate,
-            },
-        ) catch "{}";
-    }
-};
-
-/// Object structure
-pub const Object = struct {
-    object_id: []const u8,
-    version: u64,
-    digest: []const u8,
-    type: ?[]const u8,
-    owner: ?[]const u8,
-    content: ?[]const u8,
-
-    pub fn deinit(self: *Object, allocator: std.mem.Allocator) void {
-        allocator.free(self.object_id);
-        allocator.free(self.digest);
-        if (self.type) |t| allocator.free(t);
-        if (self.owner) |o| allocator.free(o);
-        if (self.content) |c| allocator.free(c);
-    }
-};
-
 /// Parse object from JSON
 fn parseObject(allocator: std.mem.Allocator, value: std.json.Value) !Object {
     const data = value.object.get("data") orelse return ClientError.InvalidResponse;
@@ -213,7 +172,7 @@ fn parseObject(allocator: std.mem.Allocator, value: std.json.Value) !Object {
     }
 
     var owner: ?[]const u8 = null;
-    if (value.object.get("owner")) |o| {
+    if (value.object.get("owner")) |_| {
         owner = try allocator.dupe(u8, "owner");
     }
 

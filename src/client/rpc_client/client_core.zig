@@ -1,12 +1,12 @@
 /// client/rpc_client/client_core.zig - Core SuiRpcClient implementation
 const std = @import("std");
-const error = @import("error.zig");
+const errors = @import("error.zig");
 const constants = @import("constants.zig");
 const utils = @import("utils.zig");
 
-const ClientError = error.ClientError;
-const RpcErrorDetail = error.RpcErrorDetail;
-const TransportStats = error.TransportStats;
+const ClientError = errors.ClientError;
+const RpcErrorDetail = errors.RpcErrorDetail;
+const TransportStats = errors.TransportStats;
 
 /// RPC request structure
 pub const RpcRequest = struct {

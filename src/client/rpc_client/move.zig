@@ -120,7 +120,7 @@ pub const MoveTypeTag = enum {
     address,
     signer,
     vector,
-    struct,
+    structure,
     type_parameter,
     reference,
     mutable_reference,
@@ -443,7 +443,7 @@ test "MoveTypeSignature deinit" {
     const allocator = gpa.allocator();
 
     var sig = MoveTypeSignature{
-        .type_tag = .struct,
+        .type_tag = .structure,
         .content = try allocator.dupe(u8, "{}"),
     };
     defer sig.deinit(allocator);

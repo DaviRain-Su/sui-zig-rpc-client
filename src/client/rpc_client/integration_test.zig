@@ -5,7 +5,7 @@ const rpc_client = @import("root.zig");
 const SuiRpcClient = rpc_client.SuiRpcClient;
 const ClientError = rpc_client.ClientError;
 
-/// Mock request sender for testing
+// Mock request sender for testing
 const MockSender = struct {
     responses: std.StringHashMap([]const u8),
     request_log: std.ArrayList([]const u8),
@@ -53,7 +53,7 @@ const MockSender = struct {
     }
 };
 
-/// Test client with mock sender
+// Test client with mock sender
 test "SuiRpcClient with mock sender" {
     const testing = std.testing;
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -81,7 +81,7 @@ test "SuiRpcClient with mock sender" {
     try testing.expectEqual(@as(usize, 1), mock.request_log.items.len);
 }
 
-/// Test error handling
+// Test error handling
 test "SuiRpcClient error handling" {
     const testing = std.testing;
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -110,7 +110,7 @@ test "SuiRpcClient error handling" {
     try testing.expectEqual(@as(i64, -32600), last_error.?.code.?);
 }
 
-/// Test balance query flow
+// Test balance query flow
 test "getBalance integration" {
     const testing = std.testing;
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -136,7 +136,7 @@ test "getBalance integration" {
     try testing.expectEqual(@as(u64, 1000000000), balance);
 }
 
-/// Test object query flow
+// Test object query flow
 test "getObject integration" {
     const testing = std.testing;
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -165,7 +165,7 @@ test "getObject integration" {
     try testing.expectEqual(@as(u64, 1), obj.version);
 }
 
-/// Test gas price query
+// Test gas price query
 test "getReferenceGasPrice integration" {
     const testing = std.testing;
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -190,7 +190,7 @@ test "getReferenceGasPrice integration" {
     try testing.expectEqual(@as(u64, 1000), gas_price);
 }
 
-/// Test event query flow
+// Test event query flow
 test "queryEvents integration" {
     const testing = std.testing;
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -220,7 +220,7 @@ test "queryEvents integration" {
     try testing.expect(!page.has_next_page);
 }
 
-/// Test Move module query
+// Test Move module query
 test "getNormalizedMoveModule integration" {
     const testing = std.testing;
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -249,7 +249,7 @@ test "getNormalizedMoveModule integration" {
     try testing.expectEqualStrings("sui", module_def.name);
 }
 
-/// Test multiple sequential calls
+// Test multiple sequential calls
 test "sequential calls integration" {
     const testing = std.testing;
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -282,7 +282,7 @@ test "sequential calls integration" {
     try testing.expectEqual(@as(usize, 3), mock.request_log.items.len);
 }
 
-/// Test transport stats accumulation
+// Test transport stats accumulation
 test "transport stats accumulation" {
     const testing = std.testing;
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -313,7 +313,7 @@ test "transport stats accumulation" {
     try testing.expectEqual(@as(usize, 5), stats.request_count);
 }
 
-/// Test error recovery
+// Test error recovery
 test "error recovery after failed call" {
     const testing = std.testing;
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -347,7 +347,7 @@ test "error recovery after failed call" {
     try testing.expect(client.getLastError() == null);
 }
 
-/// Test invalid address handling
+// Test invalid address handling
 test "invalid address handling" {
     const testing = std.testing;
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -361,7 +361,7 @@ test "invalid address handling" {
     try testing.expectError(ClientError.InvalidResponse, result);
 }
 
-/// Test empty response handling
+// Test empty response handling
 test "empty response handling" {
     const testing = std.testing;
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
