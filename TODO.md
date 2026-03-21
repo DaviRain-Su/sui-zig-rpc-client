@@ -131,7 +131,7 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
 
 ### 1. Transaction-level joint candidate ranking
 
-- [ ] Rank complete `Pool / Position / Coin / gas` combinations instead of
+- [x] Rank complete `Pool / Position / Coin / gas` combinations instead of
   selecting each parameter mostly in isolation.
 - [x] Prefer candidate sets that are internally consistent for a single
   transaction.

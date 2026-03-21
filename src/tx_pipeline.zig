@@ -49,6 +49,9 @@ pub fn resolvedTxBuildSenderFromArgs(
     for (args.signers.items) |selector| {
         if (selector.len == 0) continue;
         has_resolver_input = true;
+        if (std.mem.startsWith(u8, selector, "0x")) {
+            return try allocator.dupe(u8, selector);
+        }
         const resolved_sender = try keystore.resolveAddressBySelector(allocator, selector) orelse continue;
         return resolved_sender;
     }

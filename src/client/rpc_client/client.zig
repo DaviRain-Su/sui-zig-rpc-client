@@ -34,17 +34,21 @@ pub const TransportStats = struct {
     rate_limited_time_ms: u64 = 0,
 };
 
-pub const RequestSender = struct {
-    context: *anyopaque,
-    callback: *const fn (*anyopaque, std.mem.Allocator, struct {
-        id: u64,
-        method: []const u8,
-        params_json: []const u8,
-        request_body: []const u8,
-    }) std.mem.Allocator.Error![]u8,
+/// RPC 请求参数结构体
+pub const RpcRequest = struct {
+    id: u64,
+    method: []const u8,
+    params_json: []const u8,
+    request_body: []const u8,
 };
 
-const RpcRequest = @typeInfo(@typeInfo(RequestSender).@"struct".fields[1].type).pointer.child.@"fn".params[2].type.?;
+/// 请求发送器回调类型
+pub const RequestSenderCallback = *const fn (*anyopaque, std.mem.Allocator, RpcRequest) std.mem.Allocator.Error![]u8;
+
+pub const RequestSender = struct {
+    context: *anyopaque,
+    callback: RequestSenderCallback,
+};
 
 fn parseJsonResultExists(allocator: std.mem.Allocator, response: []const u8) !bool {
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, response, .{});
@@ -11956,6 +11960,409 @@ pub const SuiRpcClient = struct {
         }
     }
 
+    // CompletePlan: cross-parameter combination ranking
+
+    const CompletePlanCandidateSource = struct {
+        parameter_index: usize,
+        is_shared: bool,
+        candidates: []const move_result.OwnedMoveObjectCandidate,
+        shared_candidates: ?[]const move_result.SharedMoveObjectCandidate = null,
+    };
+
+    fn extractObjectIdFromCandidateJson(json_text: []const u8) ?[]const u8 {
+        const object_id_prefix = "\"objectId\":\"";
+        const start = std.mem.indexOf(u8, json_text, object_id_prefix) orelse return null;
+        const after_prefix = start + object_id_prefix.len;
+        const end = std.mem.indexOf(u8, json_text[after_prefix..], "\"") orelse return null;
+        return json_text[after_prefix .. after_prefix + end];
+    }
+
+    fn poolIdFromOwnedObjectContent(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        object_id: []const u8,
+        content_cache: *std.ArrayList(MoveObjectContentResponseCacheEntry),
+    ) !?[]u8 {
+        const content_json = self.getMoveObjectContentResponseCached(
+            allocator,
+            content_cache,
+            object_id,
+        ) catch |err| switch (err) {
+            error.ObjectNotFound => return null,
+            else => return err,
+        };
+        defer allocator.free(content_json);
+
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, content_json, .{});
+        defer parsed.deinit();
+
+        if (parsed.value != .object) return null;
+        const result = parsed.value.object.get("result") orelse return null;
+        if (result != .object) return null;
+        const data = result.object.get("data") orelse return null;
+        if (data != .object) return null;
+        const content = data.object.get("content") orelse return null;
+        if (content != .object) return null;
+        const fields = content.object.get("fields") orelse return null;
+        if (fields != .object) return null;
+
+        // Try common pool_id field names
+        const field_names = &[_][]const u8{ "pool_id", "pool", "poolId" };
+        for (field_names) |field_name| {
+            if (fields.object.get(field_name)) |field| {
+                return switch (field) {
+                    .string => |s| try allocator.dupe(u8, s),
+                    else => null,
+                };
+            }
+        }
+        return null;
+    }
+
+    fn evaluateCompletePlanInternalConsistency(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        plan: *move_result.CompletePlan,
+        parameters: []move_result.OwnedMoveParameterSummary,
+        content_cache: *std.ArrayList(MoveObjectContentResponseCacheEntry),
+    ) !void {
+        var pool_bindings = std.ArrayList(struct {
+            parameter_index: usize,
+            pool_id: []u8,
+        }).empty;
+        defer {
+            for (pool_bindings.items) |binding| allocator.free(binding.pool_id);
+            pool_bindings.deinit(allocator);
+        }
+
+        var position_bindings = std.ArrayList(struct {
+            parameter_index: usize,
+            position_id: []u8,
+            pool_id: ?[]u8,
+        }).empty;
+        defer {
+            for (position_bindings.items) |binding| {
+                allocator.free(binding.position_id);
+                if (binding.pool_id) |pid| allocator.free(pid);
+            }
+            position_bindings.deinit(allocator);
+        }
+
+        // Collect pool and position bindings
+        for (plan.bindings) |binding| {
+            const param = &parameters[binding.parameter_index];
+            const is_pool = isPoolParameter(param.signature);
+            const is_position = isPositionParameter(param.signature);
+
+            if (is_pool) {
+                try pool_bindings.append(allocator, .{
+                    .parameter_index = binding.parameter_index,
+                    .pool_id = try allocator.dupe(u8, binding.candidate_object_id),
+                });
+            } else if (is_position) {
+                const pos_pool_id = try self.poolIdFromOwnedObjectContent(
+                    allocator,
+                    binding.candidate_object_id,
+                    content_cache,
+                );
+                try position_bindings.append(allocator, .{
+                    .parameter_index = binding.parameter_index,
+                    .position_id = try allocator.dupe(u8, binding.candidate_object_id),
+                    .pool_id = pos_pool_id,
+                });
+            }
+        }
+
+        // Award consistency bonus for matching pool-position pairs
+        for (position_bindings.items) |pos_binding| {
+            const pos_pool_id = pos_binding.pool_id orelse continue;
+            for (pool_bindings.items) |pool_binding| {
+                if (std.mem.eql(u8, pos_pool_id, pool_binding.pool_id)) {
+                    plan.internal_consistency_bonus += 100;
+                }
+            }
+        }
+    }
+
+    fn isPoolParameter(signature: []const u8) bool {
+        var buf: [512]u8 = undefined;
+        if (signature.len > buf.len) return false;
+        const lowered = std.ascii.lowerString(buf[0..signature.len], signature);
+        return std.mem.indexOf(u8, lowered, "pool") != null and
+            std.mem.indexOf(u8, lowered, "position") == null;
+    }
+
+    fn isPositionParameter(signature: []const u8) bool {
+        var buf: [512]u8 = undefined;
+        if (signature.len > buf.len) return false;
+        const lowered = std.ascii.lowerString(buf[0..signature.len], signature);
+        return std.mem.indexOf(u8, lowered, "position") != null;
+    }
+
+    fn evaluateCompletePlanCrossReferences(
+        plan: *move_result.CompletePlan,
+        parameters: []move_result.OwnedMoveParameterSummary,
+    ) void {
+        // Count how many parameters reference each other's selected objects
+        var reference_score: usize = 0;
+        for (plan.bindings) |binding| {
+            const param = &parameters[binding.parameter_index];
+            const arg_json = param.auto_selected_arg_json orelse continue;
+
+            for (plan.bindings) |other_binding| {
+                if (other_binding.parameter_index == binding.parameter_index) continue;
+                if (std.mem.indexOf(u8, arg_json, other_binding.candidate_object_id) != null) {
+                    reference_score += 10;
+                }
+            }
+        }
+        plan.cross_reference_bonus = reference_score;
+    }
+
+    fn generateCandidateCombinations(
+        allocator: std.mem.Allocator,
+        sources: []const CompletePlanCandidateSource,
+        current_index: usize,
+        current_bindings: *std.ArrayList(move_result.CompletePlanParameterBinding),
+        all_plans: *std.ArrayList(move_result.CompletePlan),
+    ) !void {
+        if (current_index >= sources.len) {
+            // Complete combination generated, copy it to plans
+            var bindings_copy = try allocator.alloc(move_result.CompletePlanParameterBinding, current_bindings.items.len);
+            errdefer allocator.free(bindings_copy);
+
+            for (current_bindings.items, 0..) |binding, i| {
+                bindings_copy[i] = .{
+                    .parameter_index = binding.parameter_index,
+                    .candidate_object_id = try allocator.dupe(u8, binding.candidate_object_id),
+                    .candidate_kind = binding.candidate_kind,
+                    .selection_score = binding.selection_score,
+                };
+            }
+
+            try all_plans.append(allocator, .{
+                .bindings = bindings_copy,
+                .total_score = 0,
+                .internal_consistency_bonus = 0,
+                .gas_sufficiency_score = 0,
+                .cross_reference_bonus = 0,
+            });
+            return;
+        }
+
+        const source = sources[current_index];
+        if (source.is_shared) {
+            const shared_candidates = source.shared_candidates.?;
+            for (shared_candidates) |candidate| {
+                try current_bindings.append(allocator, .{
+                    .parameter_index = source.parameter_index,
+                    .candidate_object_id = candidate.object_id,
+                    .candidate_kind = "shared",
+                    .selection_score = candidate.selection_score,
+                });
+                try generateCandidateCombinations(
+                    allocator,
+                    sources,
+                    current_index + 1,
+                    current_bindings,
+                    all_plans,
+                );
+                _ = current_bindings.pop();
+            }
+        } else {
+            for (source.candidates) |candidate| {
+                try current_bindings.append(allocator, .{
+                    .parameter_index = source.parameter_index,
+                    .candidate_object_id = candidate.object_id,
+                    .candidate_kind = "owned",
+                    .selection_score = candidate.selection_score,
+                });
+                try generateCandidateCombinations(
+                    allocator,
+                    sources,
+                    current_index + 1,
+                    current_bindings,
+                    all_plans,
+                );
+                _ = current_bindings.pop();
+            }
+        }
+    }
+
+    fn buildAndEvaluateCompletePlans(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        parameters: []move_result.OwnedMoveParameterSummary,
+        object_content_cache: *std.ArrayList(MoveObjectContentResponseCacheEntry),
+    ) !?move_result.CompletePlan {
+        var sources = std.ArrayList(CompletePlanCandidateSource).empty;
+        defer sources.deinit(allocator);
+
+        // Collect candidate sources from parameters that need selection
+        for (parameters, 0..) |*param, idx| {
+            if (param.omitted_from_explicit_args) continue;
+            if (param.explicit_arg_json != null) continue;
+            if (param.auto_selected_arg_json != null) continue;
+
+            if (param.shared_object_candidates) |candidates| {
+                if (candidates.len > 0) {
+                    try sources.append(allocator, .{
+                        .parameter_index = idx,
+                        .is_shared = true,
+                        .shared_candidates = candidates,
+                        .candidates = &.{},
+                    });
+                }
+            } else if (param.owned_object_candidates) |candidates| {
+                if (candidates.len > 0) {
+                    try sources.append(allocator, .{
+                        .parameter_index = idx,
+                        .is_shared = false,
+                        .candidates = candidates,
+                    });
+                }
+            }
+        }
+
+        if (sources.items.len == 0) return null;
+
+        // Pruning: limit candidates per parameter to avoid explosion
+        const max_candidates_per_param = 5;
+        for (sources.items) |*source| {
+            if (source.is_shared) {
+                const candidates = source.shared_candidates.?;
+                if (candidates.len > max_candidates_per_param) {
+                    source.shared_candidates = candidates[0..max_candidates_per_param];
+                }
+            } else {
+                if (source.candidates.len > max_candidates_per_param) {
+                    source.candidates = source.candidates[0..max_candidates_per_param];
+                }
+            }
+        }
+
+        var all_plans = std.ArrayList(move_result.CompletePlan).empty;
+        defer {
+            for (all_plans.items) |*plan| plan.deinit(allocator);
+            all_plans.deinit(allocator);
+        }
+
+        var current_bindings = std.ArrayList(move_result.CompletePlanParameterBinding).empty;
+        defer {
+            for (current_bindings.items) |*binding| binding.deinit(allocator);
+            current_bindings.deinit(allocator);
+        }
+
+        try generateCandidateCombinations(
+            allocator,
+            sources.items,
+            0,
+            &current_bindings,
+            &all_plans,
+        );
+
+        if (all_plans.items.len == 0) return null;
+
+        // Evaluate each plan
+        for (all_plans.items) |*plan| {
+            // Base score from individual candidate scores
+            var base_score: usize = 0;
+            for (plan.bindings) |binding| {
+                base_score += binding.selection_score;
+            }
+            plan.total_score = base_score;
+
+            // Evaluate cross-parameter bonuses
+            try self.evaluateCompletePlanInternalConsistency(
+                allocator,
+                plan,
+                parameters,
+                object_content_cache,
+            );
+            evaluateCompletePlanCrossReferences(plan, parameters);
+        }
+
+        // Find best plan
+        var best_plan_index: usize = 0;
+        var best_score = all_plans.items[0].computedTotalScore();
+        for (all_plans.items[1..], 1..) |plan, i| {
+            const score = plan.computedTotalScore();
+            if (score > best_score) {
+                best_score = score;
+                best_plan_index = i;
+            }
+        }
+
+        // Return the best plan (copy it out)
+        const best_plan = all_plans.items[best_plan_index];
+        var result_bindings = try allocator.alloc(move_result.CompletePlanParameterBinding, best_plan.bindings.len);
+        errdefer allocator.free(result_bindings);
+
+        for (best_plan.bindings, 0..) |binding, i| {
+            result_bindings[i] = .{
+                .parameter_index = binding.parameter_index,
+                .candidate_object_id = try allocator.dupe(u8, binding.candidate_object_id),
+                .candidate_kind = binding.candidate_kind,
+                .selection_score = binding.selection_score,
+            };
+        }
+
+        return .{
+            .bindings = result_bindings,
+            .total_score = best_plan.total_score,
+            .internal_consistency_bonus = best_plan.internal_consistency_bonus,
+            .gas_sufficiency_score = best_plan.gas_sufficiency_score,
+            .cross_reference_bonus = best_plan.cross_reference_bonus,
+        };
+    }
+
+    fn applyCompletePlanToParameters(
+        allocator: std.mem.Allocator,
+        plan: move_result.CompletePlan,
+        parameters: []move_result.OwnedMoveParameterSummary,
+    ) !void {
+        for (plan.bindings) |binding| {
+            const param = &parameters[binding.parameter_index];
+            if (param.explicit_arg_json != null) continue;
+            if (param.auto_selected_arg_json != null) continue;
+
+            if (std.mem.eql(u8, binding.candidate_kind, "shared")) {
+                if (param.shared_object_candidates) |candidates| {
+                    for (candidates) |candidate| {
+                        if (std.mem.eql(u8, candidate.object_id, binding.candidate_object_id)) {
+                            const token = if (isMoveMutableReferenceSignature(param.signature))
+                                candidate.mutable_shared_object_input_select_token
+                            else
+                                candidate.shared_object_input_select_token;
+                            replaceMoveParameterAutoSelectedArgJson(
+                                allocator,
+                                param,
+                                try buildAutoSelectedScalarArgJson(allocator, token),
+                            );
+                            break;
+                        }
+                    }
+                }
+            } else {
+                if (param.owned_object_candidates) |candidates| {
+                    for (candidates) |candidate| {
+                        if (std.mem.eql(u8, candidate.object_id, binding.candidate_object_id)) {
+                            replaceMoveParameterAutoSelectedArgJson(
+                                allocator,
+                                param,
+                                try buildAutoSelectedScalarArgJson(
+                                    allocator,
+                                    candidate.object_input_select_token,
+                                ),
+                            );
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     fn resolvedMoveFunctionTypeArgsTemplateJson(
         allocator: std.mem.Allocator,
         type_parameter_count: usize,
@@ -13491,6 +13898,22 @@ pub const SuiRpcClient = struct {
         try applyCrossParameterBusinessCoinSelectionHints(allocator, summary.parameters);
         try applyCrossParameterOwnedObjectSelectionHints(allocator, summary.parameters);
 
+        // CompletePlan: build and apply optimal cross-parameter combination
+        var complete_plan = try self.buildAndEvaluateCompletePlans(
+            allocator,
+            summary.parameters,
+            &object_content_cache,
+        );
+        defer if (complete_plan) |*plan| plan.deinit(allocator);
+
+        if (complete_plan) |plan| {
+            try applyCompletePlanToParameters(allocator, plan, summary.parameters);
+            // Re-populate args after CompletePlan application
+            for (summary.parameters) |*param| {
+                try populateMoveParameterAutoSelectedArgJson(allocator, param);
+            }
+        }
+
         const type_args_json = try resolvedMoveFunctionTypeArgsTemplateJson(
             allocator,
             summary.type_parameters.len,
@@ -13649,6 +14072,28 @@ pub const SuiRpcClient = struct {
             allocator.free(argv);
         };
 
+        // Store complete_plan in call_template if available
+        const plan_for_template = if (complete_plan) |plan| blk: {
+            var bindings_copy = try allocator.alloc(move_result.CompletePlanParameterBinding, plan.bindings.len);
+            errdefer allocator.free(bindings_copy);
+            for (plan.bindings, 0..) |binding, i| {
+                bindings_copy[i] = .{
+                    .parameter_index = binding.parameter_index,
+                    .candidate_object_id = try allocator.dupe(u8, binding.candidate_object_id),
+                    .candidate_kind = binding.candidate_kind,
+                    .selection_score = binding.selection_score,
+                };
+            }
+            break :blk move_result.CompletePlan{
+                .bindings = bindings_copy,
+                .total_score = plan.total_score,
+                .internal_consistency_bonus = plan.internal_consistency_bonus,
+                .gas_sufficiency_score = plan.gas_sufficiency_score,
+                .cross_reference_bonus = plan.cross_reference_bonus,
+            };
+        } else null;
+        errdefer if (plan_for_template) |*plan| plan.deinit(allocator);
+
         summary.call_template = .{
             .type_args_json = type_args_json,
             .args_json = args_json,
@@ -13668,6 +14113,7 @@ pub const SuiRpcClient = struct {
             .preferred_tx_send_from_keystore_request_json = preferred_tx_send_from_keystore_request_json,
             .tx_send_from_keystore_argv = tx_send_from_keystore_argv,
             .preferred_tx_send_from_keystore_argv = preferred_tx_send_from_keystore_argv,
+            .complete_plan = plan_for_template,
         };
     }
 

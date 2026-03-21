@@ -7,7 +7,7 @@ const wallet_registry = @import("./wallet_registry.zig");
 const wallet_session_registry = @import("./wallet_session_registry.zig");
 const wallet_state = @import("./wallet_state.zig");
 const tx_builder = client.tx_builder;
-const RpcRequest = @typeInfo(@typeInfo(@typeInfo(client.rpc_client.RequestSender).@"struct".fields[1].type).pointer.child).@"fn".params[2].type.?;
+const RpcRequest = client.rpc_client.RpcRequest;
 
 fn sendExecuteAndMaybeWaitForConfirmation(
     allocator: std.mem.Allocator,
@@ -2382,6 +2382,26 @@ fn resolvedTxBuildSenderFromArgs(
     args: *const cli.ParsedArgs,
 ) !?[]const u8 {
     return try @import("./tx_pipeline.zig").resolvedTxBuildSenderFromArgs(allocator, args);
+}
+
+fn resolvedMoveFunctionQuerySenderFromArgs(
+    rpc: *client.SuiRpcClient,
+    allocator: std.mem.Allocator,
+    args: *const cli.ParsedArgs,
+) !?[]const u8 {
+    if (args.tx_provider_config) |raw| {
+        var provider = try ownCliProgrammaticProvider(
+            rpc,
+            allocator,
+            raw,
+        );
+        defer provider.deinit();
+        if (defaultSenderFromProgrammaticProvider(provider.provider)) |sender| {
+            return try allocator.dupe(u8, sender);
+        }
+    }
+
+    return null;
 }
 
 fn buildTxBuildTransactionBlockFromArgs(
@@ -7293,7 +7313,15 @@ pub fn runCommandWithProgrammaticProvider(
                         break :blk &move_function_query_args;
                     }
                 }
+                if (try resolvedMoveFunctionQuerySenderFromArgs(rpc, allocator, args)) |sender| {
+                    move_function_query_args.owned_tx_build_sender = sender;
+                    move_function_query_args.tx_build_sender = sender;
+                    break :blk &move_function_query_args;
+                }
                 break :blk args;
+            };
+            defer if (move_function_args == &move_function_query_args) {
+                if (move_function_query_args.owned_tx_build_sender) |value| allocator.free(value);
             };
 
             if (args.command == .move_function and
@@ -12843,6 +12871,100 @@ test "runCommand move function with --send executes preferred send request artif
     try testing.expectEqual(@as(usize, 0), state.unsafe_calls);
 
     try testing.expect(std.mem.indexOf(u8, output.items, "success") != null);
+}
+
+test "runCommand move function with --send and standalone provider prints challenge prompt" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const State = struct {
+        gas_price: usize = 0,
+        normalized: usize = 0,
+        dry_run: usize = 0,
+        coins: usize = 0,
+        execute_calls: usize = 0,
+        unsafe_calls: usize = 0,
+    };
+    var state = State{};
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const ctx = @as(*State, @ptrCast(@alignCast(context)));
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                ctx.normalized += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"visibility\":\"Public\",\"isEntry\":true,\"typeParameters\":[],\"parameters\":[\"U64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "suix_getReferenceGasPrice")) {
+                ctx.gas_price += 1;
+                return alloc.dupe(u8, "{\"result\":\"8\"}");
+            }
+            if (std.mem.eql(u8, req.method, "sui_dryRunTransactionBlock")) {
+                ctx.dry_run += 1;
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"effects\":{\"status\":{\"status\":\"success\"},\"gasUsed\":{\"computationCost\":\"9\",\"storageCost\":\"2\",\"storageRebate\":\"1\"}},\"balanceChanges\":[]}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "suix_getCoins")) {
+                ctx.coins += 1;
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, "0x1111111111111111111111111111111111111111111111111111111111111111") != null);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinObjectId\":\"0x9999999999999999999999999999999999999999999999999999999999999999\",\"version\":\"1\",\"digest\":\"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"balance\":\"1000000000\"}],\"nextCursor\":null,\"hasNextPage\":false}}",
+                );
+            }
+            if (std.mem.eql(u8, req.method, "sui_executeTransactionBlock")) {
+                ctx.execute_calls += 1;
+                return alloc.dupe(u8, "{\"result\":{\"digest\":\"0xshouldnotexecute\"}}");
+            }
+            if (std.mem.eql(u8, req.method, "unsafe_moveCall") or std.mem.eql(u8, req.method, "unsafe_batchTransaction")) {
+                ctx.unsafe_calls += 1;
+                return alloc.dupe(u8, "{\"result\":{\"txBytes\":\"AQIDBA==\"}}");
+            }
+            return error.OutOfMemory;
+        }
+    }.call;
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "move",
+        "function",
+        "0x2",
+        "counter",
+        "increment",
+        "--arg",
+        "7",
+        "--send",
+        "--provider",
+        "{\"kind\":\"passkey\",\"address\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"session\":{\"kind\":\"passkey\",\"sessionId\":\"move-function-session\"},\"challenge\":{\"passkey\":{\"rpId\":\"wallet.example\",\"challengeB64url\":\"challenge-move-function\"}},\"authorizer\":{\"exec\":[\"wallet-helper\",\"authorize\"]}}",
+    });
+    defer args.deinit(allocator);
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = &state,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    try testing.expect(state.normalized >= 1);
+    try testing.expectEqual(@as(usize, 1), state.gas_price);
+    try testing.expectEqual(@as(usize, 1), state.dry_run);
+    try testing.expect(state.coins >= 1);
+    try testing.expectEqual(@as(usize, 0), state.execute_calls);
+    try testing.expectEqual(@as(usize, 0), state.unsafe_calls);
+    try testing.expect(std.mem.indexOf(u8, output.items, "\"account_address\":\"0x1111111111111111111111111111111111111111111111111111111111111111\"") != null);
+    try testing.expect(std.mem.indexOf(u8, output.items, "\"challenge\"") != null);
 }
 
 test "runCommand tx_send move-call with standalone provider prints challenge prompt" {

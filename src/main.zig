@@ -4,7 +4,7 @@ const cli = @import("./cli.zig");
 const commands = @import("./commands.zig");
 const tx_pipeline = @import("./tx_pipeline.zig");
 const keystore = client.keystore;
-const RpcRequest = @typeInfo(@typeInfo(@typeInfo(client.rpc_client.RequestSender).@"struct".fields[1].type).pointer.child).@"fn".params[2].type.?;
+const RpcRequest = client.rpc_client.RpcRequest;
 
 const Allocator = std.mem.Allocator;
 const default_sui_client_config_path = ".sui/sui_config/client.yaml";

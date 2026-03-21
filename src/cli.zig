@@ -316,96 +316,102 @@ pub const ParsedArgs = struct {
     owned_signers: std.ArrayListUnmanaged([]const u8) = .{},
 
     pub fn deinit(self: *ParsedArgs, allocator: std.mem.Allocator) void {
-        if (self.owned_rpc_url) |value| allocator.free(value);
-        if (self.owned_params) |value| allocator.free(value);
-        if (self.owned_tx_bytes) |value| allocator.free(value);
-        if (self.owned_tx_options) |value| allocator.free(value);
-        if (self.owned_tx_build_package) |value| allocator.free(value);
-        if (self.owned_tx_build_module) |value| allocator.free(value);
-        if (self.owned_tx_build_function) |value| allocator.free(value);
-        if (self.owned_tx_build_commands) |value| allocator.free(value);
-        for (self.owned_tx_build_command_items.items) |value| allocator.free(value);
-        self.tx_build_command_items.deinit(allocator);
-        self.owned_tx_build_command_items.deinit(allocator);
-        for (self.owned_tx_build_type_arg_items.items) |value| allocator.free(value);
-        self.tx_build_type_arg_items.deinit(allocator);
-        self.owned_tx_build_type_arg_items.deinit(allocator);
-        for (self.owned_tx_build_arg_items.items) |value| allocator.free(value);
-        self.tx_build_arg_items.deinit(allocator);
-        self.owned_tx_build_arg_items.deinit(allocator);
-        if (self.owned_tx_build_sender) |value| allocator.free(value);
-        if (self.owned_tx_build_type_args) |value| allocator.free(value);
-        if (self.owned_tx_build_args) |value| allocator.free(value);
-        if (self.owned_tx_build_gas_payment) |value| allocator.free(value);
-        if (self.owned_tx_session_response) |value| allocator.free(value);
-        if (self.owned_tx_provider_config) |value| allocator.free(value);
-        if (self.owned_wallet_alias) |value| allocator.free(value);
-        if (self.owned_wallet_private_key) |value| allocator.free(value);
-        if (self.owned_wallet_network) |value| allocator.free(value);
-        if (self.owned_wallet_capabilities_json) |value| allocator.free(value);
-        if (self.owned_wallet_credential_id) |value| allocator.free(value);
-        if (self.owned_wallet_public_key_value) |value| allocator.free(value);
-        if (self.owned_wallet_rp_id) |value| allocator.free(value);
-        if (self.owned_wallet_device_name) |value| allocator.free(value);
-        if (self.owned_wallet_user_name) |value| allocator.free(value);
-        if (self.owned_wallet_session_id) |value| allocator.free(value);
-        if (self.owned_wallet_session_kind) |value| allocator.free(value);
-        if (self.owned_intent_network) |value| allocator.free(value);
-        if (self.owned_intent_execution_mode) |value| allocator.free(value);
-        if (self.owned_intent_policy_json) |value| allocator.free(value);
-        if (self.owned_intent_policy_recipient_allowlist_json) |value| allocator.free(value);
-        if (self.owned_intent_policy_protocol_allowlist_json) |value| allocator.free(value);
-        if (self.owned_request_session_selector) |value| allocator.free(value);
-        if (self.owned_request_delegated_session_json) |value| allocator.free(value);
-        if (self.owned_request_sponsor_mode) |value| allocator.free(value);
-        if (self.owned_request_sponsor_policy) |value| allocator.free(value);
-        if (self.owned_request_sponsor_gas_source_preference) |value| allocator.free(value);
-        if (self.owned_request_sponsor_refusal_fallback) |value| allocator.free(value);
-        if (self.owned_request_payment_reference) |value| allocator.free(value);
-        if (self.owned_request_payment_memo) |value| allocator.free(value);
-        if (self.owned_request_invoice_reference) |value| allocator.free(value);
-        if (self.owned_request_reconciliation_group) |value| allocator.free(value);
-        if (self.owned_request_execution_lane) |value| allocator.free(value);
-        if (self.owned_request_gas_lane) |value| allocator.free(value);
-        if (self.owned_request_conflict_keys_json) |value| allocator.free(value);
-        if (self.owned_request_conflict_strategy) |value| allocator.free(value);
-        if (self.owned_request_correlation_id) |value| allocator.free(value);
-        if (self.owned_request_entry_id) |value| allocator.free(value);
-        if (self.owned_request_schedule_id) |value| allocator.free(value);
-        if (self.owned_request_schedule_replace_id) |value| allocator.free(value);
-        if (self.owned_account_objects_filter) |value| allocator.free(value);
-        if (self.owned_account_objects_package) |value| allocator.free(value);
-        if (self.owned_event_filter) |value| allocator.free(value);
-        if (self.owned_event_package) |value| allocator.free(value);
-        if (self.owned_event_module) |value| allocator.free(value);
-        if (self.owned_event_type) |value| allocator.free(value);
-        if (self.owned_event_sender) |value| allocator.free(value);
-        if (self.owned_event_tx_digest_filter) |value| allocator.free(value);
-        if (self.owned_event_cursor_tx_digest) |value| allocator.free(value);
-        if (self.owned_move_package) |value| allocator.free(value);
-        if (self.owned_move_module) |value| allocator.free(value);
-        if (self.owned_move_function) |value| allocator.free(value);
-        if (self.owned_move_function_indexed_args_json) |value| allocator.free(value);
+        // 使用 comptime 生成释放逻辑，避免代码重复
+        const optional_strings = &.{
+            &self.owned_rpc_url,
+            &self.owned_params,
+            &self.owned_tx_bytes,
+            &self.owned_tx_options,
+            &self.owned_tx_build_package,
+            &self.owned_tx_build_module,
+            &self.owned_tx_build_function,
+            &self.owned_tx_build_commands,
+            &self.owned_tx_build_sender,
+            &self.owned_tx_build_type_args,
+            &self.owned_tx_build_args,
+            &self.owned_tx_build_gas_payment,
+            &self.owned_tx_session_response,
+            &self.owned_tx_provider_config,
+            &self.owned_wallet_alias,
+            &self.owned_wallet_private_key,
+            &self.owned_wallet_network,
+            &self.owned_wallet_capabilities_json,
+            &self.owned_wallet_credential_id,
+            &self.owned_wallet_public_key_value,
+            &self.owned_wallet_rp_id,
+            &self.owned_wallet_device_name,
+            &self.owned_wallet_user_name,
+            &self.owned_wallet_session_id,
+            &self.owned_wallet_session_kind,
+            &self.owned_intent_network,
+            &self.owned_intent_execution_mode,
+            &self.owned_intent_policy_json,
+            &self.owned_intent_policy_recipient_allowlist_json,
+            &self.owned_intent_policy_protocol_allowlist_json,
+            &self.owned_request_session_selector,
+            &self.owned_request_delegated_session_json,
+            &self.owned_request_sponsor_mode,
+            &self.owned_request_sponsor_policy,
+            &self.owned_request_sponsor_gas_source_preference,
+            &self.owned_request_sponsor_refusal_fallback,
+            &self.owned_request_payment_reference,
+            &self.owned_request_payment_memo,
+            &self.owned_request_invoice_reference,
+            &self.owned_request_reconciliation_group,
+            &self.owned_request_execution_lane,
+            &self.owned_request_gas_lane,
+            &self.owned_request_conflict_keys_json,
+            &self.owned_request_conflict_strategy,
+            &self.owned_request_correlation_id,
+            &self.owned_request_entry_id,
+            &self.owned_request_schedule_id,
+            &self.owned_request_schedule_replace_id,
+            &self.owned_account_objects_filter,
+            &self.owned_account_objects_package,
+            &self.owned_event_filter,
+            &self.owned_event_package,
+            &self.owned_event_module,
+            &self.owned_event_type,
+            &self.owned_event_sender,
+            &self.owned_event_tx_digest_filter,
+            &self.owned_event_cursor_tx_digest,
+            &self.owned_move_package,
+            &self.owned_move_module,
+            &self.owned_move_function,
+            &self.owned_move_function_indexed_args_json,
+            &self.owned_move_function_indexed_object_args_json,
+            &self.owned_object_id,
+            &self.owned_object_parent_id,
+            &self.owned_object_dynamic_field_name,
+            &self.owned_object_dynamic_field_name_value,
+            &self.owned_object_options,
+        };
+        inline for (optional_strings) |opt_ptr| {
+            if (opt_ptr.*) |value| allocator.free(value);
+        }
+
+        // 释放字符串数组
+        deinitStringArray(allocator, &self.tx_build_command_items, &self.owned_tx_build_command_items);
+        deinitStringArray(allocator, &self.tx_build_type_arg_items, &self.owned_tx_build_type_arg_items);
+        deinitStringArray(allocator, &self.tx_build_arg_items, &self.owned_tx_build_arg_items);
+        deinitStringArray(allocator, &self.move_function_indexed_arg_items, &self.owned_move_function_indexed_arg_items);
+        deinitStringArray(allocator, &self.move_function_indexed_object_arg_items, &self.owned_move_function_indexed_object_arg_items);
+        deinitStringArray(allocator, &self.signatures, &self.owned_signatures);
+        deinitStringArray(allocator, &self.signers, &self.owned_signers);
+
+        // 释放索引数组
         self.move_function_indexed_arg_indices.deinit(allocator);
-        for (self.owned_move_function_indexed_arg_items.items) |value| allocator.free(value);
-        self.move_function_indexed_arg_items.deinit(allocator);
-        self.owned_move_function_indexed_arg_items.deinit(allocator);
-        if (self.owned_move_function_indexed_object_args_json) |value| allocator.free(value);
         self.move_function_indexed_object_arg_indices.deinit(allocator);
-        for (self.owned_move_function_indexed_object_arg_items.items) |value| allocator.free(value);
-        self.move_function_indexed_object_arg_items.deinit(allocator);
-        self.owned_move_function_indexed_object_arg_items.deinit(allocator);
-        if (self.owned_object_id) |value| allocator.free(value);
-        if (self.owned_object_parent_id) |value| allocator.free(value);
-        if (self.owned_object_dynamic_field_name) |value| allocator.free(value);
-        if (self.owned_object_dynamic_field_name_value) |value| allocator.free(value);
-        if (self.owned_object_options) |value| allocator.free(value);
-        for (self.owned_signatures.items) |value| allocator.free(value);
-        self.signatures.deinit(allocator);
-        self.owned_signatures.deinit(allocator);
-        for (self.owned_signers.items) |value| allocator.free(value);
-        self.signers.deinit(allocator);
-        self.owned_signers.deinit(allocator);
+    }
+
+    fn deinitStringArray(
+        allocator: std.mem.Allocator,
+        items: *std.ArrayListUnmanaged([]const u8),
+        owned_items: *std.ArrayListUnmanaged([]const u8),
+    ) void {
+        for (owned_items.items) |value| allocator.free(value);
+        items.deinit(allocator);
+        owned_items.deinit(allocator);
     }
 };
 
@@ -3040,6 +3046,14 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
                 if (std.mem.eql(u8, sub, "info")) {
                     if (i + 2 >= args.len) return error.InvalidCli;
                     parsed.command = .account_info;
+                    parsed.has_command = true;
+                    parsed.account_selector = args[i + 2];
+                    i += 3;
+                    continue;
+                }
+                if (std.mem.eql(u8, sub, "balance")) {
+                    if (i + 2 >= args.len) return error.InvalidCli;
+                    parsed.command = .account_balance;
                     parsed.has_command = true;
                     parsed.account_selector = args[i + 2];
                     i += 3;

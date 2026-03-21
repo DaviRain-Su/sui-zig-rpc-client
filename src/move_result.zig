@@ -150,6 +150,34 @@ pub const OwnedMoveFunctionSummary = struct {
     }
 };
 
+pub const CompletePlanParameterBinding = struct {
+    parameter_index: usize,
+    candidate_object_id: []u8,
+    candidate_kind: []const u8,
+    selection_score: usize = 0,
+
+    pub fn deinit(self: *CompletePlanParameterBinding, allocator: std.mem.Allocator) void {
+        allocator.free(self.candidate_object_id);
+    }
+};
+
+pub const CompletePlan = struct {
+    bindings: []CompletePlanParameterBinding,
+    total_score: usize = 0,
+    internal_consistency_bonus: usize = 0,
+    gas_sufficiency_score: usize = 0,
+    cross_reference_bonus: usize = 0,
+
+    pub fn deinit(self: *CompletePlan, allocator: std.mem.Allocator) void {
+        for (self.bindings) |*binding| binding.deinit(allocator);
+        allocator.free(self.bindings);
+    }
+
+    pub fn computedTotalScore(self: CompletePlan) usize {
+        return self.total_score + self.internal_consistency_bonus + self.gas_sufficiency_score + self.cross_reference_bonus;
+    }
+};
+
 pub const OwnedMoveFunctionCallTemplate = struct {
     pub const PreferredResolutionParameter = struct {
         parameter_index: usize,
@@ -194,8 +222,10 @@ pub const OwnedMoveFunctionCallTemplate = struct {
     preferred_tx_send_from_keystore_request_json: ?[]u8 = null,
     tx_send_from_keystore_argv: [][]u8,
     preferred_tx_send_from_keystore_argv: ?[][]u8 = null,
+    complete_plan: ?CompletePlan = null,
 
     pub fn deinit(self: *OwnedMoveFunctionCallTemplate, allocator: std.mem.Allocator) void {
+        if (self.complete_plan) |*plan| plan.deinit(allocator);
         allocator.free(self.type_args_json);
         allocator.free(self.args_json);
         if (self.preferred_args_json) |value| allocator.free(value);
