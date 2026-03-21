@@ -301,6 +301,8 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
   the generic execute-plan path instead of forcing `unsafe_*`.
 - [ ] Continue shrinking `unsafe_moveCall` usage.
 - [ ] Continue shrinking `unsafe_batchTransaction` usage.
+- [x] Remove the dead legacy unsafe execute-payload helper now that
+  `tx_payload` / `tx_send` stay on local or generic execute-plan paths.
 - [x] Keep construction, simulation, and execution aligned to the same local
   builder path.
 

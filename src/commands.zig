@@ -1519,61 +1519,6 @@ fn resolvedUnsafeCommandSource(
     return .{ .source = commandSourceFromArgs(args) };
 }
 
-fn buildUnsafeCommandSourceExecutePayload(
-    allocator: std.mem.Allocator,
-    rpc: *client.SuiRpcClient,
-    args: *const cli.ParsedArgs,
-) ![]u8 {
-    const sender = try resolvedUnsafeMoveCallSender(allocator, rpc, args) orelse return error.InvalidCli;
-    defer allocator.free(sender);
-
-    var owned_options = try ownProgrammaticExecutionOptionsFromArgs(allocator, args, args.signatures.items);
-    defer owned_options.deinit(allocator);
-    const options = owned_options.options;
-    const config = commandRequestConfigFromOptions(options, sender);
-
-    if (args.signatures.items.len != 0) {
-        if (args.tx_build_auto_gas_payment) {
-            return try rpc.buildCommandSourceExecutePayloadWithAutoGasPaymentWithSignatures(
-                allocator,
-                options.source,
-                config,
-                args.tx_build_gas_payment_min_balance,
-            );
-        }
-        return try rpc.buildCommandSourceExecutePayloadResolvingSelectedArgumentTokensWithSignatures(
-            allocator,
-            options.source,
-            config,
-        );
-    }
-
-    if (args.tx_build_auto_gas_payment) {
-        return try rpc.buildCommandSourceExecutePayloadWithAutoGasPaymentFromDefaultKeystore(
-            allocator,
-            options.source,
-            config,
-            args.tx_build_gas_payment_min_balance,
-            .{
-                .signer_selectors = args.signers.items,
-                .from_keystore = args.from_keystore,
-                .infer_sender_from_signers = true,
-            },
-        );
-    }
-
-    return try rpc.buildCommandSourceExecutePayloadResolvingSelectedArgumentTokensFromDefaultKeystore(
-        allocator,
-        options.source,
-        config,
-        .{
-            .signer_selectors = args.signers.items,
-            .from_keystore = args.from_keystore,
-            .infer_sender_from_signers = true,
-        },
-    );
-}
-
 fn buildUnsafeCommandSourceTxBytes(
     allocator: std.mem.Allocator,
     rpc: *client.SuiRpcClient,
