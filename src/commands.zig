@@ -6,6 +6,7 @@ const wallet_intent = @import("./wallet_intent.zig");
 const wallet_registry = @import("./wallet_registry.zig");
 const wallet_session_registry = @import("./wallet_session_registry.zig");
 const wallet_state = @import("./wallet_state.zig");
+const intent_parser = @import("./intent_parser.zig");
 const tx_builder = client.tx_builder;
 const RpcRequest = client.rpc_client.RpcRequest;
 
@@ -7640,6 +7641,44 @@ pub fn runCommandWithProgrammaticProvider(
                 }
             }
         },
+        .natural_do => {
+            // If --intent-json is provided, use it directly (Claude Code pre-parsed)
+            // Otherwise, parse the natural language query locally
+            var intent_result: intent_parser.IntentResult = blk: {
+                if (args.intent_json) |json| {
+                    // Parse pre-structured intent from Claude Code
+                    break :blk try intent_parser.parseIntentJson(allocator, json);
+                } else if (args.natural_query) |query| {
+                    // Local parsing without API call
+                    break :blk try intent_parser.parseNaturalLanguageIntent(allocator, query, null);
+                } else {
+                    return error.InvalidCli;
+                }
+            };
+            defer intent_result.deinit(allocator);
+
+            switch (intent_result) {
+                .swap => |swap_intent| {
+                    try writer.print("Parsed intent: swap {s} {s} -> {s} (slippage: {d} bps)\n", .{
+                        swap_intent.amount orelse "all",
+                        swap_intent.from_token,
+                        swap_intent.to_token,
+                        swap_intent.slippage_bps,
+                    });
+
+                    // TODO: Implement actual swap execution
+                    // 1. Resolve token types from symbols
+                    // 2. Find best Cetus pool
+                    // 3. Calculate amounts
+                    // 4. Build and execute transaction
+                    try writer.print("\n(This is a preview. Full swap execution coming soon.)\n", .{});
+                },
+                .unsupported => |unsupported| {
+                    try writer.print("Unsupported intent: {s}\n", .{unsupported});
+                    try writer.print("Currently only 'swap' intents are supported.\n", .{});
+                },
+            }
+        },
         .tx_send => {
             const provider_available = effective_programmatic_provider != null;
             const can_execute_without_direct_signatures = cli.supportsProgrammableInput(args) and
@@ -7937,11 +7976,11 @@ test "runCommand events with summarized move-module filter prints event summarie
             std.debug.assert(std.mem.eql(
                 u8,
                 req.params_json,
-                "[{\"MoveModule\":{\"package\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"module\":\"pool\"}},null,5,true]",
+                "[{\"MoveModule\":{\"package\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb\",\"module\":\"pool\"}},null,5,true]",
             ));
             return alloc.dupe(
                 u8,
-                "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xdigest\",\"eventSeq\":\"7\"},\"packageId\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"transactionModule\":\"pool\",\"sender\":\"0xsender\",\"type\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3::pool::LiquidityAdded\",\"parsedJson\":{\"pool\":\"0xpool\"},\"timestampMs\":\"42\"}],\"nextCursor\":{\"txDigest\":\"0xnext\",\"eventSeq\":\"8\"},\"hasNextPage\":true}}",
+                "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xdigest\",\"eventSeq\":\"7\"},\"packageId\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb\",\"transactionModule\":\"pool\",\"sender\":\"0xsender\",\"type\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb::pool::LiquidityAdded\",\"parsedJson\":{\"pool\":\"0xpool\"},\"timestampMs\":\"42\"}],\"nextCursor\":{\"txDigest\":\"0xnext\",\"eventSeq\":\"8\"},\"hasNextPage\":true}}",
             );
         }
     }.call;
@@ -8269,7 +8308,7 @@ test "runCommand move function with --summarize prefers known object preset toke
     const callback = struct {
         fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
             if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
-                std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\"") != null);
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb\"") != null);
                 std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"pool\"") != null);
                 std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"add_liquidity_fix_coin\"") != null);
                 return alloc.dupe(
@@ -8346,7 +8385,7 @@ test "runCommand move function with --summarize adds owned object discovery temp
     const callback = struct {
         fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
             if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
-                std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\"") != null);
+                std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb\"") != null);
                 std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"pool\"") != null);
                 std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"add_liquidity_fix_coin\"") != null);
                 return alloc.dupe(
@@ -8806,7 +8845,7 @@ test "runCommand move function with --summarize links owned object candidates to
             if (std.mem.eql(u8, req.method, "suix_queryEvents")) {
                 return alloc.dupe(
                     u8,
-                    "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xevent1\",\"eventSeq\":\"1\"},\"packageId\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool1\"}}],\"hasNextPage\":false}}",
+                    "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xevent1\",\"eventSeq\":\"1\"},\"packageId\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool1\"}}],\"hasNextPage\":false}}",
                 );
             }
             if (std.mem.eql(u8, req.method, "suix_getOwnedObjects")) {
@@ -8899,7 +8938,7 @@ test "runCommand move function with --summarize jointly selects shared and owned
             if (std.mem.eql(u8, req.method, "suix_queryEvents")) {
                 return alloc.dupe(
                     u8,
-                    "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xevent1\",\"eventSeq\":\"1\"},\"packageId\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool1\"}},{\"id\":{\"txDigest\":\"0xevent2\",\"eventSeq\":\"2\"},\"packageId\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool2\"}}],\"hasNextPage\":false}}",
+                    "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xevent1\",\"eventSeq\":\"1\"},\"packageId\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool1\"}},{\"id\":{\"txDigest\":\"0xevent2\",\"eventSeq\":\"2\"},\"packageId\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool2\"}}],\"hasNextPage\":false}}",
                 );
             }
             if (std.mem.eql(u8, req.method, "suix_getOwnedObjects")) {
@@ -9163,7 +9202,7 @@ test "runCommand move function with --summarize prefers shared candidate with hi
             if (std.mem.eql(u8, req.method, "suix_queryEvents")) {
                 return alloc.dupe(
                     u8,
-                    "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xevent1\",\"eventSeq\":\"1\"},\"packageId\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool1\"}},{\"id\":{\"txDigest\":\"0xevent2\",\"eventSeq\":\"2\"},\"packageId\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool2\"}}],\"hasNextPage\":false}}",
+                    "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xevent1\",\"eventSeq\":\"1\"},\"packageId\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool1\"}},{\"id\":{\"txDigest\":\"0xevent2\",\"eventSeq\":\"2\"},\"packageId\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool2\"}}],\"hasNextPage\":false}}",
                 );
             }
             if (std.mem.eql(u8, req.method, "suix_getOwnedObjects")) {
@@ -9415,7 +9454,7 @@ test "runCommand move function with --summarize prefers owned candidate with hig
             if (std.mem.eql(u8, req.method, "suix_queryEvents")) {
                 return alloc.dupe(
                     u8,
-                    "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xevent1\",\"eventSeq\":\"1\"},\"packageId\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool1\"}}],\"hasNextPage\":false}}",
+                    "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xevent1\",\"eventSeq\":\"1\"},\"packageId\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool1\"}}],\"hasNextPage\":false}}",
                 );
             }
             if (std.mem.eql(u8, req.method, "suix_getOwnedObjects")) {
@@ -9536,7 +9575,7 @@ test "runCommand move function with --summarize tie-breaks shared candidates by 
             if (std.mem.eql(u8, req.method, "suix_queryEvents")) {
                 return alloc.dupe(
                     u8,
-                    "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xevent2\",\"eventSeq\":\"2\"},\"packageId\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool2\"}},{\"id\":{\"txDigest\":\"0xevent1\",\"eventSeq\":\"1\"},\"packageId\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool1\"}}],\"hasNextPage\":false}}",
+                    "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xevent2\",\"eventSeq\":\"2\"},\"packageId\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool2\"}},{\"id\":{\"txDigest\":\"0xevent1\",\"eventSeq\":\"1\"},\"packageId\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool1\"}}],\"hasNextPage\":false}}",
                 );
             }
             if (std.mem.eql(u8, req.method, "suix_getOwnedObjects")) {
@@ -9641,7 +9680,7 @@ test "runCommand move function with --summarize tie-breaks zero-score shared eve
             if (std.mem.eql(u8, req.method, "suix_queryEvents")) {
                 return alloc.dupe(
                     u8,
-                    "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xevent2\",\"eventSeq\":\"2\"},\"packageId\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool2\"}},{\"id\":{\"txDigest\":\"0xevent1\",\"eventSeq\":\"1\"},\"packageId\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool1\"}}],\"hasNextPage\":false}}",
+                    "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xevent2\",\"eventSeq\":\"2\"},\"packageId\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool2\"}},{\"id\":{\"txDigest\":\"0xevent1\",\"eventSeq\":\"1\"},\"packageId\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool1\"}}],\"hasNextPage\":false}}",
                 );
             }
             if (std.mem.eql(u8, req.method, "sui_getObject")) {
@@ -9720,7 +9759,7 @@ test "runCommand move function with --summarize tie-breaks owned candidates by d
             if (std.mem.eql(u8, req.method, "suix_queryEvents")) {
                 return alloc.dupe(
                     u8,
-                    "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xevent1\",\"eventSeq\":\"1\"},\"packageId\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool1\"}}],\"hasNextPage\":false}}",
+                    "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xevent1\",\"eventSeq\":\"1\"},\"packageId\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool1\"}}],\"hasNextPage\":false}}",
                 );
             }
             if (std.mem.eql(u8, req.method, "suix_getOwnedObjects")) {
@@ -12545,7 +12584,7 @@ test "runCommand move function with --emit-template prints preferred dry-run req
             if (std.mem.eql(u8, req.method, "suix_queryEvents")) {
                 return alloc.dupe(
                     u8,
-                    "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xevent1\",\"eventSeq\":\"1\"},\"packageId\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool1\"}}],\"hasNextPage\":false}}",
+                    "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xevent1\",\"eventSeq\":\"1\"},\"packageId\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool1\"}}],\"hasNextPage\":false}}",
                 );
             }
             if (std.mem.eql(u8, req.method, "sui_getTransactionBlock")) {
@@ -14074,11 +14113,11 @@ test "runCommand move function with --summarize uses queried package for shared 
                     std.debug.assert(std.mem.eql(
                         u8,
                         req.params_json,
-                        "[{\"MoveModule\":{\"package\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"module\":\"pool\"}},null,20,true]",
+                        "[{\"MoveModule\":{\"package\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb\",\"module\":\"pool\"}},null,20,true]",
                     ));
                     return alloc.dupe(
                         u8,
-                        "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xevent1\",\"eventSeq\":\"1\"},\"packageId\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool1\",\"partner_id\":\"0xpartner\"}}],\"hasNextPage\":false}}",
+                        "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xevent1\",\"eventSeq\":\"1\"},\"packageId\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool1\",\"partner_id\":\"0xpartner\"}}],\"hasNextPage\":false}}",
                     );
                 }
 
@@ -14121,7 +14160,7 @@ test "runCommand move function with --summarize uses queried package for shared 
             std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"showOwner\":true") != null);
             return alloc.dupe(
                 u8,
-                "{\"result\":{\"data\":{\"objectId\":\"0xpartner\",\"version\":\"12\",\"digest\":\"partner-digest-1\",\"type\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3::partner::Partner\",\"owner\":{\"Shared\":{\"initial_shared_version\":\"3\"}}}}}",
+                "{\"result\":{\"data\":{\"objectId\":\"0xpartner\",\"version\":\"12\",\"digest\":\"partner-digest-1\",\"type\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb::partner::Partner\",\"owner\":{\"Shared\":{\"initial_shared_version\":\"3\"}}}}}",
             );
         }
     }.call;
@@ -14178,13 +14217,13 @@ test "runCommand move function with --summarize uses queried package for shared 
         "\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xpool1\\\",\\\"inputKind\\\":\\\"shared\\\",\\\"initialSharedVersion\\\":7,\\\"mutable\\\":true}\"",
         parameter.get("auto_selected_arg_json").?.string,
     );
-    try testing.expectEqual(@as(usize, 2), query_events_requests);
+    try testing.expectEqual(@as(usize, 1), query_events_requests);
     try testing.expectEqualStrings(
         "[\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xpool1\\\",\\\"inputKind\\\":\\\"shared\\\",\\\"initialSharedVersion\\\":7,\\\"mutable\\\":true}\"]",
         parsed.value.object.get("call_template").?.object.get("preferred_args_json").?.string,
     );
     try testing.expectEqualStrings(
-        "[{\"kind\":\"MoveCall\",\"package\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"module\":\"pool\",\"function\":\"swap\",\"typeArguments\":[],\"arguments\":[\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xpool1\\\",\\\"inputKind\\\":\\\"shared\\\",\\\"initialSharedVersion\\\":7,\\\"mutable\\\":true}\"]}]",
+        "[{\"kind\":\"MoveCall\",\"package\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb\",\"module\":\"pool\",\"function\":\"swap\",\"typeArguments\":[],\"arguments\":[\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xpool1\\\",\\\"inputKind\\\":\\\"shared\\\",\\\"initialSharedVersion\\\":7,\\\"mutable\\\":true}\"]}]",
         parsed.value.object.get("call_template").?.object.get("preferred_commands_json").?.string,
     );
     const preferred_request = try std.json.parseFromSlice(
@@ -14229,11 +14268,11 @@ test "runCommand move function with --summarize discovers shared object candidat
                     std.debug.assert(std.mem.eql(
                         u8,
                         req.params_json,
-                        "[{\"MoveModule\":{\"package\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"module\":\"pool\"}},null,20,true]",
+                        "[{\"MoveModule\":{\"package\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb\",\"module\":\"pool\"}},null,20,true]",
                     ));
                     return alloc.dupe(
                         u8,
-                        "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xevent1\",\"eventSeq\":\"1\"},\"packageId\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"transactionModule\":\"pool\",\"parsedJson\":{\"partner_id\":\"0xpartner\"}}],\"nextCursor\":{\"txDigest\":\"0xcursor-next\",\"eventSeq\":\"2\"},\"hasNextPage\":true}}",
+                        "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xevent1\",\"eventSeq\":\"1\"},\"packageId\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb\",\"transactionModule\":\"pool\",\"parsedJson\":{\"partner_id\":\"0xpartner\"}}],\"nextCursor\":{\"txDigest\":\"0xcursor-next\",\"eventSeq\":\"2\"},\"hasNextPage\":true}}",
                     );
                 }
 
@@ -14241,11 +14280,11 @@ test "runCommand move function with --summarize discovers shared object candidat
                     std.debug.assert(std.mem.eql(
                         u8,
                         req.params_json,
-                        "[{\"MoveModule\":{\"package\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"module\":\"pool\"}},{\"txDigest\":\"0xcursor-next\",\"eventSeq\":\"2\"},20,true]",
+                        "[{\"MoveModule\":{\"package\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb\",\"module\":\"pool\"}},{\"txDigest\":\"0xcursor-next\",\"eventSeq\":\"2\"},20,true]",
                     ));
                     return alloc.dupe(
                         u8,
-                        "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xevent2\",\"eventSeq\":\"3\"},\"packageId\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool1\"}}],\"hasNextPage\":false}}",
+                        "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xevent2\",\"eventSeq\":\"3\"},\"packageId\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool1\"}}],\"hasNextPage\":false}}",
                     );
                 }
 
@@ -14275,7 +14314,7 @@ test "runCommand move function with --summarize discovers shared object candidat
                 std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"showOwner\":true") != null);
                 return alloc.dupe(
                     u8,
-                    "{\"result\":{\"data\":{\"objectId\":\"0xpartner\",\"version\":\"12\",\"digest\":\"partner-digest-1\",\"type\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3::partner::Partner\",\"owner\":{\"Shared\":{\"initial_shared_version\":\"3\"}}}}}",
+                    "{\"result\":{\"data\":{\"objectId\":\"0xpartner\",\"version\":\"12\",\"digest\":\"partner-digest-1\",\"type\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb::partner::Partner\",\"owner\":{\"Shared\":{\"initial_shared_version\":\"3\"}}}}}",
                 );
             }
 
@@ -14320,7 +14359,7 @@ test "runCommand move function with --summarize discovers shared object candidat
     defer parsed.deinit();
     const parameter = parsed.value.object.get("parameters").?.array.items[0].object;
     const shared_candidates = parameter.get("shared_object_candidates").?.array.items;
-    try testing.expectEqual(@as(usize, 3), event_request_count);
+    try testing.expectEqual(@as(usize, 2), event_request_count);
     try testing.expectEqual(@as(usize, 1), shared_candidates.len);
     try testing.expectEqualStrings("0xpool1", shared_candidates[0].object.get("object_id").?.string);
     try testing.expectEqualStrings(
@@ -14439,7 +14478,7 @@ test "runCommand move function with --emit-template prints preferred dry-run arg
             if (std.mem.eql(u8, req.method, "suix_queryEvents")) {
                 return alloc.dupe(
                     u8,
-                    "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xevent1\",\"eventSeq\":\"1\"},\"packageId\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool1\"}}],\"hasNextPage\":false}}",
+                    "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xevent1\",\"eventSeq\":\"1\"},\"packageId\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool1\"}}],\"hasNextPage\":false}}",
                 );
             }
             if (std.mem.eql(u8, req.method, "sui_getTransactionBlock")) {
@@ -14506,7 +14545,7 @@ test "runCommand move function with --emit-template prints preferred dry-run com
             if (std.mem.eql(u8, req.method, "suix_queryEvents")) {
                 return alloc.dupe(
                     u8,
-                    "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xevent1\",\"eventSeq\":\"1\"},\"packageId\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool1\"}}],\"hasNextPage\":false}}",
+                    "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xevent1\",\"eventSeq\":\"1\"},\"packageId\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool1\"}}],\"hasNextPage\":false}}",
                 );
             }
             if (std.mem.eql(u8, req.method, "sui_getTransactionBlock")) {
@@ -14917,7 +14956,7 @@ test "runCommand move function with --summarize scores shared candidates from se
             if (std.mem.eql(u8, req.method, "suix_queryEvents")) {
                 return alloc.dupe(
                     u8,
-                    "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xevent1\",\"eventSeq\":\"1\"},\"packageId\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool1\"}},{\"id\":{\"txDigest\":\"0xevent2\",\"eventSeq\":\"2\"},\"packageId\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool2\"}}],\"hasNextPage\":false}}",
+                    "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xevent1\",\"eventSeq\":\"1\"},\"packageId\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool1\"}},{\"id\":{\"txDigest\":\"0xevent2\",\"eventSeq\":\"2\"},\"packageId\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb\",\"transactionModule\":\"pool\",\"parsedJson\":{\"pool_id\":\"0xpool2\"}}],\"hasNextPage\":false}}",
                 );
             }
             if (std.mem.eql(u8, req.method, "sui_getTransactionBlock")) {
@@ -16732,7 +16771,7 @@ test "runCommand move package resolves aliases before issuing RPC" {
         fn call(ctx: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
             const mock: *MockContext = @ptrCast(@alignCast(ctx));
             mock.method_ok.* = std.mem.eql(u8, req.method, "sui_getNormalizedMoveModulesByPackage");
-            mock.params_ok.* = std.mem.indexOf(u8, req.params_json, "\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\"") != null;
+            mock.params_ok.* = std.mem.indexOf(u8, req.params_json, "\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb\"") != null;
             return alloc.dupe(
                 u8,
                 "{\"result\":{\"pool\":{\"structs\":{\"Pool\":{},\"Tick\":{}},\"exposedFunctions\":{\"swap\":{},\"add_liquidity\":{}}}}}",
@@ -17322,7 +17361,7 @@ test "runCommand account_objects resolves package aliases inside typed move-modu
             ctx.params_ok.* = std.mem.indexOf(
                 u8,
                 req.params_json,
-                "\"MoveModule\":{\"package\":\"0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3\",\"module\":\"pool\"}",
+                "\"MoveModule\":{\"package\":\"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb\",\"module\":\"pool\"}",
             ) != null;
             return alloc.dupe(
                 u8,

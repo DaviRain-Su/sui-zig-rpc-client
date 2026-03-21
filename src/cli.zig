@@ -70,6 +70,7 @@ pub const Command = enum {
     tx_payload,
     tx_confirm,
     tx_status,
+    natural_do,
 };
 
 pub const TxBuildKind = enum {
@@ -314,6 +315,10 @@ pub const ParsedArgs = struct {
     owned_signatures: std.ArrayListUnmanaged([]const u8) = .{},
     signers: std.ArrayListUnmanaged([]const u8) = .{},
     owned_signers: std.ArrayListUnmanaged([]const u8) = .{},
+    natural_query: ?[]const u8 = null,
+    owned_natural_query: ?[]const u8 = null,
+    intent_json: ?[]const u8 = null,
+    owned_intent_json: ?[]const u8 = null,
 
     pub fn deinit(self: *ParsedArgs, allocator: std.mem.Allocator) void {
         // 使用 comptime 生成释放逻辑，避免代码重复
@@ -385,6 +390,8 @@ pub const ParsedArgs = struct {
             &self.owned_object_dynamic_field_name,
             &self.owned_object_dynamic_field_name_value,
             &self.owned_object_options,
+            &self.owned_natural_query,
+            &self.owned_intent_json,
         };
         inline for (optional_strings) |opt_ptr| {
             if (opt_ptr.*) |value| allocator.free(value);
@@ -3629,6 +3636,54 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
                 return error.InvalidCli;
             }
 
+            if (std.mem.eql(u8, token, "do")) {
+                parsed.command = .natural_do;
+                parsed.has_command = true;
+                i += 1;
+                if (i >= args.len) return error.InvalidCli;
+                // Check for --intent-json flag first
+                if (std.mem.eql(u8, args[i], "--intent-json")) {
+                    i += 1;
+                    if (i >= args.len) return error.InvalidCli;
+                    try setOptionalStringArg(allocator, &parsed, args[i], &parsed.owned_intent_json, &parsed.intent_json);
+                    i += 1;
+                    continue;
+                }
+                // Capture the natural language query (can be a single arg or multiple args)
+                const query_start = i;
+                var query_end = i;
+                while (query_end < args.len and !std.mem.startsWith(u8, args[query_end], "--")) {
+                    query_end += 1;
+                }
+                if (query_start == query_end) return error.InvalidCli;
+                // Join all query args into a single string
+                if (query_end - query_start == 1) {
+                    // Single arg query
+                    try setOptionalStringArg(allocator, &parsed, args[query_start], &parsed.owned_natural_query, &parsed.natural_query);
+                } else {
+                    // Multi-arg query - join with spaces
+                    var total_len: usize = 0;
+                    for (args[query_start..query_end]) |arg| {
+                        total_len += arg.len + 1; // +1 for space
+                    }
+                    const joined = try allocator.alloc(u8, total_len - 1); // -1 to remove trailing space
+                    errdefer allocator.free(joined);
+                    var offset: usize = 0;
+                    for (args[query_start..query_end], 0..) |arg, idx| {
+                        @memcpy(joined[offset..][0..arg.len], arg);
+                        offset += arg.len;
+                        if (idx < query_end - query_start - 1) {
+                            joined[offset] = ' ';
+                            offset += 1;
+                        }
+                    }
+                    parsed.owned_natural_query = joined;
+                    parsed.natural_query = joined;
+                }
+                i = query_end;
+                continue;
+            }
+
             return error.InvalidCli;
         }
 
@@ -4619,6 +4674,22 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
             if (std.mem.eql(u8, token, "--options")) {
                 if (i + 1 >= args.len) return error.InvalidCli;
                 try setOptionalFileBackedArg(allocator, &parsed.owned_tx_options, &parsed.tx_options, args[i + 1]);
+                i += 2;
+                continue;
+            }
+            return error.InvalidCli;
+        }
+
+        if (parsed.command == .natural_do) {
+            if (std.mem.eql(u8, token, "--intent-json")) {
+                if (i + 1 >= args.len) return error.InvalidCli;
+                try setOptionalStringArg(
+                    allocator,
+                    &parsed,
+                    args[i + 1],
+                    &parsed.owned_intent_json,
+                    &parsed.intent_json,
+                );
                 i += 2;
                 continue;
             }
