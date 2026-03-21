@@ -16,6 +16,21 @@ pub const move = @import("move.zig");
 pub const account = @import("account.zig");
 pub const dispatch = @import("dispatch.zig");
 
+// Import integration tests
+_ = @import("integration_test.zig");
+
+// Re-export main entry points for backward compatibility
+pub const runCommand = dispatch.runCommand;
+pub const runCommandWithProgrammaticProvider = dispatch.runCommand;
+
+// Re-export types for backward compatibility
+pub const CommandResult = types.CommandResult;
+pub const TxBuildError = types.TxBuildError;
+pub const MoveFunctionTemplateOutput = move.MoveFunctionTemplateOutput;
+pub const WalletLifecycleSummary = wallet_types.WalletLifecycleSummary;
+pub const WalletAccountEntry = wallet_types.WalletAccountEntry;
+pub const WalletAccountsSummary = wallet_types.WalletAccountsSummary;
+
 // Re-export main entry points for backward compatibility
 pub const runCommand = dispatch.runCommand;
 pub const runCommandWithProgrammaticProvider = dispatch.runCommand;
