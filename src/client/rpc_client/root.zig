@@ -8,6 +8,9 @@ const std = @import("std");
 pub const error = @import("error.zig");
 pub const constants = @import("constants.zig");
 pub const utils = @import("utils.zig");
+pub const client_core = @import("client_core.zig");
+pub const query = @import("query.zig");
+pub const transaction = @import("transaction.zig");
 
 // Re-export commonly used types
 pub const ClientError = error.ClientError;
@@ -25,6 +28,38 @@ pub const default_request_timeout_ms = constants.default_request_timeout_ms;
 pub const mist_per_sui = constants.mist_per_sui;
 pub const mistToSui = constants.mistToSui;
 pub const suiToMist = constants.suiToMist;
+
+// Re-export core client
+pub const SuiRpcClient = client_core.SuiRpcClient;
+pub const RpcRequest = client_core.RpcRequest;
+pub const RequestSender = client_core.RequestSender;
+pub const RequestSenderCallback = client_core.RequestSenderCallback;
+
+// Re-export query types and functions
+pub const Balance = query.Balance;
+pub const Object = query.Object;
+pub const ObjectDataOptions = query.ObjectDataOptions;
+pub const DynamicField = query.DynamicField;
+pub const DynamicFieldPage = query.DynamicFieldPage;
+pub const getBalance = query.getBalance;
+pub const getAllBalances = query.getAllBalances;
+pub const getObject = query.getObject;
+pub const getReferenceGasPrice = query.getReferenceGasPrice;
+pub const getDynamicFields = query.getDynamicFields;
+
+// Re-export transaction types and functions
+pub const SimulationResult = transaction.SimulationResult;
+pub const ExecutionResult = transaction.ExecutionResult;
+pub const TransactionEffects = transaction.TransactionEffects;
+pub const TransactionStatus = transaction.TransactionStatus;
+pub const GasCostSummary = transaction.GasCostSummary;
+pub const Event = transaction.Event;
+pub const ObjectChange = transaction.ObjectChange;
+pub const BalanceChange = transaction.BalanceChange;
+pub const SimulationOptions = transaction.SimulationOptions;
+pub const ExecutionOptions = transaction.ExecutionOptions;
+pub const simulateTransaction = transaction.simulateTransaction;
+pub const executeTransaction = transaction.executeTransaction;
 
 // Re-export utilities
 pub const dupeOptionalString = utils.dupeOptionalString;
@@ -44,6 +79,9 @@ test "rpc_client module imports successfully" {
     _ = error;
     _ = constants;
     _ = utils;
+    _ = client_core;
+    _ = query;
+    _ = transaction;
 }
 
 test "re-exports work correctly" {
@@ -58,4 +96,15 @@ test "re-exports work correctly" {
 
     // Test utility function exists
     _ = isValidAddress;
+
+    // Test core client exists
+    _ = SuiRpcClient;
+
+    // Test query types exist
+    _ = Balance;
+    _ = Object;
+
+    // Test transaction types exist
+    _ = SimulationResult;
+    _ = ExecutionResult;
 }
