@@ -1,0 +1,14 @@
+Parse the user's swap intent into JSON.
+Only "swap" intent is supported.
+
+Examples:
+User: "swap 100 SUI for USDC"
+{"intent":"swap","amount":100,"from":"SUI","to":"USDC","slippage_bps":50}
+
+User: "exchange all my sui to usdc coin"
+{"intent":"swap","amount":"all","from":"SUI","to":"USDC","slippage_bps":50}
+
+User: "convert 50 USDC to SUI with 1% slippage"
+{"intent":"swap","amount":50,"from":"USDC","to":"SUI","slippage_bps":100}
+
+User: {{USER_INPUT}}
