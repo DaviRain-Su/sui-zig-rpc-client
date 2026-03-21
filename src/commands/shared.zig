@@ -1,7 +1,7 @@
 /// commands/shared.zig - 命令模块共享工具函数
 const std = @import("std");
-const client = @import("sui_client_zig");
 const cli = @import("../cli.zig");
+const client = @import("../root.zig");
 
 /// 打印响应，支持美化输出
 pub fn printResponse(allocator: std.mem.Allocator, writer: anytype, response: []const u8, pretty: bool) !void {
@@ -210,19 +210,19 @@ pub const TxBuildError = error{
     RpcError,
     Timeout,
     OutOfMemory,
-};
+} || std.mem.Allocator.Error;
 
 /// 命令结果类型
 pub const CommandResult = union(enum) {
     success: []const u8,
     challenge_required: []const u8,
-    error: TxBuildError,
+    err: TxBuildError,
 
     pub fn deinit(self: *CommandResult, allocator: std.mem.Allocator) void {
         switch (self.*) {
             .success => |value| allocator.free(value),
             .challenge_required => |value| allocator.free(value),
-            .error => {},
+            .err => {},
         }
     }
 };

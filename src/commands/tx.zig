@@ -1,7 +1,7 @@
 /// commands/tx.zig - 交易相关命令处理
 const std = @import("std");
-const client = @import("sui_client_zig");
 const cli = @import("../cli.zig");
+const client = @import("../root.zig");
 const shared = @import("shared.zig");
 const tx_builder = client.tx_builder;
 

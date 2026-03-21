@@ -1,7 +1,7 @@
 /// commands/account.zig - 账户相关命令处理
 const std = @import("std");
-const client = @import("sui_client_zig");
 const cli = @import("../cli.zig");
+const client = @import("../root.zig");
 const shared = @import("shared.zig");
 
 /// 账户列表输出格式

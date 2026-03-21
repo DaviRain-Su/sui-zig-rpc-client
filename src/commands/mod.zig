@@ -10,8 +10,8 @@
 /// - account: 账户命令 (account_list, account_info, account_coins, etc.)
 ///
 const std = @import("std");
-const client = @import("sui_client_zig");
 const cli = @import("../cli.zig");
+const client = @import("../root.zig");
 
 // 子模块重新导出
 pub const shared = @import("shared.zig");

@@ -1,7 +1,7 @@
 /// commands/move.zig - Move 合约相关命令处理
 const std = @import("std");
-const client = @import("sui_client_zig");
 const cli = @import("../cli.zig");
+const client = @import("../root.zig");
 const shared = @import("shared.zig");
 
 /// Move 函数模板输出类型
