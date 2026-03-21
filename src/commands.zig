@@ -449,6 +449,35 @@ fn buildDerivedMoveFunctionExecutionArgs(
     return derived;
 }
 
+fn buildDerivedMoveFunctionRequestBuildArgs(
+    allocator: std.mem.Allocator,
+    args: *const cli.ParsedArgs,
+    request_json: []const u8,
+) !cli.ParsedArgs {
+    var derived = cli.ParsedArgs{
+        .command = .request_build,
+        .has_command = true,
+        .pretty = args.pretty,
+    };
+    errdefer derived.deinit(allocator);
+
+    try cli.applyProgrammaticRequestArtifact(allocator, &derived, request_json);
+
+    if (args.tx_session_response) |raw| {
+        const owned = try allocator.dupe(u8, raw);
+        derived.owned_tx_session_response = owned;
+        derived.tx_session_response = owned;
+    }
+    if (args.tx_provider_config) |raw| {
+        const owned = try allocator.dupe(u8, raw);
+        derived.owned_tx_provider_config = owned;
+        derived.tx_provider_config = owned;
+    }
+
+    derived.pretty = args.pretty;
+    return derived;
+}
+
 const ParsedSessionChallengeResponse = struct {
     arena: std.heap.ArenaAllocator,
     response: client.tx_request_builder.SessionChallengeResponse,
@@ -7688,13 +7717,8 @@ pub fn runCommandWithProgrammaticProvider(
                     return;
                 },
                 .swap => |swap_intent| {
-                    try writer.print("Parsed intent: swap {s} {s} -> {s} (slippage: {d} bps)\n", .{
-                        swap_intent.amount orelse "all",
-                        swap_intent.from_token,
-                        swap_intent.to_token,
-                        swap_intent.slippage_bps,
-                    });
-                    try writer.print("\n(This is a preview. Full swap execution coming soon.)\n", .{});
+                    _ = swap_intent;
+                    return error.InvalidCli;
                 },
                 .unsupported => |unsupported| {
                     try writer.print("Unsupported intent: {s}\n", .{unsupported});
