@@ -10726,18 +10726,16 @@ pub const SuiRpcClient = struct {
         var total_balance: u64 = 0;
         while (total_balance < min_balance) {
             var next_index: ?usize = null;
-            var next_balance: u64 = 0;
             for (candidates, 0..) |candidate, index| {
                 if (used[index]) continue;
                 if (moveObjectIdIsExcluded(excluded_object_ids, candidate.object_id)) continue;
-                const balance = candidate.balance orelse continue;
-                if (next_index == null or
-                    balance > next_balance or
-                    (balance == next_balance and
-                        scalarBusinessCoinCandidateShouldSortBefore(candidate, candidates[next_index.?], null)))
-                {
+                _ = candidate.balance orelse continue;
+                if (next_index == null or scalarBusinessCoinCandidateShouldSortBefore(
+                    candidate,
+                    candidates[next_index.?],
+                    null,
+                )) {
                     next_index = index;
-                    next_balance = balance;
                 }
             }
             const index = next_index orelse return false;
@@ -10747,7 +10745,7 @@ pub const SuiRpcClient = struct {
                 .token = candidates[index].object_input_select_token,
                 .balance = candidates[index].balance orelse 0,
             });
-            total_balance +|= next_balance;
+            total_balance +|= candidates[index].balance orelse 0;
         }
 
         return true;
@@ -27621,6 +27619,73 @@ test "applyCrossParameterBusinessCoinSelectionHints lets scored business coin pl
 
     try testing.expectEqualStrings(
         "\"select:coin-preferred\"",
+        parameters[0].auto_selected_arg_json.?,
+    );
+}
+
+test "applyCrossParameterBusinessCoinSelectionHints prefers high-score exact vector coverage over larger low-score sources" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const vector_candidates = try allocator.alloc(move_result.OwnedMoveObjectCandidate, 4);
+    errdefer allocator.free(vector_candidates);
+    vector_candidates[0] = .{
+        .object_id = try allocator.dupe(u8, "0xcoin-high-a"),
+        .version = 1,
+        .digest = try allocator.dupe(u8, "digest-high-a"),
+        .balance = 6,
+        .selection_score = 10,
+        .object_input_select_token = try allocator.dupe(u8, "select:coin-high-a"),
+    };
+    vector_candidates[1] = .{
+        .object_id = try allocator.dupe(u8, "0xcoin-high-b"),
+        .version = 2,
+        .digest = try allocator.dupe(u8, "digest-high-b"),
+        .balance = 4,
+        .selection_score = 9,
+        .object_input_select_token = try allocator.dupe(u8, "select:coin-high-b"),
+    };
+    vector_candidates[2] = .{
+        .object_id = try allocator.dupe(u8, "0xcoin-low-big"),
+        .version = 3,
+        .digest = try allocator.dupe(u8, "digest-low-big"),
+        .balance = 8,
+        .selection_score = 1,
+        .object_input_select_token = try allocator.dupe(u8, "select:coin-low-big"),
+    };
+    vector_candidates[3] = .{
+        .object_id = try allocator.dupe(u8, "0xcoin-low-small"),
+        .version = 4,
+        .digest = try allocator.dupe(u8, "digest-low-small"),
+        .balance = 2,
+        .selection_score = 0,
+        .object_input_select_token = try allocator.dupe(u8, "select:coin-low-small"),
+    };
+    errdefer {
+        for (vector_candidates) |*candidate| candidate.deinit(allocator);
+    }
+
+    const parameters = try allocator.alloc(move_result.OwnedMoveParameterSummary, 2);
+    defer {
+        for (parameters) |*parameter| parameter.deinit(allocator);
+        allocator.free(parameters);
+    }
+    parameters[0] = .{
+        .signature = try allocator.dupe(u8, "vector<0x2::coin::Coin<0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC>>"),
+        .vector_item_owned_object_candidates = vector_candidates,
+    };
+    parameters[1] = .{
+        .signature = try allocator.dupe(u8, "u64"),
+        .lowering_kind = "u64",
+        .explicit_arg_json = try allocator.dupe(u8, "10"),
+    };
+
+    try SuiRpcClient.applyCrossParameterBusinessCoinSelectionHints(allocator, parameters);
+
+    try testing.expectEqualStrings(
+        "[\"select:coin-high-a\",\"select:coin-high-b\"]",
         parameters[0].auto_selected_arg_json.?,
     );
 }

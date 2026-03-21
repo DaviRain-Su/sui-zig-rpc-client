@@ -398,6 +398,8 @@ what the generic path still needs to finish.
   - [x] Prefer higher-scored exact split merge pairs over larger low-score
     source combinations when multiple multi-source plans can satisfy the same
     amount.
+  - [x] Prefer higher-scored exact covering sets for `vector<Coin<T>>` amount
+    hints instead of greedily taking larger low-score source coins.
 - [ ] Fewer unresolved placeholders in real `add_liquidity` / `swap`
   executions.
 
