@@ -13,6 +13,9 @@ const tx = @import("tx.zig");
 const move = @import("move.zig");
 const account = @import("account.zig");
 
+const client = @import("sui_client_zig");
+const cli = @import("../cli.zig");
+
 /// Command handler function type
 pub const CommandHandler = fn (
     allocator: std.mem.Allocator,
@@ -24,7 +27,7 @@ pub const CommandHandler = fn (
 /// Command router - dispatches commands to appropriate handlers
 pub fn runCommand(
     allocator: std.mem.Allocator,
-    rpc: anytype,
+    rpc: *client.SuiRpcClient,
     args: anytype,
     writer: anytype,
 ) !void {
@@ -47,17 +50,17 @@ pub fn runCommand(
 
         // Account commands
         .account_list => try account.listAccounts(allocator, args, writer),
-        .account_info => try account.getAccountInfo(allocator, args, writer),
-        .account_balance => try handleAccountBalance(allocator, rpc, args, writer),
-        .account_coins => try account.getAccountCoins(allocator, args, writer),
-        .account_objects => try account.getAccountObjects(allocator, args, writer),
+        .account_info => try account.getAccountInfo(allocator, rpc, args, writer),
+        .account_balance => try account.printBalanceSummaryForOwner(allocator, rpc, writer, args.account_selector orelse return error.InvalidCli, args),
+        .account_coins => try account.getAccountCoins(allocator, rpc, args, writer),
+        .account_objects => try account.getAccountObjects(allocator, rpc, args, writer),
 
         // Transaction commands
-        .tx_simulate => try handleTxSimulate(allocator, rpc, args, writer),
-        .tx_dry_run => try handleTxDryRun(allocator, rpc, args, writer),
+        .tx_simulate => try tx.runTxSimulate(allocator, rpc, args, writer),
+        .tx_dry_run => try tx.runTxDryRun(allocator, rpc, args, writer),
         .tx_build => try handleTxBuild(allocator, args, writer),
-        .tx_send => try handleTxSend(allocator, rpc, args, writer),
-        .tx_payload => try handleTxPayload(allocator, args, writer),
+        .tx_send => try tx.runTxSend(allocator, rpc, args, writer),
+        .tx_payload => try tx.runTxPayload(allocator, args, writer),
 
         // Move commands
         .move_package => try handleMovePackage(allocator, rpc, args, writer),
@@ -84,26 +87,27 @@ fn handleHelp(writer: anytype) !void {
     try writer.writeAll(
         \\Usage: sui-zig-rpc-client [command] [options]
         \\
-        \Commands:
-        \  Wallet:
-        \    wallet_create, wallet_import, wallet_use, wallet_accounts
-        \    wallet_connect, wallet_disconnect, wallet_fund
-        \  Account:
-        \    account_list, account_info, account_balance, account_coins, account_objects
-        \  Transaction:
-        \    tx_simulate, tx_dry_run, tx_build, tx_send, tx_payload
-        \  Move:
-        \    move_package, move_module, move_function
-        \  Object:
-        \    object_get, object_dynamic_fields
-        \  Other:
-        \    rpc, help, version
+        \\Commands:
+        \\  Wallet:
+        \\    wallet_create, wallet_import, wallet_use, wallet_accounts
+        \\    wallet_connect, wallet_disconnect, wallet_fund
+        \\  Account:
+        \\    account_list, account_info, account_balance, account_coins, account_objects
+        \\  Transaction:
+        \\    tx_simulate, tx_dry_run, tx_build, tx_send, tx_payload
+        \\  Move:
+        \\    move_package, move_module, move_function
+        \\  Object:
+        \\    object_get, object_dynamic_fields
+        \\  Other:
+        \\    rpc, help, version
         \\
     );
 }
 
 fn handleVersion(writer: anytype) !void {
-    try writer.writeAll("sui-zig-rpc-client 0.1.2\n");
+    const version = @import("sui_client_zig").version;
+    try writer.print("sui-zig-rpc-client {d}.{d}.{d}\n", .{ version.major, version.minor, version.patch });
 }
 
 // ============================================================
@@ -115,9 +119,14 @@ fn handleWalletCreate(
     args: anytype,
     writer: anytype,
 ) !void {
-    // Generate a mock key for now
-    const mock_key = "mock-private-key";
-    try wallet.runWalletCreateOrImport(allocator, args, writer, "created", mock_key);
+    // Generate a new key using the client keystore
+    const raw_key = client.keystore.generateRawKeyString(allocator) catch |err| {
+        try writer.print("Failed to generate key: {s}\n", .{@errorName(err)});
+        return;
+    };
+    defer allocator.free(raw_key);
+    
+    try wallet.runWalletCreateOrImport(allocator, args, writer, "created", raw_key);
 }
 
 fn handleWalletImport(
@@ -130,90 +139,33 @@ fn handleWalletImport(
 }
 
 // ============================================================
-// Account Handlers
-// ============================================================
-
-fn handleAccountBalance(
-    allocator: std.mem.Allocator,
-    rpc: anytype,
-    args: anytype,
-    writer: anytype,
-) !void {
-    _ = rpc;
-    const selector = args.account_selector orelse return error.InvalidCli;
-
-    // Query balance (placeholder)
-    const balance = try account.getAccountBalance(allocator, selector);
-
-    if (args.account_balance_json) {
-        try writer.print("{{\"address\":\"{s}\",\"balance\":{d}}}\n", .{ selector, balance });
-    } else {
-        try writer.print("Address: {s}, Balance: {d}\n", .{ selector, balance });
-    }
-}
-
-// ============================================================
 // Transaction Handlers
 // ============================================================
-
-fn handleTxSimulate(
-    allocator: std.mem.Allocator,
-    rpc: anytype,
-    args: anytype,
-    writer: anytype,
-) !void {
-    _ = allocator;
-    _ = rpc;
-    _ = args;
-    try writer.writeAll("Transaction simulation (placeholder)\n");
-}
-
-fn handleTxDryRun(
-    allocator: std.mem.Allocator,
-    rpc: anytype,
-    args: anytype,
-    writer: anytype,
-) !void {
-    _ = allocator;
-    _ = rpc;
-    _ = args;
-    try writer.writeAll("Transaction dry-run (placeholder)\n");
-}
 
 fn handleTxBuild(
     allocator: std.mem.Allocator,
     args: anytype,
     writer: anytype,
 ) !void {
-    _ = allocator;
-    _ = args;
-    try writer.writeAll("Transaction build (placeholder)\n");
-}
-
-fn handleTxSend(
-    allocator: std.mem.Allocator,
-    rpc: anytype,
-    args: anytype,
-    writer: anytype,
-) !void {
-    _ = allocator;
-    _ = rpc;
-    _ = args;
-    try writer.writeAll("Transaction send (placeholder)\n");
-}
-
-fn handleTxPayload(
-    allocator: std.mem.Allocator,
-    args: anytype,
-    writer: anytype,
-) !void {
-    const tx_bytes = args.tx_bytes orelse return error.InvalidCli;
-    const sigs = args.signatures.items;
-
-    const payload = try tx.buildExecutePayloadFromArgs(allocator, args, sigs, null);
-    defer allocator.free(payload);
-
-    try writer.print("{s}\n", .{payload});
+    // Validate arguments
+    try tx.validateTxBuildArguments(args);
+    
+    // Build transaction block
+    const tx_block = try tx.buildTransactionBlockFromArgs(allocator, args);
+    defer allocator.free(tx_block);
+    
+    if (args.tx_send_summarize) {
+        // Output summary
+        var summary = std.json.ObjectMap.init(allocator);
+        defer summary.deinit();
+        
+        try summary.put("kind", .{ .string = "transaction_block" });
+        try summary.put("data", .{ .string = tx_block });
+        
+        try shared.printStructuredJson(writer, summary, args.pretty);
+    } else {
+        try writer.print("{s}\n", .{tx_block});
+    }
 }
 
 // ============================================================
@@ -222,38 +174,115 @@ fn handleTxPayload(
 
 fn handleMovePackage(
     allocator: std.mem.Allocator,
-    rpc: anytype,
+    rpc: *client.SuiRpcClient,
     args: anytype,
     writer: anytype,
 ) !void {
-    _ = allocator;
-    _ = rpc;
-    _ = args;
-    try writer.writeAll("Move package (placeholder)\n");
+    const package_id = args.move_package_id orelse return error.InvalidCli;
+    
+    // Build RPC request for normalized move modules by package
+    const payload = try std.fmt.allocPrint(allocator, "[\"{s}\"]", .{package_id});
+    defer allocator.free(payload);
+    
+    const response = try rpc.sendJsonRpcRequest("sui_getNormalizedMoveModulesByPackage", payload);
+    defer rpc.allocator.free(response);
+    
+    if (args.move_summarize) {
+        // Parse and summarize
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, response, .{});
+        defer parsed.deinit();
+        
+        var module_count: usize = 0;
+        if (parsed.value.object.get("result")) |result| {
+            if (result == .object) {
+                module_count = result.object.count();
+            }
+        }
+        
+        try writer.print("Package: {s}\n", .{package_id});
+        try writer.print("Modules: {d}\n", .{module_count});
+    } else {
+        try writer.print("{s}\n", .{response});
+    }
 }
 
 fn handleMoveModule(
     allocator: std.mem.Allocator,
-    rpc: anytype,
+    rpc: *client.SuiRpcClient,
     args: anytype,
     writer: anytype,
 ) !void {
-    _ = allocator;
-    _ = rpc;
-    _ = args;
-    try writer.writeAll("Move module (placeholder)\n");
+    const package_id = args.move_package_id orelse return error.InvalidCli;
+    const module_name = args.move_module_name orelse return error.InvalidCli;
+    
+    // Build RPC request
+    const payload = try std.fmt.allocPrint(allocator, "[\"{s}\",\"{s}\"]", .{ package_id, module_name });
+    defer allocator.free(payload);
+    
+    const response = try rpc.sendJsonRpcRequest("sui_getNormalizedMoveModule", payload);
+    defer rpc.allocator.free(response);
+    
+    if (args.move_summarize) {
+        // Parse and summarize
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, response, .{});
+        defer parsed.deinit();
+        
+        var struct_count: usize = 0;
+        var function_count: usize = 0;
+        
+        if (parsed.value.object.get("result")) |result| {
+            if (result.object.get("structs")) |structs| {
+                if (structs == .object) struct_count = structs.object.count();
+            }
+            if (result.object.get("exposedFunctions")) |funcs| {
+                if (funcs == .object) function_count = funcs.object.count();
+            }
+        }
+        
+        try writer.print("Package: {s}\n", .{package_id});
+        try writer.print("Module: {s}\n", .{module_name});
+        try writer.print("Structs: {d}, Functions: {d}\n", .{ struct_count, function_count });
+    } else {
+        try writer.print("{s}\n", .{response});
+    }
 }
 
 fn handleMoveFunction(
     allocator: std.mem.Allocator,
-    rpc: anytype,
+    rpc: *client.SuiRpcClient,
     args: anytype,
     writer: anytype,
 ) !void {
-    _ = allocator;
-    _ = rpc;
-    _ = args;
-    try writer.writeAll("Move function (placeholder)\n");
+    const package_id = args.move_package_id orelse return error.InvalidCli;
+    const module_name = args.move_module_name orelse return error.InvalidCli;
+    const function_name = args.move_function_name orelse return error.InvalidCli;
+    
+    // Build RPC request
+    const payload = try std.fmt.allocPrint(allocator, "[\"{s}\",\"{s}\",\"{s}\"]", .{ package_id, module_name, function_name });
+    defer allocator.free(payload);
+    
+    const response = try rpc.sendJsonRpcRequest("sui_getNormalizedMoveFunction", payload);
+    defer rpc.allocator.free(response);
+    
+    if (args.move_function_output) |output_str| {
+        const output = move.parseMoveFunctionTemplateOutput(output_str) catch {
+            try writer.print("{s}\n", .{response});
+            return;
+        };
+        
+        // Parse response and format according to output type
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, response, .{});
+        defer parsed.deinit();
+        
+        switch (output) {
+            .commands => try writer.print("{s}\n", .{response}),
+            .tx_dry_run_request => try writer.writeAll("// Dry run request would be built here\n"),
+            .tx_send_from_keystore_request => try writer.writeAll("// Send request would be built here\n"),
+            else => try writer.print("{s}\n", .{response}),
+        }
+    } else {
+        try writer.print("{s}\n", .{response});
+    }
 }
 
 // ============================================================
@@ -262,26 +291,56 @@ fn handleMoveFunction(
 
 fn handleObjectGet(
     allocator: std.mem.Allocator,
-    rpc: anytype,
+    rpc: *client.SuiRpcClient,
     args: anytype,
     writer: anytype,
 ) !void {
-    _ = allocator;
-    _ = rpc;
-    _ = args;
-    try writer.writeAll("Object get (placeholder)\n");
+    const object_id = args.object_id orelse return error.InvalidCli;
+    
+    // Build RPC request
+    const payload = try std.fmt.allocPrint(allocator, "[\"{s}\"]", .{object_id});
+    defer allocator.free(payload);
+    
+    const response = try rpc.sendJsonRpcRequest("sui_getObject", payload);
+    defer rpc.allocator.free(response);
+    
+    try shared.printJsonResponse(writer, response, args.pretty);
 }
 
 fn handleObjectDynamicFields(
     allocator: std.mem.Allocator,
-    rpc: anytype,
+    rpc: *client.SuiRpcClient,
     args: anytype,
     writer: anytype,
 ) !void {
-    _ = allocator;
-    _ = rpc;
-    _ = args;
-    try writer.writeAll("Object dynamic fields (placeholder)\n");
+    const object_id = args.object_id orelse return error.InvalidCli;
+    
+    // Build RPC request with optional cursor and limit
+    var payload_arr = std.ArrayList(u8).init(allocator);
+    defer payload_arr.deinit();
+    
+    const writer_payload = payload_arr.writer(allocator);
+    try writer_payload.writeAll("[");
+    try writer_payload.print("\"{s}\"", .{object_id});
+    
+    // Add cursor if present
+    if (args.object_cursor) |cursor| {
+        try writer_payload.print(",\"{s}\"", .{cursor});
+    } else {
+        try writer_payload.writeAll(",null");
+    }
+    
+    // Add limit if present
+    if (args.object_limit) |limit| {
+        try writer_payload.print(",{d}", .{limit});
+    }
+    
+    try writer_payload.writeAll("]");
+    
+    const response = try rpc.sendJsonRpcRequest("sui_getDynamicFields", payload_arr.items);
+    defer rpc.allocator.free(response);
+    
+    try shared.printJsonResponse(writer, response, args.pretty);
 }
 
 // ============================================================
@@ -290,14 +349,17 @@ fn handleObjectDynamicFields(
 
 fn handleRpc(
     allocator: std.mem.Allocator,
-    rpc: anytype,
+    rpc: *client.SuiRpcClient,
     args: anytype,
     writer: anytype,
 ) !void {
-    _ = allocator;
-    _ = rpc;
-    _ = args;
-    try writer.writeAll("RPC call (placeholder)\n");
+    const method = args.rpc_method orelse return error.InvalidCli;
+    const params = args.rpc_params orelse "[]";
+    
+    const response = try rpc.sendJsonRpcRequest(method, params);
+    defer rpc.allocator.free(response);
+    
+    try shared.printJsonResponse(writer, response, args.pretty);
 }
 
 // ============================================================
@@ -337,4 +399,79 @@ test "handleUnimplemented outputs message" {
 
     try handleUnimplemented(output.writer(), "test_command");
     try testing.expect(std.mem.containsAtLeast(u8, output.items, 1, "test_command"));
+}
+
+test "handleTxBuild validates arguments" {
+    const testing = std.testing;
+    
+    const MockArgs = struct {
+        tx_build_kind: ?tx.TxKind = null,
+        tx_send_summarize: bool = false,
+        pretty: bool = false,
+    };
+    
+    var args = MockArgs{};
+    var output: std.ArrayList(u8) = .{};
+    defer output.deinit(testing.allocator);
+    
+    // Should not error with empty args (placeholder validation)
+    try handleTxBuild(testing.allocator, &args, output.writer());
+}
+
+test "handleMovePackage requires package_id" {
+    const testing = std.testing;
+    
+    const MockArgs = struct {
+        move_package_id: ?[]const u8 = null,
+        move_summarize: bool = false,
+    };
+    
+    var args = MockArgs{};
+    var output: std.ArrayList(u8) = .{};
+    defer output.deinit(testing.allocator);
+    
+    var rpc = try client.SuiRpcClient.init(testing.allocator, "http://example.local");
+    defer rpc.deinit();
+    
+    const result = handleMovePackage(testing.allocator, &rpc, &args, output.writer());
+    try testing.expectError(error.InvalidCli, result);
+}
+
+test "handleObjectGet requires object_id" {
+    const testing = std.testing;
+    
+    const MockArgs = struct {
+        object_id: ?[]const u8 = null,
+        pretty: bool = false,
+    };
+    
+    var args = MockArgs{};
+    var output: std.ArrayList(u8) = .{};
+    defer output.deinit(testing.allocator);
+    
+    var rpc = try client.SuiRpcClient.init(testing.allocator, "http://example.local");
+    defer rpc.deinit();
+    
+    const result = handleObjectGet(testing.allocator, &rpc, &args, output.writer());
+    try testing.expectError(error.InvalidCli, result);
+}
+
+test "handleRpc requires method" {
+    const testing = std.testing;
+    
+    const MockArgs = struct {
+        rpc_method: ?[]const u8 = null,
+        rpc_params: ?[]const u8 = null,
+        pretty: bool = false,
+    };
+    
+    var args = MockArgs{};
+    var output: std.ArrayList(u8) = .{};
+    defer output.deinit(testing.allocator);
+    
+    var rpc = try client.SuiRpcClient.init(testing.allocator, "http://example.local");
+    defer rpc.deinit();
+    
+    const result = handleRpc(testing.allocator, &rpc, &args, output.writer());
+    try testing.expectError(error.InvalidCli, result);
 }
