@@ -139,6 +139,8 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
   combinations exist.
 - [x] Expose the winning combination clearly in preferred summaries and request
   artifacts.
+- [x] Let existing business-coin candidate scores influence the final
+  business-coin plus gas-reserve plan when multiple complete SUI plans exist.
 
 ### 2. Dual-coin and multi-coin automatic arrangement
 

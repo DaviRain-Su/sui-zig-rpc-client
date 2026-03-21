@@ -9689,6 +9689,9 @@ pub const SuiRpcClient = struct {
         right: move_result.OwnedMoveObjectCandidate,
         min_balance: ?u64,
     ) bool {
+        if (left.selection_score != right.selection_score) {
+            return left.selection_score > right.selection_score;
+        }
         const left_balance = left.balance orelse 0;
         const right_balance = right.balance orelse 0;
         if (min_balance != null) {
@@ -9899,6 +9902,27 @@ pub const SuiRpcClient = struct {
         return 0;
     }
 
+    fn selectedCoinCandidateSelectionScoreForParameter(
+        parameter: move_result.OwnedMoveParameterSummary,
+        selected: SelectedCoinCandidate,
+    ) usize {
+        if (parameter.owned_object_candidates) |candidates| {
+            for (candidates) |candidate| {
+                if (std.mem.eql(u8, candidate.object_id, selected.object_id)) {
+                    return candidate.selection_score;
+                }
+            }
+        }
+        if (parameter.vector_item_owned_object_candidates) |candidates| {
+            for (candidates) |candidate| {
+                if (std.mem.eql(u8, candidate.object_id, selected.object_id)) {
+                    return candidate.selection_score;
+                }
+            }
+        }
+        return 0;
+    }
+
     fn buildPlannedCoinSelectionScoreKey(
         allocator: std.mem.Allocator,
         parameters: []move_result.OwnedMoveParameterSummary,
@@ -9915,11 +9939,13 @@ pub const SuiRpcClient = struct {
 
             if (planned_selections[index].scalar) |selected| {
                 try writer.writeByte(0x01);
+                const selection_score = selectedCoinCandidateSelectionScoreForParameter(parameter, selected);
                 const balance = selectedCoinCandidateBalanceForParameter(parameter, selected);
                 const sort_balance = if (amount_hints[index] != null)
                     balance
                 else
                     std.math.maxInt(u64) - balance;
+                try writer.writeInt(usize, std.math.maxInt(usize) - selection_score, .big);
                 try writer.writeInt(u64, sort_balance, .big);
                 try writer.writeAll(selected.object_id);
                 try writer.writeByte(0);
@@ -9930,14 +9956,17 @@ pub const SuiRpcClient = struct {
                 try writer.writeByte(0x02);
                 const source_count: u64 = @intCast(selected_values.len);
                 var total_balance: u64 = 0;
+                var total_selection_score: usize = 0;
                 for (selected_values) |selected| {
                     total_balance +|= selectedCoinCandidateBalanceForParameter(parameter, selected);
+                    total_selection_score +|= selectedCoinCandidateSelectionScoreForParameter(parameter, selected);
                 }
                 const sort_total_balance = if (amount_hints[index] != null)
                     total_balance
                 else
                     std.math.maxInt(u64) - total_balance;
                 try writer.writeInt(u64, source_count, .big);
+                try writer.writeInt(usize, std.math.maxInt(usize) - total_selection_score, .big);
                 try writer.writeInt(u64, sort_total_balance, .big);
                 for (selected_values) |selected| {
                     try writer.writeAll(selected.object_id);
@@ -10128,21 +10157,24 @@ pub const SuiRpcClient = struct {
         min_balance: u64,
         excluded_object_ids: []const []const u8,
     ) ?SelectedCoinCandidate {
-        var selected: ?SelectedCoinCandidate = null;
-        var selected_balance: u64 = 0;
-        for (candidates) |candidate| {
+        var selected_index: ?usize = null;
+        for (candidates, 0..) |candidate, candidate_index| {
             if (moveObjectIdIsExcluded(excluded_object_ids, candidate.object_id)) continue;
             const balance = candidate.balance orelse continue;
             if (balance < min_balance) continue;
-            if (selected == null or balance < selected_balance) {
-                selected = .{
-                    .object_id = candidate.object_id,
-                    .token = candidate.object_input_select_token,
-                };
-                selected_balance = balance;
+            if (selected_index == null or scalarBusinessCoinCandidateShouldSortBefore(
+                candidate,
+                candidates[selected_index.?],
+                min_balance,
+            )) {
+                selected_index = candidate_index;
             }
         }
-        return selected;
+        const index = selected_index orelse return null;
+        return .{
+            .object_id = candidates[index].object_id,
+            .token = candidates[index].object_input_select_token,
+        };
     }
 
     fn selectSmallestSufficientCoinCandidateToken(
@@ -10179,7 +10211,11 @@ pub const SuiRpcClient = struct {
                 if (used[index]) continue;
                 if (moveObjectIdIsExcluded(excluded_object_ids, candidate.object_id)) continue;
                 const balance = candidate.balance orelse continue;
-                if (next_index == null or balance > next_balance) {
+                if (next_index == null or
+                    balance > next_balance or
+                    (balance == next_balance and
+                        scalarBusinessCoinCandidateShouldSortBefore(candidate, candidates[next_index.?], null)))
+                {
                     next_index = index;
                     next_balance = balance;
                 }
@@ -10216,20 +10252,23 @@ pub const SuiRpcClient = struct {
         candidates: []const move_result.OwnedMoveObjectCandidate,
         excluded_object_ids: []const []const u8,
     ) ?SelectedCoinCandidate {
-        var selected: ?SelectedCoinCandidate = null;
-        var selected_balance: u64 = 0;
-        for (candidates) |candidate| {
+        var selected_index: ?usize = null;
+        for (candidates, 0..) |candidate, candidate_index| {
             if (moveObjectIdIsExcluded(excluded_object_ids, candidate.object_id)) continue;
-            const balance = candidate.balance orelse continue;
-            if (selected == null or balance > selected_balance) {
-                selected = .{
-                    .object_id = candidate.object_id,
-                    .token = candidate.object_input_select_token,
-                };
-                selected_balance = balance;
+            _ = candidate.balance orelse continue;
+            if (selected_index == null or scalarBusinessCoinCandidateShouldSortBefore(
+                candidate,
+                candidates[selected_index.?],
+                null,
+            )) {
+                selected_index = candidate_index;
             }
         }
-        return selected;
+        const index = selected_index orelse return null;
+        return .{
+            .object_id = candidates[index].object_id,
+            .token = candidates[index].object_input_select_token,
+        };
     }
 
     fn isNonCoinOwnedMoveParameter(
@@ -25420,6 +25459,57 @@ test "applyCrossParameterBusinessCoinSelectionHints picks the gas reserve that p
     try testing.expectEqualStrings(
         "[\"select:coin-gas-huge\"]",
         parameters[1].auto_selected_arg_json.?,
+    );
+}
+
+test "applyCrossParameterBusinessCoinSelectionHints lets scored business coin plans beat tighter fit gas reserves" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const candidates = try allocator.alloc(move_result.OwnedMoveObjectCandidate, 2);
+    errdefer allocator.free(candidates);
+    candidates[0] = .{
+        .object_id = try allocator.dupe(u8, "0xcoin-preferred"),
+        .version = 1,
+        .digest = try allocator.dupe(u8, "digest-preferred"),
+        .balance = 80,
+        .selection_score = 9,
+        .object_input_select_token = try allocator.dupe(u8, "select:coin-preferred"),
+    };
+    candidates[1] = .{
+        .object_id = try allocator.dupe(u8, "0xcoin-tight-fit"),
+        .version = 2,
+        .digest = try allocator.dupe(u8, "digest-tight-fit"),
+        .balance = 50,
+        .selection_score = 1,
+        .object_input_select_token = try allocator.dupe(u8, "select:coin-tight-fit"),
+    };
+    errdefer {
+        for (candidates) |*candidate| candidate.deinit(allocator);
+    }
+
+    const parameters = try allocator.alloc(move_result.OwnedMoveParameterSummary, 2);
+    defer {
+        for (parameters) |*parameter| parameter.deinit(allocator);
+        allocator.free(parameters);
+    }
+    parameters[0] = .{
+        .signature = try allocator.dupe(u8, "0x2::coin::Coin<0x2::sui::SUI>"),
+        .owned_object_candidates = candidates,
+    };
+    parameters[1] = .{
+        .signature = try allocator.dupe(u8, "u64"),
+        .lowering_kind = "u64",
+        .explicit_arg_json = try allocator.dupe(u8, "50"),
+    };
+
+    try SuiRpcClient.applyCrossParameterBusinessCoinSelectionHints(allocator, parameters);
+
+    try testing.expectEqualStrings(
+        "\"select:coin-preferred\"",
+        parameters[0].auto_selected_arg_json.?,
     );
 }
 
