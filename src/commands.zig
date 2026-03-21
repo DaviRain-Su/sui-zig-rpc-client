@@ -25671,6 +25671,36 @@ test "runCommand natural_do balance delegates to wallet balance path" {
     try testing.expect(std.mem.indexOf(u8, output.items, "0x123") != null);
 }
 
+// Regression: ISSUE-ENG-NL-DELEGATION-SWAP — natural_do swap should stay on the preview-only path
+// Found by /plan-eng-review on 2026-03-21
+// Report: .gstack/qa-reports/qa-report-{domain}-{date}.md
+
+test "runCommand natural_do swap stays preview only" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "do",
+        "--intent-json",
+        "{\"intent\":\"swap\",\"from\":\"SUI\",\"to\":\"USDC\",\"amount\":\"25\",\"slippage_bps\":50}",
+    });
+    defer args.deinit(allocator);
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    try testing.expect(std.mem.indexOf(u8, output.items, "Parsed intent: swap 25 SUI -> USDC") != null);
+    try testing.expect(std.mem.indexOf(u8, output.items, "Full swap execution coming soon") != null);
+}
+
 test "runCommand wallet_balance aggregates all coin pages by default" {
     const testing = std.testing;
 
