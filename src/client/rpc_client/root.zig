@@ -120,6 +120,11 @@ test "rpc_client module imports successfully" {
     _ = move_module;
 }
 
+// Import integration tests
+comptime {
+    _ = @import("integration_test.zig");
+}
+
 test "re-exports work correctly" {
     const testing = std.testing;
 
