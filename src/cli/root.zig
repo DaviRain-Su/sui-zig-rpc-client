@@ -11,6 +11,10 @@ pub const parser = @import("parser.zig");
 pub const help = @import("help.zig");
 pub const validator = @import("validator.zig");
 pub const utils = @import("utils.zig");
+pub const integration = @import("integration.zig");
+
+// Import tests
+_ = @import("e2e_test.zig");
 
 // Re-export commonly used types
 pub const Command = types.Command;
@@ -56,6 +60,8 @@ test "cli module imports successfully" {
     _ = help;
     _ = validator;
     _ = utils;
+    _ = integration;
+    // e2e_test is imported with _ = @import("e2e_test.zig");
 }
 
 test "re-exports work correctly" {
