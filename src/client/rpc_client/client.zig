@@ -7502,6 +7502,399 @@ pub const SuiRpcClient = struct {
         };
     }
 
+    const SelectedSharedObjectCandidate = struct {
+        object_id: []const u8,
+        token: []const u8,
+    };
+
+    const PlannedSharedObjectParameterSelection = struct {
+        scalar: ?SelectedSharedObjectCandidate = null,
+    };
+
+    fn selectedSharedObjectCandidateMetadataForParameter(
+        parameter: move_result.OwnedMoveParameterSummary,
+        selected: SelectedSharedObjectCandidate,
+    ) ?move_result.SharedMoveObjectCandidate {
+        const candidates = parameter.shared_object_candidates orelse return null;
+        for (candidates) |candidate| {
+            if (std.mem.eql(u8, candidate.object_id, selected.object_id)) return candidate;
+        }
+        return null;
+    }
+
+    fn sharedParameterCandidateIsExcluded(
+        parameter: move_result.OwnedMoveParameterSummary,
+        object_id: []const u8,
+        mutable_reserved_object_ids: []const []const u8,
+        all_selected_object_ids: []const []const u8,
+    ) bool {
+        if (moveObjectIdIsExcluded(mutable_reserved_object_ids, object_id)) return true;
+        return isMoveMutableReferenceSignature(parameter.signature) and
+            moveObjectIdIsExcluded(all_selected_object_ids, object_id);
+    }
+
+    fn collectScalarSharedCandidateIndicesExcluding(
+        allocator: std.mem.Allocator,
+        parameter: move_result.OwnedMoveParameterSummary,
+        candidates: []const move_result.SharedMoveObjectCandidate,
+        mutable_reserved_object_ids: []const []const u8,
+        all_selected_object_ids: []const []const u8,
+    ) ![]usize {
+        var indices = std.ArrayList(usize).empty;
+        defer indices.deinit(allocator);
+
+        for (candidates, 0..) |candidate, candidate_index| {
+            if (sharedParameterCandidateIsExcluded(
+                parameter,
+                candidate.object_id,
+                mutable_reserved_object_ids,
+                all_selected_object_ids,
+            )) continue;
+            try indices.append(allocator, candidate_index);
+        }
+
+        var index: usize = 1;
+        while (index < indices.items.len) : (index += 1) {
+            var scan = index;
+            while (scan > 0 and sharedCandidateShouldSortBefore(
+                candidates[indices.items[scan]],
+                candidates[indices.items[scan - 1]],
+            )) : (scan -= 1) {
+                std.mem.swap(usize, &indices.items[scan], &indices.items[scan - 1]);
+            }
+        }
+
+        return try indices.toOwnedSlice(allocator);
+    }
+
+    fn moveParameterHasStableSharedAutoSelection(
+        allocator: std.mem.Allocator,
+        parameter: move_result.OwnedMoveParameterSummary,
+        mutable_reserved_object_ids: []const []const u8,
+        all_selected_object_ids: []const []const u8,
+    ) bool {
+        const value = parameter.auto_selected_arg_json orelse return false;
+        if (parameter.shared_object_candidates == null) return false;
+        if (isMoveMutableReferenceSignature(parameter.signature)) {
+            return !argumentJsonUsesExcludedObjectIds(allocator, value, all_selected_object_ids);
+        }
+        return !argumentJsonUsesExcludedObjectIds(allocator, value, mutable_reserved_object_ids);
+    }
+
+    fn appendReservedMoveObjectIdsFromArgumentJsonTextConst(
+        allocator: std.mem.Allocator,
+        reserved_object_ids: *std.ArrayList([]const u8),
+        arg_json: []const u8,
+    ) !void {
+        var collected = std.ArrayList([]u8).empty;
+        var transferred: usize = 0;
+        errdefer {
+            for (collected.items[transferred..]) |value| allocator.free(value);
+            collected.deinit(allocator);
+        }
+        defer collected.deinit(allocator);
+
+        try appendReservedMoveObjectIdsFromArgumentJsonText(
+            allocator,
+            &collected,
+            arg_json,
+        );
+        for (collected.items) |value| {
+            try reserved_object_ids.append(allocator, value);
+            transferred += 1;
+        }
+    }
+
+    fn markSharedParametersNeedingCrossPlanning(
+        parameters: []const move_result.OwnedMoveParameterSummary,
+        mutable_reserved_object_ids: []const []const u8,
+        all_selected_object_ids: []const []const u8,
+        needs_replanning: []bool,
+    ) void {
+        @memset(needs_replanning, false);
+
+        for (parameters, 0..) |parameter, parameter_index| {
+            if (parameter.omitted_from_explicit_args or parameter.explicit_arg_json != null) continue;
+            const candidates = parameter.shared_object_candidates orelse continue;
+
+            const parameter_is_mutable = isMoveMutableReferenceSignature(parameter.signature);
+            for (candidates) |candidate| {
+                if (sharedParameterCandidateIsExcluded(
+                    parameter,
+                    candidate.object_id,
+                    mutable_reserved_object_ids,
+                    all_selected_object_ids,
+                )) {
+                    needs_replanning[parameter_index] = true;
+                }
+
+                for (parameters[parameter_index + 1 ..], parameter_index + 1..) |other_parameter, other_index| {
+                    if (other_parameter.omitted_from_explicit_args or other_parameter.explicit_arg_json != null) continue;
+                    const other_candidates = other_parameter.shared_object_candidates orelse continue;
+
+                    const other_is_mutable = isMoveMutableReferenceSignature(other_parameter.signature);
+                    for (other_candidates) |other_candidate| {
+                        if (!std.mem.eql(u8, candidate.object_id, other_candidate.object_id)) continue;
+                        if (parameter_is_mutable or other_is_mutable) {
+                            needs_replanning[parameter_index] = true;
+                            needs_replanning[other_index] = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn buildPlannedSharedObjectSelectionScoreKey(
+        allocator: std.mem.Allocator,
+        parameters: []move_result.OwnedMoveParameterSummary,
+        needs_replanning: []const bool,
+        planned_selections: []const PlannedSharedObjectParameterSelection,
+    ) !?[]u8 {
+        var output = std.ArrayList(u8).empty;
+        defer output.deinit(allocator);
+        const writer = output.writer(allocator);
+
+        var total_selection_score: usize = 0;
+        for (parameters, 0..) |parameter, index| {
+            if (parameter.omitted_from_explicit_args or parameter.explicit_arg_json != null) continue;
+            if (parameter.shared_object_candidates == null) continue;
+            if (!needs_replanning[index]) continue;
+            const selected = planned_selections[index].scalar orelse return null;
+            const candidate = selectedSharedObjectCandidateMetadataForParameter(parameter, selected) orelse return null;
+            total_selection_score +|= candidate.selection_score;
+        }
+
+        try writer.writeInt(usize, std.math.maxInt(usize) - total_selection_score, .big);
+        for (parameters, 0..) |parameter, index| {
+            if (parameter.omitted_from_explicit_args or parameter.explicit_arg_json != null) continue;
+            if (parameter.shared_object_candidates == null) continue;
+            if (!needs_replanning[index]) continue;
+            const selected = planned_selections[index].scalar orelse return null;
+            const candidate = selectedSharedObjectCandidateMetadataForParameter(parameter, selected) orelse return null;
+            try writer.writeByte(0x01);
+            try writer.writeInt(usize, std.math.maxInt(usize) - candidate.selection_score, .big);
+            try writer.writeInt(usize, candidate.discovery_rank, .big);
+            try writer.writeAll(candidate.object_id);
+            try writer.writeByte(0);
+        }
+
+        return try output.toOwnedSlice(allocator);
+    }
+
+    fn copyPlannedSharedObjectSelections(
+        destination: []PlannedSharedObjectParameterSelection,
+        source: []const PlannedSharedObjectParameterSelection,
+    ) void {
+        @memcpy(destination, source);
+    }
+
+    fn selectSharedObjectPlanRecursive(
+        allocator: std.mem.Allocator,
+        parameters: []move_result.OwnedMoveParameterSummary,
+        needs_replanning: []const bool,
+        parameter_index: usize,
+        mutable_reserved_object_ids: *std.ArrayList([]const u8),
+        all_selected_object_ids: *std.ArrayList([]const u8),
+        current_selections: []PlannedSharedObjectParameterSelection,
+        best_selections: []PlannedSharedObjectParameterSelection,
+        best_score_key: *?[]u8,
+    ) !void {
+        if (parameter_index >= parameters.len) {
+            const maybe_score_key = try buildPlannedSharedObjectSelectionScoreKey(
+                allocator,
+                parameters,
+                needs_replanning,
+                current_selections,
+            );
+            const score_key = maybe_score_key orelse return;
+            errdefer allocator.free(score_key);
+            const should_replace = if (best_score_key.*) |best_value|
+                std.mem.order(u8, score_key, best_value) == .lt
+            else
+                true;
+            if (should_replace) {
+                if (best_score_key.*) |value| allocator.free(value);
+                best_score_key.* = score_key;
+                copyPlannedSharedObjectSelections(best_selections, current_selections);
+            } else {
+                allocator.free(score_key);
+            }
+            return;
+        }
+
+        const parameter = parameters[parameter_index];
+        if (parameter.omitted_from_explicit_args or
+            parameter.explicit_arg_json != null or
+            parameter.shared_object_candidates == null or
+            !needs_replanning[parameter_index])
+        {
+            try selectSharedObjectPlanRecursive(
+                allocator,
+                parameters,
+                needs_replanning,
+                parameter_index + 1,
+                mutable_reserved_object_ids,
+                all_selected_object_ids,
+                current_selections,
+                best_selections,
+                best_score_key,
+            );
+            return;
+        }
+
+        const candidates = parameter.shared_object_candidates orelse return;
+        const candidate_indices = try collectScalarSharedCandidateIndicesExcluding(
+            allocator,
+            parameter,
+            candidates,
+            mutable_reserved_object_ids.items,
+            all_selected_object_ids.items,
+        );
+        defer allocator.free(candidate_indices);
+        if (candidate_indices.len == 0) return;
+
+        for (candidate_indices) |candidate_index| {
+            const candidate = candidates[candidate_index];
+            current_selections[parameter_index].scalar = .{
+                .object_id = candidate.object_id,
+                .token = if (isMoveMutableReferenceSignature(parameter.signature))
+                    candidate.mutable_shared_object_input_select_token
+                else
+                    candidate.shared_object_input_select_token,
+            };
+            try all_selected_object_ids.append(allocator, candidate.object_id);
+            if (isMoveMutableReferenceSignature(parameter.signature)) {
+                try mutable_reserved_object_ids.append(allocator, candidate.object_id);
+            }
+            try selectSharedObjectPlanRecursive(
+                allocator,
+                parameters,
+                needs_replanning,
+                parameter_index + 1,
+                mutable_reserved_object_ids,
+                all_selected_object_ids,
+                current_selections,
+                best_selections,
+                best_score_key,
+            );
+            if (isMoveMutableReferenceSignature(parameter.signature)) {
+                _ = mutable_reserved_object_ids.pop();
+            }
+            _ = all_selected_object_ids.pop();
+            current_selections[parameter_index] = .{};
+        }
+    }
+
+    fn applyCrossParameterSharedObjectSelectionHints(
+        allocator: std.mem.Allocator,
+        parameters: []move_result.OwnedMoveParameterSummary,
+    ) !void {
+        const needs_replanning = try allocator.alloc(bool, parameters.len);
+        defer allocator.free(needs_replanning);
+
+        const planned_selections = try allocator.alloc(PlannedSharedObjectParameterSelection, parameters.len);
+        defer allocator.free(planned_selections);
+        for (planned_selections) |*selection| selection.* = .{};
+
+        var mutable_reserved_object_ids = std.ArrayList([]const u8).empty;
+        defer {
+            for (mutable_reserved_object_ids.items) |value| allocator.free(value);
+            mutable_reserved_object_ids.deinit(allocator);
+        }
+        var all_selected_object_ids = std.ArrayList([]const u8).empty;
+        defer {
+            for (all_selected_object_ids.items) |value| allocator.free(value);
+            all_selected_object_ids.deinit(allocator);
+        }
+
+        for (parameters) |parameter| {
+            if (parameter.omitted_from_explicit_args) continue;
+            const value = parameter.explicit_arg_json orelse continue;
+            if (parameter.shared_object_candidates == null) continue;
+            if (isMoveMutableReferenceSignature(parameter.signature)) {
+                try appendReservedMoveObjectIdsFromArgumentJsonTextConst(
+                    allocator,
+                    &mutable_reserved_object_ids,
+                    value,
+                );
+            }
+            try appendReservedMoveObjectIdsFromArgumentJsonTextConst(
+                allocator,
+                &all_selected_object_ids,
+                value,
+            );
+        }
+
+        markSharedParametersNeedingCrossPlanning(
+            parameters,
+            mutable_reserved_object_ids.items,
+            all_selected_object_ids.items,
+            needs_replanning,
+        );
+        var any_replanning_needed = false;
+        for (needs_replanning) |value| {
+            if (value) {
+                any_replanning_needed = true;
+                break;
+            }
+        }
+        if (!any_replanning_needed) return;
+
+        for (parameters, 0..) |parameter, index| {
+            if (parameter.omitted_from_explicit_args or parameter.explicit_arg_json != null) continue;
+            if (needs_replanning[index]) continue;
+            const value = parameter.auto_selected_arg_json orelse continue;
+            if (parameter.shared_object_candidates == null) continue;
+            if (isMoveMutableReferenceSignature(parameter.signature)) {
+                try appendReservedMoveObjectIdsFromArgumentJsonTextConst(
+                    allocator,
+                    &mutable_reserved_object_ids,
+                    value,
+                );
+            }
+            try appendReservedMoveObjectIdsFromArgumentJsonTextConst(
+                allocator,
+                &all_selected_object_ids,
+                value,
+            );
+        }
+
+        var best_score_key: ?[]u8 = null;
+        defer if (best_score_key) |value| allocator.free(value);
+        const current_selections = try allocator.alloc(PlannedSharedObjectParameterSelection, parameters.len);
+        defer allocator.free(current_selections);
+        for (current_selections) |*selection| selection.* = .{};
+
+        try selectSharedObjectPlanRecursive(
+            allocator,
+            parameters,
+            needs_replanning,
+            0,
+            &mutable_reserved_object_ids,
+            &all_selected_object_ids,
+            current_selections,
+            planned_selections,
+            &best_score_key,
+        );
+
+        if (best_score_key == null) return;
+
+        for (parameters, 0..) |*parameter, index| {
+            if (parameter.omitted_from_explicit_args or parameter.explicit_arg_json != null) continue;
+            if (parameter.shared_object_candidates == null) continue;
+            if (!needs_replanning[index]) continue;
+
+            const selected = planned_selections[index].scalar orelse continue;
+            replaceMoveParameterAutoSelectedArgJson(
+                allocator,
+                parameter,
+                try buildAutoSelectedScalarArgJson(allocator, selected.token),
+            );
+            parameter.auto_selected_via_tiebreak = false;
+        }
+    }
+
     fn populateSharedObjectCandidateFallbacksFromMoveParameters(
         self: *SuiRpcClient,
         allocator: std.mem.Allocator,
@@ -9249,6 +9642,7 @@ pub const SuiRpcClient = struct {
                 &arg_json_cache,
                 &selected_object_ids_cache,
             );
+            try applyCrossParameterSharedObjectSelectionHints(allocator, parameters);
             try applyCrossParameterBusinessCoinSelectionHints(allocator, parameters);
             try applyCrossParameterOwnedObjectSelectionHints(allocator, parameters);
 
@@ -25484,6 +25878,142 @@ test "collectObjectDiscoverySeedObjectIdsFromMoveParameters skips candidate seed
     try testing.expectEqualStrings("0xselected", seeds[0]);
     try testing.expectEqualStrings("0xtiebreak-a", seeds[1]);
     try testing.expectEqualStrings("0xtiebreak-b", seeds[2]);
+}
+
+test "applyCrossParameterSharedObjectSelectionHints ranks a distinct mutable shared plan across parameters" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const first_candidates = try allocator.alloc(move_result.SharedMoveObjectCandidate, 2);
+    errdefer allocator.free(first_candidates);
+    first_candidates[0] = .{
+        .object_id = try allocator.dupe(u8, "0xpool-a"),
+        .selection_score = 10,
+        .discovery_rank = 0,
+        .initial_shared_version = 1,
+        .shared_object_input_select_token = try allocator.dupe(u8, "select:pool-a"),
+        .mutable_shared_object_input_select_token = try allocator.dupe(u8, "select:pool-a-mut"),
+    };
+    first_candidates[1] = .{
+        .object_id = try allocator.dupe(u8, "0xpool-b"),
+        .selection_score = 9,
+        .discovery_rank = 1,
+        .initial_shared_version = 2,
+        .shared_object_input_select_token = try allocator.dupe(u8, "select:pool-b"),
+        .mutable_shared_object_input_select_token = try allocator.dupe(u8, "select:pool-b-mut"),
+    };
+    errdefer {
+        for (first_candidates) |*candidate| candidate.deinit(allocator);
+    }
+
+    const second_candidates = try allocator.alloc(move_result.SharedMoveObjectCandidate, 2);
+    errdefer allocator.free(second_candidates);
+    second_candidates[0] = .{
+        .object_id = try allocator.dupe(u8, "0xpool-a"),
+        .selection_score = 10,
+        .discovery_rank = 0,
+        .initial_shared_version = 1,
+        .shared_object_input_select_token = try allocator.dupe(u8, "select:pool-a"),
+        .mutable_shared_object_input_select_token = try allocator.dupe(u8, "select:pool-a-mut"),
+    };
+    second_candidates[1] = .{
+        .object_id = try allocator.dupe(u8, "0xpool-c"),
+        .selection_score = 1,
+        .discovery_rank = 1,
+        .initial_shared_version = 3,
+        .shared_object_input_select_token = try allocator.dupe(u8, "select:pool-c"),
+        .mutable_shared_object_input_select_token = try allocator.dupe(u8, "select:pool-c-mut"),
+    };
+    errdefer {
+        for (second_candidates) |*candidate| candidate.deinit(allocator);
+    }
+
+    const parameters = try allocator.alloc(move_result.OwnedMoveParameterSummary, 2);
+    defer {
+        for (parameters) |*parameter| parameter.deinit(allocator);
+        allocator.free(parameters);
+    }
+    parameters[0] = .{
+        .signature = try allocator.dupe(u8, "&mut 0x2a::pool::Pool"),
+        .shared_object_candidates = first_candidates,
+    };
+    parameters[1] = .{
+        .signature = try allocator.dupe(u8, "&mut 0x2a::pool::Pool"),
+        .shared_object_candidates = second_candidates,
+    };
+
+    try SuiRpcClient.applyCrossParameterSharedObjectSelectionHints(allocator, parameters);
+
+    try testing.expectEqualStrings(
+        "\"select:pool-b-mut\"",
+        parameters[0].auto_selected_arg_json.?,
+    );
+    try testing.expectEqualStrings(
+        "\"select:pool-a-mut\"",
+        parameters[1].auto_selected_arg_json.?,
+    );
+}
+
+test "applyCrossParameterSharedObjectSelectionHints allows immutable shared reuse" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const first_candidates = try allocator.alloc(move_result.SharedMoveObjectCandidate, 1);
+    errdefer allocator.free(first_candidates);
+    first_candidates[0] = .{
+        .object_id = try allocator.dupe(u8, "0xclock"),
+        .selection_score = 10,
+        .discovery_rank = 0,
+        .initial_shared_version = 1,
+        .shared_object_input_select_token = try allocator.dupe(u8, "select:clock"),
+        .mutable_shared_object_input_select_token = try allocator.dupe(u8, "select:clock-mut"),
+    };
+    errdefer {
+        for (first_candidates) |*candidate| candidate.deinit(allocator);
+    }
+
+    const second_candidates = try allocator.alloc(move_result.SharedMoveObjectCandidate, 1);
+    errdefer allocator.free(second_candidates);
+    second_candidates[0] = .{
+        .object_id = try allocator.dupe(u8, "0xclock"),
+        .selection_score = 10,
+        .discovery_rank = 0,
+        .initial_shared_version = 1,
+        .shared_object_input_select_token = try allocator.dupe(u8, "select:clock"),
+        .mutable_shared_object_input_select_token = try allocator.dupe(u8, "select:clock-mut"),
+    };
+    errdefer {
+        for (second_candidates) |*candidate| candidate.deinit(allocator);
+    }
+
+    const parameters = try allocator.alloc(move_result.OwnedMoveParameterSummary, 2);
+    defer {
+        for (parameters) |*parameter| parameter.deinit(allocator);
+        allocator.free(parameters);
+    }
+    parameters[0] = .{
+        .signature = try allocator.dupe(u8, "&0x2::clock::Clock"),
+        .shared_object_candidates = first_candidates,
+    };
+    parameters[1] = .{
+        .signature = try allocator.dupe(u8, "&0x2::clock::Clock"),
+        .shared_object_candidates = second_candidates,
+    };
+
+    try SuiRpcClient.applyCrossParameterSharedObjectSelectionHints(allocator, parameters);
+
+    try testing.expectEqualStrings(
+        "\"select:clock\"",
+        parameters[0].auto_selected_arg_json.?,
+    );
+    try testing.expectEqualStrings(
+        "\"select:clock\"",
+        parameters[1].auto_selected_arg_json.?,
+    );
 }
 
 test "applyCrossParameterOwnedObjectSelectionHints ranks a complete scalar owned-object plan" {
