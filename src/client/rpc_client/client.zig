@@ -10634,10 +10634,30 @@ pub const SuiRpcClient = struct {
             }
         }
 
+        var plan_reserved_object_ids = std.ArrayList([]u8).empty;
+        defer {
+            for (plan_reserved_object_ids.items) |value| allocator.free(value);
+            plan_reserved_object_ids.deinit(allocator);
+        }
+        for (reserved_object_ids.items) |value| {
+            try plan_reserved_object_ids.append(allocator, try allocator.dupe(u8, value));
+        }
+        for (parameters) |parameter| {
+            if (parameter.omitted_from_explicit_args or parameter.explicit_arg_json != null) continue;
+            const value = parameter.auto_selected_arg_json orelse continue;
+            if (!(isNonCoinOwnedMoveParameter(parameter) or isNonCoinVectorOwnedMoveParameter(parameter))) continue;
+            if (argumentJsonUsesExcludedObjectIds(allocator, value, reserved_object_ids.items)) continue;
+            try appendReservedMoveObjectIdsFromArgumentJsonText(
+                allocator,
+                &plan_reserved_object_ids,
+                value,
+            );
+        }
+
         const has_plan = try selectOwnedObjectPlanExcluding(
             allocator,
             parameters,
-            reserved_object_ids.items,
+            plan_reserved_object_ids.items,
             planned_selections,
         );
 
@@ -25541,6 +25561,82 @@ test "applyCrossParameterOwnedObjectSelectionHints keeps stable owned auto selec
     );
     try testing.expectEqualStrings(
         "\"select:pool-open\"",
+        parameters[1].auto_selected_arg_json.?,
+    );
+}
+
+test "applyCrossParameterOwnedObjectSelectionHints reserves stable vector-owned selections before scalar replanning" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const vector_candidates = try allocator.alloc(move_result.OwnedMoveObjectCandidate, 2);
+    errdefer allocator.free(vector_candidates);
+    vector_candidates[0] = .{
+        .object_id = try allocator.dupe(u8, "0xvector-a"),
+        .version = 1,
+        .digest = try allocator.dupe(u8, "digest-vector-a"),
+        .selection_score = 7,
+        .object_input_select_token = try allocator.dupe(u8, "select:vector-a"),
+    };
+    vector_candidates[1] = .{
+        .object_id = try allocator.dupe(u8, "0xvector-b"),
+        .version = 2,
+        .digest = try allocator.dupe(u8, "digest-vector-b"),
+        .selection_score = 6,
+        .object_input_select_token = try allocator.dupe(u8, "select:vector-b"),
+    };
+    errdefer {
+        for (vector_candidates) |*candidate| candidate.deinit(allocator);
+    }
+
+    const scalar_candidates = try allocator.alloc(move_result.OwnedMoveObjectCandidate, 2);
+    errdefer allocator.free(scalar_candidates);
+    scalar_candidates[0] = .{
+        .object_id = try allocator.dupe(u8, "0xvector-a"),
+        .version = 3,
+        .digest = try allocator.dupe(u8, "digest-scalar-conflict"),
+        .selection_score = 10,
+        .object_input_select_token = try allocator.dupe(u8, "select:vector-a"),
+    };
+    scalar_candidates[1] = .{
+        .object_id = try allocator.dupe(u8, "0xscalar-open"),
+        .version = 4,
+        .digest = try allocator.dupe(u8, "digest-scalar-open"),
+        .selection_score = 1,
+        .object_input_select_token = try allocator.dupe(u8, "select:scalar-open"),
+    };
+    errdefer {
+        for (scalar_candidates) |*candidate| candidate.deinit(allocator);
+    }
+
+    const parameters = try allocator.alloc(move_result.OwnedMoveParameterSummary, 2);
+    defer {
+        for (parameters) |*parameter| parameter.deinit(allocator);
+        allocator.free(parameters);
+    }
+    parameters[0] = .{
+        .signature = try allocator.dupe(u8, "vector<0x2a::position::Position>"),
+        .vector_item_owned_object_candidates = vector_candidates,
+        .auto_selected_arg_json = try allocator.dupe(
+            u8,
+            "[\"select:vector-a\",\"select:vector-b\"]",
+        ),
+    };
+    parameters[1] = .{
+        .signature = try allocator.dupe(u8, "0x2a::position::Position"),
+        .owned_object_candidates = scalar_candidates,
+    };
+
+    try SuiRpcClient.applyCrossParameterOwnedObjectSelectionHints(allocator, parameters);
+
+    try testing.expectEqualStrings(
+        "[\"select:vector-a\",\"select:vector-b\"]",
+        parameters[0].auto_selected_arg_json.?,
+    );
+    try testing.expectEqualStrings(
+        "\"select:scalar-open\"",
         parameters[1].auto_selected_arg_json.?,
     );
 }

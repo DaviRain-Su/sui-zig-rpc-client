@@ -148,6 +148,8 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
   business-coin plans are otherwise equal.
 - [x] Rank scalar non-coin owned-object candidates as a complete plan before
   falling back to per-parameter greedy selection.
+- [x] Reserve stable non-coin owned/vector selections before scalar owned-object
+  replanning so later scalar choices cannot steal already-stable objects.
 
 ### 2. Dual-coin and multi-coin automatic arrangement
 
