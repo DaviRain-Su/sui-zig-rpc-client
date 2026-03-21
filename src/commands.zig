@@ -25381,6 +25381,96 @@ test "runCommand wallet_balance aggregates all coin pages when requested" {
     try testing.expectEqualStrings("9", balances[1].object.get("total_balance").?.string);
 }
 
+test "runCommand wallet_coins uses suix_getAllCoins when requesting all coin types" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const keystore_path = try std.fmt.allocPrint(allocator, "tmp_commands_wallet_coins_all_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(keystore_path);
+
+    const old_override = client.keystore.test_keystore_path_override;
+    client.keystore.test_keystore_path_override = keystore_path;
+    defer client.keystore.test_keystore_path_override = old_override;
+
+    var file = try std.fs.cwd().createFile(keystore_path, .{ .truncate = true });
+    defer file.close();
+    defer _ = std.fs.cwd().deleteFile(keystore_path) catch {};
+    try file.writeAll("[{\"alias\":\"main\",\"privateKey\":\"sk_wallet\",\"address\":\"0x123\"}]");
+
+    var request_count: usize = 0;
+    var params_ok = false;
+
+    const MockContext = struct {
+        request_count: *usize,
+        params_ok: *bool,
+    };
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const ctx = @as(*MockContext, @ptrCast(@alignCast(context)));
+            ctx.request_count.* += 1;
+            const current_ok = switch (ctx.request_count.*) {
+                1 => std.mem.eql(u8, req.method, "suix_getAllCoins") and
+                    std.mem.eql(u8, req.params_json, "[\"0x123\",null,2]"),
+                2 => std.mem.eql(u8, req.method, "suix_getAllCoins") and
+                    std.mem.eql(u8, req.params_json, "[\"0x123\",\"cursor-2\",2]"),
+                else => false,
+            };
+            ctx.params_ok.* = if (ctx.request_count.* == 1) current_ok else ctx.params_ok.* and current_ok;
+            return switch (ctx.request_count.*) {
+                1 => alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xcoin-1\",\"balance\":\"5\"}],\"nextCursor\":\"cursor-2\",\"hasNextPage\":true}}",
+                ),
+                2 => alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinType\":\"0x3::usdc::USDC\",\"coinObjectId\":\"0xcoin-2\",\"balance\":\"7\"}],\"hasNextPage\":false}}",
+                ),
+                else => error.OutOfMemory,
+            };
+        }
+    }.call;
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    var ctx = MockContext{
+        .request_count = &request_count,
+        .params_ok = &params_ok,
+    };
+    rpc.request_sender = .{
+        .context = &ctx,
+        .callback = callback,
+    };
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "wallet",
+        "coins",
+        "--limit",
+        "2",
+        "--all",
+        "--json",
+    });
+    defer args.deinit(allocator);
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+
+    try testing.expectEqual(@as(usize, 2), request_count);
+    try testing.expect(params_ok);
+    const entries = parsed.value.object.get("entries").?.array.items;
+    try testing.expectEqual(@as(usize, 2), entries.len);
+    try testing.expectEqualStrings("0x2::sui::SUI", entries[0].object.get("coin_type").?.string);
+    try testing.expectEqualStrings("0x3::usdc::USDC", entries[1].object.get("coin_type").?.string);
+}
+
 test "runCommand wallet_coins resolves the default wallet owner" {
     const testing = std.testing;
 

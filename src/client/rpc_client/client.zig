@@ -18007,6 +18007,40 @@ pub const SuiRpcClient = struct {
         return try self.getCoins(owner, request.coin_type, request.cursor, request.limit);
     }
 
+    pub fn getAllCoinsPage(
+        self: *SuiRpcClient,
+        owner: []const u8,
+        cursor: ?[]const u8,
+        limit: ?u64,
+    ) ![]u8 {
+        const params_json = if (limit) |page_limit|
+            if (cursor) |page_cursor|
+                try std.fmt.allocPrint(self.allocator, "[\"{s}\",\"{s}\",{d}]", .{ owner, page_cursor, page_limit })
+            else
+                try std.fmt.allocPrint(self.allocator, "[\"{s}\",null,{d}]", .{ owner, page_limit })
+        else if (cursor) |page_cursor|
+            try std.fmt.allocPrint(self.allocator, "[\"{s}\",\"{s}\"]", .{ owner, page_cursor })
+        else
+            try std.fmt.allocPrint(self.allocator, "[\"{s}\"]", .{owner});
+        defer self.allocator.free(params_json);
+
+        return try self.call("suix_getAllCoins", params_json);
+    }
+
+    pub fn getAllCoinsPageWithRequest(
+        self: *SuiRpcClient,
+        allocator: std.mem.Allocator,
+        owner: []const u8,
+        request: CoinPageRequest,
+    ) !coin_result.OwnedCoinPage {
+        const response = if (request.coin_type) |_|
+            try self.getCoinsWithRequest(owner, request)
+        else
+            try self.getAllCoinsPage(owner, request.cursor, request.limit);
+        defer allocator.free(response);
+        return try self.summarizeCoinsResponse(allocator, response);
+    }
+
     fn buildOwnedObjectsFilterJson(
         allocator: std.mem.Allocator,
         filter: OwnedObjectsFilter,
@@ -25003,7 +25037,7 @@ pub const SuiRpcClient = struct {
         defer if (cursor_owned) |value| allocator.free(value);
 
         while (true) {
-            var page = try self.getCoinsPageWithRequest(
+            var page = try self.getAllCoinsPageWithRequest(
                 allocator,
                 owner,
                 .{
@@ -30371,6 +30405,56 @@ test "getAllCoinsWithRequest aggregates multiple pages" {
     try testing.expectEqualStrings("7", page.entries[0].balance.?);
     try testing.expectEqualStrings("0xcoin-2", page.entries[1].coin_object_id.?);
     try testing.expectEqualStrings("8", page.entries[1].balance.?);
+    try testing.expect(!page.has_next_page);
+    try testing.expect(page.next_cursor == null);
+}
+
+test "getAllCoinsWithRequest uses suix_getAllCoins when coin type is omitted" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var request_count: usize = 0;
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const count = @as(*usize, @ptrCast(@alignCast(context)));
+            count.* += 1;
+            try testing.expectEqualStrings("suix_getAllCoins", req.method);
+
+            if (count.* == 1) {
+                try testing.expectEqualStrings("[\"0xowner\",null,2]", req.params_json);
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xcoin-1\",\"version\":\"1\",\"digest\":\"digest-1\",\"balance\":\"7\",\"previousTransaction\":\"0xprev-1\"}],\"nextCursor\":\"cursor-next\",\"hasNextPage\":true}}",
+                );
+            }
+
+            try testing.expectEqualStrings("[\"0xowner\",\"cursor-next\",2]", req.params_json);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"coinType\":\"0x3::usdc::USDC\",\"coinObjectId\":\"0xcoin-2\",\"version\":\"2\",\"digest\":\"digest-2\",\"balance\":\"8\",\"previousTransaction\":\"0xprev-2\"}],\"nextCursor\":null,\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &request_count,
+        .callback = callback,
+    };
+
+    var page = try client_instance.getAllCoinsWithRequest(allocator, "0xowner", .{
+        .limit = 2,
+    });
+    defer page.deinit(allocator);
+
+    try testing.expectEqual(@as(usize, 2), request_count);
+    try testing.expectEqual(@as(usize, 2), page.entries.len);
+    try testing.expectEqualStrings("0x2::sui::SUI", page.entries[0].coin_type.?);
+    try testing.expectEqualStrings("0x3::usdc::USDC", page.entries[1].coin_type.?);
     try testing.expect(!page.has_next_page);
     try testing.expect(page.next_cursor == null);
 }
