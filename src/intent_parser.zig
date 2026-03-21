@@ -3,10 +3,10 @@ const builtin = @import("builtin");
 
 /// 解析的交换意图
 pub const SwapIntent = struct {
-    amount: ?[]const u8,  // "100" 或 "all"
-    from_token: []const u8,  // "SUI"
-    to_token: []const u8,    // "USDC"
-    slippage_bps: u64,       // 默认 50 (0.5%)
+    amount: ?[]const u8, // "100" 或 "all"
+    from_token: []const u8, // "SUI"
+    to_token: []const u8, // "USDC"
+    slippage_bps: u64, // 默认 50 (0.5%)
 
     pub fn deinit(self: *SwapIntent, allocator: std.mem.Allocator) void {
         if (self.amount) |a| allocator.free(a);
@@ -15,14 +15,38 @@ pub const SwapIntent = struct {
     }
 };
 
+pub const TransferIntent = struct {
+    amount: []const u8,
+    token: []const u8,
+    recipient: []const u8,
+
+    pub fn deinit(self: *TransferIntent, allocator: std.mem.Allocator) void {
+        allocator.free(self.amount);
+        allocator.free(self.token);
+        allocator.free(self.recipient);
+    }
+};
+
+pub const BalanceIntent = struct {
+    token: ?[]const u8,
+
+    pub fn deinit(self: *BalanceIntent, allocator: std.mem.Allocator) void {
+        if (self.token) |token| allocator.free(token);
+    }
+};
+
 /// 意图解析结果
 pub const IntentResult = union(enum) {
     swap: SwapIntent,
-    unsupported: []const u8,  // 不支持的操作类型
+    transfer: TransferIntent,
+    balance: BalanceIntent,
+    unsupported: []const u8, // 不支持的操作类型
 
     pub fn deinit(self: *IntentResult, allocator: std.mem.Allocator) void {
         switch (self.*) {
             .swap => |*s| s.deinit(allocator),
+            .transfer => |*t| t.deinit(allocator),
+            .balance => |*b| b.deinit(allocator),
             .unsupported => |u| allocator.free(u),
         }
     }
@@ -72,36 +96,79 @@ pub fn parseNaturalLanguageIntent(
     return try callClaudeApi(allocator, query, api_key.?);
 }
 
+fn detectFirstNumericToken(allocator: std.mem.Allocator, query: []const u8) !?[]const u8 {
+    var it = std.mem.splitScalar(u8, query, ' ');
+    while (it.next()) |word| {
+        if (std.fmt.parseInt(u64, word, 10)) |_| {
+            return try allocator.dupe(u8, word);
+        } else |_| {}
+    }
+    return null;
+}
+
+fn dupOptionalUpperToken(allocator: std.mem.Allocator, lower_query: []const u8, token: []const u8) !?[]const u8 {
+    if (std.mem.indexOf(u8, lower_query, token) == null) return null;
+    return try std.ascii.allocUpperString(allocator, token);
+}
+
+fn extractHexAddress(allocator: std.mem.Allocator, query: []const u8) !?[]const u8 {
+    var it = std.mem.splitScalar(u8, query, ' ');
+    while (it.next()) |word| {
+        if (word.len >= 3 and std.mem.startsWith(u8, word, "0x")) {
+            var valid = true;
+            for (word[2..]) |ch| {
+                if (!std.ascii.isHex(ch)) {
+                    valid = false;
+                    break;
+                }
+            }
+            if (valid) return try allocator.dupe(u8, word);
+        }
+    }
+    return null;
+}
+
 /// Mock 解析 - 用于测试
 fn mockParseIntent(allocator: std.mem.Allocator, query: []const u8) !IntentResult {
-    // Smart mock parser for preview mode
     const lower = try std.ascii.allocLowerString(allocator, query);
     defer allocator.free(lower);
 
-    // Check for swap intent with SUI and USDC
+    if (std.mem.indexOf(u8, lower, "balance") != null or
+        std.mem.indexOf(u8, lower, "how much") != null or
+        std.mem.indexOf(u8, lower, "check my") != null)
+    {
+        return IntentResult{
+            .balance = .{
+                .token = try dupOptionalUpperToken(allocator, lower, "sui"),
+            },
+        };
+    }
+
+    if ((std.mem.indexOf(u8, lower, "send") != null or std.mem.indexOf(u8, lower, "transfer") != null)) {
+        const amount = try detectFirstNumericToken(allocator, query) orelse try allocator.dupe(u8, "1");
+        const recipient = try extractHexAddress(allocator, query) orelse try allocator.dupe(u8, "0x2");
+        const token = try dupOptionalUpperToken(allocator, lower, "usdc") orelse try allocator.dupe(u8, "SUI");
+        return IntentResult{
+            .transfer = .{
+                .amount = amount,
+                .token = token,
+                .recipient = recipient,
+            },
+        };
+    }
+
     if (std.mem.indexOf(u8, lower, "swap") != null and
         std.mem.indexOf(u8, lower, "sui") != null and
         std.mem.indexOf(u8, lower, "usdc") != null)
     {
-        // Extract amount
         var amount: ?[]const u8 = null;
         if (std.mem.indexOf(u8, lower, "all") != null) {
             amount = try allocator.dupe(u8, "all");
         } else {
-            // Try to find a number in the query
-            var it = std.mem.splitScalar(u8, query, ' ');
-            while (it.next()) |word| {
-                if (std.fmt.parseInt(u64, word, 10)) |_| {
-                    amount = try allocator.dupe(u8, word);
-                    break;
-                } else |_| {}
-            }
-            if (amount == null) {
-                amount = try allocator.dupe(u8, "100"); // default
-            }
+            amount = try detectFirstNumericToken(allocator, query);
+            if (amount == null) amount = try allocator.dupe(u8, "100");
         }
 
-        // Determine from/to based on word order
         const sui_idx = std.mem.indexOf(u8, lower, "sui").?;
         const usdc_idx = std.mem.indexOf(u8, lower, "usdc").?;
         const from_sui = sui_idx < usdc_idx;
@@ -117,7 +184,7 @@ fn mockParseIntent(allocator: std.mem.Allocator, query: []const u8) !IntentResul
     }
 
     return IntentResult{
-        .unsupported = try allocator.dupe(u8, "only swap SUI/USDC is supported in preview mode"),
+        .unsupported = try allocator.dupe(u8, "only swap, transfer, and balance intents are supported in preview mode"),
     };
 }
 
@@ -141,49 +208,7 @@ fn callClaudeApi(
     const lower = try std.ascii.allocLowerString(allocator, query);
     defer allocator.free(lower);
 
-    if (std.mem.indexOf(u8, lower, "swap") != null and
-        std.mem.indexOf(u8, lower, "sui") != null and
-        std.mem.indexOf(u8, lower, "usdc") != null)
-    {
-        // Extract amount if present
-        var amount: ?[]const u8 = null;
-        if (std.mem.indexOf(u8, lower, "all") != null) {
-            amount = try allocator.dupe(u8, "all");
-        } else {
-            // Try to find a number
-            var it = std.mem.splitScalar(u8, query, ' ');
-            while (it.next()) |word| {
-                if (std.fmt.parseInt(u64, word, 10)) |_| {
-                    amount = try allocator.dupe(u8, word);
-                    break;
-                } else |_| {}
-            }
-        }
-
-        // Determine from/to based on word order: "swap SUI for USDC" vs "swap USDC for SUI"
-        const sui_idx = std.mem.indexOf(u8, lower, "sui").?;
-        const usdc_idx = std.mem.indexOf(u8, lower, "usdc").?;
-        const from_sui = sui_idx < usdc_idx;
-
-        return IntentResult{
-            .swap = .{
-                .amount = amount,
-                .from_token = if (from_sui)
-                    try allocator.dupe(u8, "SUI")
-                else
-                    try allocator.dupe(u8, "USDC"),
-                .to_token = if (from_sui)
-                    try allocator.dupe(u8, "USDC")
-                else
-                    try allocator.dupe(u8, "SUI"),
-                .slippage_bps = 50,
-            },
-        };
-    }
-
-    return IntentResult{
-        .unsupported = try allocator.dupe(u8, "only swap SUI/USDC is supported in preview mode"),
-    };
+    return try mockParseIntent(allocator, query);
 }
 
 /// 构建 prompt
@@ -249,53 +274,87 @@ pub fn parseIntentJson(
 
     const intent_str = intent.string;
 
-    if (!std.mem.eql(u8, intent_str, "swap")) {
+    if (std.mem.eql(u8, intent_str, "swap")) {
+        const from_token = root.object.get("from") orelse {
+            return IntentParseError.MissingRequiredField;
+        };
+        const to_token = root.object.get("to") orelse {
+            return IntentParseError.MissingRequiredField;
+        };
+        const amount = root.object.get("amount");
+
+        if (from_token != .string or to_token != .string) {
+            return IntentParseError.InvalidResponse;
+        }
+
+        var slippage_bps: u64 = 50;
+        if (root.object.get("slippage_bps")) |s| {
+            if (s == .integer) {
+                slippage_bps = @intCast(@max(0, s.integer));
+            } else if (s == .float) {
+                slippage_bps = @intFromFloat(@max(0, s.float));
+            }
+        }
+
+        var amount_str: ?[]const u8 = null;
+        if (amount) |a| {
+            if (a == .string) {
+                amount_str = try allocator.dupe(u8, a.string);
+            } else if (a == .integer) {
+                amount_str = try std.fmt.allocPrint(allocator, "{d}", .{a.integer});
+            } else if (a == .float) {
+                amount_str = try std.fmt.allocPrint(allocator, "{d}", .{@as(u64, @intFromFloat(a.float))});
+            }
+        }
+
         return IntentResult{
-            .unsupported = try allocator.dupe(u8, intent_str),
+            .swap = .{
+                .amount = amount_str,
+                .from_token = try allocator.dupe(u8, from_token.string),
+                .to_token = try allocator.dupe(u8, to_token.string),
+                .slippage_bps = slippage_bps,
+            },
         };
     }
 
-    // 解析 swap 意图
-    const from_token = root.object.get("from") orelse {
-        return IntentParseError.MissingRequiredField;
-    };
-    const to_token = root.object.get("to") orelse {
-        return IntentParseError.MissingRequiredField;
-    };
-    const amount = root.object.get("amount");
+    if (std.mem.eql(u8, intent_str, "transfer")) {
+        const amount = root.object.get("amount") orelse return IntentParseError.MissingRequiredField;
+        const recipient = root.object.get("recipient") orelse return IntentParseError.MissingRequiredField;
+        const token = root.object.get("token") orelse return IntentParseError.MissingRequiredField;
+        if (recipient != .string or token != .string) return IntentParseError.InvalidResponse;
 
-    if (from_token != .string or to_token != .string) {
-        return IntentParseError.InvalidResponse;
+        const amount_str = switch (amount) {
+            .string => try allocator.dupe(u8, amount.string),
+            .integer => try std.fmt.allocPrint(allocator, "{d}", .{amount.integer}),
+            .float => try std.fmt.allocPrint(allocator, "{d}", .{@as(u64, @intFromFloat(amount.float))}),
+            else => return IntentParseError.InvalidResponse,
+        };
+
+        return IntentResult{
+            .transfer = .{
+                .amount = amount_str,
+                .token = try allocator.dupe(u8, token.string),
+                .recipient = try allocator.dupe(u8, recipient.string),
+            },
+        };
     }
 
-    // 获取 slippage，默认 50 bps
-    var slippage_bps: u64 = 50;
-    if (root.object.get("slippage_bps")) |s| {
-        if (s == .integer) {
-            slippage_bps = @intCast(@max(0, s.integer));
-        } else if (s == .float) {
-            slippage_bps = @intFromFloat(@max(0, s.float));
+    if (std.mem.eql(u8, intent_str, "balance")) {
+        const token = root.object.get("token");
+        var token_str: ?[]const u8 = null;
+        if (token) |value| {
+            if (value != .string) return IntentParseError.InvalidResponse;
+            token_str = try allocator.dupe(u8, value.string);
         }
-    }
-
-    var amount_str: ?[]const u8 = null;
-    if (amount) |a| {
-        if (a == .string) {
-            amount_str = try allocator.dupe(u8, a.string);
-        } else if (a == .integer) {
-            amount_str = try std.fmt.allocPrint(allocator, "{d}", .{a.integer});
-        } else if (a == .float) {
-            amount_str = try std.fmt.allocPrint(allocator, "{d}", .{@as(u64, @intFromFloat(a.float))});
-        }
+        return IntentResult{
+            .balance = .{
+                .token = token_str,
+            },
+        };
     }
 
     return IntentResult{
-        .swap = .{
-            .amount = amount_str,
-            .from_token = try allocator.dupe(u8, from_token.string),
-            .to_token = try allocator.dupe(u8, to_token.string),
-            .slippage_bps = slippage_bps,
-        },
+        .unsupported = try allocator.dupe(u8, intent_str),
     };
 }
 
@@ -350,13 +409,52 @@ test "mock parse swap intent" {
     );
     defer result.deinit(testing.allocator);
 
-    try testing.expectEqualStrings("swap", "swap");
     switch (result) {
-        .swap => |s| {
-            try testing.expectEqualStrings("100", s.amount.?);
-            try testing.expectEqualStrings("SUI", s.from_token);
-            try testing.expectEqualStrings("USDC", s.to_token);
-            try testing.expectEqual(@as(u64, 50), s.slippage_bps);
+        .swap => |intent| {
+            try testing.expect(intent.amount != null);
+            try testing.expectEqualStrings("100", intent.amount.?);
+            try testing.expectEqualStrings("SUI", intent.from_token);
+            try testing.expectEqualStrings("USDC", intent.to_token);
+            try testing.expectEqual(@as(u64, 50), intent.slippage_bps);
+        },
+        else => return error.UnexpectedResult,
+    }
+}
+
+test "mock parse transfer intent" {
+    const testing = std.testing;
+
+    var result = try parseNaturalLanguageIntent(
+        testing.allocator,
+        "send 42 SUI to 0x1234",
+        null,
+    );
+    defer result.deinit(testing.allocator);
+
+    switch (result) {
+        .transfer => |intent| {
+            try testing.expectEqualStrings("42", intent.amount);
+            try testing.expectEqualStrings("SUI", intent.token);
+            try testing.expectEqualStrings("0x1234", intent.recipient);
+        },
+        else => return error.UnexpectedResult,
+    }
+}
+
+test "mock parse balance intent" {
+    const testing = std.testing;
+
+    var result = try parseNaturalLanguageIntent(
+        testing.allocator,
+        "check my USDC balance",
+        null,
+    );
+    defer result.deinit(testing.allocator);
+
+    switch (result) {
+        .balance => |intent| {
+            try testing.expect(intent.token != null);
+            try testing.expectEqualStrings("USDC", intent.token.?);
         },
         else => return error.UnexpectedResult,
     }
@@ -372,8 +470,123 @@ test "mock parse unsupported intent" {
     );
     defer result.deinit(testing.allocator);
 
-    switch (result) {
-        .unsupported => {},
-        else => return error.ShouldBeUnsupported,
+    try testing.expect(result == .unsupported);
+}
+
+// Regression: ISSUE-ENG-NL-LOWERING — parser must support all 3 MVP intents
+// Found by /plan-eng-review on 2026-03-21
+// Report: .gstack/qa-reports/qa-report-{domain}-{date}.md
+
+test "parse intent json covers swap transfer and balance" {
+    const testing = std.testing;
+
+    var swap_result = try parseIntentJson(
+        testing.allocator,
+        "{\"intent\":\"swap\",\"from\":\"SUI\",\"to\":\"USDC\",\"amount\":\"100\",\"slippage_bps\":75}",
+    );
+    defer swap_result.deinit(testing.allocator);
+    var transfer_result = try parseIntentJson(
+        testing.allocator,
+        "{\"intent\":\"transfer\",\"amount\":25,\"token\":\"SUI\",\"recipient\":\"0xabc\"}",
+    );
+    defer transfer_result.deinit(testing.allocator);
+    var balance_result = try parseIntentJson(
+        testing.allocator,
+        "{\"intent\":\"balance\",\"token\":\"SUI\"}",
+    );
+    defer balance_result.deinit(testing.allocator);
+
+    switch (swap_result) {
+        .swap => |intent| {
+            try testing.expect(intent.amount != null);
+            try testing.expectEqualStrings("100", intent.amount.?);
+            try testing.expectEqual(@as(u64, 75), intent.slippage_bps);
+        },
+        else => return error.UnexpectedResult,
     }
+    switch (transfer_result) {
+        .transfer => |intent| {
+            try testing.expectEqualStrings("25", intent.amount);
+            try testing.expectEqualStrings("SUI", intent.token);
+            try testing.expectEqualStrings("0xabc", intent.recipient);
+        },
+        else => return error.UnexpectedResult,
+    }
+    switch (balance_result) {
+        .balance => |intent| {
+            try testing.expect(intent.token != null);
+            try testing.expectEqualStrings("SUI", intent.token.?);
+        },
+        else => return error.UnexpectedResult,
+    }
+}
+
+// Regression: ISSUE-ENG-NL-MOCK-FALLBACK — no API key behavior must stay explicit and stable
+// Found by /plan-eng-review on 2026-03-21
+// Report: .gstack/qa-reports/qa-report-{domain}-{date}.md
+
+test "parseNaturalLanguageIntent with and without api key stays aligned" {
+    const testing = std.testing;
+
+    var no_key_transfer = try parseNaturalLanguageIntent(testing.allocator, "send 7 USDC to 0x9999", null);
+    defer no_key_transfer.deinit(testing.allocator);
+    var key_transfer = try parseNaturalLanguageIntent(testing.allocator, "send 7 USDC to 0x9999", "test-key");
+    defer key_transfer.deinit(testing.allocator);
+    var no_key_balance = try parseNaturalLanguageIntent(testing.allocator, "show my balance", null);
+    defer no_key_balance.deinit(testing.allocator);
+    var key_balance = try parseNaturalLanguageIntent(testing.allocator, "show my balance", "test-key");
+    defer key_balance.deinit(testing.allocator);
+
+    try testing.expect(no_key_transfer == .transfer);
+    try testing.expect(key_transfer == .transfer);
+    try testing.expect(no_key_balance == .balance);
+    try testing.expect(key_balance == .balance);
+}
+
+// Regression: ISSUE-ENG-NL-CONTRACT — malformed JSON and wrapped provider responses must fail loudly
+// Found by /plan-eng-review on 2026-03-21
+// Report: .gstack/qa-reports/qa-report-{domain}-{date}.md
+
+test "parse intent json malformed variants fail loudly" {
+    const testing = std.testing;
+
+    try testing.expectError(IntentParseError.MissingRequiredField, parseIntentJson(testing.allocator, "{}"));
+    try testing.expectError(IntentParseError.InvalidResponse, parseIntentJson(testing.allocator, "[]"));
+    try testing.expectError(IntentParseError.InvalidResponse, parseIntentJson(testing.allocator, "{\"intent\":123}"));
+    try testing.expectError(IntentParseError.MissingRequiredField, parseIntentJson(testing.allocator, "{\"intent\":\"transfer\",\"amount\":1,\"token\":\"SUI\"}"));
+    try testing.expectError(IntentParseError.InvalidResponse, parseIntentJson(testing.allocator, "{\"intent\":\"balance\",\"token\":123}"));
+}
+
+test "parseClaudeResponse covers wrapped intents and rejects malformed payloads" {
+    const testing = std.testing;
+
+    var balance_result = try parseClaudeResponse(
+        testing.allocator,
+        "{\"content\":[{\"text\":\"{\\\"intent\\\":\\\"balance\\\",\\\"token\\\":\\\"SUI\\\"}\"}]}",
+    );
+    defer balance_result.deinit(testing.allocator);
+    var transfer_result = try parseClaudeResponse(
+        testing.allocator,
+        "{\"content\":[{\"text\":\"{\\\"intent\\\":\\\"transfer\\\",\\\"amount\\\":1,\\\"token\\\":\\\"SUI\\\",\\\"recipient\\\":\\\"0x1\\\"}\"}]}",
+    );
+    defer transfer_result.deinit(testing.allocator);
+    var swap_result = try parseClaudeResponse(
+        testing.allocator,
+        "{\"content\":[{\"text\":\"{\\\"intent\\\":\\\"swap\\\",\\\"from\\\":\\\"SUI\\\",\\\"to\\\":\\\"USDC\\\"}\"}]}",
+    );
+    defer swap_result.deinit(testing.allocator);
+    var unsupported_result = try parseClaudeResponse(
+        testing.allocator,
+        "{\"content\":[{\"text\":\"{\\\"intent\\\":\\\"stake\\\"}\"}]}",
+    );
+    defer unsupported_result.deinit(testing.allocator);
+
+    try testing.expect(balance_result == .balance);
+    try testing.expect(transfer_result == .transfer);
+    try testing.expect(swap_result == .swap);
+    try testing.expect(unsupported_result == .unsupported);
+
+    try testing.expectError(IntentParseError.InvalidResponse, parseClaudeResponse(testing.allocator, "{\"content\":[]}"));
+    try testing.expectError(IntentParseError.InvalidResponse, parseClaudeResponse(testing.allocator, "{\"content\":[{}]}"));
+    try testing.expectError(IntentParseError.InvalidJson, parseClaudeResponse(testing.allocator, "{\"content\":[{\"text\":\"{not-json}\"}]}"));
 }

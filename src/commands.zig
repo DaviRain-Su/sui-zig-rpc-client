@@ -7642,14 +7642,10 @@ pub fn runCommandWithProgrammaticProvider(
             }
         },
         .natural_do => {
-            // If --intent-json is provided, use it directly (Claude Code pre-parsed)
-            // Otherwise, parse the natural language query locally
             var intent_result: intent_parser.IntentResult = blk: {
                 if (args.intent_json) |json| {
-                    // Parse pre-structured intent from Claude Code
                     break :blk try intent_parser.parseIntentJson(allocator, json);
                 } else if (args.natural_query) |query| {
-                    // Local parsing without API call
                     break :blk try intent_parser.parseNaturalLanguageIntent(allocator, query, null);
                 } else {
                     return error.InvalidCli;
@@ -7658,6 +7654,39 @@ pub fn runCommandWithProgrammaticProvider(
             defer intent_result.deinit(allocator);
 
             switch (intent_result) {
+                .balance => |balance_intent| {
+                    var derived_args = cli.ParsedArgs{
+                        .command = .wallet_balance,
+                        .has_command = true,
+                        .pretty = args.pretty,
+                    };
+                    defer derived_args.deinit(allocator);
+                    if (balance_intent.token) |token| {
+                        const resolved_coin_type = if (std.ascii.eqlIgnoreCase(token, "SUI"))
+                            "0x2::sui::SUI"
+                        else
+                            return error.InvalidCli;
+                        derived_args.owned_account_coin_type = try allocator.dupe(u8, resolved_coin_type);
+                        derived_args.account_coin_type = derived_args.owned_account_coin_type;
+                    }
+                    try runCommandWithProgrammaticProvider(allocator, rpc, &derived_args, writer, effective_programmatic_provider);
+                    return;
+                },
+                .transfer => |transfer_intent| {
+                    const amount = std.fmt.parseInt(u64, transfer_intent.amount, 10) catch return error.InvalidCli;
+                    var derived_args = cli.ParsedArgs{
+                        .command = .wallet_fund,
+                        .has_command = true,
+                        .pretty = args.pretty,
+                        .wallet_fund_amount = amount,
+                        .wallet_fund_emit_request = true,
+                    };
+                    defer derived_args.deinit(allocator);
+                    derived_args.owned_account_selector = try allocator.dupe(u8, transfer_intent.recipient);
+                    derived_args.account_selector = derived_args.owned_account_selector;
+                    try runCommandWithProgrammaticProvider(allocator, rpc, &derived_args, writer, effective_programmatic_provider);
+                    return;
+                },
                 .swap => |swap_intent| {
                     try writer.print("Parsed intent: swap {s} {s} -> {s} (slippage: {d} bps)\n", .{
                         swap_intent.amount orelse "all",
@@ -7665,17 +7694,11 @@ pub fn runCommandWithProgrammaticProvider(
                         swap_intent.to_token,
                         swap_intent.slippage_bps,
                     });
-
-                    // TODO: Implement actual swap execution
-                    // 1. Resolve token types from symbols
-                    // 2. Find best Cetus pool
-                    // 3. Calculate amounts
-                    // 4. Build and execute transaction
                     try writer.print("\n(This is a preview. Full swap execution coming soon.)\n", .{});
                 },
                 .unsupported => |unsupported| {
                     try writer.print("Unsupported intent: {s}\n", .{unsupported});
-                    try writer.print("Currently only 'swap' intents are supported.\n", .{});
+                    try writer.print("Currently only 'swap', 'transfer', and 'balance' intents are supported.\n", .{});
                 },
             }
         },
@@ -25594,6 +25617,60 @@ test "runCommand wallet_address resolves the default keystore address" {
     try testing.expectEqualStrings("0x123\n", output.items);
 }
 
+// Regression: ISSUE-ENG-NL-DELEGATION-BALANCE — natural_do balance should delegate to the existing wallet_balance path
+// Found by /plan-eng-review on 2026-03-21
+// Report: .gstack/qa-reports/qa-report-{domain}-{date}.md
+
+test "runCommand natural_do balance delegates to wallet balance path" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const keystore_path = try std.fmt.allocPrint(allocator, "tmp_commands_natural_balance_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(keystore_path);
+
+    const old_override = client.keystore.test_keystore_path_override;
+    client.keystore.test_keystore_path_override = keystore_path;
+    defer client.keystore.test_keystore_path_override = old_override;
+
+    var file = try std.fs.cwd().createFile(keystore_path, .{ .truncate = true });
+    defer file.close();
+    defer _ = std.fs.cwd().deleteFile(keystore_path) catch {};
+    try file.writeAll("[{\"alias\":\"main\",\"privateKey\":\"sk_wallet\",\"address\":\"0x123\"}]");
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    var params_ok = false;
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) error{OutOfMemory}![]u8 {
+            const ok = @as(*bool, @ptrCast(@alignCast(context)));
+            ok.* = std.mem.eql(u8, req.method, "suix_getAllBalances") and std.mem.indexOf(u8, req.params_json, "\"0x123\"") != null;
+            return alloc.dupe(u8, "{\"result\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectCount\":1,\"totalBalance\":\"123\"}]}");
+        }
+    }.call;
+    rpc.request_sender = .{
+        .context = &params_ok,
+        .callback = callback,
+    };
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "do",
+        "--intent-json",
+        "{\"intent\":\"balance\"}",
+    });
+    defer args.deinit(allocator);
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+    try testing.expect(params_ok);
+    try testing.expect(std.mem.indexOf(u8, output.items, "0x123") != null);
+}
+
 test "runCommand wallet_balance aggregates all coin pages by default" {
     const testing = std.testing;
 
@@ -26047,6 +26124,59 @@ test "runCommand wallet_objects resolves the default wallet owner" {
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
     defer parsed.deinit();
     try testing.expectEqualStrings("0xowned-1", parsed.value.object.get("entries").?.array.items[0].object.get("object_id").?.string);
+}
+
+// Regression: ISSUE-ENG-NL-DELEGATION — natural_do transfer should lower into the existing wallet_fund request path
+// Found by /plan-eng-review on 2026-03-21
+// Report: .gstack/qa-reports/qa-report-{domain}-{date}.md
+
+test "runCommand natural_do transfer emits wallet fund request artifact" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const keystore_path = try std.fmt.allocPrint(allocator, "tmp_commands_natural_transfer_request_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(keystore_path);
+    defer std.fs.cwd().deleteFile(keystore_path) catch {};
+
+    const old_override = client.keystore.test_keystore_path_override;
+    client.keystore.test_keystore_path_override = keystore_path;
+    defer client.keystore.test_keystore_path_override = old_override;
+
+    var file = try std.fs.cwd().createFile(keystore_path, .{ .truncate = true });
+    defer file.close();
+    try file.writeAll("[{\"alias\":\"main\",\"privateKey\":\"sk_wallet\",\"address\":\"0x123\"}]");
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "do",
+        "--intent-json",
+        "{\"intent\":\"transfer\",\"amount\":77,\"token\":\"SUI\",\"recipient\":\"0x2222222222222222222222222222222222222222222222222222222222222222\"}",
+    });
+    defer args.deinit(allocator);
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    try testing.expectEqualStrings("0x123", parsed.value.object.get("sender").?.string);
+    try testing.expect(parsed.value.object.get("autoGasPayment").?.bool);
+    try testing.expect(parsed.value.object.get("autoGasBudget").?.bool);
+    try testing.expectEqual(@as(i64, 77), parsed.value.object.get("gasPaymentMinBalance").?.integer);
+
+    const commands = parsed.value.object.get("commands").?.array.items;
+    try testing.expectEqual(@as(usize, 2), commands.len);
+    try testing.expectEqualStrings("SplitCoins", commands[0].object.get("kind").?.string);
+
+    try testing.expectEqualStrings("TransferObjects", commands[1].object.get("kind").?.string);
+    try testing.expectEqualStrings("0x2222222222222222222222222222222222222222222222222222222222222222", commands[1].object.get("address").?.string);
 }
 
 test "runCommand wallet_fund emit-request builds split-and-transfer request artifacts" {

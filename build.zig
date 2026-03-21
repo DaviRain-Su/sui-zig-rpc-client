@@ -14,12 +14,14 @@ pub fn build(b: *std.Build) void {
         "fixtures/move/pool_like_protocol_lab",
     };
 
+    // Core client module
     const client_module = b.addModule("sui_client_zig", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
     });
 
+    // Executable module (original structure)
     const exe_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
@@ -59,6 +61,8 @@ pub fn build(b: *std.Build) void {
     }
 
     const test_step = b.step("test", "Run project tests");
+    
+    // Test the main module
     const tests = b.addTest(.{
         .root_module = exe_module,
     });

@@ -294,6 +294,8 @@ pub const ParsedArgs = struct {
     owned_request_entry_id: ?[]const u8 = null,
     owned_request_schedule_id: ?[]const u8 = null,
     owned_request_schedule_replace_id: ?[]const u8 = null,
+    owned_account_selector: ?[]const u8 = null,
+    owned_account_coin_type: ?[]const u8 = null,
     owned_account_objects_filter: ?[]const u8 = null,
     owned_account_objects_package: ?[]const u8 = null,
     owned_event_filter: ?[]const u8 = null,
@@ -371,6 +373,8 @@ pub const ParsedArgs = struct {
             &self.owned_request_entry_id,
             &self.owned_request_schedule_id,
             &self.owned_request_schedule_replace_id,
+            &self.owned_account_selector,
+            &self.owned_account_coin_type,
             &self.owned_account_objects_filter,
             &self.owned_account_objects_package,
             &self.owned_event_filter,
@@ -10200,6 +10204,38 @@ test "parseCliArgs parses wallet intent send command" {
     try testing.expect(parsed.from_keystore);
     try testing.expectEqualStrings("0", parsed.signers.items[0]);
     try testing.expect(parsed.tx_send_observe);
+}
+
+// Regression: ISSUE-ENG-NL-CLI — natural_do should preserve query text and deterministic intent-json input
+// Found by /plan-eng-review on 2026-03-21
+// Report: .gstack/qa-reports/qa-report-{domain}-{date}.md
+
+test "parseCliArgs parses natural do query and intent json" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var query_args = try parseCliArgs(allocator, &.{
+        "do",
+        "check",
+        "my",
+        "USDC",
+        "balance",
+    });
+    defer query_args.deinit(allocator);
+    try testing.expectEqual(Command.natural_do, query_args.command);
+    try testing.expectEqualStrings("check my USDC balance", query_args.natural_query.?);
+
+    var json_args = try parseCliArgs(allocator, &.{
+        "do",
+        "--intent-json",
+        "{\"intent\":\"balance\"}",
+    });
+    defer json_args.deinit(allocator);
+    try testing.expectEqual(Command.natural_do, json_args.command);
+    try testing.expectEqualStrings("{\"intent\":\"balance\"}", json_args.intent_json.?);
 }
 
 test "parseCliArgs parses request build move-call input" {

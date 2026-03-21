@@ -551,7 +551,7 @@ fn run(
     allocator: std.mem.Allocator,
     rpc: *client.SuiRpcClient,
     parsed: *const cli.ParsedArgs,
-) !u8 {
+) anyerror!u8 {
     const stdout = std.fs.File.stdout().deprecatedWriter();
     try commands.runCommand(allocator, rpc, parsed, stdout);
     return 0;
