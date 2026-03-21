@@ -291,6 +291,9 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
 - [x] Keep batched `tx_payload` / `tx_send` command sources on the generic
   execute-plan path when local payload lowering fails with `InvalidCli`,
   without dropping back to `unsafe_batchTransaction`.
+- [x] Remove the remaining legacy unsafe dispatcher from programmatic
+  `tx_payload` / `tx_send`; after local lowering falls through, continue on
+  the generic execute-plan path instead of forcing `unsafe_*`.
 - [ ] Continue shrinking `unsafe_moveCall` usage.
 - [ ] Continue shrinking `unsafe_batchTransaction` usage.
 - [x] Keep construction, simulation, and execution aligned to the same local

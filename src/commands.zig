@@ -1181,31 +1181,6 @@ fn hasRealBuilderSignerSource(args: *const cli.ParsedArgs) bool {
     return args.signatures.items.len != 0 or hasKeystoreBackedSignerSource(args);
 }
 
-fn shouldUseUnsafeTransactionBuilderPath(
-    allocator: std.mem.Allocator,
-    args: *const cli.ParsedArgs,
-) !bool {
-    if (!hasRealBuilderSignerSource(args)) return false;
-    if (!cli.supportsProgrammableInput(args)) return false;
-    if (args.tx_build_gas_budget == null) return false;
-    const source = commandSourceFromArgs(args);
-    if (try client.SuiRpcClient.commandSourceSupportsLocalProgrammableTransactionBuilder(
-        allocator,
-        source,
-    )) return false;
-    const supports_real_builder = try client.SuiRpcClient.commandSourceSupportsUnsafeTransactionBuilder(
-        allocator,
-        source,
-    );
-    if (!supports_real_builder) return false;
-
-    if (hasKeystoreBackedSignerSource(args)) return true;
-
-    return (try hasSelectedMoveCallArgumentRequests(allocator, args)) or
-        programmaticCommandsContainSelectedRequestTokens(args) or
-        gasPaymentContainsSelectedRequestToken(args);
-}
-
 fn resolvedLocalBuilderGasPaymentJson(
     allocator: std.mem.Allocator,
     rpc: *client.SuiRpcClient,
@@ -2038,155 +2013,6 @@ fn runLocalCommandSourceAction(
         error.InvalidCli => return null,
         else => return err,
     };
-}
-
-fn runUnsafeCommandSourceAction(
-    allocator: std.mem.Allocator,
-    rpc: *client.SuiRpcClient,
-    args: *const cli.ParsedArgs,
-    provider: ?client.tx_request_builder.AccountProvider,
-    action: client.rpc_client.ProgrammaticClientAction,
-) !client.rpc_client.ProgrammaticClientActionOrChallengePromptResult {
-    var parsed_session_response: ?ParsedSessionChallengeResponse = null;
-    defer if (parsed_session_response) |*value| value.deinit();
-    if (args.tx_session_response) |raw| {
-        parsed_session_response = try parseSessionChallengeResponseArg(allocator, raw);
-    }
-
-    const sender = blk: {
-        if (try resolvedUnsafeMoveCallSender(allocator, rpc, args)) |value| break :blk value;
-        if (provider) |value| {
-            if (try resolveSenderFromProgrammaticProvider(allocator, value)) |account_sender| {
-                break :blk account_sender;
-            }
-        }
-        return error.InvalidCli;
-    };
-    defer allocator.free(sender);
-
-    var owned_options = try ownProgrammaticExecutionOptionsFromArgs(allocator, args, args.signatures.items);
-    defer owned_options.deinit(allocator);
-    const options = owned_options.options;
-    const config = commandRequestConfigFromOptions(options, sender);
-
-    if (parsed_session_response) |challenge_response| {
-        if (args.signatures.items.len != 0 or hasKeystoreBackedSignerSource(args)) return error.InvalidCli;
-        const effective_provider = provider orelse return error.InvalidCli;
-        if (args.tx_build_auto_gas_payment) {
-            return .{ .completed = try rpc.runCommandSourceWithAutoGasPaymentWithChallengeResponseWithAccountProvider(
-                allocator,
-                options.source,
-                config,
-                effective_provider,
-                args.tx_build_gas_payment_min_balance,
-                challenge_response.response,
-                action,
-            ) };
-        }
-
-        return .{ .completed = try rpc.runCommandSourceResolvingSelectedArgumentTokensWithChallengeResponseWithAccountProvider(
-            allocator,
-            options.source,
-            config,
-            effective_provider,
-            challenge_response.response,
-            action,
-        ) };
-    }
-
-    if (args.signatures.items.len != 0) {
-        if (args.tx_build_auto_gas_payment) {
-            return .{ .completed = try rpc.runCommandSourceWithAutoGasPaymentWithSignatures(
-                allocator,
-                options.source,
-                config,
-                args.tx_build_gas_payment_min_balance,
-                action,
-            ) };
-        }
-        return .{ .completed = try rpc.runCommandSourceResolvingSelectedArgumentTokensWithSignatures(
-            allocator,
-            options.source,
-            config,
-            action,
-        ) };
-    }
-
-    if (hasKeystoreBackedSignerSource(args)) {
-        if (args.tx_build_auto_gas_payment) {
-            return .{ .completed = try rpc.runCommandSourceWithAutoGasPaymentFromDefaultKeystore(
-                allocator,
-                options.source,
-                config,
-                args.tx_build_gas_payment_min_balance,
-                .{
-                    .signer_selectors = args.signers.items,
-                    .from_keystore = args.from_keystore,
-                    .infer_sender_from_signers = true,
-                },
-                action,
-            ) };
-        }
-
-        return .{ .completed = try rpc.runCommandSourceResolvingSelectedArgumentTokensFromDefaultKeystore(
-            allocator,
-            options.source,
-            config,
-            .{
-                .signer_selectors = args.signers.items,
-                .from_keystore = args.from_keystore,
-                .infer_sender_from_signers = true,
-            },
-            action,
-        ) };
-    }
-
-    const effective_provider = provider orelse return error.InvalidCli;
-    if (args.tx_build_auto_gas_payment) {
-        return try rpc.runCommandSourceWithAutoGasPaymentOrChallengePromptWithAccountProvider(
-            allocator,
-            options.source,
-            config,
-            effective_provider,
-            args.tx_build_gas_payment_min_balance,
-            action,
-        );
-    }
-
-    return try rpc.runCommandSourceResolvingSelectedArgumentTokensOrChallengePromptWithAccountProvider(
-        allocator,
-        options.source,
-        config,
-        effective_provider,
-        action,
-    );
-}
-
-fn shouldUseUnsafeTransactionBuilderPathWithProvider(
-    allocator: std.mem.Allocator,
-    args: *const cli.ParsedArgs,
-    provider_available: bool,
-) !bool {
-    if (!provider_available) return false;
-    if (!cli.supportsProgrammableInput(args)) return false;
-    if (args.tx_build_gas_budget == null) return false;
-    const source = commandSourceFromArgs(args);
-    if (try client.SuiRpcClient.commandSourceSupportsLocalProgrammableTransactionBuilder(
-        allocator,
-        source,
-    )) return false;
-
-    const supports_real_builder = try client.SuiRpcClient.commandSourceSupportsUnsafeTransactionBuilder(
-        allocator,
-        source,
-    );
-    if (!supports_real_builder) return false;
-
-    const needs_real_builder_resolution = args.tx_build_auto_gas_payment or
-        (try hasSelectedMoveCallArgumentRequests(allocator, args)) or
-        programmaticCommandsContainSelectedRequestTokens(args) or
-        gasPaymentContainsSelectedRequestToken(args);
-    return needs_real_builder_resolution;
 }
 
 fn printProgrammaticActionResult(
@@ -7727,31 +7553,16 @@ pub fn runCommandWithProgrammaticProvider(
                     }
                     return;
                 }
-                const provider_available = effective_programmatic_provider != null;
-                const use_unsafe_transaction_builder_path = (try shouldUseUnsafeTransactionBuilderPath(allocator, args)) or
-                    (try shouldUseUnsafeTransactionBuilderPathWithProvider(allocator, args, provider_available));
-                if (use_unsafe_transaction_builder_path) {
-                    var result = try runUnsafeCommandSourceAction(
-                        allocator,
-                        rpc,
-                        args,
-                        effective_programmatic_provider,
-                        local_payload_action,
-                    );
-                    defer result.deinit(allocator);
-                    try printProgrammaticActionOrChallengePromptResult(allocator, writer, result, args.pretty);
-                } else {
-                    var result = try runProgrammaticActionMaybeAutoGasPaymentOrChallengePrompt(
-                        allocator,
-                        rpc,
-                        args,
-                        signatures,
-                        effective_programmatic_provider,
-                        local_payload_action,
-                    );
-                    defer result.deinit(allocator);
-                    try printProgrammaticActionOrChallengePromptResult(allocator, writer, result, args.pretty);
-                }
+                var result = try runProgrammaticActionMaybeAutoGasPaymentOrChallengePrompt(
+                    allocator,
+                    rpc,
+                    args,
+                    signatures,
+                    effective_programmatic_provider,
+                    local_payload_action,
+                );
+                defer result.deinit(allocator);
+                try printProgrammaticActionOrChallengePromptResult(allocator, writer, result, args.pretty);
             } else {
                 const payload =
                     try buildExecutePayloadFromArgs(allocator, args, signatures, null);
@@ -7770,11 +7581,6 @@ pub fn runCommandWithProgrammaticProvider(
         },
         .tx_send => {
             const provider_available = effective_programmatic_provider != null;
-            const use_unsafe_transaction_builder_path = (try shouldUseUnsafeTransactionBuilderPath(allocator, args)) or
-                (try shouldUseUnsafeTransactionBuilderPathWithProvider(allocator, args, provider_available));
-            if (args.tx_session_response != null and effective_programmatic_provider == null and !use_unsafe_transaction_builder_path) {
-                if (!provider_available) return error.InvalidCli;
-            }
             const can_execute_without_direct_signatures = cli.supportsProgrammableInput(args) and
                 (provider_available or hasKeystoreBackedSignerSource(args));
             if (args.signatures.items.len == 0 and !can_execute_without_direct_signatures) {
@@ -7812,12 +7618,6 @@ pub fn runCommandWithProgrammaticProvider(
                 } else if (try buildLocalCommandSourceExecutePayload(allocator, rpc, args, null)) |payload| {
                     defer allocator.free(payload);
                     try sendExecuteAndMaybeWaitForConfirmation(allocator, rpc, args, payload, writer);
-                    return;
-                }
-                if (use_unsafe_transaction_builder_path) {
-                    var result = try runUnsafeCommandSourceAction(allocator, rpc, args, effective_programmatic_provider, action);
-                    defer result.deinit(allocator);
-                    try printProgrammaticActionOrChallengePromptResult(allocator, writer, result, args.pretty);
                     return;
                 }
                 var result = try runProgrammaticActionMaybeAutoGasPaymentOrChallengePrompt(
@@ -19198,46 +18998,6 @@ test "runCommand tx_payload move-call resolves ownerless selected tokens from de
     const signature = payload.value.array.items[1].array.items[0].string;
     const decoded_len = try std.base64.standard.Decoder.calcSizeForSlice(signature);
     try testing.expect(decoded_len > 0);
-}
-
-test "shouldUseUnsafeTransactionBuilderPath skips local-capable default-keystore command sources" {
-    const testing = std.testing;
-
-    var args = cli.ParsedArgs{
-        .command = .tx_payload,
-        .has_command = true,
-        .tx_build_package = "0x2",
-        .tx_build_module = "counter",
-        .tx_build_function = "increment",
-        .tx_build_type_args = "[]",
-        .tx_build_args = "[\"0xabc\",7]",
-        .tx_build_gas_budget = 1200,
-        .from_keystore = true,
-    };
-
-    try testing.expect(!(try shouldUseUnsafeTransactionBuilderPath(testing.allocator, &args)));
-}
-
-test "shouldUseUnsafeTransactionBuilderPathWithProvider skips local-capable provider command sources" {
-    const testing = std.testing;
-
-    var args = cli.ParsedArgs{
-        .command = .tx_send,
-        .has_command = true,
-        .tx_build_package = "0x2",
-        .tx_build_module = "counter",
-        .tx_build_function = "increment",
-        .tx_build_type_args = "[]",
-        .tx_build_args = "[\"select:{\\\"kind\\\":\\\"owned_object_struct_type\\\",\\\"structType\\\":\\\"0x2::example::Thing\\\"}\",7]",
-        .tx_build_gas_budget = 1200,
-        .tx_build_auto_gas_payment = true,
-    };
-
-    try testing.expect(!(try shouldUseUnsafeTransactionBuilderPathWithProvider(
-        testing.allocator,
-        &args,
-        true,
-    )));
 }
 
 test "runCommand tx_payload move-call with from-keystore uses local programmable builder path" {
