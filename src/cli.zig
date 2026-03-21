@@ -39,6 +39,7 @@ pub const Command = enum {
     wallet_intent_send,
     account_list,
     account_info,
+    account_balance,
     account_coins,
     account_objects,
     account_resources,
@@ -5432,7 +5433,7 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
             return error.InvalidCli;
         }
 
-        if (parsed.command == .wallet_balance) {
+        if (parsed.command == .wallet_balance or parsed.command == .account_balance) {
             if (std.mem.eql(u8, token, "--coin-type")) {
                 if (i + 1 >= args.len) return error.InvalidCli;
                 parsed.account_coin_type = args[i + 1];
@@ -6461,6 +6462,10 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: []const []const u8) !Par
         if (parsed.account_selector == null) return error.InvalidCli;
         if (parsed.account_coins_all and parsed.account_coins_cursor != null) return error.InvalidCli;
     }
+    if (parsed.command == .account_balance) {
+        const selector = parsed.account_selector orelse return error.InvalidCli;
+        if (selector.len == 0) return error.InvalidCli;
+    }
     if (parsed.command == .account_objects) {
         if (parsed.account_selector == null) return error.InvalidCli;
         if (parsed.account_objects_all and parsed.account_objects_cursor != null) return error.InvalidCli;
@@ -7053,6 +7058,10 @@ pub fn printUsage(writer: anytype) !void {
         "    --json                               Emit machine-readable account JSON\n" ++
         "  account info <selector>               Show keystore entry by selector/index\n" ++
         "    --json                               Emit machine-readable account JSON\n" ++
+        "  account balance <selector|0xaddress>  Print aggregated coin balances for a selector or address\n" ++
+        "    --coin-type <type>                    Optional coin type filter\n" ++
+        "    --limit <n>                           Optional page size for paged coin-scan fallback\n" ++
+        "    --all                                 Compatibility alias; account balance already aggregates all pages\n" ++
         "  account coins <selector|0xaddress>    List coins for a local selector or address\n" ++
         "    --coin-type <type>                    Filter by coin type\n" ++
         "    --cursor <cursor>                     Page from a specific cursor\n" ++
@@ -9421,6 +9430,32 @@ test "parseCliArgs parses wallet balance command options" {
     defer parsed.deinit(allocator);
 
     try testing.expectEqual(Command.wallet_balance, parsed.command);
+    try testing.expectEqualStrings("main", parsed.account_selector.?);
+    try testing.expectEqualStrings("0x2::sui::SUI", parsed.account_coin_type.?);
+    try testing.expectEqual(@as(?u64, 25), parsed.account_resources_limit);
+    try testing.expect(parsed.account_resources_all);
+}
+
+test "parseCliArgs parses account balance command options" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var parsed = try parseCliArgs(allocator, &.{
+        "account",
+        "balance",
+        "main",
+        "--coin-type",
+        "0x2::sui::SUI",
+        "--limit",
+        "25",
+        "--all",
+    });
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(Command.account_balance, parsed.command);
     try testing.expectEqualStrings("main", parsed.account_selector.?);
     try testing.expectEqualStrings("0x2::sui::SUI", parsed.account_coin_type.?);
     try testing.expectEqual(@as(?u64, 25), parsed.account_resources_limit);

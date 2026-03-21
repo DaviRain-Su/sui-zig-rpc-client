@@ -1088,6 +1088,7 @@ pub fn main() !void {
 - `wallet/request` 这一层现在已经有 deterministic smoke regressions，覆盖 `sponsored transfer`、`sponsored swap`、`session-limited swap`、`scheduled self-transfer`，不再只靠零散 unit tests 验证 artifact 字段。
 - `account list`: 列出 keystore 条目。
 - `account info <selector>`: 按索引或别名/地址/密钥字段查询并展示单条 keystore 记录；`--json` 输出 JSON。
+- `account balance <selector|0xaddress>`: 聚合 selector 或裸地址的 coin 余额；支持 `--coin-type`、`--limit`、`--all`。默认无 `--limit` 时直接走 `suix_getAllBalances`，单币种过滤走 `suix_getBalance`；只有显式给 `--limit` 时才回到 paged coin scan。`--all` 保留为兼容 alias。
 - `account coins <selector|0xaddress>`: 查询 owner 的 coin page；支持 `--coin-type`、`--limit`、`--all`、`--json`。
 - `account objects <selector|0xaddress>`: 查询 owner 的 owned objects；支持 raw filter JSON 和 typed filters：
   - `--struct-type`

@@ -5361,6 +5361,67 @@ fn summarizeWalletBalanceRpcResponse(
     };
 }
 
+fn printBalanceSummaryForOwner(
+    allocator: std.mem.Allocator,
+    rpc: *client.SuiRpcClient,
+    writer: anytype,
+    owner: []const u8,
+    args: *const cli.ParsedArgs,
+) !void {
+    if (args.account_resources_limit == null) {
+        const response = if (args.account_coin_type) |coin_type|
+            try rpc.getBalance(owner, coin_type)
+        else
+            try rpc.getAllBalances(owner);
+        defer rpc.allocator.free(response);
+
+        var summary = try summarizeWalletBalanceRpcResponse(
+            allocator,
+            owner,
+            response,
+        );
+        defer summary.deinit(allocator);
+        try printStructuredJson(writer, summary, args.pretty);
+        return;
+    }
+
+    const coin_query: client.rpc_client.CoinQuery = .{
+        .all = .{
+            .owner = owner,
+            .request = .{
+                .coin_type = args.account_coin_type,
+                .limit = args.account_resources_limit,
+            },
+        },
+    };
+
+    var result = try rpc.runResourceQueryAction(
+        allocator,
+        .{
+            .coins = coin_query,
+        },
+        .summarize,
+    );
+    defer result.deinit(allocator);
+
+    var summary = switch (result) {
+        .summarized => |value| switch (value) {
+            .coins => |page| try summarizeWalletCoinBalances(
+                allocator,
+                owner,
+                page,
+                true,
+                args.account_resources_limit,
+            ),
+            else => return error.InvalidCli,
+        },
+        else => return error.InvalidCli,
+    };
+    defer summary.deinit(allocator);
+
+    try printStructuredJson(writer, summary, args.pretty);
+}
+
 fn writeJsonFieldPrefix(writer: anytype, has_fields: *bool, name: []const u8) !void {
     if (has_fields.*) try writer.writeAll(",");
     has_fields.* = true;
@@ -6818,59 +6879,7 @@ pub fn runCommandWithProgrammaticProvider(
         .wallet_balance => {
             const resolved = try resolveWalletOwner(allocator, args);
             defer if (resolved.owned) |value| allocator.free(value);
-
-            if (args.account_resources_limit == null) {
-                const response = if (args.account_coin_type) |coin_type|
-                    try rpc.getBalance(resolved.owner, coin_type)
-                else
-                    try rpc.getAllBalances(resolved.owner);
-                defer rpc.allocator.free(response);
-
-                var summary = try summarizeWalletBalanceRpcResponse(
-                    allocator,
-                    resolved.owner,
-                    response,
-                );
-                defer summary.deinit(allocator);
-                try printStructuredJson(writer, summary, args.pretty);
-                return;
-            }
-
-            const coin_query: client.rpc_client.CoinQuery = .{
-                .all = .{
-                    .owner = resolved.owner,
-                    .request = .{
-                        .coin_type = args.account_coin_type,
-                        .limit = args.account_resources_limit,
-                    },
-                },
-            };
-
-            var result = try rpc.runResourceQueryAction(
-                allocator,
-                .{
-                    .coins = coin_query,
-                },
-                .summarize,
-            );
-            defer result.deinit(allocator);
-
-            var summary = switch (result) {
-                .summarized => |value| switch (value) {
-                    .coins => |page| try summarizeWalletCoinBalances(
-                        allocator,
-                        resolved.owner,
-                        page,
-                        true,
-                        args.account_resources_limit,
-                    ),
-                    else => return error.InvalidCli,
-                },
-                else => return error.InvalidCli,
-            };
-            defer summary.deinit(allocator);
-
-            try printStructuredJson(writer, summary, args.pretty);
+            try printBalanceSummaryForOwner(allocator, rpc, writer, resolved.owner, args);
         },
         .wallet_coins, .wallet_objects => {
             const resolved = try resolveWalletOwner(allocator, args);
@@ -7247,6 +7256,11 @@ pub fn runCommandWithProgrammaticProvider(
             );
             defer result.deinit(allocator);
             try printReadQueryActionResult(allocator, writer, result, args.pretty);
+        },
+        .account_balance => {
+            const resolved = try resolveAccountQueryOwner(allocator, args);
+            defer if (resolved.owned) |value| allocator.free(value);
+            try printBalanceSummaryForOwner(allocator, rpc, writer, resolved.owner, args);
         },
         .account_coins, .account_objects => {
             const resolved = try resolveAccountQueryOwner(allocator, args);
@@ -16847,6 +16861,142 @@ test "runCommand account_coins prints summarized coin output for selector" {
     try testing.expect(params_ok);
     try testing.expectEqualStrings("0xcoin-1", parsed.value.object.get("entries").?.array.items[0].object.get("coin_object_id").?.string);
     try testing.expectEqualStrings("7", parsed.value.object.get("entries").?.array.items[0].object.get("balance").?.string);
+}
+
+test "runCommand account_balance resolves selector and uses suix_getAllBalances" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const keystore_path = try std.fmt.allocPrint(allocator, "tmp_commands_account_balance_{d}.json", .{std.time.milliTimestamp()});
+    defer allocator.free(keystore_path);
+
+    const old_override = client.keystore.test_keystore_path_override;
+    client.keystore.test_keystore_path_override = keystore_path;
+    defer client.keystore.test_keystore_path_override = old_override;
+
+    var file = try std.fs.cwd().createFile(keystore_path, .{ .truncate = true });
+    defer file.close();
+    defer _ = std.fs.cwd().deleteFile(keystore_path) catch {};
+    try file.writeAll("[{\"alias\":\"main\",\"privateKey\":\"sk_balance\",\"address\":\"0x123\"}]");
+
+    var request_count: usize = 0;
+    var params_ok = false;
+
+    const MockContext = struct {
+        request_count: *usize,
+        params_ok: *bool,
+    };
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const ctx = @as(*MockContext, @ptrCast(@alignCast(context)));
+            ctx.request_count.* += 1;
+            ctx.params_ok.* = std.mem.eql(u8, req.method, "suix_getAllBalances") and
+                std.mem.eql(u8, req.params_json, "[\"0x123\"]");
+            return alloc.dupe(
+                u8,
+                "{\"result\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectCount\":2,\"totalBalance\":\"12\",\"lockedBalance\":{},\"fundsInAddressBalance\":\"0\"}]}",
+            );
+        }
+    }.call;
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    var ctx = MockContext{
+        .request_count = &request_count,
+        .params_ok = &params_ok,
+    };
+    rpc.request_sender = .{
+        .context = &ctx,
+        .callback = callback,
+    };
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "account",
+        "balance",
+        "main",
+    });
+    defer args.deinit(allocator);
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+
+    try testing.expectEqual(@as(usize, 1), request_count);
+    try testing.expect(params_ok);
+    try testing.expectEqualStrings("0x123", parsed.value.object.get("owner").?.string);
+    try testing.expectEqual(@as(usize, 1), parsed.value.object.get("coin_balances").?.array.items.len);
+    try testing.expectEqualStrings("12", parsed.value.object.get("coin_balances").?.array.items[0].object.get("total_balance").?.string);
+}
+
+test "runCommand account_balance with raw address and coin type uses suix_getBalance" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var request_count: usize = 0;
+    var params_ok = false;
+
+    const MockContext = struct {
+        request_count: *usize,
+        params_ok: *bool,
+    };
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const ctx = @as(*MockContext, @ptrCast(@alignCast(context)));
+            ctx.request_count.* += 1;
+            ctx.params_ok.* = std.mem.eql(u8, req.method, "suix_getBalance") and
+                std.mem.eql(u8, req.params_json, "[\"0x456\",\"0x3::usdc::USDC\"]");
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"coinType\":\"0x3::usdc::USDC\",\"coinObjectCount\":1,\"totalBalance\":\"9\",\"lockedBalance\":{},\"fundsInAddressBalance\":\"0\"}}",
+            );
+        }
+    }.call;
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    var ctx = MockContext{
+        .request_count = &request_count,
+        .params_ok = &params_ok,
+    };
+    rpc.request_sender = .{
+        .context = &ctx,
+        .callback = callback,
+    };
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "account",
+        "balance",
+        "0x456",
+        "--coin-type",
+        "0x3::usdc::USDC",
+    });
+    defer args.deinit(allocator);
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+
+    try testing.expectEqual(@as(usize, 1), request_count);
+    try testing.expect(params_ok);
+    try testing.expectEqualStrings("0x456", parsed.value.object.get("owner").?.string);
+    try testing.expectEqual(@as(usize, 1), parsed.value.object.get("coin_balances").?.array.items.len);
+    try testing.expectEqualStrings("0x3::usdc::USDC", parsed.value.object.get("coin_balances").?.array.items[0].object.get("coin_type").?.string);
 }
 
 test "runCommand account_objects prints summarized owned-object output for selector" {
