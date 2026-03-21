@@ -7826,6 +7826,27 @@ pub const SuiRpcClient = struct {
             );
         }
 
+        for (parameters) |parameter| {
+            if (parameter.omitted_from_explicit_args or parameter.explicit_arg_json != null) continue;
+            if (parameter.shared_object_candidates != null) continue;
+            if (!isMoveReferenceSignature(parameter.signature)) continue;
+            if (parameter.owned_object_candidates != null or parameter.vector_item_owned_object_candidates != null) continue;
+
+            const value = parameter.auto_selected_arg_json orelse continue;
+            if (isMoveMutableReferenceSignature(parameter.signature)) {
+                try appendReservedMoveObjectIdsFromArgumentJsonTextConst(
+                    allocator,
+                    &mutable_reserved_object_ids,
+                    value,
+                );
+            }
+            try appendReservedMoveObjectIdsFromArgumentJsonTextConst(
+                allocator,
+                &all_selected_object_ids,
+                value,
+            );
+        }
+
         markSharedParametersNeedingCrossPlanning(
             parameters,
             mutable_reserved_object_ids.items,
@@ -26185,6 +26206,63 @@ test "applyCrossParameterSharedObjectSelectionHints allows immutable shared reus
     );
     try testing.expectEqualStrings(
         "\"select:clock\"",
+        parameters[1].auto_selected_arg_json.?,
+    );
+}
+
+test "applyCrossParameterSharedObjectSelectionHints reserves preset shared selections before mutable replanning" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const mutable_candidates = try allocator.alloc(move_result.SharedMoveObjectCandidate, 2);
+    errdefer allocator.free(mutable_candidates);
+    mutable_candidates[0] = .{
+        .object_id = try allocator.dupe(u8, "0x6"),
+        .selection_score = 10,
+        .discovery_rank = 0,
+        .initial_shared_version = 1,
+        .shared_object_input_select_token = try allocator.dupe(u8, "select:clock"),
+        .mutable_shared_object_input_select_token = try allocator.dupe(u8, "select:clock-mut"),
+    };
+    mutable_candidates[1] = .{
+        .object_id = try allocator.dupe(u8, "0xpool-a"),
+        .selection_score = 1,
+        .discovery_rank = 1,
+        .initial_shared_version = 2,
+        .shared_object_input_select_token = try allocator.dupe(u8, "select:pool-a"),
+        .mutable_shared_object_input_select_token = try allocator.dupe(u8, "select:pool-a-mut"),
+    };
+    errdefer {
+        for (mutable_candidates) |*candidate| candidate.deinit(allocator);
+    }
+
+    const parameters = try allocator.alloc(move_result.OwnedMoveParameterSummary, 2);
+    defer {
+        for (parameters) |*parameter| parameter.deinit(allocator);
+        allocator.free(parameters);
+    }
+    parameters[0] = .{
+        .signature = try allocator.dupe(u8, "&0x2::clock::Clock"),
+        .auto_selected_arg_json = try allocator.dupe(
+            u8,
+            "\"select:{\\\"kind\\\":\\\"object_preset\\\",\\\"name\\\":\\\"clock\\\"}\"",
+        ),
+    };
+    parameters[1] = .{
+        .signature = try allocator.dupe(u8, "&mut 0x2a::pool::Pool"),
+        .shared_object_candidates = mutable_candidates,
+    };
+
+    try SuiRpcClient.applyCrossParameterSharedObjectSelectionHints(allocator, parameters);
+
+    try testing.expectEqualStrings(
+        "\"select:{\\\"kind\\\":\\\"object_preset\\\",\\\"name\\\":\\\"clock\\\"}\"",
+        parameters[0].auto_selected_arg_json.?,
+    );
+    try testing.expectEqualStrings(
+        "\"select:pool-a-mut\"",
         parameters[1].auto_selected_arg_json.?,
     );
 }

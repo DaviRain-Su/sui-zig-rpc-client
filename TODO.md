@@ -156,6 +156,8 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
   scalar replanning matches the actual greedy vector assignment order.
 - [x] Rank shared-object combinations across parameters, while still allowing
   legal immutable shared reuse and forbidding conflicting mutable reuse.
+- [x] Reserve stable preset/shared auto selections before mutable shared
+  replanning so fixed shared inputs participate in the joint plan.
 
 ### 2. Dual-coin and multi-coin automatic arrangement
 
