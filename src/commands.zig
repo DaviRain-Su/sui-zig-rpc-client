@@ -15530,6 +15530,88 @@ test "runCommand move function with --summarize avoids reusing the same scalar c
     );
 }
 
+test "runCommand move function with --summarize reuses one large scalar coin across exact split parameters" {
+    const testing = std.testing;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const callback = struct {
+        fn call(_: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            if (std.mem.eql(u8, req.method, "sui_getNormalizedMoveFunction")) {
+                return alloc.dupe(
+                    u8,
+                    "{\"result\":{\"visibility\":\"Public\",\"isEntry\":true,\"typeParameters\":[],\"parameters\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"coin\",\"name\":\"Coin\",\"typeParams\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"sui\",\"name\":\"SUI\",\"typeParams\":[]}}]}},{\"Struct\":{\"address\":\"0x2\",\"module\":\"coin\",\"name\":\"Coin\",\"typeParams\":[{\"Struct\":{\"address\":\"0x2\",\"module\":\"sui\",\"name\":\"SUI\",\"typeParams\":[]}}]}},\"u64\",\"u64\",{\"MutableReference\":{\"Struct\":{\"address\":\"0x2\",\"module\":\"tx_context\",\"name\":\"TxContext\",\"typeParams\":[]}}}],\"return\":[]}}",
+                );
+            }
+
+            std.debug.assert(std.mem.eql(u8, req.method, "suix_getCoins"));
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0xowner\"") != null);
+            std.debug.assert(std.mem.indexOf(u8, req.params_json, "\"0x2::sui::SUI\"") != null);
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xcoin-big\",\"version\":\"11\",\"digest\":\"coin-digest-big\",\"balance\":\"25\"}],\"hasNextPage\":false}}",
+            );
+        }
+    }.call;
+
+    var args = cli.ParsedArgs{
+        .command = .move_function,
+        .has_command = true,
+        .move_package = "0x2",
+        .move_module = "router",
+        .move_function = "deposit_two_same_exact",
+        .tx_build_sender = "0xowner",
+        .tx_build_args = "[11,5]",
+        .tx_send_summarize = true,
+    };
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+    rpc.request_sender = .{
+        .context = undefined,
+        .callback = callback,
+    };
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+
+    const template = parsed.value.object.get("call_template").?.object;
+    const preferred_commands = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        template.get("preferred_commands_json").?.string,
+        .{},
+    );
+    defer preferred_commands.deinit();
+
+    try testing.expectEqual(@as(usize, 3), preferred_commands.value.array.items.len);
+    try testing.expectEqualStrings("SplitCoins", preferred_commands.value.array.items[0].object.get("kind").?.string);
+    try testing.expectEqualStrings("SplitCoins", preferred_commands.value.array.items[1].object.get("kind").?.string);
+    try testing.expectEqualStrings(
+        "select:{\"kind\":\"object_input\",\"objectId\":\"0xcoin-big\",\"inputKind\":\"imm_or_owned\",\"version\":11,\"digest\":\"coin-digest-big\"}",
+        preferred_commands.value.array.items[0].object.get("coin").?.string,
+    );
+    try testing.expectEqualStrings(
+        "select:{\"kind\":\"object_input\",\"objectId\":\"0xcoin-big\",\"inputKind\":\"imm_or_owned\",\"version\":11,\"digest\":\"coin-digest-big\"}",
+        preferred_commands.value.array.items[1].object.get("coin").?.string,
+    );
+
+    const move_call_args = preferred_commands.value.array.items[2].object.get("arguments").?.array.items;
+    try testing.expectEqual(@as(i64, 0), move_call_args[0].object.get("NestedResult").?.array.items[0].integer);
+    try testing.expectEqual(@as(i64, 0), move_call_args[0].object.get("NestedResult").?.array.items[1].integer);
+    try testing.expectEqual(@as(i64, 1), move_call_args[1].object.get("NestedResult").?.array.items[0].integer);
+    try testing.expectEqual(@as(i64, 0), move_call_args[1].object.get("NestedResult").?.array.items[1].integer);
+    try testing.expectEqual(@as(i64, 11), move_call_args[2].integer);
+    try testing.expectEqual(@as(i64, 5), move_call_args[3].integer);
+}
+
 test "runCommand move function with --summarize picks the gas reserve that preserves a cleaner business coin plan" {
     const testing = std.testing;
 

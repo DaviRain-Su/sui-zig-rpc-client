@@ -11690,6 +11690,11 @@ pub const SuiRpcClient = struct {
         sources: ?[]SelectedCoinCandidate = null,
     };
 
+    const SingleSplitCoinCandidateOption = struct {
+        candidate_index: usize,
+        effective_balance: u64,
+    };
+
     fn deinitPlannedSplitCoinParameterSelections(
         allocator: std.mem.Allocator,
         selections: []PlannedSplitCoinParameterSelection,
@@ -11710,16 +11715,129 @@ pub const SuiRpcClient = struct {
         return std.mem.order(u8, left.object_id, right.object_id) == .lt;
     }
 
+    fn singleSplitCoinCandidateOptionShouldSortBefore(
+        candidates: []const move_result.OwnedMoveObjectCandidate,
+        left: SingleSplitCoinCandidateOption,
+        right: SingleSplitCoinCandidateOption,
+    ) bool {
+        const left_candidate = candidates[left.candidate_index];
+        const right_candidate = candidates[right.candidate_index];
+        if (left_candidate.selection_score != right_candidate.selection_score) {
+            return left_candidate.selection_score > right_candidate.selection_score;
+        }
+        if (left.effective_balance != right.effective_balance) {
+            return left.effective_balance < right.effective_balance;
+        }
+        return std.mem.order(u8, left_candidate.object_id, right_candidate.object_id) == .lt;
+    }
+
+    fn splitCoinSelectedInPreviousMultiSourceSelections(
+        planned_selections: []const PlannedSplitCoinParameterSelection,
+        upto_parameter_index: usize,
+        object_id: []const u8,
+    ) bool {
+        for (planned_selections[0..upto_parameter_index]) |selection| {
+            const sources = selection.sources orelse continue;
+            if (sources.len <= 1) continue;
+            for (sources) |selected| {
+                if (std.mem.eql(u8, selected.object_id, object_id)) return true;
+            }
+        }
+        return false;
+    }
+
+    fn splitCoinPreviouslyConsumedBalance(
+        planned_selections: []const PlannedSplitCoinParameterSelection,
+        split_amount_values: []const ?u64,
+        upto_parameter_index: usize,
+        object_id: []const u8,
+    ) u64 {
+        var total: u64 = 0;
+        for (planned_selections[0..upto_parameter_index], split_amount_values[0..upto_parameter_index]) |selection, amount| {
+            const sources = selection.sources orelse continue;
+            if (sources.len != 1) continue;
+            if (!std.mem.eql(u8, sources[0].object_id, object_id)) continue;
+            total +|= amount orelse 0;
+        }
+        return total;
+    }
+
+    fn collectSingleSplitCoinCandidateOptions(
+        allocator: std.mem.Allocator,
+        candidates: []const move_result.OwnedMoveObjectCandidate,
+        min_balance: u64,
+        excluded_object_ids: []const []const u8,
+        split_amount_values: []const ?u64,
+        parameter_index: usize,
+        planned_selections: []const PlannedSplitCoinParameterSelection,
+    ) ![]SingleSplitCoinCandidateOption {
+        var options = std.ArrayList(SingleSplitCoinCandidateOption).empty;
+        defer options.deinit(allocator);
+
+        for (candidates, 0..) |candidate, candidate_index| {
+            if (moveObjectIdIsExcluded(excluded_object_ids, candidate.object_id)) continue;
+            if (splitCoinSelectedInPreviousMultiSourceSelections(
+                planned_selections,
+                parameter_index,
+                candidate.object_id,
+            )) continue;
+
+            const balance = candidate.balance orelse continue;
+            const consumed = splitCoinPreviouslyConsumedBalance(
+                planned_selections,
+                split_amount_values,
+                parameter_index,
+                candidate.object_id,
+            );
+            if (consumed >= balance) continue;
+            const effective_balance = balance - consumed;
+            if (effective_balance < min_balance) continue;
+
+            try options.append(allocator, .{
+                .candidate_index = candidate_index,
+                .effective_balance = effective_balance,
+            });
+        }
+
+        var index: usize = 1;
+        while (index < options.items.len) : (index += 1) {
+            var scan = index;
+            while (scan > 0 and singleSplitCoinCandidateOptionShouldSortBefore(
+                candidates,
+                options.items[scan],
+                options.items[scan - 1],
+            )) : (scan -= 1) {
+                std.mem.swap(SingleSplitCoinCandidateOption, &options.items[scan], &options.items[scan - 1]);
+            }
+        }
+
+        return try options.toOwnedSlice(allocator);
+    }
+
+    fn splitCoinCandidateIsExcluded(
+        initial_excluded_object_ids: []const []const u8,
+        reserved_object_ids: []const []const u8,
+        object_id: []const u8,
+    ) bool {
+        return moveObjectIdIsExcluded(initial_excluded_object_ids, object_id) or
+            moveObjectIdIsExcluded(reserved_object_ids, object_id);
+    }
+
     fn collectSplitCoinCandidateIndicesExcluding(
         allocator: std.mem.Allocator,
         candidates: []const move_result.OwnedMoveObjectCandidate,
-        excluded_object_ids: []const []const u8,
+        initial_excluded_object_ids: []const []const u8,
+        reserved_object_ids: []const []const u8,
     ) ![]usize {
         var indices = std.ArrayList(usize).empty;
         defer indices.deinit(allocator);
 
         for (candidates, 0..) |candidate, candidate_index| {
-            if (moveObjectIdIsExcluded(excluded_object_ids, candidate.object_id)) continue;
+            if (splitCoinCandidateIsExcluded(
+                initial_excluded_object_ids,
+                reserved_object_ids,
+                candidate.object_id,
+            )) continue;
             if (candidate.balance == null) continue;
             try indices.append(allocator, candidate_index);
         }
@@ -11742,6 +11860,7 @@ pub const SuiRpcClient = struct {
         allocator: std.mem.Allocator,
         parameters: []move_result.OwnedMoveParameterSummary,
         split_amount_values: []const ?u64,
+        initial_excluded_object_ids: []const []const u8,
         parameter_index: usize,
         candidates: []const move_result.OwnedMoveObjectCandidate,
         candidate_indices: []const usize,
@@ -11766,6 +11885,7 @@ pub const SuiRpcClient = struct {
                 allocator,
                 parameters,
                 split_amount_values,
+                initial_excluded_object_ids,
                 parameter_index + 1,
                 reserved_object_ids,
                 planned_selections,
@@ -11795,6 +11915,7 @@ pub const SuiRpcClient = struct {
                 allocator,
                 parameters,
                 split_amount_values,
+                initial_excluded_object_ids,
                 parameter_index,
                 candidates,
                 candidate_indices,
@@ -11816,6 +11937,7 @@ pub const SuiRpcClient = struct {
         allocator: std.mem.Allocator,
         parameters: []move_result.OwnedMoveParameterSummary,
         split_amount_values: []const ?u64,
+        initial_excluded_object_ids: []const []const u8,
         parameter_index: usize,
         reserved_object_ids: *std.ArrayList([]const u8),
         planned_selections: []PlannedSplitCoinParameterSelection,
@@ -11827,6 +11949,7 @@ pub const SuiRpcClient = struct {
             allocator,
             parameters,
             split_amount_values,
+            initial_excluded_object_ids,
             parameter_index + 1,
             reserved_object_ids,
             planned_selections,
@@ -11836,6 +11959,7 @@ pub const SuiRpcClient = struct {
                 allocator,
                 parameters,
                 split_amount_values,
+                initial_excluded_object_ids,
                 parameter_index + 1,
                 reserved_object_ids,
                 planned_selections,
@@ -11848,33 +11972,18 @@ pub const SuiRpcClient = struct {
             values
         else
             return false;
-        const candidate_indices = try collectSplitCoinCandidateIndicesExcluding(
+        const single_candidate_options = try collectSingleSplitCoinCandidateOptions(
             allocator,
             candidates,
-            reserved_object_ids.items,
+            min_balance,
+            initial_excluded_object_ids,
+            split_amount_values,
+            parameter_index,
+            planned_selections,
         );
-        defer allocator.free(candidate_indices);
-
-        var single_candidate_indices = std.ArrayList(usize).empty;
-        defer single_candidate_indices.deinit(allocator);
-        for (candidate_indices) |candidate_index| {
-            const candidate = candidates[candidate_index];
-            const balance = candidate.balance orelse continue;
-            if (balance < min_balance) continue;
-            try single_candidate_indices.append(allocator, candidate_index);
-        }
-        var single_index: usize = 1;
-        while (single_index < single_candidate_indices.items.len) : (single_index += 1) {
-            var scan = single_index;
-            while (scan > 0 and scalarBusinessCoinCandidateShouldSortBefore(
-                candidates[single_candidate_indices.items[scan]],
-                candidates[single_candidate_indices.items[scan - 1]],
-                min_balance,
-            )) : (scan -= 1) {
-                std.mem.swap(usize, &single_candidate_indices.items[scan], &single_candidate_indices.items[scan - 1]);
-            }
-        }
-        for (single_candidate_indices.items) |candidate_index| {
+        defer allocator.free(single_candidate_options);
+        for (single_candidate_options) |option| {
+            const candidate_index = option.candidate_index;
             const candidate = candidates[candidate_index];
             planned_selections[parameter_index].sources = try allocator.dupe(
                 SelectedCoinCandidate,
@@ -11888,6 +11997,7 @@ pub const SuiRpcClient = struct {
                 allocator,
                 parameters,
                 split_amount_values,
+                initial_excluded_object_ids,
                 parameter_index + 1,
                 reserved_object_ids,
                 planned_selections,
@@ -11899,12 +12009,21 @@ pub const SuiRpcClient = struct {
             planned_selections[parameter_index].sources = null;
         }
 
+        const candidate_indices = try collectSplitCoinCandidateIndicesExcluding(
+            allocator,
+            candidates,
+            initial_excluded_object_ids,
+            reserved_object_ids.items,
+        );
+        defer allocator.free(candidate_indices);
+
         var current_sources = std.ArrayList(SelectedCoinCandidate).empty;
         defer current_sources.deinit(allocator);
         return try selectSplitCoinSourcesForParameterRecursive(
             allocator,
             parameters,
             split_amount_values,
+            initial_excluded_object_ids,
             parameter_index,
             candidates,
             candidate_indices,
@@ -11928,12 +12047,12 @@ pub const SuiRpcClient = struct {
 
         var reserved_object_ids = std.ArrayList([]const u8).empty;
         defer reserved_object_ids.deinit(allocator);
-        try reserved_object_ids.appendSlice(allocator, excluded_object_ids);
 
         return try selectSplitCoinPlanRecursive(
             allocator,
             parameters,
             split_amount_values,
+            excluded_object_ids,
             0,
             &reserved_object_ids,
             planned_selections,
@@ -27074,6 +27193,120 @@ test "buildMoveFunctionSplitCoinPreferredCommandsJson uses the global coin plan 
     try testing.expectEqual(@as(i64, 3), move_call_args[1].object.get("Result").?.integer);
     try testing.expectEqual(@as(i64, 50), move_call_args[2].integer);
     try testing.expectEqual(@as(i64, 100), move_call_args[3].integer);
+}
+
+test "buildMoveFunctionSplitCoinPreferredCommandsJson reuses one large split source across scalar exact params" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const first_candidates = try allocator.alloc(move_result.OwnedMoveObjectCandidate, 1);
+    errdefer allocator.free(first_candidates);
+    first_candidates[0] = .{
+        .object_id = try allocator.dupe(u8, "0xcoin-big"),
+        .version = 11,
+        .digest = try allocator.dupe(u8, "coin-digest-big-first"),
+        .balance = 25,
+        .object_input_select_token = try allocator.dupe(
+            u8,
+            "select:{\"kind\":\"object_input\",\"objectId\":\"0xcoin-big\",\"inputKind\":\"imm_or_owned\",\"version\":11,\"digest\":\"coin-digest-big\"}",
+        ),
+    };
+    errdefer {
+        for (first_candidates) |*candidate| candidate.deinit(allocator);
+    }
+
+    const second_candidates = try allocator.alloc(move_result.OwnedMoveObjectCandidate, 1);
+    errdefer allocator.free(second_candidates);
+    second_candidates[0] = .{
+        .object_id = try allocator.dupe(u8, "0xcoin-big"),
+        .version = 11,
+        .digest = try allocator.dupe(u8, "coin-digest-big-second"),
+        .balance = 25,
+        .object_input_select_token = try allocator.dupe(
+            u8,
+            "select:{\"kind\":\"object_input\",\"objectId\":\"0xcoin-big\",\"inputKind\":\"imm_or_owned\",\"version\":11,\"digest\":\"coin-digest-big\"}",
+        ),
+    };
+    errdefer {
+        for (second_candidates) |*candidate| candidate.deinit(allocator);
+    }
+
+    const parameters = try allocator.alloc(move_result.OwnedMoveParameterSummary, 5);
+    errdefer allocator.free(parameters);
+    parameters[0] = .{
+        .signature = try allocator.dupe(u8, "0x2::coin::Coin<0x2::sui::SUI>"),
+        .owned_object_candidates = first_candidates,
+    };
+    parameters[1] = .{
+        .signature = try allocator.dupe(u8, "0x2::coin::Coin<0x2::sui::SUI>"),
+        .owned_object_candidates = second_candidates,
+    };
+    parameters[2] = .{
+        .signature = try allocator.dupe(u8, "u64"),
+        .lowering_kind = "u64",
+        .explicit_arg_json = try allocator.dupe(u8, "11"),
+    };
+    parameters[3] = .{
+        .signature = try allocator.dupe(u8, "u64"),
+        .lowering_kind = "u64",
+        .explicit_arg_json = try allocator.dupe(u8, "5"),
+    };
+    parameters[4] = .{
+        .signature = try allocator.dupe(u8, "&mut 0x2::tx_context::TxContext"),
+        .omitted_from_explicit_args = true,
+    };
+    errdefer {
+        for (parameters) |*parameter| parameter.deinit(allocator);
+    }
+
+    const type_parameters = try allocator.alloc(move_result.OwnedMoveTypeParameter, 0);
+    errdefer allocator.free(type_parameters);
+    const returns = try allocator.alloc(move_result.OwnedMoveParameterSummary, 0);
+    errdefer allocator.free(returns);
+
+    var summary = move_result.OwnedMoveFunctionSummary{
+        .package_id = try allocator.dupe(u8, "0x2"),
+        .module_name = try allocator.dupe(u8, "router"),
+        .function_name = try allocator.dupe(u8, "deposit_two_same_exact"),
+        .visibility = try allocator.dupe(u8, "Public"),
+        .is_entry = true,
+        .type_parameters = type_parameters,
+        .parameters = parameters,
+        .returns = returns,
+    };
+    defer summary.deinit(allocator);
+
+    const commands_json = (try SuiRpcClient.buildMoveFunctionSplitCoinPreferredCommandsJson(
+        allocator,
+        summary,
+        "[]",
+    )).?;
+    defer allocator.free(commands_json);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, commands_json, .{});
+    defer parsed.deinit();
+
+    try testing.expectEqual(@as(usize, 3), parsed.value.array.items.len);
+    try testing.expectEqualStrings("SplitCoins", parsed.value.array.items[0].object.get("kind").?.string);
+    try testing.expectEqualStrings("SplitCoins", parsed.value.array.items[1].object.get("kind").?.string);
+    try testing.expectEqualStrings(
+        "select:{\"kind\":\"object_input\",\"objectId\":\"0xcoin-big\",\"inputKind\":\"imm_or_owned\",\"version\":11,\"digest\":\"coin-digest-big\"}",
+        parsed.value.array.items[0].object.get("coin").?.string,
+    );
+    try testing.expectEqualStrings(
+        "select:{\"kind\":\"object_input\",\"objectId\":\"0xcoin-big\",\"inputKind\":\"imm_or_owned\",\"version\":11,\"digest\":\"coin-digest-big\"}",
+        parsed.value.array.items[1].object.get("coin").?.string,
+    );
+
+    const move_call_args = parsed.value.array.items[2].object.get("arguments").?.array.items;
+    try testing.expectEqual(@as(i64, 0), move_call_args[0].object.get("NestedResult").?.array.items[0].integer);
+    try testing.expectEqual(@as(i64, 0), move_call_args[0].object.get("NestedResult").?.array.items[1].integer);
+    try testing.expectEqual(@as(i64, 1), move_call_args[1].object.get("NestedResult").?.array.items[0].integer);
+    try testing.expectEqual(@as(i64, 0), move_call_args[1].object.get("NestedResult").?.array.items[1].integer);
+    try testing.expectEqual(@as(i64, 11), move_call_args[2].integer);
+    try testing.expectEqual(@as(i64, 5), move_call_args[3].integer);
 }
 
 test "getMoveDynamicFieldDiscoveredObjectIdsCachedBorrowed reuses cached discoveries" {
