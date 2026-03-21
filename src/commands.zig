@@ -16229,6 +16229,37 @@ test "runCommand move function preferred split planning backtracks exact vector 
         "[[\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xcoin-c\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":11,\\\"digest\\\":\\\"coin-digest-c\\\"}\",\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xcoin-b\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":10,\\\"digest\\\":\\\"coin-digest-b\\\"}\"],\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xcoin-a\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":9,\\\"digest\\\":\\\"coin-digest-a\\\"}\",10,8]",
         template.get("preferred_args_json").?.string,
     );
+    const preferred_commands = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        template.get("preferred_commands_json").?.string,
+        .{},
+    );
+    defer preferred_commands.deinit();
+    try testing.expectEqual(@as(usize, 5), preferred_commands.value.array.items.len);
+    try testing.expectEqualStrings("MergeCoins", preferred_commands.value.array.items[0].object.get("kind").?.string);
+    try testing.expectEqualStrings("SplitCoins", preferred_commands.value.array.items[1].object.get("kind").?.string);
+    try testing.expectEqualStrings("MakeMoveVec", preferred_commands.value.array.items[2].object.get("kind").?.string);
+    try testing.expectEqualStrings("SplitCoins", preferred_commands.value.array.items[3].object.get("kind").?.string);
+    try testing.expectEqualStrings("MoveCall", preferred_commands.value.array.items[4].object.get("kind").?.string);
+    try testing.expectEqualStrings(
+        "select:{\"kind\":\"object_input\",\"objectId\":\"0xcoin-c\",\"inputKind\":\"imm_or_owned\",\"version\":11,\"digest\":\"coin-digest-c\"}",
+        preferred_commands.value.array.items[0].object.get("destination").?.string,
+    );
+    const merge_sources = preferred_commands.value.array.items[0].object.get("sources").?.array.items;
+    try testing.expectEqual(@as(usize, 1), merge_sources.len);
+    try testing.expectEqualStrings(
+        "select:{\"kind\":\"object_input\",\"objectId\":\"0xcoin-b\",\"inputKind\":\"imm_or_owned\",\"version\":10,\"digest\":\"coin-digest-b\"}",
+        merge_sources[0].string,
+    );
+    try testing.expectEqualStrings(
+        "select:{\"kind\":\"object_input\",\"objectId\":\"0xcoin-c\",\"inputKind\":\"imm_or_owned\",\"version\":11,\"digest\":\"coin-digest-c\"}",
+        preferred_commands.value.array.items[1].object.get("coin").?.string,
+    );
+    try testing.expectEqualStrings(
+        "select:{\"kind\":\"object_input\",\"objectId\":\"0xcoin-a\",\"inputKind\":\"imm_or_owned\",\"version\":9,\"digest\":\"coin-digest-a\"}",
+        preferred_commands.value.array.items[3].object.get("coin").?.string,
+    );
 }
 
 test "runCommand move function with --summarize plans merge split make-move-vec for vector coin amount" {
@@ -16307,8 +16338,12 @@ test "runCommand move function with --summarize plans merge split make-move-vec 
     const merge_sources = preferred_commands.value.array.items[0].object.get("sources").?.array.items;
     try testing.expectEqual(@as(usize, 1), merge_sources.len);
     try testing.expectEqualStrings(
-        "select:{\"kind\":\"object_input\",\"objectId\":\"0xcoin-mid\",\"inputKind\":\"imm_or_owned\",\"version\":10,\"digest\":\"coin-digest-mid\"}",
+        "select:{\"kind\":\"object_input\",\"objectId\":\"0xcoin-large\",\"inputKind\":\"imm_or_owned\",\"version\":11,\"digest\":\"coin-digest-large\"}",
         merge_sources[0].string,
+    );
+    try testing.expectEqualStrings(
+        "select:{\"kind\":\"object_input\",\"objectId\":\"0xcoin-mid\",\"inputKind\":\"imm_or_owned\",\"version\":10,\"digest\":\"coin-digest-mid\"}",
+        preferred_commands.value.array.items[1].object.get("coin").?.string,
     );
 
     const make_move_vec_elements = preferred_commands.value.array.items[2].object.get("elements").?.array.items;

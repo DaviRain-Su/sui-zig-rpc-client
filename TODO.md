@@ -402,6 +402,9 @@ what the generic path still needs to finish.
     amount.
   - [x] Prefer higher-scored exact covering sets for `vector<Coin<T>>` amount
     hints instead of greedily taking larger low-score source coins.
+  - [x] Prefer exact split plans that stay aligned with the winning business
+    coin auto-selection when later exact scalar/vector parameters would
+    otherwise drift onto a different multi-source fallback.
 - [ ] Fewer unresolved placeholders in real `add_liquidity` / `swap`
   executions.
 
