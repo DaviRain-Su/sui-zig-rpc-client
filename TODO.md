@@ -150,6 +150,8 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
   falling back to per-parameter greedy selection.
 - [x] Reserve stable non-coin owned/vector selections before scalar owned-object
   replanning so later scalar choices cannot steal already-stable objects.
+- [x] Let remaining non-coin vector-owned demand influence scalar owned-object
+  replanning so scalar picks do not collapse better vector object sets.
 
 ### 2. Dual-coin and multi-coin automatic arrangement
 
