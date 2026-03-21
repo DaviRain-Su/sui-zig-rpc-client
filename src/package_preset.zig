@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub const cetus_clmm_mainnet = "0x25ebb9a7c50eb17b3fa9c5a30fb8b5ad8f97caaf4928943acbcff7153dfee5e3";
+pub const cetus_clmm_mainnet = "0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb";
 pub const cetus_clmm_testnet = "0x6bbdf09f9fa0baa1524080a5b8991042e95061c4e1206217279aec51ba08edf7";
 
 fn trimPresetPrefix(raw: []const u8) []const u8 {
@@ -51,6 +51,7 @@ test "resolvePackageIdAlias resolves built-in package aliases" {
     try testing.expectEqualStrings("0x2", resolvePackageIdAlias("preset:sui-framework").?);
     try testing.expectEqualStrings("0x3", resolvePackageIdAlias("system").?);
     try testing.expectEqualStrings(cetus_clmm_mainnet, resolvePackageIdAlias("cetus_clmm_mainnet").?);
+    try testing.expectEqualStrings(cetus_clmm_mainnet, resolvePackageIdAlias("cetus-clmm-mainnet").?);
     try testing.expectEqualStrings(cetus_clmm_mainnet, resolvePackageIdAlias("pkg:cetus.mainnet.clmm").?);
     try testing.expectEqualStrings(cetus_clmm_testnet, resolvePackageIdAlias("CETUS-CLMM-TESTNET").?);
     try testing.expect(resolvePackageIdAlias("0x2") == null);
