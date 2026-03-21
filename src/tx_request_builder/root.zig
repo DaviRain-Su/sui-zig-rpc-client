@@ -77,6 +77,11 @@ pub const TransactionBlock = builder.TransactionBlock;
 pub const buildTransactionBlockFromCommandSource = builder.buildTransactionBlockFromCommandSource;
 pub const buildArtifact = builder.buildArtifact;
 
+// Import integration tests
+comptime {
+    _ = @import("integration_test.zig");
+}
+
 // ============================================================
 // Tests
 // ============================================================
