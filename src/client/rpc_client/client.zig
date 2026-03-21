@@ -18007,6 +18007,30 @@ pub const SuiRpcClient = struct {
         return try self.getCoins(owner, request.coin_type, request.cursor, request.limit);
     }
 
+    pub fn getBalance(
+        self: *SuiRpcClient,
+        owner: []const u8,
+        coin_type: ?[]const u8,
+    ) ![]u8 {
+        const params_json = if (coin_type) |resolved_coin_type|
+            try std.fmt.allocPrint(self.allocator, "[\"{s}\",\"{s}\"]", .{ owner, resolved_coin_type })
+        else
+            try std.fmt.allocPrint(self.allocator, "[\"{s}\"]", .{owner});
+        defer self.allocator.free(params_json);
+
+        return try self.call("suix_getBalance", params_json);
+    }
+
+    pub fn getAllBalances(
+        self: *SuiRpcClient,
+        owner: []const u8,
+    ) ![]u8 {
+        const params_json = try std.fmt.allocPrint(self.allocator, "[\"{s}\"]", .{owner});
+        defer self.allocator.free(params_json);
+
+        return try self.call("suix_getAllBalances", params_json);
+    }
+
     pub fn getAllCoinsPage(
         self: *SuiRpcClient,
         owner: []const u8,
@@ -30457,6 +30481,74 @@ test "getAllCoinsWithRequest uses suix_getAllCoins when coin type is omitted" {
     try testing.expectEqualStrings("0x3::usdc::USDC", page.entries[1].coin_type.?);
     try testing.expect(!page.has_next_page);
     try testing.expect(page.next_cursor == null);
+}
+
+test "getAllBalances calls suix_getAllBalances" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var called = false;
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const ok = @as(*bool, @ptrCast(@alignCast(context)));
+            ok.* = std.mem.eql(u8, req.method, "suix_getAllBalances") and
+                std.mem.eql(u8, req.params_json, "[\"0xowner\"]");
+            return alloc.dupe(
+                u8,
+                "{\"result\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectCount\":2,\"totalBalance\":\"15\",\"lockedBalance\":{},\"fundsInAddressBalance\":\"0\"}]}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &called,
+        .callback = callback,
+    };
+
+    const response = try client_instance.getAllBalances("0xowner");
+    defer allocator.free(response);
+
+    try testing.expect(called);
+    try testing.expect(std.mem.indexOf(u8, response, "\"totalBalance\":\"15\"") != null);
+}
+
+test "getBalance calls suix_getBalance with explicit coin type" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var called = false;
+
+    const callback = struct {
+        fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
+            const ok = @as(*bool, @ptrCast(@alignCast(context)));
+            ok.* = std.mem.eql(u8, req.method, "suix_getBalance") and
+                std.mem.eql(u8, req.params_json, "[\"0xowner\",\"0x3::usdc::USDC\"]");
+            return alloc.dupe(
+                u8,
+                "{\"result\":{\"coinType\":\"0x3::usdc::USDC\",\"coinObjectCount\":1,\"totalBalance\":\"7\",\"lockedBalance\":{},\"fundsInAddressBalance\":\"0\"}}",
+            );
+        }
+    }.call;
+
+    var client_instance = try SuiRpcClient.init(allocator, "http://localhost:1234");
+    defer client_instance.deinit();
+    client_instance.request_sender = .{
+        .context = &called,
+        .callback = callback,
+    };
+
+    const response = try client_instance.getBalance("0xowner", "0x3::usdc::USDC");
+    defer allocator.free(response);
+
+    try testing.expect(called);
+    try testing.expect(std.mem.indexOf(u8, response, "\"totalBalance\":\"7\"") != null);
 }
 
 test "getAllOwnedObjectsWithRequest aggregates multiple pages" {
