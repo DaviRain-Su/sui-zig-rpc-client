@@ -12276,6 +12276,31 @@ pub const SuiRpcClient = struct {
             split_amount_values[target_index] = min_balance;
             needs_split = true;
         }
+        for (summary.parameters, 0..) |parameter, index| {
+            if (parameter.omitted_from_explicit_args) continue;
+            if (parameter.explicit_arg_json != null) continue;
+            if (split_amount_jsons[index] != null) continue;
+
+            const auto_selected_value = parameter.auto_selected_arg_json orelse continue;
+            if (coinTypeFromMoveSignature(parameter.signature) != null) {
+                try appendReservedMoveObjectIdsFromArgumentJsonText(
+                    allocator,
+                    &reserved_coin_object_ids,
+                    auto_selected_value,
+                );
+                continue;
+            }
+
+            if (vectorElementTypeSignature(parameter.signature)) |element_signature| {
+                if (coinTypeFromCoinStructType(element_signature) != null) {
+                    try appendReservedMoveObjectIdsFromArgumentJsonText(
+                        allocator,
+                        &reserved_coin_object_ids,
+                        auto_selected_value,
+                    );
+                }
+            }
+        }
 
         if (!needs_split) return null;
 
@@ -27886,6 +27911,124 @@ test "buildMoveFunctionSplitCoinPreferredCommandsJson can reuse merged destinati
     try testing.expectEqual(@as(i64, 0), move_call_args[0].object.get("NestedResult").?.array.items[1].integer);
     try testing.expectEqual(@as(i64, 2), move_call_args[1].object.get("NestedResult").?.array.items[0].integer);
     try testing.expectEqual(@as(i64, 0), move_call_args[1].object.get("NestedResult").?.array.items[1].integer);
+}
+
+test "buildMoveFunctionSplitCoinPreferredCommandsJson reserves stable later coin auto selections before split planning" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const first_candidates = try allocator.alloc(move_result.OwnedMoveObjectCandidate, 2);
+    errdefer allocator.free(first_candidates);
+    first_candidates[0] = .{
+        .object_id = try allocator.dupe(u8, "0xcoin-locked"),
+        .version = 11,
+        .digest = try allocator.dupe(u8, "coin-digest-locked-first"),
+        .balance = 9,
+        .object_input_select_token = try allocator.dupe(
+            u8,
+            "select:{\"kind\":\"object_input\",\"objectId\":\"0xcoin-locked\",\"inputKind\":\"imm_or_owned\",\"version\":11,\"digest\":\"coin-digest-locked\"}",
+        ),
+    };
+    first_candidates[1] = .{
+        .object_id = try allocator.dupe(u8, "0xcoin-alt"),
+        .version = 12,
+        .digest = try allocator.dupe(u8, "coin-digest-alt-first"),
+        .balance = 12,
+        .object_input_select_token = try allocator.dupe(
+            u8,
+            "select:{\"kind\":\"object_input\",\"objectId\":\"0xcoin-alt\",\"inputKind\":\"imm_or_owned\",\"version\":12,\"digest\":\"coin-digest-alt\"}",
+        ),
+    };
+    errdefer {
+        for (first_candidates) |*candidate| candidate.deinit(allocator);
+    }
+
+    const later_candidates = try allocator.alloc(move_result.OwnedMoveObjectCandidate, 1);
+    errdefer allocator.free(later_candidates);
+    later_candidates[0] = .{
+        .object_id = try allocator.dupe(u8, "0xcoin-locked"),
+        .version = 11,
+        .digest = try allocator.dupe(u8, "coin-digest-locked-later"),
+        .balance = 9,
+        .object_input_select_token = try allocator.dupe(
+            u8,
+            "select:{\"kind\":\"object_input\",\"objectId\":\"0xcoin-locked\",\"inputKind\":\"imm_or_owned\",\"version\":11,\"digest\":\"coin-digest-locked\"}",
+        ),
+    };
+    errdefer {
+        for (later_candidates) |*candidate| candidate.deinit(allocator);
+    }
+
+    const parameters = try allocator.alloc(move_result.OwnedMoveParameterSummary, 4);
+    errdefer allocator.free(parameters);
+    parameters[0] = .{
+        .signature = try allocator.dupe(u8, "0x2::coin::Coin<0x2::sui::SUI>"),
+        .owned_object_candidates = first_candidates,
+    };
+    parameters[1] = .{
+        .signature = try allocator.dupe(u8, "u64"),
+        .lowering_kind = "u64",
+        .explicit_arg_json = try allocator.dupe(u8, "9"),
+    };
+    parameters[2] = .{
+        .signature = try allocator.dupe(u8, "0x2::coin::Coin<0x2::sui::SUI>"),
+        .owned_object_candidates = later_candidates,
+        .auto_selected_arg_json = try SuiRpcClient.buildAutoSelectedScalarArgJson(
+            allocator,
+            "select:{\"kind\":\"object_input\",\"objectId\":\"0xcoin-locked\",\"inputKind\":\"imm_or_owned\",\"version\":11,\"digest\":\"coin-digest-locked\"}",
+        ),
+    };
+    parameters[3] = .{
+        .signature = try allocator.dupe(u8, "&mut 0x2::tx_context::TxContext"),
+        .omitted_from_explicit_args = true,
+    };
+    errdefer {
+        for (parameters) |*parameter| parameter.deinit(allocator);
+    }
+
+    const type_parameters = try allocator.alloc(move_result.OwnedMoveTypeParameter, 0);
+    errdefer allocator.free(type_parameters);
+    const returns = try allocator.alloc(move_result.OwnedMoveParameterSummary, 0);
+    errdefer allocator.free(returns);
+
+    var summary = move_result.OwnedMoveFunctionSummary{
+        .package_id = try allocator.dupe(u8, "0x2"),
+        .module_name = try allocator.dupe(u8, "router"),
+        .function_name = try allocator.dupe(u8, "deposit_exact_then_reuse_locked_coin"),
+        .visibility = try allocator.dupe(u8, "Public"),
+        .is_entry = true,
+        .type_parameters = type_parameters,
+        .parameters = parameters,
+        .returns = returns,
+    };
+    defer summary.deinit(allocator);
+
+    const commands_json = (try SuiRpcClient.buildMoveFunctionSplitCoinPreferredCommandsJson(
+        allocator,
+        summary,
+        "[]",
+    )).?;
+    defer allocator.free(commands_json);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, commands_json, .{});
+    defer parsed.deinit();
+
+    try testing.expectEqual(@as(usize, 2), parsed.value.array.items.len);
+    try testing.expectEqualStrings("SplitCoins", parsed.value.array.items[0].object.get("kind").?.string);
+    try testing.expectEqualStrings(
+        "select:{\"kind\":\"object_input\",\"objectId\":\"0xcoin-alt\",\"inputKind\":\"imm_or_owned\",\"version\":12,\"digest\":\"coin-digest-alt\"}",
+        parsed.value.array.items[0].object.get("coin").?.string,
+    );
+
+    const move_call_args = parsed.value.array.items[1].object.get("arguments").?.array.items;
+    try testing.expectEqual(@as(i64, 0), move_call_args[0].object.get("NestedResult").?.array.items[0].integer);
+    try testing.expectEqual(@as(i64, 0), move_call_args[0].object.get("NestedResult").?.array.items[1].integer);
+    try testing.expectEqualStrings(
+        "select:{\"kind\":\"object_input\",\"objectId\":\"0xcoin-locked\",\"inputKind\":\"imm_or_owned\",\"version\":11,\"digest\":\"coin-digest-locked\"}",
+        move_call_args[2].string,
+    );
 }
 
 test "getMoveDynamicFieldDiscoveredObjectIdsCachedBorrowed reuses cached discoveries" {

@@ -387,6 +387,9 @@ what the generic path still needs to finish.
   - [x] When a reused merged destination no longer covers a later exact amount
     by itself, keep treating its post-split remainder as available and merge in
     only the extra source coins still needed.
+  - [x] Reserve stable later auto-selected coin parameters before exact split
+    planning so preferred split commands do not steal coins already locked by
+    later business inputs.
 - [ ] Fewer unresolved placeholders in real `add_liquidity` / `swap`
   executions.
 
