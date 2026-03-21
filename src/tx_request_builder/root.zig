@@ -6,6 +6,8 @@ pub const types = @import("types.zig");
 pub const argument = @import("argument.zig");
 pub const account = @import("account.zig");
 pub const session = @import("session.zig");
+pub const authorization = @import("authorization.zig");
+pub const builder = @import("builder.zig");
 
 // Re-export types
 pub const CommandResultAliases = types.CommandResultAliases;
@@ -54,6 +56,27 @@ pub const SessionChallenger = session.SessionChallenger;
 pub const buildSignPersonalMessageChallengeText = session.buildSignPersonalMessageChallengeText;
 pub const buildSessionChallengeText = session.buildSessionChallengeText;
 
+// Re-export authorization types
+pub const AuthorizationPlan = authorization.AuthorizationPlan;
+pub const OwnedAuthorizationPlan = authorization.OwnedAuthorizationPlan;
+pub const OwnedProgrammaticRequestOptions = authorization.OwnedProgrammaticRequestOptions;
+pub const authorizationPlan = authorization.authorizationPlan;
+pub const ownedAuthorizationPlan = authorization.ownedAuthorizationPlan;
+
+// Re-export builder types
+pub const TransactionInstruction = builder.TransactionInstruction;
+pub const InstructionKind = builder.InstructionKind;
+pub const MoveCallInstruction = builder.MoveCallInstruction;
+pub const TransferObjectsInstruction = builder.TransferObjectsInstruction;
+pub const SplitCoinsInstruction = builder.SplitCoinsInstruction;
+pub const MergeCoinsInstruction = builder.MergeCoinsInstruction;
+pub const PublishInstruction = builder.PublishInstruction;
+pub const UpgradeInstruction = builder.UpgradeInstruction;
+pub const MakeMoveVecInstruction = builder.MakeMoveVecInstruction;
+pub const TransactionBlock = builder.TransactionBlock;
+pub const buildTransactionBlockFromCommandSource = builder.buildTransactionBlockFromCommandSource;
+pub const buildArtifact = builder.buildArtifact;
+
 // ============================================================
 // Tests
 // ============================================================
@@ -63,6 +86,8 @@ test "tx_request_builder module imports successfully" {
     _ = argument;
     _ = account;
     _ = session;
+    _ = authorization;
+    _ = builder;
 }
 
 test "re-exports work correctly" {
@@ -91,10 +116,25 @@ test "re-exports work correctly" {
         .timestamp_ms = 0,
     };
 
+    // Test authorization types
+    _ = AuthorizationPlan{ .options = .{} };
+    _ = OwnedAuthorizationPlan{ .owned_options = .{ .options = .{} } };
+
+    // Test builder types
+    _ = TransactionBlock{ .instructions = &.{} };
+    _ = InstructionKind{ .make_move_vec = .{
+        .element_type = "u64",
+        .elements = &.{},
+    } };
+
     // Test functions exist
     _ = accountProviderCanExecute;
     _ = buildSignPersonalMessageChallengeText;
     _ = buildSessionChallengeText;
+    _ = authorizationPlan;
+    _ = ownedAuthorizationPlan;
+    _ = buildTransactionBlockFromCommandSource;
+    _ = buildArtifact;
 }
 
 test "end-to-end type usage" {
