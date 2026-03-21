@@ -11949,6 +11949,9 @@ pub const SuiRpcClient = struct {
         left: move_result.OwnedMoveObjectCandidate,
         right: move_result.OwnedMoveObjectCandidate,
     ) bool {
+        if (left.selection_score != right.selection_score) {
+            return left.selection_score > right.selection_score;
+        }
         const left_balance = left.balance orelse 0;
         const right_balance = right.balance orelse 0;
         if (left_balance != right_balance) return left_balance > right_balance;
@@ -28230,6 +28233,128 @@ test "buildMoveFunctionSplitCoinPreferredCommandsJson can reuse merged destinati
     try testing.expectEqual(@as(i64, 0), move_call_args[0].object.get("NestedResult").?.array.items[1].integer);
     try testing.expectEqual(@as(i64, 2), move_call_args[1].object.get("NestedResult").?.array.items[0].integer);
     try testing.expectEqual(@as(i64, 0), move_call_args[1].object.get("NestedResult").?.array.items[1].integer);
+}
+
+test "buildMoveFunctionSplitCoinPreferredCommandsJson prefers high-score merge pairs over larger low-score sources" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const candidates = try allocator.alloc(move_result.OwnedMoveObjectCandidate, 4);
+    errdefer allocator.free(candidates);
+    candidates[0] = .{
+        .object_id = try allocator.dupe(u8, "0xcoin-high-a"),
+        .version = 11,
+        .digest = try allocator.dupe(u8, "coin-digest-high-a"),
+        .balance = 6,
+        .object_input_select_token = try allocator.dupe(
+            u8,
+            "select:{\"kind\":\"object_input\",\"objectId\":\"0xcoin-high-a\",\"inputKind\":\"imm_or_owned\",\"version\":11,\"digest\":\"coin-digest-high-a\"}",
+        ),
+        .selection_score = 10,
+    };
+    candidates[1] = .{
+        .object_id = try allocator.dupe(u8, "0xcoin-high-b"),
+        .version = 12,
+        .digest = try allocator.dupe(u8, "coin-digest-high-b"),
+        .balance = 4,
+        .object_input_select_token = try allocator.dupe(
+            u8,
+            "select:{\"kind\":\"object_input\",\"objectId\":\"0xcoin-high-b\",\"inputKind\":\"imm_or_owned\",\"version\":12,\"digest\":\"coin-digest-high-b\"}",
+        ),
+        .selection_score = 9,
+    };
+    candidates[2] = .{
+        .object_id = try allocator.dupe(u8, "0xcoin-low-a"),
+        .version = 13,
+        .digest = try allocator.dupe(u8, "coin-digest-low-a"),
+        .balance = 8,
+        .object_input_select_token = try allocator.dupe(
+            u8,
+            "select:{\"kind\":\"object_input\",\"objectId\":\"0xcoin-low-a\",\"inputKind\":\"imm_or_owned\",\"version\":13,\"digest\":\"coin-digest-low-a\"}",
+        ),
+        .selection_score = 1,
+    };
+    candidates[3] = .{
+        .object_id = try allocator.dupe(u8, "0xcoin-low-b"),
+        .version = 14,
+        .digest = try allocator.dupe(u8, "coin-digest-low-b"),
+        .balance = 2,
+        .object_input_select_token = try allocator.dupe(
+            u8,
+            "select:{\"kind\":\"object_input\",\"objectId\":\"0xcoin-low-b\",\"inputKind\":\"imm_or_owned\",\"version\":14,\"digest\":\"coin-digest-low-b\"}",
+        ),
+        .selection_score = 0,
+    };
+    errdefer {
+        for (candidates) |*candidate| candidate.deinit(allocator);
+    }
+
+    const parameters = try allocator.alloc(move_result.OwnedMoveParameterSummary, 3);
+    errdefer allocator.free(parameters);
+    parameters[0] = .{
+        .signature = try allocator.dupe(u8, "0x2::coin::Coin<0x2::sui::SUI>"),
+        .owned_object_candidates = candidates,
+    };
+    parameters[1] = .{
+        .signature = try allocator.dupe(u8, "u64"),
+        .lowering_kind = "u64",
+        .explicit_arg_json = try allocator.dupe(u8, "10"),
+    };
+    parameters[2] = .{
+        .signature = try allocator.dupe(u8, "&mut 0x2::tx_context::TxContext"),
+        .omitted_from_explicit_args = true,
+    };
+    errdefer {
+        for (parameters) |*parameter| parameter.deinit(allocator);
+    }
+
+    const type_parameters = try allocator.alloc(move_result.OwnedMoveTypeParameter, 0);
+    errdefer allocator.free(type_parameters);
+    const returns = try allocator.alloc(move_result.OwnedMoveParameterSummary, 0);
+    errdefer allocator.free(returns);
+
+    var summary = move_result.OwnedMoveFunctionSummary{
+        .package_id = try allocator.dupe(u8, "0x2"),
+        .module_name = try allocator.dupe(u8, "router"),
+        .function_name = try allocator.dupe(u8, "deposit_scored_exact"),
+        .visibility = try allocator.dupe(u8, "Public"),
+        .is_entry = true,
+        .type_parameters = type_parameters,
+        .parameters = parameters,
+        .returns = returns,
+    };
+    defer summary.deinit(allocator);
+
+    const commands_json = (try SuiRpcClient.buildMoveFunctionSplitCoinPreferredCommandsJson(
+        allocator,
+        summary,
+        "[]",
+    )).?;
+    defer allocator.free(commands_json);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, commands_json, .{});
+    defer parsed.deinit();
+
+    try testing.expectEqual(@as(usize, 3), parsed.value.array.items.len);
+    try testing.expectEqualStrings("MergeCoins", parsed.value.array.items[0].object.get("kind").?.string);
+    try testing.expectEqualStrings("SplitCoins", parsed.value.array.items[1].object.get("kind").?.string);
+    try testing.expectEqualStrings("MoveCall", parsed.value.array.items[2].object.get("kind").?.string);
+    try testing.expectEqualStrings(
+        "select:{\"kind\":\"object_input\",\"objectId\":\"0xcoin-high-a\",\"inputKind\":\"imm_or_owned\",\"version\":11,\"digest\":\"coin-digest-high-a\"}",
+        parsed.value.array.items[0].object.get("destination").?.string,
+    );
+    const merge_sources = parsed.value.array.items[0].object.get("sources").?.array.items;
+    try testing.expectEqual(@as(usize, 1), merge_sources.len);
+    try testing.expectEqualStrings(
+        "select:{\"kind\":\"object_input\",\"objectId\":\"0xcoin-high-b\",\"inputKind\":\"imm_or_owned\",\"version\":12,\"digest\":\"coin-digest-high-b\"}",
+        merge_sources[0].string,
+    );
+    try testing.expectEqualStrings(
+        "select:{\"kind\":\"object_input\",\"objectId\":\"0xcoin-high-a\",\"inputKind\":\"imm_or_owned\",\"version\":11,\"digest\":\"coin-digest-high-a\"}",
+        parsed.value.array.items[1].object.get("coin").?.string,
+    );
 }
 
 test "buildMoveFunctionSplitCoinPreferredCommandsJson reserves stable later coin auto selections before split planning" {

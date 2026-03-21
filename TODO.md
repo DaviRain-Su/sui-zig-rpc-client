@@ -395,6 +395,9 @@ what the generic path still needs to finish.
   - [x] Reserve stable later auto-selected coin parameters before exact split
     planning so preferred split commands do not steal coins already locked by
     later business inputs.
+  - [x] Prefer higher-scored exact split merge pairs over larger low-score
+    source combinations when multiple multi-source plans can satisfy the same
+    amount.
 - [ ] Fewer unresolved placeholders in real `add_liquidity` / `swap`
   executions.
 
