@@ -381,6 +381,9 @@ what the generic path still needs to finish.
 - [ ] Joint selection of `Pool + Position + Coin + gas`.
   - [x] Backtrack earlier no-hint `vector<Coin<T>>` selections when later
     exact scalar coin parameters need one of the same sources.
+  - [x] Keep later scalar owned-object selections out of earlier
+    `vector<T>` owned-object auto picks so final auto-selection matches the
+    joint scalar/vector plan.
 - [ ] Dual-coin automatic merge/split planning for liquidity flows.
   - [x] Reuse one large exact split source across repeated scalar coin
     parameters when later splits still fit the remaining balance.

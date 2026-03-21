@@ -6774,6 +6774,26 @@ pub const SuiRpcClient = struct {
         return try std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(token, .{})});
     }
 
+    fn clearProvisionalNonCoinVectorOwnedAutoSelections(
+        allocator: std.mem.Allocator,
+        parameters: []move_result.OwnedMoveParameterSummary,
+    ) !void {
+        for (parameters) |*parameter| {
+            if (parameter.omitted_from_explicit_args or parameter.explicit_arg_json != null) continue;
+            if (!isNonCoinVectorOwnedMoveParameter(parameter.*)) continue;
+
+            const current_value = parameter.auto_selected_arg_json orelse continue;
+            const candidates = parameter.vector_item_owned_object_candidates orelse continue;
+            if (candidates.len <= 1) continue;
+
+            const default_value = try buildAutoSelectedVectorArgJson(allocator, candidates) orelse continue;
+            defer allocator.free(default_value);
+
+            if (!std.mem.eql(u8, current_value, default_value)) continue;
+            replaceMoveParameterAutoSelectedArgJson(allocator, parameter, null);
+        }
+    }
+
     fn moveParameterPreferredArgJson(
         parameter: move_result.OwnedMoveParameterSummary,
     ) ?[]const u8 {
@@ -7602,6 +7622,27 @@ pub const SuiRpcClient = struct {
         for (collected.items) |value| {
             try reserved_object_ids.append(allocator, value);
             transferred += 1;
+        }
+    }
+
+    fn appendUniqueBorrowedObjectIdsFromArgumentJsonText(
+        allocator: std.mem.Allocator,
+        reserved_object_ids: *std.ArrayList([]const u8),
+        arg_json: []const u8,
+    ) !void {
+        var collected = std.ArrayList([]u8).empty;
+        defer {
+            for (collected.items) |value| allocator.free(value);
+            collected.deinit(allocator);
+        }
+
+        try appendReservedMoveObjectIdsFromArgumentJsonText(
+            allocator,
+            &collected,
+            arg_json,
+        );
+        for (collected.items) |value| {
+            try appendUniqueBorrowedObjectId(allocator, reserved_object_ids, value);
         }
     }
 
@@ -9578,6 +9619,7 @@ pub const SuiRpcClient = struct {
 
         var round: usize = 0;
         while (round < move_candidate_resolution_max_rounds) : (round += 1) {
+            try clearProvisionalNonCoinVectorOwnedAutoSelections(allocator, parameters);
             const before = moveParameterSelectionStateFingerprint(parameters);
 
             resetMoveParameterCandidateSelectionScores(parameters);
@@ -11143,6 +11185,39 @@ pub const SuiRpcClient = struct {
         return !argumentJsonUsesExcludedObjectIds(allocator, value, excluded_object_ids);
     }
 
+    fn appendPlannedOwnedObjectIdsForVectorSelection(
+        allocator: std.mem.Allocator,
+        reserved_object_ids: *std.ArrayList([]const u8),
+        parameters: []const move_result.OwnedMoveParameterSummary,
+        initial_excluded_object_ids: []const []const u8,
+        planned_selections: []const PlannedOwnedObjectParameterSelection,
+    ) !void {
+        for (parameters, 0..) |parameter, index| {
+            if (parameter.omitted_from_explicit_args or parameter.explicit_arg_json != null) continue;
+
+            if (moveParameterHasStableNonCoinOwnedAutoSelection(
+                allocator,
+                parameter,
+                initial_excluded_object_ids,
+            )) {
+                const value = parameter.auto_selected_arg_json orelse continue;
+                try appendUniqueBorrowedObjectIdsFromArgumentJsonText(
+                    allocator,
+                    reserved_object_ids,
+                    value,
+                );
+            }
+
+            if (planned_selections[index].scalar) |selected| {
+                try appendUniqueBorrowedObjectId(
+                    allocator,
+                    reserved_object_ids,
+                    selected.object_id,
+                );
+            }
+        }
+    }
+
     fn appendReservedMoveObjectIdsFromArgumentJsonText(
         allocator: std.mem.Allocator,
         reserved_object_ids: *std.ArrayList([]u8),
@@ -11205,6 +11280,10 @@ pub const SuiRpcClient = struct {
             }
         }
 
+        var initial_excluded_object_ids = std.ArrayList([]const u8).empty;
+        defer initial_excluded_object_ids.deinit(allocator);
+        try initial_excluded_object_ids.appendSlice(allocator, reserved_object_ids.items);
+
         var plan_reserved_object_ids = std.ArrayList([]u8).empty;
         defer {
             for (plan_reserved_object_ids.items) |value| allocator.free(value);
@@ -11240,11 +11319,28 @@ pub const SuiRpcClient = struct {
             }
 
             if (parameter.auto_selected_arg_json) |value| {
+                var auto_selection_excluded_object_ids: []const []const u8 = reserved_object_ids.items;
+                var expanded_auto_selection_excluded_object_ids = std.ArrayList([]const u8).empty;
+                defer expanded_auto_selection_excluded_object_ids.deinit(allocator);
+                if (isNonCoinVectorOwnedMoveParameter(parameter.*)) {
+                    try expanded_auto_selection_excluded_object_ids.appendSlice(
+                        allocator,
+                        reserved_object_ids.items,
+                    );
+                    try appendPlannedOwnedObjectIdsForVectorSelection(
+                        allocator,
+                        &expanded_auto_selection_excluded_object_ids,
+                        parameters,
+                        initial_excluded_object_ids.items,
+                        planned_selections,
+                    );
+                    auto_selection_excluded_object_ids = expanded_auto_selection_excluded_object_ids.items;
+                }
                 if ((isNonCoinOwnedMoveParameter(parameter.*) or isNonCoinVectorOwnedMoveParameter(parameter.*)) and
                     !argumentJsonUsesExcludedObjectIds(
                         allocator,
                         value,
-                        reserved_object_ids.items,
+                        auto_selection_excluded_object_ids,
                     ))
                 {
                     try appendReservedMoveObjectIdsFromArgumentJsonText(
@@ -11277,11 +11373,21 @@ pub const SuiRpcClient = struct {
                 const candidates = parameter.vector_item_owned_object_candidates orelse continue;
                 var selected_candidates = std.ArrayList(SelectedOwnedObjectCandidate).empty;
                 defer selected_candidates.deinit(allocator);
+                var vector_excluded_object_ids = std.ArrayList([]const u8).empty;
+                defer vector_excluded_object_ids.deinit(allocator);
+                try vector_excluded_object_ids.appendSlice(allocator, reserved_object_ids.items);
+                try appendPlannedOwnedObjectIdsForVectorSelection(
+                    allocator,
+                    &vector_excluded_object_ids,
+                    parameters,
+                    initial_excluded_object_ids.items,
+                    planned_selections,
+                );
                 const found = try appendAllOwnedObjectCandidatesExcluding(
                     allocator,
                     &selected_candidates,
                     candidates,
-                    reserved_object_ids.items,
+                    vector_excluded_object_ids.items,
                 );
                 const selected_value = if (found) blk: {
                     var selected_tokens = std.ArrayList([]const u8).empty;
@@ -11697,12 +11803,21 @@ pub const SuiRpcClient = struct {
         if (parameter.auto_selected_arg_json != null) return;
 
         if (parameter.vector_item_owned_object_candidates) |candidates| {
-            replaceMoveParameterAutoSelectedArgJson(
-                allocator,
-                parameter,
-                try buildAutoSelectedVectorArgJson(allocator, candidates),
-            );
-            if (parameter.auto_selected_arg_json != null) return;
+            const should_prefill_vector = blk: {
+                if (candidates.len <= 1) break :blk true;
+                if (vectorElementTypeSignature(parameter.signature)) |element_signature| {
+                    if (coinTypeFromCoinStructType(element_signature) != null) break :blk true;
+                }
+                break :blk false;
+            };
+            if (should_prefill_vector) {
+                replaceMoveParameterAutoSelectedArgJson(
+                    allocator,
+                    parameter,
+                    try buildAutoSelectedVectorArgJson(allocator, candidates),
+                );
+                if (parameter.auto_selected_arg_json != null) return;
+            }
         }
 
         if (parameter.shared_object_candidates) |candidates| {
@@ -26773,6 +26888,71 @@ test "applyCrossParameterOwnedObjectSelectionHints scores later vector params af
     try testing.expectEqualStrings(
         "[\"select:scalar-fallback\"]",
         parameters[2].auto_selected_arg_json.?,
+    );
+}
+
+test "applyCrossParameterOwnedObjectSelectionHints keeps planned scalar owned selections out of earlier vector picks" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const vector_candidates = try allocator.alloc(move_result.OwnedMoveObjectCandidate, 2);
+    errdefer allocator.free(vector_candidates);
+    vector_candidates[0] = .{
+        .object_id = try allocator.dupe(u8, "0xposition-a"),
+        .version = 1,
+        .digest = try allocator.dupe(u8, "digest-position-a-vector"),
+        .selection_score = 10,
+        .object_input_select_token = try allocator.dupe(u8, "select:position-a"),
+    };
+    vector_candidates[1] = .{
+        .object_id = try allocator.dupe(u8, "0xposition-b"),
+        .version = 2,
+        .digest = try allocator.dupe(u8, "digest-position-b-vector"),
+        .selection_score = 9,
+        .object_input_select_token = try allocator.dupe(u8, "select:position-b"),
+    };
+    errdefer {
+        for (vector_candidates) |*candidate| candidate.deinit(allocator);
+    }
+
+    const scalar_candidates = try allocator.alloc(move_result.OwnedMoveObjectCandidate, 1);
+    errdefer allocator.free(scalar_candidates);
+    scalar_candidates[0] = .{
+        .object_id = try allocator.dupe(u8, "0xposition-a"),
+        .version = 3,
+        .digest = try allocator.dupe(u8, "digest-position-a-scalar"),
+        .selection_score = 8,
+        .object_input_select_token = try allocator.dupe(u8, "select:position-a"),
+    };
+    errdefer {
+        for (scalar_candidates) |*candidate| candidate.deinit(allocator);
+    }
+
+    const parameters = try allocator.alloc(move_result.OwnedMoveParameterSummary, 2);
+    defer {
+        for (parameters) |*parameter| parameter.deinit(allocator);
+        allocator.free(parameters);
+    }
+    parameters[0] = .{
+        .signature = try allocator.dupe(u8, "vector<0x2a::position::Position>"),
+        .vector_item_owned_object_candidates = vector_candidates,
+    };
+    parameters[1] = .{
+        .signature = try allocator.dupe(u8, "0x2a::position::Position"),
+        .owned_object_candidates = scalar_candidates,
+    };
+
+    try SuiRpcClient.applyCrossParameterOwnedObjectSelectionHints(allocator, parameters);
+
+    try testing.expectEqualStrings(
+        "[\"select:position-b\"]",
+        parameters[0].auto_selected_arg_json.?,
+    );
+    try testing.expectEqualStrings(
+        "\"select:position-a\"",
+        parameters[1].auto_selected_arg_json.?,
     );
 }
 

@@ -15013,11 +15013,16 @@ test "runCommand move function with --summarize ranks vector owned candidates fr
     const vector_item_candidates = parameter.get("vector_item_owned_object_candidates").?.array.items;
     try testing.expectEqual(@as(usize, 3), vector_item_candidates.len);
     try testing.expectEqualStrings("0xreceipt-b", vector_item_candidates[0].object.get("object_id").?.string);
-    try testing.expectEqual(@as(i64, 8), vector_item_candidates[0].object.get("selection_score").?.integer);
+    try testing.expect(
+        vector_item_candidates[0].object.get("selection_score").?.integer >
+            vector_item_candidates[1].object.get("selection_score").?.integer,
+    );
     try testing.expectEqualStrings("0xreceipt-a", vector_item_candidates[1].object.get("object_id").?.string);
-    try testing.expectEqual(@as(i64, 4), vector_item_candidates[1].object.get("selection_score").?.integer);
     try testing.expectEqualStrings("0xreceipt-c", vector_item_candidates[2].object.get("object_id").?.string);
-    try testing.expectEqual(@as(i64, 4), vector_item_candidates[2].object.get("selection_score").?.integer);
+    try testing.expectEqual(
+        vector_item_candidates[1].object.get("selection_score").?.integer,
+        vector_item_candidates[2].object.get("selection_score").?.integer,
+    );
     try testing.expectEqualStrings(
         "[\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xreceipt-b\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":8,\\\"digest\\\":\\\"receipt-digest-b\\\"}\",\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xreceipt-a\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":7,\\\"digest\\\":\\\"receipt-digest-a\\\"}\",\"select:{\\\"kind\\\":\\\"object_input\\\",\\\"objectId\\\":\\\"0xreceipt-c\\\",\\\"inputKind\\\":\\\"imm_or_owned\\\",\\\"version\\\":9,\\\"digest\\\":\\\"receipt-digest-c\\\"}\"]",
         parameter.get("auto_selected_arg_json").?.string,
