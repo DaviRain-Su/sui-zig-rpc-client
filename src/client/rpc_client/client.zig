@@ -10332,6 +10332,246 @@ pub const SuiRpcClient = struct {
         return selected_candidates.items.len != 0;
     }
 
+    const PlannedOwnedObjectParameterSelection = struct {
+        scalar: ?SelectedOwnedObjectCandidate = null,
+    };
+
+    fn selectedOwnedObjectCandidateSelectionScoreForParameter(
+        parameter: move_result.OwnedMoveParameterSummary,
+        selected: SelectedOwnedObjectCandidate,
+    ) usize {
+        const candidates = parameter.owned_object_candidates orelse return 0;
+        for (candidates) |candidate| {
+            if (std.mem.eql(u8, candidate.object_id, selected.object_id)) {
+                return candidate.selection_score;
+            }
+        }
+        return 0;
+    }
+
+    fn scalarOwnedObjectCandidateShouldSortBefore(
+        left: move_result.OwnedMoveObjectCandidate,
+        right: move_result.OwnedMoveObjectCandidate,
+    ) bool {
+        if (left.selection_score != right.selection_score) {
+            return left.selection_score > right.selection_score;
+        }
+        return std.mem.order(u8, left.object_id, right.object_id) == .lt;
+    }
+
+    fn collectScalarOwnedObjectCandidateIndicesExcluding(
+        allocator: std.mem.Allocator,
+        candidates: []const move_result.OwnedMoveObjectCandidate,
+        excluded_object_ids: []const []const u8,
+    ) ![]usize {
+        var indices = std.ArrayList(usize).empty;
+        defer indices.deinit(allocator);
+
+        for (candidates, 0..) |candidate, candidate_index| {
+            if (moveObjectIdIsExcluded(excluded_object_ids, candidate.object_id)) continue;
+            try indices.append(allocator, candidate_index);
+        }
+
+        var index: usize = 1;
+        while (index < indices.items.len) : (index += 1) {
+            var scan = index;
+            while (scan > 0 and scalarOwnedObjectCandidateShouldSortBefore(
+                candidates[indices.items[scan]],
+                candidates[indices.items[scan - 1]],
+            )) : (scan -= 1) {
+                std.mem.swap(usize, &indices.items[scan], &indices.items[scan - 1]);
+            }
+        }
+
+        return try indices.toOwnedSlice(allocator);
+    }
+
+    fn buildPlannedOwnedObjectSelectionScoreKey(
+        allocator: std.mem.Allocator,
+        parameters: []move_result.OwnedMoveParameterSummary,
+        excluded_object_ids: []const []const u8,
+        planned_selections: []const PlannedOwnedObjectParameterSelection,
+    ) ![]u8 {
+        var output = std.ArrayList(u8).empty;
+        defer output.deinit(allocator);
+        const writer = output.writer(allocator);
+
+        var total_selection_score: usize = 0;
+        for (parameters, 0..) |parameter, index| {
+            if (parameter.omitted_from_explicit_args or parameter.explicit_arg_json != null) continue;
+            if (!isNonCoinOwnedMoveParameter(parameter)) continue;
+            if (moveParameterHasStableOwnedAutoSelection(
+                allocator,
+                parameter,
+                excluded_object_ids,
+            )) continue;
+            if (planned_selections[index].scalar) |selected| {
+                total_selection_score +|= selectedOwnedObjectCandidateSelectionScoreForParameter(
+                    parameter,
+                    selected,
+                );
+            }
+        }
+
+        try writer.writeInt(usize, std.math.maxInt(usize) - total_selection_score, .big);
+        for (parameters, 0..) |parameter, index| {
+            if (parameter.omitted_from_explicit_args or parameter.explicit_arg_json != null) continue;
+            if (!isNonCoinOwnedMoveParameter(parameter)) continue;
+            if (moveParameterHasStableOwnedAutoSelection(
+                allocator,
+                parameter,
+                excluded_object_ids,
+            )) continue;
+
+            if (planned_selections[index].scalar) |selected| {
+                try writer.writeByte(0x01);
+                const selection_score = selectedOwnedObjectCandidateSelectionScoreForParameter(
+                    parameter,
+                    selected,
+                );
+                try writer.writeInt(usize, std.math.maxInt(usize) - selection_score, .big);
+                try writer.writeAll(selected.object_id);
+                try writer.writeByte(0);
+            } else {
+                try writer.writeByte(0x00);
+            }
+        }
+
+        return try output.toOwnedSlice(allocator);
+    }
+
+    fn copyPlannedOwnedObjectSelections(
+        destination: []PlannedOwnedObjectParameterSelection,
+        source: []const PlannedOwnedObjectParameterSelection,
+    ) void {
+        @memcpy(destination, source);
+    }
+
+    fn selectOwnedObjectPlanRecursive(
+        allocator: std.mem.Allocator,
+        parameters: []move_result.OwnedMoveParameterSummary,
+        excluded_object_ids: []const []const u8,
+        parameter_index: usize,
+        reserved_object_ids: *std.ArrayList([]const u8),
+        current_selections: []PlannedOwnedObjectParameterSelection,
+        best_selections: []PlannedOwnedObjectParameterSelection,
+        best_score_key: *?[]u8,
+    ) !void {
+        if (parameter_index >= parameters.len) {
+            const score_key = try buildPlannedOwnedObjectSelectionScoreKey(
+                allocator,
+                parameters,
+                excluded_object_ids,
+                current_selections,
+            );
+            errdefer allocator.free(score_key);
+            const should_replace = if (best_score_key.*) |best_value|
+                std.mem.order(u8, score_key, best_value) == .lt
+            else
+                true;
+            if (should_replace) {
+                if (best_score_key.*) |value| allocator.free(value);
+                best_score_key.* = score_key;
+                copyPlannedOwnedObjectSelections(best_selections, current_selections);
+            } else {
+                allocator.free(score_key);
+            }
+            return;
+        }
+
+        const parameter = parameters[parameter_index];
+        if (parameter.omitted_from_explicit_args or
+            parameter.explicit_arg_json != null or
+            moveParameterHasStableOwnedAutoSelection(allocator, parameter, excluded_object_ids) or
+            !isNonCoinOwnedMoveParameter(parameter))
+        {
+            try selectOwnedObjectPlanRecursive(
+                allocator,
+                parameters,
+                excluded_object_ids,
+                parameter_index + 1,
+                reserved_object_ids,
+                current_selections,
+                best_selections,
+                best_score_key,
+            );
+            return;
+        }
+
+        const candidates = parameter.owned_object_candidates orelse return;
+        const candidate_indices = try collectScalarOwnedObjectCandidateIndicesExcluding(
+            allocator,
+            candidates,
+            reserved_object_ids.items,
+        );
+        defer allocator.free(candidate_indices);
+        if (candidate_indices.len == 0) return;
+
+        for (candidate_indices) |candidate_index| {
+            const candidate = candidates[candidate_index];
+            current_selections[parameter_index].scalar = .{
+                .object_id = candidate.object_id,
+                .token = candidate.object_input_select_token,
+            };
+            try reserved_object_ids.append(allocator, candidate.object_id);
+            try selectOwnedObjectPlanRecursive(
+                allocator,
+                parameters,
+                excluded_object_ids,
+                parameter_index + 1,
+                reserved_object_ids,
+                current_selections,
+                best_selections,
+                best_score_key,
+            );
+            _ = reserved_object_ids.pop();
+            current_selections[parameter_index] = .{};
+        }
+    }
+
+    fn selectOwnedObjectPlanExcluding(
+        allocator: std.mem.Allocator,
+        parameters: []move_result.OwnedMoveParameterSummary,
+        excluded_object_ids: []const []const u8,
+        planned_selections: []PlannedOwnedObjectParameterSelection,
+    ) !bool {
+        for (planned_selections) |*selection| selection.* = .{};
+
+        const current_selections = try allocator.alloc(PlannedOwnedObjectParameterSelection, parameters.len);
+        defer allocator.free(current_selections);
+        for (current_selections) |*selection| selection.* = .{};
+
+        var reserved_object_ids = std.ArrayList([]const u8).empty;
+        defer reserved_object_ids.deinit(allocator);
+        try reserved_object_ids.appendSlice(allocator, excluded_object_ids);
+
+        var best_score_key: ?[]u8 = null;
+        defer if (best_score_key) |value| allocator.free(value);
+
+        try selectOwnedObjectPlanRecursive(
+            allocator,
+            parameters,
+            excluded_object_ids,
+            0,
+            &reserved_object_ids,
+            current_selections,
+            planned_selections,
+            &best_score_key,
+        );
+
+        return best_score_key != null;
+    }
+
+    fn moveParameterHasStableOwnedAutoSelection(
+        allocator: std.mem.Allocator,
+        parameter: move_result.OwnedMoveParameterSummary,
+        excluded_object_ids: []const []const u8,
+    ) bool {
+        const value = parameter.auto_selected_arg_json orelse return false;
+        if (!isNonCoinOwnedMoveParameter(parameter)) return false;
+        return !argumentJsonUsesExcludedObjectIds(allocator, value, excluded_object_ids);
+    }
+
     fn appendReservedMoveObjectIdsFromArgumentJsonText(
         allocator: std.mem.Allocator,
         reserved_object_ids: *std.ArrayList([]u8),
@@ -10375,6 +10615,8 @@ pub const SuiRpcClient = struct {
         allocator: std.mem.Allocator,
         parameters: []move_result.OwnedMoveParameterSummary,
     ) !void {
+        const planned_selections = try allocator.alloc(PlannedOwnedObjectParameterSelection, parameters.len);
+        defer allocator.free(planned_selections);
         var reserved_object_ids = std.ArrayList([]u8).empty;
         defer {
             for (reserved_object_ids.items) |value| allocator.free(value);
@@ -10392,7 +10634,14 @@ pub const SuiRpcClient = struct {
             }
         }
 
-        for (parameters) |*parameter| {
+        const has_plan = try selectOwnedObjectPlanExcluding(
+            allocator,
+            parameters,
+            reserved_object_ids.items,
+            planned_selections,
+        );
+
+        for (parameters, 0..) |*parameter, index| {
             if (parameter.omitted_from_explicit_args) continue;
 
             if (parameter.explicit_arg_json != null) {
@@ -10418,7 +10667,8 @@ pub const SuiRpcClient = struct {
 
             if (isNonCoinOwnedMoveParameter(parameter.*)) {
                 const candidates = parameter.owned_object_candidates orelse continue;
-                const selected_value = if (selectFirstOwnedObjectCandidateExcluding(
+                const planned_selected = if (has_plan) planned_selections[index].scalar else null;
+                const selected_value = if (planned_selected orelse selectFirstOwnedObjectCandidateExcluding(
                     candidates,
                     reserved_object_ids.items,
                 )) |selected| blk: {
@@ -25162,6 +25412,137 @@ test "collectObjectDiscoverySeedObjectIdsFromMoveParameters skips candidate seed
     try testing.expectEqualStrings("0xselected", seeds[0]);
     try testing.expectEqualStrings("0xtiebreak-a", seeds[1]);
     try testing.expectEqualStrings("0xtiebreak-b", seeds[2]);
+}
+
+test "applyCrossParameterOwnedObjectSelectionHints ranks a complete scalar owned-object plan" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const first_candidates = try allocator.alloc(move_result.OwnedMoveObjectCandidate, 2);
+    errdefer allocator.free(first_candidates);
+    first_candidates[0] = .{
+        .object_id = try allocator.dupe(u8, "0xpool-shared-anchor"),
+        .version = 1,
+        .digest = try allocator.dupe(u8, "digest-pool-anchor-first"),
+        .selection_score = 10,
+        .object_input_select_token = try allocator.dupe(u8, "select:pool-shared-anchor"),
+    };
+    first_candidates[1] = .{
+        .object_id = try allocator.dupe(u8, "0xposition-owned"),
+        .version = 2,
+        .digest = try allocator.dupe(u8, "digest-position-owned-first"),
+        .selection_score = 9,
+        .object_input_select_token = try allocator.dupe(u8, "select:position-owned"),
+    };
+    errdefer {
+        for (first_candidates) |*candidate| candidate.deinit(allocator);
+    }
+
+    const second_candidates = try allocator.alloc(move_result.OwnedMoveObjectCandidate, 2);
+    errdefer allocator.free(second_candidates);
+    second_candidates[0] = .{
+        .object_id = try allocator.dupe(u8, "0xpool-shared-anchor"),
+        .version = 1,
+        .digest = try allocator.dupe(u8, "digest-pool-anchor-second"),
+        .selection_score = 8,
+        .object_input_select_token = try allocator.dupe(u8, "select:pool-shared-anchor"),
+    };
+    second_candidates[1] = .{
+        .object_id = try allocator.dupe(u8, "0xpool-fallback"),
+        .version = 3,
+        .digest = try allocator.dupe(u8, "digest-pool-fallback-second"),
+        .selection_score = 0,
+        .object_input_select_token = try allocator.dupe(u8, "select:pool-fallback"),
+    };
+    errdefer {
+        for (second_candidates) |*candidate| candidate.deinit(allocator);
+    }
+
+    const parameters = try allocator.alloc(move_result.OwnedMoveParameterSummary, 2);
+    defer {
+        for (parameters) |*parameter| parameter.deinit(allocator);
+        allocator.free(parameters);
+    }
+    parameters[0] = .{
+        .signature = try allocator.dupe(u8, "0x2a::position::Position"),
+        .owned_object_candidates = first_candidates,
+    };
+    parameters[1] = .{
+        .signature = try allocator.dupe(u8, "0x2a::pool::Pool"),
+        .owned_object_candidates = second_candidates,
+    };
+
+    try SuiRpcClient.applyCrossParameterOwnedObjectSelectionHints(allocator, parameters);
+
+    try testing.expectEqualStrings(
+        "\"select:position-owned\"",
+        parameters[0].auto_selected_arg_json.?,
+    );
+    try testing.expectEqualStrings(
+        "\"select:pool-shared-anchor\"",
+        parameters[1].auto_selected_arg_json.?,
+    );
+}
+
+test "applyCrossParameterOwnedObjectSelectionHints keeps stable owned auto selections out of scalar replanning" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const first_candidates = try allocator.alloc(move_result.OwnedMoveObjectCandidate, 1);
+    errdefer allocator.free(first_candidates);
+    first_candidates[0] = .{
+        .object_id = try allocator.dupe(u8, "0xposition-locked"),
+        .version = 1,
+        .digest = try allocator.dupe(u8, "digest-position-locked"),
+        .selection_score = 5,
+        .object_input_select_token = try allocator.dupe(u8, "select:position-locked"),
+    };
+    errdefer {
+        for (first_candidates) |*candidate| candidate.deinit(allocator);
+    }
+
+    const second_candidates = try allocator.alloc(move_result.OwnedMoveObjectCandidate, 1);
+    errdefer allocator.free(second_candidates);
+    second_candidates[0] = .{
+        .object_id = try allocator.dupe(u8, "0xpool-open"),
+        .version = 2,
+        .digest = try allocator.dupe(u8, "digest-pool-open"),
+        .selection_score = 4,
+        .object_input_select_token = try allocator.dupe(u8, "select:pool-open"),
+    };
+    errdefer {
+        for (second_candidates) |*candidate| candidate.deinit(allocator);
+    }
+
+    const parameters = try allocator.alloc(move_result.OwnedMoveParameterSummary, 2);
+    defer {
+        for (parameters) |*parameter| parameter.deinit(allocator);
+        allocator.free(parameters);
+    }
+    parameters[0] = .{
+        .signature = try allocator.dupe(u8, "0x2a::position::Position"),
+        .owned_object_candidates = first_candidates,
+        .auto_selected_arg_json = try allocator.dupe(u8, "\"select:position-locked\""),
+    };
+    parameters[1] = .{
+        .signature = try allocator.dupe(u8, "0x2a::pool::Pool"),
+        .owned_object_candidates = second_candidates,
+    };
+
+    try SuiRpcClient.applyCrossParameterOwnedObjectSelectionHints(allocator, parameters);
+
+    try testing.expectEqualStrings(
+        "\"select:position-locked\"",
+        parameters[0].auto_selected_arg_json.?,
+    );
+    try testing.expectEqualStrings(
+        "\"select:pool-open\"",
+        parameters[1].auto_selected_arg_json.?,
+    );
 }
 
 test "applyCrossParameterBusinessCoinSelectionHints keeps a separate sui coin available for gas" {

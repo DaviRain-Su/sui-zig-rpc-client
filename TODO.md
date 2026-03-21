@@ -146,6 +146,8 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
   merely viable reserve.
 - [x] Prefer lower-scored SUI candidates as gas reserve when complete
   business-coin plans are otherwise equal.
+- [x] Rank scalar non-coin owned-object candidates as a complete plan before
+  falling back to per-parameter greedy selection.
 
 ### 2. Dual-coin and multi-coin automatic arrangement
 
