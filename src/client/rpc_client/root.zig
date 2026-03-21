@@ -11,6 +11,9 @@ pub const utils = @import("utils.zig");
 pub const client_core = @import("client_core.zig");
 pub const query = @import("query.zig");
 pub const transaction = @import("transaction.zig");
+pub const object = @import("object.zig");
+pub const event = @import("event.zig");
+pub const move_module = @import("move.zig");
 
 // Re-export commonly used types
 pub const ClientError = error.ClientError;
@@ -61,6 +64,36 @@ pub const ExecutionOptions = transaction.ExecutionOptions;
 pub const simulateTransaction = transaction.simulateTransaction;
 pub const executeTransaction = transaction.executeTransaction;
 
+// Re-export object types and functions
+pub const Object = object.Object;
+pub const ObjectDataOptions = object.ObjectDataOptions;
+pub const ObjectQuery = object.ObjectQuery;
+pub const ObjectFilter = object.ObjectFilter;
+pub const ObjectPage = object.ObjectPage;
+pub const Owner = object.Owner;
+pub const OwnerType = object.OwnerType;
+pub const getMultipleObjects = object.getMultipleObjects;
+pub const getOwnedObjects = object.getOwnedObjects;
+
+// Re-export event types and functions
+pub const SuiEvent = event.SuiEvent;
+pub const EventId = event.EventId;
+pub const EventFilter = event.EventFilter;
+pub const EventPage = event.EventPage;
+pub const EventSubscription = event.EventSubscription;
+pub const queryEvents = event.queryEvents;
+pub const subscribeToEvents = event.subscribeToEvents;
+
+// Re-export move module types and functions
+pub const NormalizedMoveModule = move_module.NormalizedMoveModule;
+pub const NormalizedMoveStruct = move_module.NormalizedMoveStruct;
+pub const NormalizedMoveFunction = move_module.NormalizedMoveFunction;
+pub const MoveField = move_module.MoveField;
+pub const MoveTypeSignature = move_module.MoveTypeSignature;
+pub const MoveTypeTag = move_module.MoveTypeTag;
+pub const MoveVisibility = move_module.MoveVisibility;
+pub const getNormalizedMoveModule = move_module.getNormalizedMoveModule;
+
 // Re-export utilities
 pub const dupeOptionalString = utils.dupeOptionalString;
 pub const dupeStringList = utils.dupeStringList;
@@ -82,6 +115,9 @@ test "rpc_client module imports successfully" {
     _ = client_core;
     _ = query;
     _ = transaction;
+    _ = object;
+    _ = event;
+    _ = move_module;
 }
 
 test "re-exports work correctly" {
@@ -107,4 +143,16 @@ test "re-exports work correctly" {
     // Test transaction types exist
     _ = SimulationResult;
     _ = ExecutionResult;
+
+    // Test object types exist
+    _ = Object;
+    _ = Owner;
+
+    // Test event types exist
+    _ = SuiEvent;
+    _ = EventFilter;
+
+    // Test move module types exist
+    _ = NormalizedMoveModule;
+    _ = MoveVisibility;
 }
