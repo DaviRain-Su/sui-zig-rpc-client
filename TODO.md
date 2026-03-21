@@ -384,6 +384,8 @@ what the generic path still needs to finish.
   - [x] Keep later scalar owned-object selections out of earlier
     `vector<T>` owned-object auto picks so final auto-selection matches the
     joint scalar/vector plan.
+  - [x] Backtrack exact `vector<Coin<T>>` covering sets when a greedy exact
+    vector choice would block a later exact scalar coin parameter.
 - [ ] Dual-coin automatic merge/split planning for liquidity flows.
   - [x] Reuse one large exact split source across repeated scalar coin
     parameters when later splits still fit the remaining balance.

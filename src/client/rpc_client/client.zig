@@ -10193,6 +10193,115 @@ pub const SuiRpcClient = struct {
         return try indices.toOwnedSlice(allocator);
     }
 
+    fn collectBusinessCoinCoverageCandidateIndicesExcluding(
+        allocator: std.mem.Allocator,
+        candidates: []const move_result.OwnedMoveObjectCandidate,
+        min_balance: u64,
+        excluded_object_ids: []const []const u8,
+    ) ![]usize {
+        var indices = std.ArrayList(usize).empty;
+        defer indices.deinit(allocator);
+
+        for (candidates, 0..) |candidate, candidate_index| {
+            if (moveObjectIdIsExcluded(excluded_object_ids, candidate.object_id)) continue;
+            _ = candidate.balance orelse continue;
+            try indices.append(allocator, candidate_index);
+        }
+
+        var index: usize = 1;
+        while (index < indices.items.len) : (index += 1) {
+            var scan = index;
+            while (scan > 0 and scalarBusinessCoinCandidateShouldSortBefore(
+                candidates[indices.items[scan]],
+                candidates[indices.items[scan - 1]],
+                min_balance,
+            )) : (scan -= 1) {
+                std.mem.swap(usize, &indices.items[scan], &indices.items[scan - 1]);
+            }
+        }
+
+        return try indices.toOwnedSlice(allocator);
+    }
+
+    fn selectBusinessCoinVectorCoverageRecursive(
+        allocator: std.mem.Allocator,
+        parameters: []move_result.OwnedMoveParameterSummary,
+        amount_hints: []const ?u64,
+        parameter_index: usize,
+        candidates: []const move_result.OwnedMoveObjectCandidate,
+        candidate_indices: []const usize,
+        next_candidate_offset: usize,
+        current_total: u64,
+        min_balance: u64,
+        current_selection: *std.ArrayList(SelectedCoinCandidate),
+        reserved_object_ids: *std.ArrayList([]const u8),
+        planned_selections: []PlannedCoinParameterSelection,
+    ) anyerror!bool {
+        if (current_total >= min_balance) {
+            planned_selections[parameter_index].vector = try allocator.dupe(
+                SelectedCoinCandidate,
+                current_selection.items,
+            );
+            errdefer {
+                allocator.free(planned_selections[parameter_index].vector.?);
+                planned_selections[parameter_index].vector = null;
+            }
+
+            for (current_selection.items) |selected| {
+                try reserved_object_ids.append(allocator, selected.object_id);
+            }
+
+            if (try selectBusinessCoinPlanRecursive(
+                allocator,
+                parameters,
+                amount_hints,
+                parameter_index + 1,
+                reserved_object_ids,
+                planned_selections,
+            )) {
+                return true;
+            }
+
+            var remaining = current_selection.items.len;
+            while (remaining > 0) : (remaining -= 1) {
+                _ = reserved_object_ids.pop();
+            }
+            allocator.free(planned_selections[parameter_index].vector.?);
+            planned_selections[parameter_index].vector = null;
+        }
+
+        var offset = next_candidate_offset;
+        while (offset < candidate_indices.len) : (offset += 1) {
+            const candidate = candidates[candidate_indices[offset]];
+            try current_selection.append(allocator, .{
+                .object_id = candidate.object_id,
+                .token = candidate.object_input_select_token,
+                .balance = candidate.balance orelse 0,
+            });
+            defer _ = current_selection.pop();
+
+            const next_total = current_total +| (candidate.balance orelse 0);
+            if (try selectBusinessCoinVectorCoverageRecursive(
+                allocator,
+                parameters,
+                amount_hints,
+                parameter_index,
+                candidates,
+                candidate_indices,
+                offset + 1,
+                next_total,
+                min_balance,
+                current_selection,
+                reserved_object_ids,
+                planned_selections,
+            )) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     fn selectBusinessCoinPlanRecursive(
         allocator: std.mem.Allocator,
         parameters: []move_result.OwnedMoveParameterSummary,
@@ -10255,48 +10364,31 @@ pub const SuiRpcClient = struct {
             if (coinTypeFromCoinStructType(element_signature) != null) {
                 const candidates = parameter.vector_item_owned_object_candidates orelse return false;
                 if (amount_hints[parameter_index]) |min_balance| {
-                    var selected_candidates = std.ArrayList(SelectedCoinCandidate).empty;
-                    defer selected_candidates.deinit(allocator);
-                    const found = try appendCoveringCoinCandidatesExcluding(
+                    const candidate_indices = try collectBusinessCoinCoverageCandidateIndicesExcluding(
                         allocator,
-                        &selected_candidates,
                         candidates,
                         min_balance,
                         reserved_object_ids.items,
                     );
-                    if (!found) return false;
+                    defer allocator.free(candidate_indices);
+                    if (candidate_indices.len == 0) return false;
 
-                    planned_selections[parameter_index].vector = try allocator.dupe(
-                        SelectedCoinCandidate,
-                        selected_candidates.items,
-                    );
-                    errdefer {
-                        allocator.free(planned_selections[parameter_index].vector.?);
-                        planned_selections[parameter_index].vector = null;
-                    }
-
-                    for (selected_candidates.items) |selected| {
-                        try reserved_object_ids.append(allocator, selected.object_id);
-                    }
-
-                    if (try selectBusinessCoinPlanRecursive(
+                    var current_selection = std.ArrayList(SelectedCoinCandidate).empty;
+                    defer current_selection.deinit(allocator);
+                    return try selectBusinessCoinVectorCoverageRecursive(
                         allocator,
                         parameters,
                         amount_hints,
-                        parameter_index + 1,
+                        parameter_index,
+                        candidates,
+                        candidate_indices,
+                        0,
+                        0,
+                        min_balance,
+                        &current_selection,
                         reserved_object_ids,
                         planned_selections,
-                    )) {
-                        return true;
-                    }
-
-                    var remaining = selected_candidates.items.len;
-                    while (remaining > 0) : (remaining -= 1) {
-                        _ = reserved_object_ids.pop();
-                    }
-                    allocator.free(planned_selections[parameter_index].vector.?);
-                    planned_selections[parameter_index].vector = null;
-                    return false;
+                    );
                 }
 
                 const candidate_indices = try collectScalarBusinessCoinCandidateIndicesExcluding(
@@ -10733,7 +10825,7 @@ pub const SuiRpcClient = struct {
                 if (next_index == null or scalarBusinessCoinCandidateShouldSortBefore(
                     candidate,
                     candidates[next_index.?],
-                    null,
+                    min_balance,
                 )) {
                     next_index = index;
                 }
@@ -27518,6 +27610,96 @@ test "applyCrossParameterBusinessCoinSelectionHints backtracks no-hint vector se
     );
     try testing.expectEqualStrings(
         "\"select:coin-mid\"",
+        parameters[1].auto_selected_arg_json.?,
+    );
+}
+
+test "applyCrossParameterBusinessCoinSelectionHints backtracks exact vector coverage to preserve later scalar exact coverage" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const vector_candidates = try allocator.alloc(move_result.OwnedMoveObjectCandidate, 3);
+    errdefer allocator.free(vector_candidates);
+    vector_candidates[0] = .{
+        .object_id = try allocator.dupe(u8, "0xcoin-a"),
+        .version = 1,
+        .digest = try allocator.dupe(u8, "digest-a-vector"),
+        .balance = 10,
+        .selection_score = 10,
+        .object_input_select_token = try allocator.dupe(u8, "select:coin-a"),
+    };
+    vector_candidates[1] = .{
+        .object_id = try allocator.dupe(u8, "0xcoin-b"),
+        .version = 2,
+        .digest = try allocator.dupe(u8, "digest-b-vector"),
+        .balance = 6,
+        .selection_score = 9,
+        .object_input_select_token = try allocator.dupe(u8, "select:coin-b"),
+    };
+    vector_candidates[2] = .{
+        .object_id = try allocator.dupe(u8, "0xcoin-c"),
+        .version = 3,
+        .digest = try allocator.dupe(u8, "digest-c-vector"),
+        .balance = 4,
+        .selection_score = 8,
+        .object_input_select_token = try allocator.dupe(u8, "select:coin-c"),
+    };
+    errdefer {
+        for (vector_candidates) |*candidate| candidate.deinit(allocator);
+    }
+
+    const scalar_candidates = try allocator.alloc(move_result.OwnedMoveObjectCandidate, 1);
+    errdefer allocator.free(scalar_candidates);
+    scalar_candidates[0] = .{
+        .object_id = try allocator.dupe(u8, "0xcoin-a"),
+        .version = 1,
+        .digest = try allocator.dupe(u8, "digest-a-scalar"),
+        .balance = 10,
+        .selection_score = 10,
+        .object_input_select_token = try allocator.dupe(u8, "select:coin-a"),
+    };
+    errdefer {
+        for (scalar_candidates) |*candidate| candidate.deinit(allocator);
+    }
+
+    const parameters = try allocator.alloc(move_result.OwnedMoveParameterSummary, 5);
+    defer {
+        for (parameters) |*parameter| parameter.deinit(allocator);
+        allocator.free(parameters);
+    }
+    parameters[0] = .{
+        .signature = try allocator.dupe(u8, "vector<0x2::coin::Coin<0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC>>"),
+        .vector_item_owned_object_candidates = vector_candidates,
+    };
+    parameters[1] = .{
+        .signature = try allocator.dupe(u8, "0x2::coin::Coin<0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC>"),
+        .owned_object_candidates = scalar_candidates,
+    };
+    parameters[2] = .{
+        .signature = try allocator.dupe(u8, "u64"),
+        .lowering_kind = "u64",
+        .explicit_arg_json = try allocator.dupe(u8, "10"),
+    };
+    parameters[3] = .{
+        .signature = try allocator.dupe(u8, "u64"),
+        .lowering_kind = "u64",
+        .explicit_arg_json = try allocator.dupe(u8, "8"),
+    };
+    parameters[4] = .{
+        .signature = try allocator.dupe(u8, "&mut 0x2::tx_context::TxContext"),
+        .omitted_from_explicit_args = true,
+    };
+
+    try SuiRpcClient.applyCrossParameterBusinessCoinSelectionHints(allocator, parameters);
+
+    try testing.expectEqualStrings(
+        "[\"select:coin-b\",\"select:coin-c\"]",
+        parameters[0].auto_selected_arg_json.?,
+    );
+    try testing.expectEqualStrings(
+        "\"select:coin-a\"",
         parameters[1].auto_selected_arg_json.?,
     );
 }
