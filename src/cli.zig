@@ -6822,7 +6822,7 @@ pub fn printUsage(writer: anytype) !void {
         "  wallet balance [selector]           Print aggregated coin balances for a wallet\n" ++
         "    --coin-type <type>                 Optional coin type filter\n" ++
         "    --limit <n>                        Page size used while aggregating balances\n" ++
-        "    --all                              Aggregate all coin pages instead of a single page\n" ++
+        "    --all                              Compatibility alias; wallet balance already aggregates all pages\n" ++
         "  wallet coins [selector]             Query wallet-owned coin objects with default-wallet fallback\n" ++
         "    same options as account coins, including --json/--coin-type/--cursor/--limit/--all\n" ++
         "  wallet objects [selector]           Query wallet-owned objects with default-wallet fallback\n" ++

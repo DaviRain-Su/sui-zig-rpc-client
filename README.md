@@ -1040,7 +1040,7 @@ pub fn main() !void {
 - `wallet session revoke <selector|label|session-id|0xaddress>`: 把本地 delegated session 条目标成 `revoked`；不会隐式断开底层 wallet selector，只更新 session registry。
 - `wallet policy inspect [session-selector|label|session-id|0xaddress]`: 归一化检查 wallet policy contract。支持直接读取 session registry 里的 base policy，并和 `--policy`、`--policy-recurring-*`、`--policy-recipient-allowlist`、`--policy-protocol-allowlist` 叠加，输出统一后的 policy summary。
 - `wallet address [selector]`: 输出解析后的钱包地址；未给 selector 时优先读取 active wallet selector，再回退到默认 keystore 的首个地址。
-- `wallet balance [selector]`: 聚合钱包 coin 余额；支持 `--coin-type`、`--limit`、`--all`。默认只聚合单页并显式输出 `has_next_page/next_cursor`，`--all` 会扫描全部 coin page；未给 selector 时同样优先用 active wallet selector。
+- `wallet balance [selector]`: 聚合钱包 coin 余额；支持 `--coin-type`、`--limit`、`--all`。现在默认就会扫描全部 coin page，`--limit` 只控制分页批大小，`--all` 保留为兼容 alias；未给 selector 时同样优先用 active wallet selector。
 - `wallet coins [selector]`: 直接查询钱包 coin page；支持 `--coin-type`、`--cursor`、`--limit`、`--all`、`--json`。
 - `wallet objects [selector]`: 直接查询钱包 owned objects；支持 `--struct-type`、`--object-id`、`--package`、`--module`、`--cursor`、`--limit`、`--all`、`--json`。
 - `wallet fund <selector|0xaddress>`: 构建一个一等公民的钱包注资路径；当前先支持 `SUI` 注资，会把命令 lower 成 `SplitCoins(GasCoin) + TransferObjects`。支持 `--amount <mist>`、`--from <selector|0xaddress>`、`--emit-request`、`--dry-run`，执行路径默认继续复用现有 `request send` / local programmable builder，并默认开启 `autoGasPayment + autoGasBudget`。

@@ -6751,26 +6751,15 @@ pub fn runCommandWithProgrammaticProvider(
             const resolved = try resolveWalletOwner(allocator, args);
             defer if (resolved.owned) |value| allocator.free(value);
 
-            const coin_query: client.rpc_client.CoinQuery = if (args.account_resources_all)
-                .{
-                    .all = .{
-                        .owner = resolved.owner,
-                        .request = .{
-                            .coin_type = args.account_coin_type,
-                            .limit = args.account_resources_limit,
-                        },
+            const coin_query: client.rpc_client.CoinQuery = .{
+                .all = .{
+                    .owner = resolved.owner,
+                    .request = .{
+                        .coin_type = args.account_coin_type,
+                        .limit = args.account_resources_limit,
                     },
-                }
-            else
-                .{
-                    .page = .{
-                        .owner = resolved.owner,
-                        .request = .{
-                            .coin_type = args.account_coin_type,
-                            .limit = args.account_resources_limit,
-                        },
-                    },
-                };
+                },
+            };
 
             var result = try rpc.runResourceQueryAction(
                 allocator,
@@ -6787,7 +6776,7 @@ pub fn runCommandWithProgrammaticProvider(
                         allocator,
                         resolved.owner,
                         page,
-                        args.account_resources_all,
+                        true,
                         args.account_resources_limit,
                     ),
                     else => return error.InvalidCli,
@@ -25209,7 +25198,7 @@ test "runCommand wallet_address resolves the default keystore address" {
     try testing.expectEqualStrings("0x123\n", output.items);
 }
 
-test "runCommand wallet_balance summarizes a single coin page by default" {
+test "runCommand wallet_balance aggregates all coin pages by default" {
     const testing = std.testing;
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -25240,12 +25229,24 @@ test "runCommand wallet_balance summarizes a single coin page by default" {
         fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
             const ctx = @as(*MockContext, @ptrCast(@alignCast(context)));
             ctx.request_count.* += 1;
-            ctx.params_ok.* = std.mem.eql(u8, req.method, "suix_getCoins") and
-                std.mem.eql(u8, req.params_json, "[\"0x123\",null,null,2]");
-            return alloc.dupe(
-                u8,
-                "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xcoin-1\",\"balance\":\"5\"},{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xcoin-2\",\"balance\":\"7\"}],\"nextCursor\":\"cursor-2\",\"hasNextPage\":true}}",
-            );
+            ctx.params_ok.* = std.mem.eql(u8, req.method, "suix_getAllCoins");
+            return switch (ctx.request_count.*) {
+                1 => blk: {
+                    ctx.params_ok.* = ctx.params_ok.* and std.mem.eql(u8, req.params_json, "[\"0x123\",null,2]");
+                    break :blk alloc.dupe(
+                        u8,
+                        "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xcoin-1\",\"balance\":\"5\"},{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xcoin-2\",\"balance\":\"7\"}],\"nextCursor\":\"cursor-2\",\"hasNextPage\":true}}",
+                    );
+                },
+                2 => blk: {
+                    ctx.params_ok.* = ctx.params_ok.* and std.mem.eql(u8, req.params_json, "[\"0x123\",\"cursor-2\",2]");
+                    break :blk alloc.dupe(
+                        u8,
+                        "{\"result\":{\"data\":[{\"coinType\":\"0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC\",\"coinObjectId\":\"0xcoin-3\",\"balance\":\"9\"}],\"hasNextPage\":false}}",
+                    );
+                },
+                else => error.OutOfMemory,
+            };
         }
     }.call;
 
@@ -25276,18 +25277,20 @@ test "runCommand wallet_balance summarizes a single coin page by default" {
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
     defer parsed.deinit();
 
-    try testing.expectEqual(@as(usize, 1), request_count);
+    try testing.expectEqual(@as(usize, 2), request_count);
     try testing.expect(params_ok);
     try testing.expectEqualStrings("0x123", parsed.value.object.get("owner").?.string);
-    try testing.expect(!parsed.value.object.get("scanned_all_pages").?.bool);
-    try testing.expect(parsed.value.object.get("has_next_page").?.bool);
-    try testing.expectEqualStrings("cursor-2", parsed.value.object.get("next_cursor").?.string);
+    try testing.expect(parsed.value.object.get("scanned_all_pages").?.bool);
+    try testing.expect(!parsed.value.object.get("has_next_page").?.bool);
+    try testing.expect(parsed.value.object.get("next_cursor").? == .null);
     try testing.expectEqual(@as(i64, 2), parsed.value.object.get("page_limit").?.integer);
     const balances = parsed.value.object.get("coin_balances").?.array.items;
-    try testing.expectEqual(@as(usize, 1), balances.len);
+    try testing.expectEqual(@as(usize, 2), balances.len);
     try testing.expectEqualStrings("0x2::sui::SUI", balances[0].object.get("coin_type").?.string);
     try testing.expectEqualStrings("12", balances[0].object.get("total_balance").?.string);
     try testing.expectEqual(@as(i64, 2), balances[0].object.get("coin_object_count").?.integer);
+    try testing.expectEqualStrings("0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC", balances[1].object.get("coin_type").?.string);
+    try testing.expectEqualStrings("9", balances[1].object.get("total_balance").?.string);
 }
 
 test "runCommand wallet_balance aggregates all coin pages when requested" {
@@ -25321,17 +25324,17 @@ test "runCommand wallet_balance aggregates all coin pages when requested" {
         fn call(context: *anyopaque, alloc: std.mem.Allocator, req: RpcRequest) ![]u8 {
             const ctx = @as(*MockContext, @ptrCast(@alignCast(context)));
             ctx.request_count.* += 1;
-            ctx.params_ok.* = std.mem.eql(u8, req.method, "suix_getCoins");
+            ctx.params_ok.* = std.mem.eql(u8, req.method, "suix_getAllCoins");
             return switch (ctx.request_count.*) {
                 1 => blk: {
-                    ctx.params_ok.* = ctx.params_ok.* and std.mem.eql(u8, req.params_json, "[\"0x123\",null,null,2]");
+                    ctx.params_ok.* = ctx.params_ok.* and std.mem.eql(u8, req.params_json, "[\"0x123\",null,2]");
                     break :blk alloc.dupe(
                         u8,
                         "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xcoin-1\",\"balance\":\"5\"}],\"nextCursor\":\"cursor-2\",\"hasNextPage\":true}}",
                     );
                 },
                 2 => blk: {
-                    ctx.params_ok.* = ctx.params_ok.* and std.mem.eql(u8, req.params_json, "[\"0x123\",null,\"cursor-2\",2]");
+                    ctx.params_ok.* = ctx.params_ok.* and std.mem.eql(u8, req.params_json, "[\"0x123\",\"cursor-2\",2]");
                     break :blk alloc.dupe(
                         u8,
                         "{\"result\":{\"data\":[{\"coinType\":\"0x2::sui::SUI\",\"coinObjectId\":\"0xcoin-2\",\"balance\":\"7\"},{\"coinType\":\"0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC\",\"coinObjectId\":\"0xcoin-3\",\"balance\":\"9\"}],\"hasNextPage\":false}}",
