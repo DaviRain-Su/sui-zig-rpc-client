@@ -141,6 +141,9 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
   artifacts.
 - [x] Let existing business-coin candidate scores influence the final
   business-coin plus gas-reserve plan when multiple complete SUI plans exist.
+- [x] Compare complete business-coin plus gas-reserve plans even when no
+  explicit coin amount hint is present, instead of stopping at the first
+  merely viable reserve.
 
 ### 2. Dual-coin and multi-coin automatic arrangement
 

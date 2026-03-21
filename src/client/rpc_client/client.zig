@@ -10082,7 +10082,15 @@ pub const SuiRpcClient = struct {
             }
         }
 
-        if (!has_amount_hints) {
+        var unresolved_sui_coin_parameter_count: usize = 0;
+        for (parameters) |parameter| {
+            if (parameter.omitted_from_explicit_args) continue;
+            if (parameter.explicit_arg_json != null) continue;
+            if (!moveParameterUsesSuiCoin(parameter)) continue;
+            unresolved_sui_coin_parameter_count += 1;
+        }
+
+        if (!has_amount_hints and unresolved_sui_coin_parameter_count <= 1) {
             for (reserve_candidates.items) |candidate| {
                 try appendUniqueBorrowedObjectId(
                     allocator,
@@ -25189,6 +25197,98 @@ test "applyCrossParameterBusinessCoinSelectionHints keeps a separate sui coin av
     try testing.expectEqualStrings(
         "\"select:coin-small\"",
         parameters[0].auto_selected_arg_json.?,
+    );
+}
+
+test "applyCrossParameterBusinessCoinSelectionHints compares complete no-hint gas reserve plans across multiple business parameters" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const first_candidates = try allocator.alloc(move_result.OwnedMoveObjectCandidate, 3);
+    errdefer allocator.free(first_candidates);
+    first_candidates[0] = .{
+        .object_id = try allocator.dupe(u8, "0xcoin-preferred-big"),
+        .version = 1,
+        .digest = try allocator.dupe(u8, "digest-preferred-big"),
+        .balance = 300,
+        .selection_score = 9,
+        .object_input_select_token = try allocator.dupe(u8, "select:coin-preferred-big"),
+    };
+    first_candidates[1] = .{
+        .object_id = try allocator.dupe(u8, "0xcoin-reserve-mid"),
+        .version = 2,
+        .digest = try allocator.dupe(u8, "digest-reserve-mid"),
+        .balance = 140,
+        .selection_score = 0,
+        .object_input_select_token = try allocator.dupe(u8, "select:coin-reserve-mid"),
+    };
+    first_candidates[2] = .{
+        .object_id = try allocator.dupe(u8, "0xcoin-other"),
+        .version = 3,
+        .digest = try allocator.dupe(u8, "digest-other"),
+        .balance = 120,
+        .selection_score = 1,
+        .object_input_select_token = try allocator.dupe(u8, "select:coin-other"),
+    };
+    errdefer {
+        for (first_candidates) |*candidate| candidate.deinit(allocator);
+    }
+
+    const second_candidates = try allocator.alloc(move_result.OwnedMoveObjectCandidate, 3);
+    errdefer allocator.free(second_candidates);
+    second_candidates[0] = .{
+        .object_id = try allocator.dupe(u8, "0xcoin-preferred-big"),
+        .version = 1,
+        .digest = try allocator.dupe(u8, "digest-preferred-big-second"),
+        .balance = 300,
+        .selection_score = 9,
+        .object_input_select_token = try allocator.dupe(u8, "select:coin-preferred-big"),
+    };
+    second_candidates[1] = .{
+        .object_id = try allocator.dupe(u8, "0xcoin-reserve-mid"),
+        .version = 2,
+        .digest = try allocator.dupe(u8, "digest-reserve-mid-second"),
+        .balance = 140,
+        .selection_score = 0,
+        .object_input_select_token = try allocator.dupe(u8, "select:coin-reserve-mid"),
+    };
+    second_candidates[2] = .{
+        .object_id = try allocator.dupe(u8, "0xcoin-other"),
+        .version = 3,
+        .digest = try allocator.dupe(u8, "digest-other-second"),
+        .balance = 120,
+        .selection_score = 1,
+        .object_input_select_token = try allocator.dupe(u8, "select:coin-other"),
+    };
+    errdefer {
+        for (second_candidates) |*candidate| candidate.deinit(allocator);
+    }
+
+    const parameters = try allocator.alloc(move_result.OwnedMoveParameterSummary, 2);
+    defer {
+        for (parameters) |*parameter| parameter.deinit(allocator);
+        allocator.free(parameters);
+    }
+    parameters[0] = .{
+        .signature = try allocator.dupe(u8, "0x2::coin::Coin<0x2::sui::SUI>"),
+        .owned_object_candidates = first_candidates,
+    };
+    parameters[1] = .{
+        .signature = try allocator.dupe(u8, "0x2::coin::Coin<0x2::sui::SUI>"),
+        .owned_object_candidates = second_candidates,
+    };
+
+    try SuiRpcClient.applyCrossParameterBusinessCoinSelectionHints(allocator, parameters);
+
+    try testing.expectEqualStrings(
+        "\"select:coin-preferred-big\"",
+        parameters[0].auto_selected_arg_json.?,
+    );
+    try testing.expectEqualStrings(
+        "\"select:coin-other\"",
+        parameters[1].auto_selected_arg_json.?,
     );
 }
 
