@@ -11873,27 +11873,12 @@ pub const SuiRpcClient = struct {
 
         for (candidates, 0..) |candidate, candidate_index| {
             if (moveObjectIdIsExcluded(excluded_object_ids, candidate.object_id)) continue;
-            if (splitCoinSelectedAsConsumedSourceInPreviousMultiSourceSelections(
-                planned_selections,
-                parameter_index,
-                candidate.object_id,
-            )) continue;
-
-            const balance = candidate.balance orelse continue;
-            const merged_balance = splitCoinPreviouslyMergedBalance(
-                planned_selections,
-                parameter_index,
-                candidate.object_id,
-            );
-            const consumed = splitCoinPreviouslyConsumedBalance(
-                planned_selections,
+            const effective_balance = splitCoinCandidateEffectiveBalanceForParameter(
+                candidate,
                 split_amount_values,
                 parameter_index,
-                candidate.object_id,
-            );
-            const total_balance = balance +| merged_balance;
-            if (consumed >= total_balance) continue;
-            const effective_balance = total_balance - consumed;
+                planned_selections,
+            ) orelse continue;
             if (effective_balance < min_balance) continue;
 
             try options.append(allocator, .{
@@ -11926,11 +11911,43 @@ pub const SuiRpcClient = struct {
             moveObjectIdIsExcluded(reserved_object_ids, object_id);
     }
 
+    fn splitCoinCandidateEffectiveBalanceForParameter(
+        candidate: move_result.OwnedMoveObjectCandidate,
+        split_amount_values: []const ?u64,
+        parameter_index: usize,
+        planned_selections: []const PlannedSplitCoinParameterSelection,
+    ) ?u64 {
+        if (splitCoinSelectedAsConsumedSourceInPreviousMultiSourceSelections(
+            planned_selections,
+            parameter_index,
+            candidate.object_id,
+        )) return null;
+
+        const balance = candidate.balance orelse return null;
+        const merged_balance = splitCoinPreviouslyMergedBalance(
+            planned_selections,
+            parameter_index,
+            candidate.object_id,
+        );
+        const consumed = splitCoinPreviouslyConsumedBalance(
+            planned_selections,
+            split_amount_values,
+            parameter_index,
+            candidate.object_id,
+        );
+        const total_balance = balance +| merged_balance;
+        if (consumed >= total_balance) return null;
+        return total_balance - consumed;
+    }
+
     fn collectSplitCoinCandidateIndicesExcluding(
         allocator: std.mem.Allocator,
         candidates: []const move_result.OwnedMoveObjectCandidate,
         initial_excluded_object_ids: []const []const u8,
         reserved_object_ids: []const []const u8,
+        split_amount_values: []const ?u64,
+        parameter_index: usize,
+        planned_selections: []const PlannedSplitCoinParameterSelection,
     ) ![]usize {
         var indices = std.ArrayList(usize).empty;
         defer indices.deinit(allocator);
@@ -11941,7 +11958,12 @@ pub const SuiRpcClient = struct {
                 reserved_object_ids,
                 candidate.object_id,
             )) continue;
-            if (candidate.balance == null) continue;
+            if (splitCoinCandidateEffectiveBalanceForParameter(
+                candidate,
+                split_amount_values,
+                parameter_index,
+                planned_selections,
+            ) == null) continue;
             try indices.append(allocator, candidate_index);
         }
 
@@ -12014,7 +12036,13 @@ pub const SuiRpcClient = struct {
             });
             defer _ = current_sources.pop();
 
-            const next_total = current_total +| (candidate.balance orelse 0);
+            const effective_balance = splitCoinCandidateEffectiveBalanceForParameter(
+                candidate,
+                split_amount_values,
+                parameter_index,
+                planned_selections,
+            ) orelse continue;
+            const next_total = current_total +| effective_balance;
             if (try selectSplitCoinSourcesForParameterRecursive(
                 allocator,
                 parameters,
@@ -12119,6 +12147,9 @@ pub const SuiRpcClient = struct {
             candidates,
             initial_excluded_object_ids,
             reserved_object_ids.items,
+            split_amount_values,
+            parameter_index,
+            planned_selections,
         );
         defer allocator.free(candidate_indices);
 
@@ -27697,6 +27728,164 @@ test "buildMoveFunctionSplitCoinPreferredCommandsJson reuses merged split destin
         "select:{\"kind\":\"object_input\",\"objectId\":\"0xcoin-large\",\"inputKind\":\"imm_or_owned\",\"version\":11,\"digest\":\"coin-digest-large\"}",
         parsed.value.array.items[2].object.get("coin").?.string,
     );
+}
+
+test "buildMoveFunctionSplitCoinPreferredCommandsJson can reuse merged destinations with an extra later source" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const first_candidates = try allocator.alloc(move_result.OwnedMoveObjectCandidate, 2);
+    errdefer allocator.free(first_candidates);
+    first_candidates[0] = .{
+        .object_id = try allocator.dupe(u8, "0xcoin-large"),
+        .version = 11,
+        .digest = try allocator.dupe(u8, "coin-digest-large-first"),
+        .balance = 10,
+        .object_input_select_token = try allocator.dupe(
+            u8,
+            "select:{\"kind\":\"object_input\",\"objectId\":\"0xcoin-large\",\"inputKind\":\"imm_or_owned\",\"version\":11,\"digest\":\"coin-digest-large\"}",
+        ),
+    };
+    first_candidates[1] = .{
+        .object_id = try allocator.dupe(u8, "0xcoin-mid"),
+        .version = 12,
+        .digest = try allocator.dupe(u8, "coin-digest-mid-first"),
+        .balance = 7,
+        .object_input_select_token = try allocator.dupe(
+            u8,
+            "select:{\"kind\":\"object_input\",\"objectId\":\"0xcoin-mid\",\"inputKind\":\"imm_or_owned\",\"version\":12,\"digest\":\"coin-digest-mid\"}",
+        ),
+    };
+    errdefer {
+        for (first_candidates) |*candidate| candidate.deinit(allocator);
+    }
+
+    const second_candidates = try allocator.alloc(move_result.OwnedMoveObjectCandidate, 3);
+    errdefer allocator.free(second_candidates);
+    second_candidates[0] = .{
+        .object_id = try allocator.dupe(u8, "0xcoin-large"),
+        .version = 11,
+        .digest = try allocator.dupe(u8, "coin-digest-large-second"),
+        .balance = 10,
+        .object_input_select_token = try allocator.dupe(
+            u8,
+            "select:{\"kind\":\"object_input\",\"objectId\":\"0xcoin-large\",\"inputKind\":\"imm_or_owned\",\"version\":11,\"digest\":\"coin-digest-large\"}",
+        ),
+    };
+    second_candidates[1] = .{
+        .object_id = try allocator.dupe(u8, "0xcoin-small"),
+        .version = 13,
+        .digest = try allocator.dupe(u8, "coin-digest-small-second"),
+        .balance = 5,
+        .object_input_select_token = try allocator.dupe(
+            u8,
+            "select:{\"kind\":\"object_input\",\"objectId\":\"0xcoin-small\",\"inputKind\":\"imm_or_owned\",\"version\":13,\"digest\":\"coin-digest-small\"}",
+        ),
+    };
+    second_candidates[2] = .{
+        .object_id = try allocator.dupe(u8, "0xcoin-dust"),
+        .version = 14,
+        .digest = try allocator.dupe(u8, "coin-digest-dust-second"),
+        .balance = 1,
+        .object_input_select_token = try allocator.dupe(
+            u8,
+            "select:{\"kind\":\"object_input\",\"objectId\":\"0xcoin-dust\",\"inputKind\":\"imm_or_owned\",\"version\":14,\"digest\":\"coin-digest-dust\"}",
+        ),
+    };
+    errdefer {
+        for (second_candidates) |*candidate| candidate.deinit(allocator);
+    }
+
+    const parameters = try allocator.alloc(move_result.OwnedMoveParameterSummary, 5);
+    errdefer allocator.free(parameters);
+    parameters[0] = .{
+        .signature = try allocator.dupe(u8, "0x2::coin::Coin<0x2::sui::SUI>"),
+        .owned_object_candidates = first_candidates,
+    };
+    parameters[1] = .{
+        .signature = try allocator.dupe(u8, "0x2::coin::Coin<0x2::sui::SUI>"),
+        .owned_object_candidates = second_candidates,
+    };
+    parameters[2] = .{
+        .signature = try allocator.dupe(u8, "u64"),
+        .lowering_kind = "u64",
+        .explicit_arg_json = try allocator.dupe(u8, "13"),
+    };
+    parameters[3] = .{
+        .signature = try allocator.dupe(u8, "u64"),
+        .lowering_kind = "u64",
+        .explicit_arg_json = try allocator.dupe(u8, "9"),
+    };
+    parameters[4] = .{
+        .signature = try allocator.dupe(u8, "&mut 0x2::tx_context::TxContext"),
+        .omitted_from_explicit_args = true,
+    };
+    errdefer {
+        for (parameters) |*parameter| parameter.deinit(allocator);
+    }
+
+    const type_parameters = try allocator.alloc(move_result.OwnedMoveTypeParameter, 0);
+    errdefer allocator.free(type_parameters);
+    const returns = try allocator.alloc(move_result.OwnedMoveParameterSummary, 0);
+    errdefer allocator.free(returns);
+
+    var summary = move_result.OwnedMoveFunctionSummary{
+        .package_id = try allocator.dupe(u8, "0x2"),
+        .module_name = try allocator.dupe(u8, "router"),
+        .function_name = try allocator.dupe(u8, "deposit_merge_then_split_again_with_extra_source"),
+        .visibility = try allocator.dupe(u8, "Public"),
+        .is_entry = true,
+        .type_parameters = type_parameters,
+        .parameters = parameters,
+        .returns = returns,
+    };
+    defer summary.deinit(allocator);
+
+    const commands_json = (try SuiRpcClient.buildMoveFunctionSplitCoinPreferredCommandsJson(
+        allocator,
+        summary,
+        "[]",
+    )).?;
+    defer allocator.free(commands_json);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, commands_json, .{});
+    defer parsed.deinit();
+
+    try testing.expectEqual(@as(usize, 4), parsed.value.array.items.len);
+    try testing.expectEqualStrings("MergeCoins", parsed.value.array.items[0].object.get("kind").?.string);
+    try testing.expectEqualStrings("SplitCoins", parsed.value.array.items[1].object.get("kind").?.string);
+    try testing.expectEqualStrings("SplitCoins", parsed.value.array.items[2].object.get("kind").?.string);
+    try testing.expectEqualStrings("MoveCall", parsed.value.array.items[3].object.get("kind").?.string);
+    try testing.expectEqualStrings(
+        "select:{\"kind\":\"object_input\",\"objectId\":\"0xcoin-large\",\"inputKind\":\"imm_or_owned\",\"version\":11,\"digest\":\"coin-digest-large\"}",
+        parsed.value.array.items[0].object.get("destination").?.string,
+    );
+    const merge_sources = parsed.value.array.items[0].object.get("sources").?.array.items;
+    try testing.expectEqual(@as(usize, 2), merge_sources.len);
+    try testing.expectEqualStrings(
+        "select:{\"kind\":\"object_input\",\"objectId\":\"0xcoin-mid\",\"inputKind\":\"imm_or_owned\",\"version\":12,\"digest\":\"coin-digest-mid\"}",
+        merge_sources[0].string,
+    );
+    try testing.expectEqualStrings(
+        "select:{\"kind\":\"object_input\",\"objectId\":\"0xcoin-small\",\"inputKind\":\"imm_or_owned\",\"version\":13,\"digest\":\"coin-digest-small\"}",
+        merge_sources[1].string,
+    );
+    try testing.expectEqualStrings(
+        "select:{\"kind\":\"object_input\",\"objectId\":\"0xcoin-large\",\"inputKind\":\"imm_or_owned\",\"version\":11,\"digest\":\"coin-digest-large\"}",
+        parsed.value.array.items[1].object.get("coin").?.string,
+    );
+    try testing.expectEqualStrings(
+        "select:{\"kind\":\"object_input\",\"objectId\":\"0xcoin-large\",\"inputKind\":\"imm_or_owned\",\"version\":11,\"digest\":\"coin-digest-large\"}",
+        parsed.value.array.items[2].object.get("coin").?.string,
+    );
+
+    const move_call_args = parsed.value.array.items[3].object.get("arguments").?.array.items;
+    try testing.expectEqual(@as(i64, 1), move_call_args[0].object.get("NestedResult").?.array.items[0].integer);
+    try testing.expectEqual(@as(i64, 0), move_call_args[0].object.get("NestedResult").?.array.items[1].integer);
+    try testing.expectEqual(@as(i64, 2), move_call_args[1].object.get("NestedResult").?.array.items[0].integer);
+    try testing.expectEqual(@as(i64, 0), move_call_args[1].object.get("NestedResult").?.array.items[1].integer);
 }
 
 test "getMoveDynamicFieldDiscoveredObjectIdsCachedBorrowed reuses cached discoveries" {

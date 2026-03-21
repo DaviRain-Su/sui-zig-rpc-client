@@ -384,6 +384,9 @@ what the generic path still needs to finish.
     parameters when later splits still fit the remaining balance.
   - [x] Reuse a merged split destination across later exact coin parameters
     when the earlier merge leaves enough remaining balance.
+  - [x] When a reused merged destination no longer covers a later exact amount
+    by itself, keep treating its post-split remainder as available and merge in
+    only the extra source coins still needed.
 - [ ] Fewer unresolved placeholders in real `add_liquidity` / `swap`
   executions.
 
