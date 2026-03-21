@@ -144,6 +144,8 @@ in the generic `move function` -> request artifact -> `tx dry-run/send` path.
 - [x] Compare complete business-coin plus gas-reserve plans even when no
   explicit coin amount hint is present, instead of stopping at the first
   merely viable reserve.
+- [x] Prefer lower-scored SUI candidates as gas reserve when complete
+  business-coin plans are otherwise equal.
 
 ### 2. Dual-coin and multi-coin automatic arrangement
 

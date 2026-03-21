@@ -9979,6 +9979,7 @@ pub const SuiRpcClient = struct {
         }
 
         try writer.writeByte(0xff);
+        try writer.writeInt(usize, reserved_gas_candidate.selection_score, .big);
         try writer.writeInt(u64, std.math.maxInt(u64) - reserved_gas_candidate.balance, .big);
         try writer.writeAll(reserved_gas_candidate.object_id);
         try writer.writeByte(0);
@@ -9988,6 +9989,7 @@ pub const SuiRpcClient = struct {
     const SuiGasReserveCandidate = struct {
         object_id: []const u8,
         balance: u64,
+        selection_score: usize,
     };
 
     fn reserveCandidateShouldSortBefore(
@@ -10016,10 +10018,12 @@ pub const SuiRpcClient = struct {
                 for (candidates) |candidate| {
                     if (moveObjectIdIsExcluded(reserved_coin_object_ids, candidate.object_id)) continue;
                     const balance = candidate.balance orelse continue;
+                    const selection_score = candidate.selection_score;
 
                     var duplicate = false;
-                    for (reserve_candidates.items) |existing| {
+                    for (reserve_candidates.items) |*existing| {
                         if (std.mem.eql(u8, existing.object_id, candidate.object_id)) {
+                            existing.selection_score = @max(existing.selection_score, selection_score);
                             duplicate = true;
                             break;
                         }
@@ -10028,6 +10032,7 @@ pub const SuiRpcClient = struct {
                     try reserve_candidates.append(allocator, .{
                         .object_id = candidate.object_id,
                         .balance = balance,
+                        .selection_score = selection_score,
                     });
                 }
             }
@@ -10036,10 +10041,12 @@ pub const SuiRpcClient = struct {
                 for (candidates) |candidate| {
                     if (moveObjectIdIsExcluded(reserved_coin_object_ids, candidate.object_id)) continue;
                     const balance = candidate.balance orelse continue;
+                    const selection_score = candidate.selection_score;
 
                     var duplicate = false;
-                    for (reserve_candidates.items) |existing| {
+                    for (reserve_candidates.items) |*existing| {
                         if (std.mem.eql(u8, existing.object_id, candidate.object_id)) {
+                            existing.selection_score = @max(existing.selection_score, selection_score);
                             duplicate = true;
                             break;
                         }
@@ -10048,6 +10055,7 @@ pub const SuiRpcClient = struct {
                     try reserve_candidates.append(allocator, .{
                         .object_id = candidate.object_id,
                         .balance = balance,
+                        .selection_score = selection_score,
                     });
                 }
             }
@@ -25289,6 +25297,120 @@ test "applyCrossParameterBusinessCoinSelectionHints compares complete no-hint ga
     try testing.expectEqualStrings(
         "\"select:coin-other\"",
         parameters[1].auto_selected_arg_json.?,
+    );
+}
+
+test "selectReservedGasSuiCoinObjectId prefers the lower-scored reserve when complete business plans tie" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const first_candidates = try allocator.alloc(move_result.OwnedMoveObjectCandidate, 4);
+    errdefer allocator.free(first_candidates);
+    first_candidates[0] = .{
+        .object_id = try allocator.dupe(u8, "0xcoin-business-a"),
+        .version = 1,
+        .digest = try allocator.dupe(u8, "digest-business-a-first"),
+        .balance = 220,
+        .selection_score = 20,
+        .object_input_select_token = try allocator.dupe(u8, "select:coin-business-a"),
+    };
+    first_candidates[1] = .{
+        .object_id = try allocator.dupe(u8, "0xcoin-business-b"),
+        .version = 2,
+        .digest = try allocator.dupe(u8, "digest-business-b-first"),
+        .balance = 180,
+        .selection_score = 19,
+        .object_input_select_token = try allocator.dupe(u8, "select:coin-business-b"),
+    };
+    first_candidates[2] = .{
+        .object_id = try allocator.dupe(u8, "0xcoin-reserve-high-score"),
+        .version = 3,
+        .digest = try allocator.dupe(u8, "digest-reserve-high-first"),
+        .balance = 260,
+        .selection_score = 5,
+        .object_input_select_token = try allocator.dupe(u8, "select:coin-reserve-high-score"),
+    };
+    first_candidates[3] = .{
+        .object_id = try allocator.dupe(u8, "0xcoin-reserve-low-score"),
+        .version = 4,
+        .digest = try allocator.dupe(u8, "digest-reserve-low-first"),
+        .balance = 200,
+        .selection_score = 0,
+        .object_input_select_token = try allocator.dupe(u8, "select:coin-reserve-low-score"),
+    };
+    errdefer {
+        for (first_candidates) |*candidate| candidate.deinit(allocator);
+    }
+
+    const second_candidates = try allocator.alloc(move_result.OwnedMoveObjectCandidate, 4);
+    errdefer allocator.free(second_candidates);
+    second_candidates[0] = .{
+        .object_id = try allocator.dupe(u8, "0xcoin-business-a"),
+        .version = 1,
+        .digest = try allocator.dupe(u8, "digest-business-a-second"),
+        .balance = 220,
+        .selection_score = 20,
+        .object_input_select_token = try allocator.dupe(u8, "select:coin-business-a"),
+    };
+    second_candidates[1] = .{
+        .object_id = try allocator.dupe(u8, "0xcoin-business-b"),
+        .version = 2,
+        .digest = try allocator.dupe(u8, "digest-business-b-second"),
+        .balance = 180,
+        .selection_score = 19,
+        .object_input_select_token = try allocator.dupe(u8, "select:coin-business-b"),
+    };
+    second_candidates[2] = .{
+        .object_id = try allocator.dupe(u8, "0xcoin-reserve-high-score"),
+        .version = 3,
+        .digest = try allocator.dupe(u8, "digest-reserve-high-second"),
+        .balance = 260,
+        .selection_score = 5,
+        .object_input_select_token = try allocator.dupe(u8, "select:coin-reserve-high-score"),
+    };
+    second_candidates[3] = .{
+        .object_id = try allocator.dupe(u8, "0xcoin-reserve-low-score"),
+        .version = 4,
+        .digest = try allocator.dupe(u8, "digest-reserve-low-second"),
+        .balance = 200,
+        .selection_score = 0,
+        .object_input_select_token = try allocator.dupe(u8, "select:coin-reserve-low-score"),
+    };
+    errdefer {
+        for (second_candidates) |*candidate| candidate.deinit(allocator);
+    }
+
+    const parameters = try allocator.alloc(move_result.OwnedMoveParameterSummary, 2);
+    defer {
+        for (parameters) |*parameter| parameter.deinit(allocator);
+        allocator.free(parameters);
+    }
+    parameters[0] = .{
+        .signature = try allocator.dupe(u8, "0x2::coin::Coin<0x2::sui::SUI>"),
+        .owned_object_candidates = first_candidates,
+    };
+    parameters[1] = .{
+        .signature = try allocator.dupe(u8, "0x2::coin::Coin<0x2::sui::SUI>"),
+        .owned_object_candidates = second_candidates,
+    };
+
+    const amount_hints = try allocator.alloc(?u64, 2);
+    defer allocator.free(amount_hints);
+    amount_hints[0] = null;
+    amount_hints[1] = null;
+
+    const reserve = try SuiRpcClient.selectReservedGasSuiCoinObjectId(
+        allocator,
+        parameters,
+        amount_hints,
+        &.{},
+    );
+
+    try testing.expectEqualStrings(
+        "0xcoin-reserve-low-score",
+        reserve.?,
     );
 }
 
