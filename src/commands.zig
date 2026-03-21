@@ -1495,76 +1495,6 @@ fn resolvedUnsafeMoveCallArgumentsJson(
     return try client.tx_request_builder.buildArgumentValueArray(allocator, values.slice());
 }
 
-fn buildUnsafeSignedExecutePayloadFromDefaultKeystoreTxBytes(
-    allocator: std.mem.Allocator,
-    args: *const cli.ParsedArgs,
-    tx_bytes: []const u8,
-) ![]u8 {
-    var signed = try client.keystore.signTransactionBytesFromDefaultKeystore(
-        allocator,
-        tx_bytes,
-        .{
-            .signer_selectors = args.signers.items,
-            .from_keystore = args.from_keystore,
-            .infer_sender_from_signers = true,
-        },
-    );
-    defer signed.deinit(allocator);
-
-    return try tx_builder.buildExecutePayload(
-        allocator,
-        tx_bytes,
-        signed.items,
-        args.tx_options,
-    );
-}
-
-fn buildUnsafeExecutePayloadFromResolvedTxBytes(
-    allocator: std.mem.Allocator,
-    args: *const cli.ParsedArgs,
-    tx_bytes: []const u8,
-) ![]u8 {
-    if (args.signatures.items.len != 0) {
-        return try tx_builder.buildExecutePayload(
-            allocator,
-            tx_bytes,
-            args.signatures.items,
-            args.tx_options,
-        );
-    }
-    return try buildUnsafeSignedExecutePayloadFromDefaultKeystoreTxBytes(allocator, args, tx_bytes);
-}
-
-fn buildUnsafeMoveCallExecutePayloadFromDefaultKeystore(
-    allocator: std.mem.Allocator,
-    rpc: *client.SuiRpcClient,
-    args: *const cli.ParsedArgs,
-) ![]u8 {
-    const sender = try resolvedUnsafeMoveCallSender(allocator, rpc, args) orelse return error.InvalidCli;
-    defer allocator.free(sender);
-
-    const resolved_arguments_json = try resolvedUnsafeMoveCallArgumentsJson(allocator, rpc, args, sender);
-    defer if (resolved_arguments_json) |value| allocator.free(value);
-
-    const gas_object_id = try resolvedUnsafeMoveCallGasObjectId(allocator, rpc, args, sender);
-    defer if (gas_object_id) |value| allocator.free(value);
-
-    const tx_bytes = try rpc.buildMoveCallTxBytes(
-        allocator,
-        sender,
-        args.tx_build_package.?,
-        args.tx_build_module.?,
-        args.tx_build_function.?,
-        args.tx_build_type_args,
-        resolved_arguments_json orelse args.tx_build_args,
-        gas_object_id,
-        args.tx_build_gas_budget orelse return error.InvalidCli,
-    );
-    defer allocator.free(tx_bytes);
-
-    return try buildUnsafeSignedExecutePayloadFromDefaultKeystoreTxBytes(allocator, args, tx_bytes);
-}
-
 const OwnedUnsafeCommandSource = struct {
     source: tx_builder.CommandSource,
     owned_json: ?[]u8 = null,
@@ -2296,41 +2226,6 @@ fn printProgrammaticActionOrChallengePromptResult(
         .challenge_required => |value| try printStructuredJson(writer, value, pretty),
         .completed => |value| try printProgrammaticActionResult(allocator, writer, value, pretty),
     }
-}
-
-fn buildUnsafeBatchExecutePayloadFromDefaultKeystore(
-    allocator: std.mem.Allocator,
-    rpc: *client.SuiRpcClient,
-    args: *const cli.ParsedArgs,
-) ![]u8 {
-    const sender = try resolvedUnsafeMoveCallSender(allocator, rpc, args) orelse return error.InvalidCli;
-    defer allocator.free(sender);
-
-    const maybe_resolved_commands_json = try rpc.resolveSelectedArgumentTokensInCommandSourceWithDefaultOwner(
-        allocator,
-        commandSourceFromArgs(args),
-        sender,
-    );
-    defer if (maybe_resolved_commands_json) |value| allocator.free(value);
-    const resolved_commands_json = maybe_resolved_commands_json orelse try tx_builder.resolveCommands(
-        allocator,
-        commandSourceFromArgs(args),
-    );
-    defer if (maybe_resolved_commands_json == null) allocator.free(resolved_commands_json);
-
-    const gas_object_id = try resolvedUnsafeMoveCallGasObjectId(allocator, rpc, args, sender);
-    defer if (gas_object_id) |value| allocator.free(value);
-
-    const tx_bytes = try rpc.buildBatchTransactionTxBytes(
-        allocator,
-        sender,
-        resolved_commands_json,
-        gas_object_id,
-        args.tx_build_gas_budget orelse return error.InvalidCli,
-    );
-    defer allocator.free(tx_bytes);
-
-    return try buildUnsafeSignedExecutePayloadFromDefaultKeystoreTxBytes(allocator, args, tx_bytes);
 }
 
 fn runProgrammaticActionMaybeAutoGasPayment(
