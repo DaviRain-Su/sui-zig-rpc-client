@@ -104,6 +104,8 @@ pub fn main() !void {
         try cmdPasskey(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "websocket") or std.mem.eql(u8, command, "ws")) {
         try cmdWebsocket(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "wallet")) {
+        try cmdWallet(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "help") or std.mem.eql(u8, command, "--help")) {
         printUsage(args[0]);
     } else {
@@ -156,6 +158,7 @@ fn printUsage(prog_name: []const u8) void {
     std.log.info("  send <from> <to> <amt>      Send SUI (build, sign, execute)", .{});
     std.log.info("  zklogin <action>            zkLogin (OAuth) authentication", .{});
     std.log.info("  passkey <action>            Passkey (WebAuthn) authentication", .{});
+    std.log.info("  wallet <action>             Advanced wallet (sessions, policy)", .{});
     std.log.info("  help                        Show this help", .{});
 }
 
@@ -5074,3 +5077,11 @@ const websocket_cmd = @import("main_v2_websocket.zig");
 fn cmdWebsocket(allocator: Allocator, args: []const []const u8) !void {
     try websocket_cmd.cmdWebsocket(allocator, args);
 }
+
+// Import wallet command module
+const wallet_cmd = @import("main_v2_wallet.zig");
+
+fn cmdWallet(allocator: Allocator, args: []const []const u8) !void {
+    try wallet_cmd.cmdWallet(allocator, args);
+}
+
