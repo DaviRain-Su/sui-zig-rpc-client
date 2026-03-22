@@ -4,6 +4,9 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
+// Use Zig's standard library Ed25519 implementation
+const Ed25519 = std.crypto.sign.Ed25519;
+
 // Ed25519 constants
 pub const ED25519_PUBLIC_KEY_LEN: usize = 32;
 pub const ED25519_SECRET_KEY_LEN: usize = 32;
@@ -21,14 +24,15 @@ pub const KeyPair = struct {
     secret_key: [ED25519_SECRET_KEY_LEN]u8,
 
     pub fn fromSecretKey(secret_key: [ED25519_SECRET_KEY_LEN]u8) !KeyPair {
-        // In a real implementation, we would derive the public key from the secret key
-        // using Ed25519 key generation
-        // For now, this is a placeholder
-        var public_key: [ED25519_PUBLIC_KEY_LEN]u8 = undefined;
+        // Derive public key from secret key using Ed25519
+        // Ed25519 secret key is the seed, we need to expand it
+        const seed = secret_key;
         
-        // TODO: Implement actual Ed25519 public key derivation
-        // This requires a crypto library like libsodium or similar
-        @memcpy(&public_key, &secret_key);
+        // Use Ed25519 key pair generation from seed
+        const kp = try Ed25519.KeyPair.fromSeed(seed);
+        
+        var public_key: [ED25519_PUBLIC_KEY_LEN]u8 = undefined;
+        @memcpy(&public_key, &kp.public_key.bytes);
         
         return KeyPair{
             .public_key = public_key,
@@ -64,17 +68,18 @@ pub const TransactionSigner = struct {
         // Signature scheme flag
         signature[0] = SIGNATURE_SCHEME_ED25519;
         
-        // TODO: Implement actual Ed25519 signing
-        // This requires a crypto library
-        // For now, we create a placeholder signature
+        // Create Ed25519 key pair from our secret key
+        const seed = self.keypair.secret_key;
+        const kp = try Ed25519.KeyPair.fromSeed(seed);
         
-        // Placeholder: Copy signature bytes (64 bytes)
-        @memset(signature[1..65], 0xAA);
+        // Sign the transaction data
+        const sig = try kp.sign(tx_data, null);
         
-        // Placeholder: Copy public key (32 bytes)
+        // Copy signature bytes (64 bytes)
+        @memcpy(signature[1..65], &sig.toBytes());
+        
+        // Copy public key (32 bytes)
         @memcpy(signature[65..97], &self.keypair.public_key);
-        
-        _ = tx_data; // TODO: Use actual transaction data for signing
         
         return signature;
     }
@@ -89,18 +94,19 @@ pub const TransactionSigner = struct {
         pk_with_scheme[0] = SIGNATURE_SCHEME_ED25519;
         @memcpy(pk_with_scheme[1..], &self.keypair.public_key);
         
-        // TODO: Implement Blake2b-256 hashing
-        // For now, return a placeholder address
+        // Blake2b-256 hash
+        var hash: [32]u8 = undefined;
+        std.crypto.hash.blake2.Blake2b256.hash(&pk_with_scheme, &hash, .{});
         
-        const address = try allocator.alloc(u8, 42); // "0x" + 40 hex chars
+        // Format address: 0x + hex(first 20 bytes)
+        const address = try allocator.alloc(u8, 42);
         errdefer allocator.free(address);
         
         @memcpy(address[0..2], "0x");
         
-        // Placeholder: Use first 20 bytes of public key as address
         const hex_chars = "0123456789abcdef";
         for (0..20) |i| {
-            const byte = self.keypair.public_key[i % 32];
+            const byte = hash[i];
             address[2 + i * 2] = hex_chars[byte >> 4];
             address[2 + i * 2 + 1] = hex_chars[byte & 0x0F];
         }
@@ -134,7 +140,7 @@ pub fn loadKeypairFromKeystore(allocator: Allocator, keystore_path: []const u8, 
             
             try std.base64.standard.Decoder.decode(decoded, key_b64);
             
-            // Extract secret key (last 32 bytes)
+            // Extract secret key (last 32 bytes for Ed25519)
             var secret_key: [ED25519_SECRET_KEY_LEN]u8 = undefined;
             @memcpy(&secret_key, decoded[decoded_len - 32 ..]);
             
@@ -246,4 +252,34 @@ test "Address generation" {
     
     try std.testing.expectEqual(address.len, 42);
     try std.testing.expectEqual(address[0..2], "0x");
+}
+
+test "Transaction signing" {
+    const keypair = try KeyPair.generateRandom();
+    const signer = TransactionSigner.init(std.testing.allocator, keypair);
+    
+    const tx_data = "test transaction data";
+    const signature = try signer.signTransaction(tx_data);
+    
+    // Verify signature structure
+    try std.testing.expectEqual(signature[0], SIGNATURE_SCHEME_ED25519);
+    try std.testing.expectEqual(signature.len, SUI_SIGNATURE_LEN);
+}
+
+test "Ed25519 signature verification" {
+    const keypair = try KeyPair.generateRandom();
+    const signer = TransactionSigner.init(std.testing.allocator, keypair);
+    
+    const tx_data = "test transaction data";
+    const signature = try signer.signTransaction(tx_data);
+    
+    // Extract signature components
+    const sig_bytes = signature[1..65];
+    const pk_bytes = signature[65..97];
+    
+    // Verify the signature
+    const pk = try Ed25519.PublicKey.fromBytes(pk_bytes.*);
+    const sig = try Ed25519.Signature.fromBytes(sig_bytes.*);
+    
+    try sig.verify(&pk, tx_data);
 }
