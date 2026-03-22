@@ -631,7 +631,7 @@ fn cmdTransfer(allocator: Allocator, args: []const []const u8) !void {
         std.log.err("Usage: transfer <from_address> <to_address> <amount_mist> [--export]", .{});
         std.log.info("Options:", .{});
         std.log.info("  --export    Export transaction for Sui CLI instead of dry-run", .{});
-        std.log.info("---", .{});
+        std.log.info(" ", .{});
         std.log.info("Example:", .{});
         std.log.info("  sui-zig-rpc-client-v2 transfer 0xFROM 0xTO 1000000 --export", .{});
         std.log.info("  sui client execute-signed-tx --tx-data $(cat tx.json)", .{});
@@ -700,7 +700,7 @@ fn cmdTransfer(allocator: Allocator, args: []const []const u8) !void {
 
     if (export_mode) {
         // Export mode: Generate Sui CLI compatible command
-        std.log.info("---", .{});
+        std.log.info(" ", .{});
         std.log.info("=== Sui CLI Command ===", .{});
         std.log.info("sui client pay \\", .{});
         std.log.info("  --input-coins {s} \\", .{gas_coin_id.?});
@@ -708,7 +708,7 @@ fn cmdTransfer(allocator: Allocator, args: []const []const u8) !void {
         std.log.info("  --amounts {d} \\", .{amount});
         std.log.info("  --gas-budget 5000000 \\", .{});
         std.log.info("  --sender {s}", .{from});
-        std.log.info("---", .{});
+        std.log.info(" ", .{});
         std.log.info("Or use the simpler transfer command:", .{});
         std.log.info("sui client transfer-sui \\", .{});
         std.log.info("  --to {s} \\", .{to});
@@ -729,7 +729,7 @@ fn cmdTransfer(allocator: Allocator, args: []const []const u8) !void {
         std.log.info("    Commands:", .{});
         std.log.info("      0: TransferObjects([Input(0)], Input(1))", .{});
 
-        std.log.info("---", .{});
+        std.log.info(" ", .{});
         std.log.info("Note: This is a dry-run demonstration.", .{});
         std.log.info("Use --export to get the Sui CLI command for actual execution.", .{});
     }
@@ -1135,7 +1135,7 @@ fn cmdSubscribe(allocator: Allocator, args: []const []const u8) !void {
 
         std.log.info("Subscribing to events for {s}::{s}...", .{ package_id, module_name });
         std.log.info("(Press Ctrl+C to stop)", .{});
-        std.log.info("---", .{});
+        std.log.info(" ", .{});
 
         var last_seen: ?[]const u8 = null;
         defer if (last_seen) |ls| allocator.free(ls);
@@ -1177,7 +1177,7 @@ fn cmdSubscribe(allocator: Allocator, args: []const []const u8) !void {
                                         std.fmt.parseInt(u64, ts.string, 10) catch 0;
                                     std.log.info("  Timestamp: {d} ms", .{ts_num});
                                 }
-                                std.log.info("---", .{});
+                                std.log.info(" ", .{});
                             }
                         }
                     }
@@ -1193,7 +1193,7 @@ fn cmdSubscribe(allocator: Allocator, args: []const []const u8) !void {
     } else if (std.mem.eql(u8, sub_type, "checkpoints")) {
         std.log.info("Subscribing to new checkpoints...", .{});
         std.log.info("(Press Ctrl+C to stop)", .{});
-        std.log.info("---", .{});
+        std.log.info(" ", .{});
 
         var last_checkpoint: u64 = 0;
         var poll_count: u32 = 0;
@@ -1236,7 +1236,7 @@ fn cmdSubscribe(allocator: Allocator, args: []const []const u8) !void {
         const address = args[1];
         std.log.info("Subscribing to transactions for {s}...", .{address});
         std.log.info("(Press Ctrl+C to stop)", .{});
-        std.log.info("---", .{});
+        std.log.info(" ", .{});
 
         var last_count: usize = 0;
         var poll_count: u32 = 0;
@@ -1312,7 +1312,7 @@ fn cmdBatch(allocator: Allocator, args: []const []const u8) !void {
     defer allocator.free(content);
 
     std.log.info("Executing batch commands from {s}...", .{file_path});
-    std.log.info("---", .{});
+    std.log.info(" ", .{});
 
     var lines = std.mem.splitSequence(u8, content, "\n");
     var line_num: u32 = 0;
@@ -1383,7 +1383,7 @@ fn cmdBatch(allocator: Allocator, args: []const []const u8) !void {
         }
 
         rpc_client.deinit();
-        std.log.info("---", .{});
+        std.log.info(" ", .{});
     }
 
     std.log.info("Batch execution complete:", .{});
@@ -1405,7 +1405,7 @@ fn cmdSearch(allocator: Allocator, args: []const []const u8) !void {
     defer rpc_client.deinit();
 
     std.log.info("Searching for address: {s}", .{address});
-    std.log.info("---", .{});
+    std.log.info(" ", .{});
 
     // Search 1: Get balance
     std.log.info("=== Balance ===", .{});
@@ -1424,7 +1424,7 @@ fn cmdSearch(allocator: Allocator, args: []const []const u8) !void {
     });
 
     // Search 2: Get objects count
-    std.log.info("---", .{});
+    std.log.info(" ", .{});
     std.log.info("=== Objects ===", .{});
     const params = try std.fmt.allocPrint(
         allocator,
@@ -1453,7 +1453,7 @@ fn cmdSearch(allocator: Allocator, args: []const []const u8) !void {
         }
     }
 
-    std.log.info("---", .{});
+    std.log.info(" ", .{});
     std.log.info("Use 'objects {s}' to list all objects", .{address});
 }
 /// Configuration and output formatting for main_v2.zig
@@ -1607,7 +1607,7 @@ fn cmdConfig(allocator: Allocator, args: []const []const u8) !void {
         std.log.info("  set <key> <value>       Set config value", .{});
         std.log.info("  get <key>               Get config value", .{});
         std.log.info("  init                    Create default config", .{});
-        std.log.info("---", .{});
+        std.log.info(" ", .{});
         std.log.info("Config keys:", .{});
         std.log.info("  rpc_url                 RPC endpoint URL", .{});
         std.log.info("  default_address         Default wallet address", .{});
@@ -1797,7 +1797,7 @@ fn cmdHistory(allocator: Allocator, args: []const []const u8) !void {
 
     if (std.mem.eql(u8, history_type, "transactions")) {
         std.log.info("Transaction history for {s} (limit: {d}):", .{ target, limit });
-        std.log.info("---", .{});
+        std.log.info(" ", .{});
 
         // Query transactions for address
         const params = try std.fmt.allocPrint(
@@ -1817,7 +1817,7 @@ fn cmdHistory(allocator: Allocator, args: []const []const u8) !void {
             if (result.object.get("data")) |data| {
                 if (data == .array) {
                     std.log.info("Found {d} transactions:", .{data.array.items.len});
-                    std.log.info("---", .{});
+                    std.log.info(" ", .{});
 
                     for (data.array.items, 0..) |tx, i| {
                         std.log.info("Transaction {d}:", .{i + 1});
@@ -1850,7 +1850,7 @@ fn cmdHistory(allocator: Allocator, args: []const []const u8) !void {
                             }
                         }
 
-                        std.log.info("---", .{});
+                        std.log.info(" ", .{});
                     }
 
                     if (result.object.get("hasNextPage")) |has_next| {
@@ -1865,7 +1865,7 @@ fn cmdHistory(allocator: Allocator, args: []const []const u8) !void {
         }
     } else if (std.mem.eql(u8, history_type, "checkpoints")) {
         std.log.info("Recent checkpoints (limit: {d}):", .{limit});
-        std.log.info("---", .{});
+        std.log.info(" ", .{});
 
         // Get latest checkpoint number
         const latest_response = try rpc_client.call("sui_getLatestCheckpointSequenceNumber", "[]");
@@ -1921,14 +1921,14 @@ fn cmdHistory(allocator: Allocator, args: []const []const u8) !void {
                     }
                 }
 
-                std.log.info("---", .{});
+                std.log.info(" ", .{});
             }
 
             seq -= 1;
         }
     } else if (std.mem.eql(u8, history_type, "epochs")) {
         std.log.info("Epoch history (limit: {d}):", .{limit});
-        std.log.info("---", .{});
+        std.log.info(" ", .{});
 
         // Get current epoch
         const epoch_response = try rpc_client.call("sui_getEpoch", "[]");
@@ -1946,7 +1946,7 @@ fn cmdHistory(allocator: Allocator, args: []const []const u8) !void {
             0;
 
         std.log.info("Current epoch: {d}", .{current_epoch});
-        std.log.info("---", .{});
+        std.log.info(" ", .{});
 
         // Query recent epochs
         var count: u32 = 0;
@@ -1970,7 +1970,7 @@ fn cmdHistory(allocator: Allocator, args: []const []const u8) !void {
                     }
                 }
 
-                std.log.info("---", .{});
+                std.log.info(" ", .{});
             }
 
             epoch -= 1;
@@ -2000,7 +2000,7 @@ fn cmdAnalytics(allocator: Allocator, args: []const []const u8) !void {
 
     if (std.mem.eql(u8, analytics_type, "portfolio")) {
         std.log.info("Portfolio analysis for {s}:", .{address});
-        std.log.info("---", .{});
+        std.log.info(" ", .{});
 
         // Get all coins
         const params = try std.fmt.allocPrint(
@@ -2068,7 +2068,7 @@ fn cmdAnalytics(allocator: Allocator, args: []const []const u8) !void {
 
     } else if (std.mem.eql(u8, analytics_type, "activity")) {
         std.log.info("Activity analysis for {s}:", .{address});
-        std.log.info("---", .{});
+        std.log.info(" ", .{});
 
         // Query recent transactions
         const params = try std.fmt.allocPrint(
@@ -2147,7 +2147,7 @@ fn cmdAnalytics(allocator: Allocator, args: []const []const u8) !void {
 
     } else if (std.mem.eql(u8, analytics_type, "gas")) {
         std.log.info("Gas usage analysis for {s}:", .{address});
-        std.log.info("---", .{});
+        std.log.info(" ", .{});
 
         // Get gas objects to analyze
         const params = try std.fmt.allocPrint(
@@ -2200,7 +2200,7 @@ fn cmdAnalytics(allocator: Allocator, args: []const []const u8) !void {
         std.log.info("Gas Objects: {d}", .{gas_objects});
         std.log.info("Total Gas Balance: {d} MIST", .{total_gas_balance});
         std.log.info("Reference Gas Price: {d} MIST (estimated)", .{gas_price});
-        std.log.info("---", .{});
+        std.log.info(" ", .{});
         std.log.info("Estimated Simple Transfer Cost: ~{d} MIST", .{gas_price * 2000});
         std.log.info("Estimated Complex Tx Cost: ~{d} MIST", .{gas_price * 10000});
     } else {
@@ -2226,7 +2226,7 @@ fn cmdCompare(allocator: Allocator, args: []const []const u8) !void {
     std.log.info("Comparing addresses:", .{});
     std.log.info("  A: {s}", .{addr1});
     std.log.info("  B: {s}", .{addr2});
-    std.log.info("---", .{});
+    std.log.info(" ", .{});
 
     // Compare balances
     const balance1 = sui_client.rpc_client_new.getBalance(
@@ -2293,7 +2293,7 @@ fn cmdCompare(allocator: Allocator, args: []const []const u8) !void {
         }
     }
 
-    std.log.info("---", .{});
+    std.log.info(" ", .{});
     std.log.info("=== Object Count Comparison ===", .{});
     std.log.info("A: {d} objects", .{count1});
     std.log.info("B: {d} objects", .{count2});
@@ -2329,7 +2329,7 @@ fn cmdMonitor(allocator: Allocator, args: []const []const u8) !void {
         std.log.info("=== Network Health Monitor ===", .{});
         std.log.info("Monitoring network status...", .{});
         std.log.info("(Press Ctrl+C to stop)", .{});
-        std.log.info("---", .{});
+        std.log.info(" ", .{});
 
         var last_checkpoint: u64 = 0;
         var poll_count: u32 = 0;
@@ -2404,7 +2404,7 @@ fn cmdMonitor(allocator: Allocator, args: []const []const u8) !void {
         std.log.info("=== Address Monitor: {s} ===", .{address});
         std.log.info("Monitoring address activity...", .{});
         std.log.info("(Press Ctrl+C to stop)", .{});
-        std.log.info("---", .{});
+        std.log.info(" ", .{});
 
         var last_balance: u64 = 0;
         var last_objects: u32 = 0;
@@ -2474,7 +2474,7 @@ fn cmdMonitor(allocator: Allocator, args: []const []const u8) !void {
         std.log.info("=== Gas Price Monitor ===", .{});
         std.log.info("Monitoring gas price changes...", .{});
         std.log.info("(Press Ctrl+C to stop)", .{});
-        std.log.info("---", .{});
+        std.log.info(" ", .{});
 
         var last_gas_price: u64 = 0;
         var poll_count: u32 = 0;
@@ -2534,7 +2534,7 @@ fn cmdMonitor(allocator: Allocator, args: []const []const u8) !void {
         std.log.info("=== TPS Monitor ===", .{});
         std.log.info("Monitoring transactions per second...", .{});
         std.log.info("(Press Ctrl+C to stop)", .{});
-        std.log.info("---", .{});
+        std.log.info(" ", .{});
 
         var last_tx_count: u64 = 0;
         var last_timestamp: i64 = 0;
@@ -2804,7 +2804,7 @@ fn cmdStats(allocator: Allocator, args: []const []const u8) !void {
 
     if (std.mem.eql(u8, stats_type, "network")) {
         std.log.info("=== Network Statistics ===", .{});
-        std.log.info("---", .{});
+        std.log.info(" ", .{});
 
         // Get latest checkpoint
         const cp_response = try rpc_client.call("sui_getLatestCheckpointSequenceNumber", "[]");
@@ -2822,7 +2822,7 @@ fn cmdStats(allocator: Allocator, args: []const []const u8) !void {
 
     } else if (std.mem.eql(u8, stats_type, "validators")) {
         std.log.info("=== Validator Statistics ===", .{});
-        std.log.info("---", .{});
+        std.log.info(" ", .{});
 
         const response = try rpc_client.call("suix_getValidators", "[]");
         defer allocator.free(response);
@@ -2834,7 +2834,7 @@ fn cmdStats(allocator: Allocator, args: []const []const u8) !void {
             if (result.object.get("validators")) |validators| {
                 if (validators == .array) {
                     std.log.info("Total Validators: {d}", .{validators.array.items.len});
-                    std.log.info("---", .{});
+                    std.log.info(" ", .{});
 
                     // Show top validators by stake
                     std.log.info("Top Validators by Stake:", .{});
@@ -2875,7 +2875,7 @@ fn cmdStats(allocator: Allocator, args: []const []const u8) !void {
 
         const address = args[1];
         std.log.info("=== Address Statistics: {s} ===", .{address});
-        std.log.info("---", .{});
+        std.log.info(" ", .{});
 
         // Get balance
         const balance = sui_client.rpc_client_new.getBalance(
@@ -2923,7 +2923,7 @@ fn cmdStats(allocator: Allocator, args: []const []const u8) !void {
 
         // Calculate percentiles
         if (balance > 0) {
-            std.log.info("---", .{});
+            std.log.info(" ", .{});
             std.log.info("Balance Percentile Estimates:", .{});
             std.log.info("  > 0.1 SUI: Top ~90%", .{});
             std.log.info("  > 1 SUI: Top ~70%", .{});
@@ -2946,10 +2946,10 @@ const ReplCommand = struct {
 
 fn cmdInteractive(_: Allocator, _: []const []const u8) !void {
     std.log.info("=== Sui Zig RPC Client - Interactive Mode ===", .{});
-    std.log.info("---", .{});
+    std.log.info(" ", .{});
     std.log.info("Interactive mode requires std.io.getStdIn which is not available in Zig 0.15.2.", .{});
     std.log.info("Please use command-line mode instead.", .{});
-    std.log.info("---", .{});
+    std.log.info(" ", .{});
     std.log.info("Example commands:", .{});
     std.log.info("  balance 0xADDRESS", .{});
     std.log.info("  objects 0xADDRESS", .{});
@@ -2958,26 +2958,26 @@ fn cmdInteractive(_: Allocator, _: []const []const u8) !void {
 
 fn printReplHelp() void {
     std.log.info("=== Interactive Mode Commands ===", .{});
-    std.log.info("---", .{});
+    std.log.info(" ", .{});
     std.log.info("Basic Commands:", .{});
     std.log.info("  balance <address> [--format]  Get SUI balance", .{});
     std.log.info("  objects <address>             List owned objects", .{});
     std.log.info("  tx <digest>                   Get transaction details", .{});
     std.log.info("  gas <address>                 Get gas objects", .{});
-    std.log.info("---", .{});
+    std.log.info(" ", .{});
     std.log.info("Network Commands:", .{});
     std.log.info("  checkpoint [id]               Get checkpoint info", .{});
     std.log.info("  epoch                         Get current epoch", .{});
     std.log.info("  validators                    List validators", .{});
-    std.log.info("---", .{});
+    std.log.info(" ", .{});
     std.log.info("Analysis Commands:", .{});
     std.log.info("  search <address>              Search address summary", .{});
     std.log.info("  analytics <type> <address>    Analyze address data", .{});
     std.log.info("  stats <type>                  Show statistics", .{});
-    std.log.info("---", .{});
+    std.log.info(" ", .{});
     std.log.info("Config Commands:", .{});
     std.log.info("  config <action>               Manage configuration", .{});
-    std.log.info("---", .{});
+    std.log.info(" ", .{});
     std.log.info("REPL Commands:", .{});
     std.log.info("  help                          Show this help", .{});
     std.log.info("  clear                         Clear screen", .{});
@@ -3012,7 +3012,7 @@ fn cmdPlugin(_: Allocator, args: []const []const u8) !void {
 
     if (std.mem.eql(u8, action, "list")) {
         std.log.info("=== Available Plugins ===", .{});
-        std.log.info("---", .{});
+        std.log.info(" ", .{});
 
         // Built-in plugins
         const plugins = [_]Plugin{
@@ -3049,7 +3049,7 @@ fn cmdPlugin(_: Allocator, args: []const []const u8) !void {
             std.log.info("{s} v{s}", .{ plugin.name, plugin.version });
             std.log.info("  {s}", .{plugin.description});
             std.log.info("  Commands: {d} available", .{plugin.commands.len});
-            std.log.info("---", .{});
+            std.log.info(" ", .{});
         }
     } else if (std.mem.eql(u8, action, "info")) {
         if (args.len < 2) {
@@ -3061,10 +3061,10 @@ fn cmdPlugin(_: Allocator, args: []const []const u8) !void {
 
         // Show plugin info (mock for now)
         std.log.info("=== Plugin: {s} ===", .{plugin_name});
-        std.log.info("---", .{});
+        std.log.info(" ", .{});
         std.log.info("Version: 1.0.0", .{});
         std.log.info("Status: Built-in", .{});
-        std.log.info("---", .{});
+        std.log.info(" ", .{});
         std.log.info("Available Commands:", .{});
 
         if (std.mem.eql(u8, plugin_name, "portfolio-tracker")) {
@@ -3091,7 +3091,7 @@ fn cmdPlugin(_: Allocator, args: []const []const u8) !void {
 
         // Run plugin command (mock implementation)
         std.log.info("Running plugin: {s} {s}", .{ plugin_name, plugin_cmd });
-        std.log.info("---", .{});
+        std.log.info(" ", .{});
 
         if (std.mem.eql(u8, plugin_name, "portfolio-tracker")) {
             if (std.mem.eql(u8, plugin_cmd, "track")) {
@@ -3108,7 +3108,7 @@ fn cmdPlugin(_: Allocator, args: []const []const u8) !void {
                     std.process.exit(1);
                 }
                 std.log.info("Portfolio Report for {s}:", .{plugin_args[0]});
-                std.log.info("---", .{});
+                std.log.info(" ", .{});
                 std.log.info("Total Value: 0.215 SUI", .{});
                 std.log.info("24h Change: +0.5%", .{});
                 std.log.info("7d Change: +2.3%", .{});
@@ -3123,15 +3123,15 @@ fn cmdPlugin(_: Allocator, args: []const []const u8) !void {
                     std.process.exit(1);
                 }
                 std.log.info("Gas Analysis for {s}:", .{plugin_args[0]});
-                std.log.info("---", .{});
+                std.log.info(" ", .{});
                 std.log.info("Average Gas per Tx: 2,500 MIST", .{});
                 std.log.info("Most Expensive Tx: 15,000 MIST", .{});
                 std.log.info("Cheapest Tx: 1,200 MIST", .{});
-                std.log.info("---", .{});
+                std.log.info(" ", .{});
                 std.log.info("Recommendation: Use batch transactions to save ~20% gas", .{});
             } else if (std.mem.eql(u8, plugin_cmd, "suggest")) {
                 std.log.info("Gas Optimization Suggestions:", .{});
-                std.log.info("---", .{});
+                std.log.info(" ", .{});
                 std.log.info("1. Combine multiple transfers into one transaction", .{});
                 std.log.info("2. Use reference gas price for timing", .{});
                 std.log.info("3. Merge small coin objects to reduce storage", .{});
@@ -3179,7 +3179,7 @@ fn cmdAlias(allocator: Allocator, args: []const []const u8) !void {
         std.log.info("  get <name>              Show alias definition", .{});
         std.log.info("  delete <name>           Delete alias", .{});
         std.log.info("  run <name> [args...]    Run aliased command", .{});
-        std.log.info("---", .{});
+        std.log.info(" ", .{});
         std.log.info("Examples:", .{});
         std.log.info("  alias set mybal 'balance 0xADDRESS'", .{});
         std.log.info("  alias run mybal", .{});
@@ -3190,14 +3190,14 @@ fn cmdAlias(allocator: Allocator, args: []const []const u8) !void {
 
     if (std.mem.eql(u8, action, "list")) {
         std.log.info("=== Command Aliases ===", .{});
-        std.log.info("---", .{});
+        std.log.info(" ", .{});
         std.log.info("Built-in aliases:", .{});
         std.log.info("  mywallet    -> balance $DEFAULT_ADDRESS", .{});
         std.log.info("  myobjects   -> objects $DEFAULT_ADDRESS", .{});
         std.log.info("  mygas       -> gas $DEFAULT_ADDRESS", .{});
-        std.log.info("---", .{});
+        std.log.info(" ", .{});
         std.log.info("User aliases: (none configured)", .{});
-        std.log.info("---", .{});
+        std.log.info(" ", .{});
         std.log.info("Use 'alias set <name> <command>' to create aliases.", .{});
     } else if (std.mem.eql(u8, action, "set")) {
         if (args.len < 3) {
@@ -3261,7 +3261,7 @@ fn cmdScript(allocator: Allocator, args: []const []const u8) !void {
 
         const file_path = args[1];
         std.log.info("Executing script: {s}", .{file_path});
-        std.log.info("---", .{});
+        std.log.info(" ", .{});
 
         // Read and execute script
         const file = std.fs.cwd().openFile(file_path, .{}) catch |err| {
@@ -3329,7 +3329,7 @@ fn cmdScript(allocator: Allocator, args: []const []const u8) !void {
             }
         }
 
-        std.log.info("---", .{});
+        std.log.info(" ", .{});
         std.log.info("Script execution complete:", .{});
         std.log.info("  Lines executed: {d}", .{success_count + fail_count});
         std.log.info("  Successful: {d}", .{success_count});
@@ -3349,38 +3349,38 @@ fn cmdScript(allocator: Allocator, args: []const []const u8) !void {
         const template_name = if (args.len >= 2) args[1] else "default";
 
         std.log.info("=== Script Template: {s} ===", .{template_name});
-        std.log.info("---", .{});
+        std.log.info(" ", .{});
 
         if (std.mem.eql(u8, template_name, "default")) {
             std.log.info("# Default script template", .{});
             std.log.info("# This script demonstrates basic commands", .{});
-            std.log.info("---", .{});
+            std.log.info(" ", .{});
             std.log.info("# Check balance", .{});
             std.log.info("balance 0xYOUR_ADDRESS", .{});
-            std.log.info("---", .{});
+            std.log.info(" ", .{});
             std.log.info("# List objects", .{});
             std.log.info("objects 0xYOUR_ADDRESS", .{});
-            std.log.info("---", .{});
+            std.log.info(" ", .{});
             std.log.info("# Get gas objects", .{});
             std.log.info("gas 0xYOUR_ADDRESS", .{});
         } else if (std.mem.eql(u8, template_name, "monitor")) {
             std.log.info("# Monitoring script template", .{});
             std.log.info("# Use with: script run monitor.sui", .{});
-            std.log.info("---", .{});
+            std.log.info(" ", .{});
             std.log.info("# Initial balance check", .{});
             std.log.info("balance 0xYOUR_ADDRESS", .{});
-            std.log.info("---", .{});
+            std.log.info(" ", .{});
             std.log.info("# Get current gas price", .{});
             std.log.info("gas-price", .{});
-            std.log.info("---", .{});
+            std.log.info(" ", .{});
             std.log.info("# Check network status", .{});
             std.log.info("checkpoint", .{});
         } else if (std.mem.eql(u8, template_name, "export")) {
             std.log.info("# Data export script template", .{});
-            std.log.info("---", .{});
+            std.log.info(" ", .{});
             std.log.info("# Export balance", .{});
             std.log.info("# export balance 0xYOUR_ADDRESS /tmp/balance.csv", .{});
-            std.log.info("---", .{});
+            std.log.info(" ", .{});
             std.log.info("# Export objects", .{});
             std.log.info("# export objects 0xYOUR_ADDRESS /tmp/objects.csv", .{});
         } else {
@@ -3422,14 +3422,14 @@ fn cmdWs(allocator: Allocator, args: []const []const u8) !void {
         std.log.info("=== WebSocket Subscription ===", .{});
         std.log.info("Connecting to: {s}", .{rpc_url});
         std.log.info("Subscription type: {s}", .{sub_type});
-        std.log.info("---", .{});
+        std.log.info(" ", .{});
 
         // Note: Zig 0.15.2 doesn't have native WebSocket support
         // This is a simulated implementation using polling
         std.log.info("Note: Native WebSocket not available in Zig 0.15.2", .{});
         std.log.info("Using simulated subscription with polling...", .{});
         std.log.info("(Press Ctrl+C to stop)", .{});
-        std.log.info("---", .{});
+        std.log.info(" ", .{});
 
         var rpc_client = try SuiRpcClient.init(allocator, rpc_url);
         defer rpc_client.deinit();
@@ -3572,11 +3572,11 @@ fn cmdWs(allocator: Allocator, args: []const []const u8) !void {
 
     } else if (std.mem.eql(u8, action, "status")) {
         std.log.info("=== WebSocket Status ===", .{});
-        std.log.info("---", .{});
+        std.log.info(" ", .{});
         std.log.info("Connection State: Simulated (Polling)", .{});
         std.log.info("Native WebSocket: Not available in Zig 0.15.2", .{});
         std.log.info("Fallback Mode: HTTP Polling", .{});
-        std.log.info("---", .{});
+        std.log.info(" ", .{});
         std.log.info("Note: For production use, consider:", .{});
         std.log.info("  - Using a WebSocket proxy", .{});
         std.log.info("  - External WebSocket client", .{});
@@ -3629,7 +3629,7 @@ fn cmdGraphql(allocator: Allocator, args: []const []const u8) !void {
         // Execute query (mock)
         std.log.info("Query:", .{});
         std.log.info("{s}", .{query});
-        std.log.info("---", .{});
+        std.log.info(" ", .{});
         std.log.info("Note: GraphQL execution requires external GraphQL endpoint", .{});
         std.log.info("Query saved for manual execution.", .{});
 
@@ -3642,12 +3642,12 @@ fn cmdGraphql(allocator: Allocator, args: []const []const u8) !void {
         const query = args[1];
         std.log.info("Executing GraphQL query:", .{});
         std.log.info("{s}", .{query});
-        std.log.info("---", .{});
+        std.log.info(" ", .{});
         std.log.info("Note: GraphQL execution requires external GraphQL endpoint", .{});
 
     } else if (std.mem.eql(u8, action, "introspect")) {
         std.log.info("=== GraphQL Schema Introspection ===", .{});
-        std.log.info("---", .{});
+        std.log.info(" ", .{});
         std.log.info("Available Types:", .{});
         std.log.info("  Query", .{});
         std.log.info("    - address(address: String!): Address", .{});
@@ -3656,13 +3656,13 @@ fn cmdGraphql(allocator: Allocator, args: []const []const u8) !void {
         std.log.info("    - checkpoint(id: String!): Checkpoint", .{});
         std.log.info("    - epoch(id: String!): Epoch", .{});
         std.log.info("    - coins(owner: String!, coinType: String): [Coin]", .{});
-        std.log.info("---", .{});
+        std.log.info(" ", .{});
         std.log.info("  Address", .{});
         std.log.info("    - address: String!", .{});
         std.log.info("    - balance: Balance", .{});
         std.log.info("    - objects: [Object]", .{});
         std.log.info("    - coins: [Coin]", .{});
-        std.log.info("---", .{});
+        std.log.info(" ", .{});
         std.log.info("  Object", .{});
         std.log.info("    - id: String!", .{});
         std.log.info("    - version: Int!", .{});
@@ -3670,21 +3670,21 @@ fn cmdGraphql(allocator: Allocator, args: []const []const u8) !void {
         std.log.info("    - type: String!", .{});
         std.log.info("    - owner: Owner", .{});
         std.log.info("    - content: ObjectContent", .{});
-        std.log.info("---", .{});
+        std.log.info(" ", .{});
         std.log.info("  Transaction", .{});
         std.log.info("    - digest: String!", .{});
         std.log.info("    - timestamp: String", .{});
         std.log.info("    - checkpoint: Checkpoint", .{});
         std.log.info("    - effects: TransactionEffects", .{});
         std.log.info("    - sender: Address", .{});
-        std.log.info("---", .{});
+        std.log.info(" ", .{});
         std.log.info("Note: Full introspection requires GraphQL endpoint", .{});
 
     } else if (std.mem.eql(u8, action, "template")) {
         const template_name = if (args.len >= 2) args[1] else "address";
 
-        std.log.info("=== GraphQL Query Template: {s} ===", .{template_name});
-        std.log.info("---", .{});
+        std.log.info("=== GraphQL Query Template: {s} ===", .{});
+        std.log.info(" ", .{});
 
         if (std.mem.eql(u8, template_name, "address")) {
             std.log.info("query GetAddress($address: String!)", .{});
@@ -3709,15 +3709,15 @@ fn cmdGraphql(allocator: Allocator, args: []const []const u8) !void {
             std.log.info("    effects ", .{});
             std.log.info("      status ", .{});
             std.log.info("        status", .{});
-            std.log.info("-", .{});
+            std.log.info("      ", .{});
             std.log.info("      gasUsed ", .{});
             std.log.info("        computationCost", .{});
             std.log.info("        storageCost", .{});
             std.log.info("        storageRebate", .{});
-            std.log.info("-", .{});
+            std.log.info("      ", .{});
             std.log.info("    (end)", .{});
-            std.log.info("-", .{});
-            std.log.info("---", .{});
+            std.log.info("  ", .{});
+            std.log.info(" ", .{});
         } else if (std.mem.eql(u8, template_name, "checkpoint")) {
             std.log.info("query GetCheckpoint($id: String!) ", .{});
             std.log.info("  checkpoint(id: $id) ", .{});
@@ -3731,11 +3731,11 @@ fn cmdGraphql(allocator: Allocator, args: []const []const u8) !void {
             std.log.info("      edges ", .{});
             std.log.info("        node ", .{});
             std.log.info("          digest", .{});
-            std.log.info("-", .{});
-            std.log.info("-", .{});
+            std.log.info("        ", .{});
+            std.log.info("      ", .{});
             std.log.info("    (end)", .{});
-            std.log.info("-", .{});
-            std.log.info("---", .{});
+            std.log.info("  ", .{});
+            std.log.info(" ", .{});
         } else if (std.mem.eql(u8, template_name, "coins")) {
             std.log.info("query GetCoins($owner: String!, $coinType: String) ", .{});
             std.log.info("  coins(owner: $owner, coinType: $coinType) ", .{});
@@ -3745,11 +3745,11 @@ fn cmdGraphql(allocator: Allocator, args: []const []const u8) !void {
             std.log.info("        balance", .{});
             std.log.info("        coinType ", .{});
             std.log.info("          repr", .{});
-            std.log.info("-", .{});
-            std.log.info("-", .{});
+            std.log.info("        ", .{});
+            std.log.info("      ", .{});
             std.log.info("    (end)", .{});
-            std.log.info("-", .{});
-            std.log.info("---", .{});
+            std.log.info("  ", .{});
+            std.log.info(" ", .{});
         } else if (std.mem.eql(u8, template_name, "events")) {
             std.log.info("query GetEvents($filter: EventFilter!) ", .{});
             std.log.info("  events(filter: $filter) ", .{});
@@ -3759,21 +3759,21 @@ fn cmdGraphql(allocator: Allocator, args: []const []const u8) !void {
             std.log.info("        timestamp", .{});
             std.log.info("        type ", .{});
             std.log.info("          repr", .{});
-            std.log.info("-", .{});
+            std.log.info("        ", .{});
             std.log.info("        sender ", .{});
             std.log.info("          address", .{});
-            std.log.info("-", .{});
+            std.log.info("        ", .{});
             std.log.info("        contents", .{});
-            std.log.info("-", .{});
+            std.log.info("      ", .{});
             std.log.info("    (end)", .{});
-            std.log.info("-", .{});
-            std.log.info("---", .{});
+            std.log.info("  ", .{});
+            std.log.info(" ", .{});
         } else {
             std.log.err("Unknown template: {s}", .{template_name});
             std.log.info("Available templates: address, transaction, checkpoint, coins, events", .{});
         }
 
-        std.log.info("---", .{});
+        std.log.info(" ", .{});
         std.log.info("Save to file and use: graphql query <file>", .{});
 
     } else {
@@ -3802,14 +3802,14 @@ fn cmdCache(allocator: Allocator, args: []const []const u8) !void {
 
     } else if (std.mem.eql(u8, action, "stats")) {
         std.log.info("=== Cache Statistics ===", .{});
-        std.log.info("---", .{});
+        std.log.info(" ", .{});
         std.log.info("Cache Type          | Entries | Hit Rate | Size", .{});
         std.log.info("--------------------+---------+----------+------", .{});
         std.log.info("Balance Cache       | 0       | 0%       | 0 B", .{});
         std.log.info("Object Cache        | 0       | 0%       | 0 B", .{});
         std.log.info("Transaction Cache   | 0       | 0%       | 0 B", .{});
         std.log.info("Checkpoint Cache    | 0       | 0%       | 0 B", .{});
-        std.log.info("---", .{});
+        std.log.info(" ", .{});
         std.log.info("Note: Caching not implemented in this version", .{});
 
     } else if (std.mem.eql(u8, action, "warm")) {
@@ -3820,13 +3820,13 @@ fn cmdCache(allocator: Allocator, args: []const []const u8) !void {
 
         const address = args[1];
         std.log.info("Warming cache for {s}...", .{address});
-        std.log.info("---", .{});
+        std.log.info(" ", .{});
         std.log.info("Pre-loading:", .{});
         std.log.info("  - Balance", .{});
         std.log.info("  - Objects", .{});
         std.log.info("  - Gas objects", .{});
         std.log.info("  - Recent transactions", .{});
-        std.log.info("---", .{});
+        std.log.info(" ", .{});
         std.log.info("Cache warming complete.", .{});
 
     } else {
@@ -3862,7 +3862,7 @@ fn cmdDebug(allocator: Allocator, args: []const []const u8) !void {
         std.log.info("URL: {s}", .{rpc_url});
         std.log.info("Method: {s}", .{method});
         std.log.info("Params: {s}", .{params});
-        std.log.info("---", .{});
+        std.log.info(" ", .{});
 
         var rpc_client = try SuiRpcClient.init(allocator, rpc_url);
         defer rpc_client.deinit();
@@ -3874,7 +3874,7 @@ fn cmdDebug(allocator: Allocator, args: []const []const u8) !void {
 
         std.log.info("Response time: {d} ms", .{end_time - start_time});
         std.log.info("Response size: {d} bytes", .{response.len});
-        std.log.info("---", .{});
+        std.log.info(" ", .{});
         std.log.info("Response:", .{});
 
         // Show response (pretty print not available in Zig 0.15.2)
@@ -3882,13 +3882,13 @@ fn cmdDebug(allocator: Allocator, args: []const []const u8) !void {
 
     } else if (std.mem.eql(u8, action, "config")) {
         std.log.info("=== Debug Configuration ===", .{});
-        std.log.info("---", .{});
+        std.log.info(" ", .{});
         std.log.info("RPC URL: {s}", .{getRpcUrl() orelse "default"});
         std.log.info("Verbose Mode: false", .{});
         std.log.info("Log Level: info", .{});
         std.log.info("Request Timeout: 30s", .{});
         std.log.info("Max Retries: 3", .{});
-        std.log.info("---", .{});
+        std.log.info(" ", .{});
         std.log.info("Features:", .{});
         std.log.info("  - HTTP Client: enabled", .{});
         std.log.info("  - WebSocket: simulated (polling)", .{});
@@ -3899,7 +3899,7 @@ fn cmdDebug(allocator: Allocator, args: []const []const u8) !void {
         const rpc_url = getRpcUrl() orelse "https://fullnode.mainnet.sui.io:443";
 
         std.log.info("Testing connection to: {s}", .{rpc_url});
-        std.log.info("---", .{});
+        std.log.info(" ", .{});
 
         var rpc_client = try SuiRpcClient.init(allocator, rpc_url);
         defer rpc_client.deinit();
