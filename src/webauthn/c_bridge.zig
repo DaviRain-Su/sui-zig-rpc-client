@@ -58,6 +58,7 @@ pub extern fn LAContextCreate() LAContextRef;
 pub extern fn LAContextRelease(context: LAContextRef) void;
 pub extern fn LAContextCanEvaluatePolicy(context: LAContextRef, policy: BridgeLAPolicy, errorCode: *c_int) bool;
 pub extern fn LAContextEvaluatePolicy(context: LAContextRef, policy: BridgeLAPolicy, localizedReason: [*c]const u8, completion: *const fn (success: bool, errorCode: c_int) callconv(.C) void) void;
+pub extern fn LAContextEvaluatePolicySync(context: LAContextRef, policy: BridgeLAPolicy, localizedReason: [*c]const u8, errorCode: *c_int) bool;
 pub extern fn LAContextGetBiometryType(context: LAContextRef) BridgeBiometryType;
 
 // Secure Enclave functions

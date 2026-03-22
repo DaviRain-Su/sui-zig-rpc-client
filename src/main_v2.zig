@@ -4635,16 +4635,32 @@ fn cmdZklogin(allocator: Allocator, args: []const []const u8) !void {
     }
 }
 
+const cmd_passkey = @import("cmd_passkey.zig");
+
 fn cmdPasskey(allocator: Allocator, args: []const []const u8) !void {
     if (args.len < 1) {
         std.log.err("Usage: passkey <action>", .{});
         std.log.info("Actions:", .{});
-        std.log.info("  create --name <name>            Create new Passkey", .{});
-        std.log.info("  list                            List Passkeys", .{});
-        std.log.info("  sign --id <id> --tx <bytes>     Sign transaction", .{});
-        std.log.info("  address --id <id>               Show derived address", .{});
-        std.log.info("  export --id <id>                Export public key", .{});
+        std.log.info("  create --name <name>            Create new Passkey with Touch ID", .{});
         std.log.info("  platform                        Show platform info", .{});
+        std.log.info("  test                            Test Touch ID authentication", .{});
+        std.process.exit(1);
+    }
+
+    try cmd_passkey.execute(allocator, args);
+}
+
+// Legacy implementation - kept for reference
+fn cmdPasskeyLegacy(allocator: Allocator, args: []const []const u8) !void {
+    _ = allocator;
+    _ = args;
+    // This function is no longer used
+}
+
+// Old cmdPasskey implementation - replaced by cmd_passkey.zig
+fn cmdPasskeyOld(allocator: Allocator, args: []const []const u8) !void {
+    if (args.len < 1) {
+        std.log.err("Usage: passkey <action>", .{});
         std.process.exit(1);
     }
 
