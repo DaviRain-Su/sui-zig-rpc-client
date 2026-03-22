@@ -1129,3 +1129,173 @@ test "parseIntValue rejects invalid integers" {
     try testing.expectError(error.InvalidCli, parseIntValue(""));
     try testing.expectError(error.InvalidCli, parseIntValue("12.34"));
 }
+
+// Boundary tests for edge cases
+
+test "parseCliArgs empty args defaults to help" {
+    const testing = std.testing;
+    const args = &.{""};
+
+    var parsed = try parseCliArgs(testing.allocator, args);
+    defer parsed.deinit(testing.allocator);
+
+    try testing.expectEqual(types.Command.help, parsed.command);
+    try testing.expect(parsed.show_usage);
+}
+
+test "parseCliArgs handles very long argument" {
+    const testing = std.testing;
+    const long_arg = "a" ** 1000;
+    const args = &.{ "rpc", long_arg };
+
+    var parsed = try parseCliArgs(testing.allocator, args);
+    defer parsed.deinit(testing.allocator);
+
+    try testing.expectEqual(types.Command.rpc, parsed.command);
+}
+
+test "parseCliArgs handles special characters in args" {
+    const testing = std.testing;
+    const args = &.{
+        "tx", "send",
+        "--tx-bytes", "AA==",
+        "--signature", "sig_with-special.chars",
+    };
+
+    var parsed = try parseCliArgs(testing.allocator, args);
+    defer parsed.deinit(testing.allocator);
+
+    try testing.expectEqual(types.Command.tx_send, parsed.command);
+    try testing.expectEqualStrings("AA==", parsed.tx_bytes.?);
+}
+
+test "parseCliArgs handles multiple flags" {
+    const testing = std.testing;
+    const args = &.{
+        "tx", "send",
+        "--wait",
+        "--summarize",
+        "--observe",
+    };
+
+    var parsed = try parseCliArgs(testing.allocator, args);
+    defer parsed.deinit(testing.allocator);
+
+    try testing.expect(parsed.tx_send_wait);
+    try testing.expect(parsed.tx_send_summarize);
+    try testing.expect(parsed.tx_send_observe);
+}
+
+test "parseIntValue handles boundary values" {
+    const testing = std.testing;
+
+    // Test max u64 value
+    try testing.expectEqual(@as(u64, std.math.maxInt(u64)), try parseIntValue("18446744073709551615"));
+    
+    // Test large values
+    try testing.expectEqual(@as(u64, 1000000000000), try parseIntValue("1000000000000"));
+}
+
+test "parseIntValue rejects negative numbers" {
+    const testing = std.testing;
+
+    try testing.expectError(error.InvalidCli, parseIntValue("-1"));
+    try testing.expectError(error.InvalidCli, parseIntValue("-100"));
+}
+
+test "parseCliArgs wallet commands" {
+    const testing = std.testing;
+
+    // Test wallet create
+    const args1 = &.{
+        "wallet", "create",
+        "--alias", "test_wallet",
+    };
+    var parsed1 = try parseCliArgs(testing.allocator, args1);
+    defer parsed1.deinit(testing.allocator);
+    try testing.expectEqual(types.Command.wallet_create, parsed1.command);
+    try testing.expectEqualStrings("test_wallet", parsed1.wallet_alias.?);
+
+    // Test wallet balance
+    const args2 = &.{
+        "wallet", "balance",
+        "--limit", "50",
+    };
+    var parsed2 = try parseCliArgs(testing.allocator, args2);
+    defer parsed2.deinit(testing.allocator);
+    try testing.expectEqual(types.Command.wallet_balance, parsed2.command);
+}
+
+test "parseCliArgs account commands" {
+    const testing = std.testing;
+
+    // Test account list
+    const args1 = &.{
+        "account", "list",
+        "--json",
+    };
+    var parsed1 = try parseCliArgs(testing.allocator, args1);
+    defer parsed1.deinit(testing.allocator);
+    try testing.expectEqual(types.Command.account_list, parsed1.command);
+    try testing.expect(parsed1.account_list_json);
+
+    // Test account balance with selector
+    const args2 = &.{
+        "account", "balance", "main",
+        "--coin-type", "0x2::sui::SUI",
+    };
+    var parsed2 = try parseCliArgs(testing.allocator, args2);
+    defer parsed2.deinit(testing.allocator);
+    try testing.expectEqual(types.Command.account_balance, parsed2.command);
+    try testing.expectEqualStrings("main", parsed2.account_selector.?);
+}
+
+test "parseCliArgs move commands" {
+    const testing = std.testing;
+
+    const args = &.{
+        "move", "function",
+        "0x1", "module", "func",
+        "--summarize",
+    };
+    var parsed = try parseCliArgs(testing.allocator, args);
+    defer parsed.deinit(testing.allocator);
+
+    try testing.expectEqual(types.Command.move_function, parsed.command);
+    try testing.expectEqualStrings("0x1", parsed.move_package.?);
+    try testing.expectEqualStrings("module", parsed.move_module.?);
+    try testing.expectEqualStrings("func", parsed.move_function.?);
+    try testing.expect(parsed.move_summarize);
+}
+
+test "parseCliArgs request commands" {
+    const testing = std.testing;
+
+    const args = &.{
+        "request", "build",
+        "--gas-budget", "1000000",
+    };
+    var parsed = try parseCliArgs(testing.allocator, args);
+    defer parsed.deinit(testing.allocator);
+
+    try testing.expectEqual(types.Command.request_build, parsed.command);
+    try testing.expectEqual(@as(u64, 1000000), parsed.tx_build_gas_budget.?);
+}
+
+test "parseCliArgs event commands" {
+    const testing = std.testing;
+
+    const args = &.{
+        "events",
+        "--package", "0x1",
+        "--module", "test",
+        "--limit", "100",
+    };
+    var parsed = try parseCliArgs(testing.allocator, args);
+    defer parsed.deinit(testing.allocator);
+
+    try testing.expectEqual(types.Command.events, parsed.command);
+    try testing.expectEqualStrings("0x1", parsed.event_package.?);
+    try testing.expectEqualStrings("test", parsed.event_module.?);
+    try testing.expectEqual(@as(u64, 100), parsed.event_limit.?);
+}
