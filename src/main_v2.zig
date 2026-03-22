@@ -62,6 +62,8 @@ pub fn main() !void {
         try cmdBatch(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "search")) {
         try cmdSearch(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "config")) {
+        try cmdConfig(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "help") or std.mem.eql(u8, command, "--help")) {
         printUsage(args[0]);
     } else {
@@ -94,6 +96,7 @@ fn printUsage(prog_name: []const u8) void {
     std.log.info("  subscribe <type>            Subscribe to events (simulated)", .{});
     std.log.info("  batch <file>                Execute batch commands from file", .{});
     std.log.info("  search <address>            Search address summary", .{});
+    std.log.info("  config <action>             Manage configuration", .{});
     std.log.info("  help                        Show this help", .{});
 }
 
@@ -103,11 +106,24 @@ fn getRpcUrl() ?[]const u8 {
 
 fn cmdBalance(allocator: Allocator, args: []const []const u8) !void {
     if (args.len < 1) {
-        std.log.err("Usage: balance <address>", .{});
+        std.log.err("Usage: balance <address> [--format human|json|csv]", .{});
         std.process.exit(1);
     }
 
     const address = args[0];
+    var format: OutputFormat = .human;
+    
+    // Parse format option
+    if (args.len >= 3 and std.mem.eql(u8, args[1], "--format")) {
+        if (std.mem.eql(u8, args[2], "json")) {
+            format = .json;
+        } else if (std.mem.eql(u8, args[2], "csv")) {
+            format = .csv;
+        } else if (std.mem.eql(u8, args[2], "human")) {
+            format = .human;
+        }
+    }
+    
     const rpc_url = getRpcUrl() orelse "https://fullnode.mainnet.sui.io:443";
 
     var rpc_client = try SuiRpcClient.init(allocator, rpc_url);
@@ -119,12 +135,32 @@ fn cmdBalance(allocator: Allocator, args: []const []const u8) !void {
         null,
     );
 
-    std.log.info("Address: {s}", .{address});
-    std.log.info("Balance: {d} MIST ({d}.{d} SUI)", .{
-        balance,
-        balance / 1_000_000_000,
-        balance % 1_000_000_000,
-    });
+    switch (format) {
+        .human => {
+            std.log.info("Address: {s}", .{address});
+            std.log.info("Balance: {d} MIST ({d}.{d:0>9} SUI)", .{
+                balance,
+                balance / 1_000_000_000,
+                balance % 1_000_000_000,
+            });
+        },
+        .json => {
+            std.log.info("{{\"address\":\"{s}\",\"balance_mist\":{d},\"balance_sui\":{d}.{d:0>9}}}", .{
+                address,
+                balance,
+                balance / 1_000_000_000,
+                balance % 1_000_000_000,
+            });
+        },
+        .csv => {
+            std.log.info("{s},{d},{d}.{d:0>9}", .{
+                address,
+                balance,
+                balance / 1_000_000_000,
+                balance % 1_000_000_000,
+            });
+        },
+    }
 }
 
 fn cmdObjects(allocator: Allocator, args: []const []const u8) !void {
@@ -1378,3 +1414,322 @@ fn cmdSearch(allocator: Allocator, args: []const []const u8) !void {
     std.log.info("", .{});
     std.log.info("Use 'objects {s}' to list all objects", .{address});
 }
+/// Configuration and output formatting for main_v2.zig
+
+const OutputFormat = enum {
+    human,
+    json,
+    csv,
+};
+
+const Config = struct {
+    rpc_url: []const u8,
+    default_address: ?[]const u8,
+    output_format: OutputFormat,
+    verbose: bool,
+
+    fn default(allocator: Allocator) Config {
+        return .{
+            .rpc_url = allocator.dupe(u8, "https://fullnode.mainnet.sui.io:443") catch unreachable,
+            .default_address = null,
+            .output_format = .human,
+            .verbose = false,
+        };
+    }
+
+    fn deinit(self: *Config, allocator: Allocator) void {
+        allocator.free(self.rpc_url);
+        if (self.default_address) |addr| allocator.free(addr);
+    }
+};
+
+var global_config: ?Config = null;
+
+fn getConfig(allocator: Allocator) !*Config {
+    if (global_config == null) {
+        global_config = try loadConfig(allocator);
+    }
+    return &global_config.?;
+}
+
+fn loadConfig(allocator: Allocator) !Config {
+    // Try to load from config file
+    const config_path = getConfigPath() orelse return Config.default(allocator);
+    
+    const file = std.fs.cwd().openFile(config_path, .{}) catch |err| {
+        if (err == error.FileNotFound) {
+            return Config.default(allocator);
+        }
+        return err;
+    };
+    defer file.close();
+    
+    const content = file.readToEndAlloc(allocator, 1024 * 1024) catch |err| {
+        std.log.warn("Failed to read config: {s}", .{@errorName(err)});
+        return Config.default(allocator);
+    };
+    defer allocator.free(content);
+    
+    var config = Config.default(allocator);
+    
+    // Simple key=value parser
+    var lines = std.mem.splitSequence(u8, content, "\n");
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r\n");
+        if (trimmed.len == 0 or std.mem.startsWith(u8, trimmed, "#")) {
+            continue;
+        }
+        
+        if (std.mem.indexOf(u8, trimmed, "=")) |eq_pos| {
+            const key = std.mem.trim(u8, trimmed[0..eq_pos], " \t");
+            const value = std.mem.trim(u8, trimmed[eq_pos + 1 ..], " \t\"'");
+            
+            if (std.mem.eql(u8, key, "rpc_url")) {
+                allocator.free(config.rpc_url);
+                config.rpc_url = try allocator.dupe(u8, value);
+            } else if (std.mem.eql(u8, key, "default_address")) {
+                if (config.default_address) |addr| allocator.free(addr);
+                config.default_address = try allocator.dupe(u8, value);
+            } else if (std.mem.eql(u8, key, "output_format")) {
+                if (std.mem.eql(u8, value, "json")) {
+                    config.output_format = .json;
+                } else if (std.mem.eql(u8, value, "csv")) {
+                    config.output_format = .csv;
+                } else {
+                    config.output_format = .human;
+                }
+            } else if (std.mem.eql(u8, key, "verbose")) {
+                config.verbose = std.mem.eql(u8, value, "true") or std.mem.eql(u8, value, "1");
+            }
+        }
+    }
+    
+    return config;
+}
+
+fn getConfigPath() ?[]const u8 {
+    if (std.process.getEnvVarOwned(std.heap.page_allocator, "SUI_ZIG_CONFIG")) |path| {
+        return path;
+    } else |_| {}
+    
+    const home = std.process.getEnvVarOwned(std.heap.page_allocator, "HOME") catch return null;
+    defer std.heap.page_allocator.free(home);
+    
+    return std.fs.path.join(std.heap.page_allocator, &[_][]const u8{
+        home, ".config", "sui-zig", "config",
+    }) catch null;
+}
+
+fn saveConfig(_: Allocator, config: Config) !void {
+    const config_path = getConfigPath() orelse {
+        std.log.err("Could not determine config path", .{});
+        return;
+    };
+    defer std.heap.page_allocator.free(config_path);
+    
+    // Ensure directory exists
+    const config_dir = std.fs.path.dirname(config_path).?;
+    std.fs.cwd().makePath(config_dir) catch |err| {
+        std.log.err("Failed to create config directory: {s}", .{@errorName(err)});
+        return;
+    };
+    
+    const file = try std.fs.cwd().createFile(config_path, .{});
+    defer file.close();
+    
+    // Write config content
+    var buf: [4096]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buf);
+    const writer = fbs.writer();
+    
+    try writer.print("# Sui Zig RPC Client Configuration\n", .{});
+    try writer.print("# Generated automatically\n\n", .{});
+    try writer.print("rpc_url=\"{s}\"\n", .{config.rpc_url});
+    if (config.default_address) |addr| {
+        try writer.print("default_address=\"{s}\"\n", .{addr});
+    }
+    try writer.print("output_format=\"{s}\"\n", .{@tagName(config.output_format)});
+    try writer.print("verbose={s}\n", .{if (config.verbose) "true" else "false"});
+    
+    const written = fbs.getWritten();
+    try file.writeAll(written);
+    
+    std.log.info("Config saved to {s}", .{config_path});
+}
+
+fn cmdConfig(allocator: Allocator, args: []const []const u8) !void {
+    if (args.len < 1) {
+        std.log.err("Usage: config <action>", .{});
+        std.log.info("Actions:", .{});
+        std.log.info("  show                    Show current config", .{});
+        std.log.info("  set <key> <value>       Set config value", .{});
+        std.log.info("  get <key>               Get config value", .{});
+        std.log.info("  init                    Create default config", .{});
+        std.log.info("", .{});
+        std.log.info("Config keys:", .{});
+        std.log.info("  rpc_url                 RPC endpoint URL", .{});
+        std.log.info("  default_address         Default wallet address", .{});
+        std.log.info("  output_format           human|json|csv", .{});
+        std.log.info("  verbose                 true|false", .{});
+        std.process.exit(1);
+    }
+    
+    const action = args[0];
+    
+    if (std.mem.eql(u8, action, "show")) {
+        var config = try loadConfig(allocator);
+        defer config.deinit(allocator);
+        
+        std.log.info("Current configuration:", .{});
+        std.log.info("  rpc_url: {s}", .{config.rpc_url});
+        std.log.info("  default_address: {s}", .{config.default_address orelse "(none)"});
+        std.log.info("  output_format: {s}", .{@tagName(config.output_format)});
+        std.log.info("  verbose: {s}", .{if (config.verbose) "true" else "false"});
+        
+        if (getConfigPath()) |path| {
+            defer std.heap.page_allocator.free(path);
+            std.log.info("  config_file: {s}", .{path});
+        }
+        
+    } else if (std.mem.eql(u8, action, "set")) {
+        if (args.len < 3) {
+            std.log.err("Usage: config set <key> <value>", .{});
+            std.process.exit(1);
+        }
+        
+        var config = try loadConfig(allocator);
+        defer config.deinit(allocator);
+        
+        const key = args[1];
+        const value = args[2];
+        
+        if (std.mem.eql(u8, key, "rpc_url")) {
+            allocator.free(config.rpc_url);
+            config.rpc_url = try allocator.dupe(u8, value);
+        } else if (std.mem.eql(u8, key, "default_address")) {
+            if (config.default_address) |addr| allocator.free(addr);
+            config.default_address = try allocator.dupe(u8, value);
+        } else if (std.mem.eql(u8, key, "output_format")) {
+            if (std.mem.eql(u8, value, "json")) {
+                config.output_format = .json;
+            } else if (std.mem.eql(u8, value, "csv")) {
+                config.output_format = .csv;
+            } else if (std.mem.eql(u8, value, "human")) {
+                config.output_format = .human;
+            } else {
+                std.log.err("Invalid output format: {s}", .{value});
+                std.process.exit(1);
+            }
+        } else if (std.mem.eql(u8, key, "verbose")) {
+            config.verbose = std.mem.eql(u8, value, "true") or std.mem.eql(u8, value, "1");
+        } else {
+            std.log.err("Unknown config key: {s}", .{key});
+            std.process.exit(1);
+        }
+        
+        try saveConfig(allocator, config);
+        std.log.info("Set {s} = {s}", .{ key, value });
+        
+    } else if (std.mem.eql(u8, action, "get")) {
+        if (args.len < 2) {
+            std.log.err("Usage: config get <key>", .{});
+            std.process.exit(1);
+        }
+        
+        var config = try loadConfig(allocator);
+        defer config.deinit(allocator);
+        
+        const key = args[1];
+        
+        if (std.mem.eql(u8, key, "rpc_url")) {
+            std.log.info("{s}", .{config.rpc_url});
+        } else if (std.mem.eql(u8, key, "default_address")) {
+            std.log.info("{s}", .{config.default_address orelse ""});
+        } else if (std.mem.eql(u8, key, "output_format")) {
+            std.log.info("{s}", .{@tagName(config.output_format)});
+        } else if (std.mem.eql(u8, key, "verbose")) {
+            std.log.info("{s}", .{if (config.verbose) "true" else "false"});
+        } else {
+            std.log.err("Unknown config key: {s}", .{key});
+            std.process.exit(1);
+        }
+        
+    } else if (std.mem.eql(u8, action, "init")) {
+        var config = Config.default(allocator);
+        defer config.deinit(allocator);
+        try saveConfig(allocator, config);
+        std.log.info("Created default config file", .{});
+        
+    } else {
+        std.log.err("Unknown action: {s}", .{action});
+        std.process.exit(1);
+    }
+}
+
+// Output formatting helpers
+fn printJsonBalance(writer: anytype, address: []const u8, balance: u64) !void {
+    try writer.print("{{" +
+        "\"address\":\"{s}\"," +
+        "\"balance\":{d}," +
+        "\"balance_sui\":{d}.{d:0>9}" +
+        "}}\n", .{
+        address,
+        balance,
+        balance / 1_000_000_000,
+        balance % 1_000_000_000,
+    });
+}
+
+fn printCsvBalance(writer: anytype, address: []const u8, balance: u64) !void {
+    try writer.print("{s},{d},{d}.{d:0>9}\n", .{
+        address,
+        balance,
+        balance / 1_000_000_000,
+        balance % 1_000_000_000,
+    });
+}
+
+fn printHumanBalance(address: []const u8, balance: u64) void {
+    std.log.info("Address: {s}", .{address});
+    std.log.info("Balance: {d} MIST ({d}.{d:0>9} SUI)", .{
+        balance,
+        balance / 1_000_000_000,
+        balance % 1_000_000_000,
+    });
+}
+
+fn printJsonObject(writer: anytype, obj: ObjectInfo) !void {
+    try writer.print("{{" +
+        "\"id\":\"{s}\"," +
+        "\"type\":\"{s}\"," +
+        "\"version\":{d}," +
+        "\"digest\":\"{s}\"" +
+        "}}\n", .{
+        obj.id,
+        obj.type,
+        obj.version,
+        obj.digest,
+    });
+}
+
+fn printCsvObject(writer: anytype, obj: ObjectInfo) !void {
+    try writer.print("{s},{s},{d},{s}\n", .{
+        obj.id,
+        obj.type,
+        obj.version,
+        obj.digest,
+    });
+}
+
+fn printHumanObject(obj: ObjectInfo, index: usize) void {
+    std.log.info("  {d}. {s}", .{ index, obj.id });
+    std.log.info("      Type: {s}", .{obj.type});
+    std.log.info("      Version: {d}, Digest: {s}", .{ obj.version, obj.digest });
+}
+
+const ObjectInfo = struct {
+    id: []const u8,
+    type: []const u8,
+    version: u64,
+    digest: []const u8,
+};
