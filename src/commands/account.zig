@@ -1,4 +1,4 @@
-/// commands/account.zig - Account commands
+/// commands/account.zig - Account commands (migrated to new RPC client API)
 const std = @import("std");
 const types = @import("types.zig");
 const shared = @import("shared.zig");
@@ -6,6 +6,10 @@ const shared = @import("shared.zig");
 const client = @import("sui_client_zig");
 const wallet_state = @import("../wallet_state.zig");
 const cli = @import("../cli.zig");
+
+// Use new RPC client API
+const rpc_new = client.rpc_client_new;
+const SuiRpcClient = rpc_new.SuiRpcClient;
 
 /// Account information
 pub const AccountInfo = struct {
@@ -127,7 +131,7 @@ pub fn listAccounts(
 /// Get account info with RPC
 pub fn getAccountInfo(
     allocator: std.mem.Allocator,
-    rpc: *client.SuiRpcClient,
+    rpc: *SuiRpcClient,
     args: anytype,
     writer: anytype,
 ) !void {
@@ -139,44 +143,25 @@ pub fn getAccountInfo(
     } else {
         try writer.print("Address: {s}\n", .{resolved.owner});
     }
-    
-    _ = rpc;
 }
 
-/// Get account balance via RPC
+/// Get account balance via RPC (using new API)
 pub fn getAccountBalance(
     allocator: std.mem.Allocator,
-    rpc: *client.SuiRpcClient,
+    rpc: *SuiRpcClient,
     address: []const u8,
 ) !u64 {
-    // Build balance query payload
-    const payload = try std.fmt.allocPrint(allocator, "[\"{s}\"]", .{address});
-    defer allocator.free(payload);
+    // Use new API
+    const balance = try rpc_new.getBalance(rpc, address, null);
+    defer balance.deinit(allocator);
     
-    const response = try rpc.sendJsonRpcRequest("suix_getBalance", payload);
-    defer rpc.allocator.free(response);
-    
-    // Parse balance from response
-    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, response, .{});
-    defer parsed.deinit();
-    
-    if (parsed.value.object.get("result")) |result| {
-        if (result.object.get("totalBalance")) |balance| {
-            if (balance == .integer) {
-                return @intCast(balance.integer);
-            } else if (balance == .string) {
-                return try std.fmt.parseInt(u64, balance.string, 10);
-            }
-        }
-    }
-    
-    return 0;
+    return balance.totalBalance;
 }
 
-/// Print balance summary for owner
+/// Print balance summary for owner (using new API)
 pub fn printBalanceSummaryForOwner(
     allocator: std.mem.Allocator,
-    rpc: *client.SuiRpcClient,
+    rpc: *SuiRpcClient,
     writer: anytype,
     owner: []const u8,
     args: anytype,
@@ -191,83 +176,74 @@ pub fn printBalanceSummaryForOwner(
     }
 }
 
-/// Get account coins via RPC
+/// Get account coins via RPC (using new API)
 pub fn getAccountCoins(
     allocator: std.mem.Allocator,
-    rpc: *client.SuiRpcClient,
+    rpc: *SuiRpcClient,
     args: anytype,
     writer: anytype,
 ) !void {
     const resolved = try resolveWalletOwner(allocator, args);
     defer if (resolved.owned) |o| allocator.free(o);
     
-    // Build coins query payload
-    const payload = try std.fmt.allocPrint(allocator, "[\"{s}\",null,null,null]", .{resolved.owner});
-    defer allocator.free(payload);
-    
-    const response = try rpc.sendJsonRpcRequest("suix_getCoins", payload);
-    defer rpc.allocator.free(response);
+    // Use new API - get all coins
+    const coins = try rpc_new.getAllCoins(rpc, resolved.owner, null, null);
+    defer coins.deinit(allocator);
     
     if (args.account_info_json) {
-        // Output raw response
-        try writer.print("{s}\n", .{response});
+        // Output as JSON
+        try writer.writeAll("{\"coins\":[");
+        for (coins.data, 0..) |coin, i| {
+            if (i > 0) try writer.writeAll(",");
+            try writer.print("{{\"coinType\":\"{s}\",\"balance\":{d},\"objectId\":\"{s}\"}}", .{
+                coin.coin_type,
+                coin.balance,
+                coin.object_id,
+            });
+        }
+        try writer.writeAll("]}\n");
     } else {
-        // Parse and format
-        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, response, .{});
-        defer parsed.deinit();
-        
         try writer.print("Coins for {s}:\n", .{resolved.owner});
-        
-        if (parsed.value.object.get("result")) |result| {
-            if (result.object.get("data")) |data| {
-                for (data.array.items) |coin| {
-                    const coin_type = coin.object.get("coinType") orelse continue;
-                    const balance = coin.object.get("balance") orelse continue;
-                    try writer.print("  - {s}: {d}\n", .{ coin_type.string, balance.integer });
-                }
-            }
+        for (coins.data) |coin| {
+            try writer.print("  - {s}: {d}\n", .{ coin.coin_type, coin.balance });
         }
     }
 }
 
-/// Get account objects via RPC
+/// Get account objects via RPC (using new API)
 pub fn getAccountObjects(
     allocator: std.mem.Allocator,
-    rpc: *client.SuiRpcClient,
+    rpc: *SuiRpcClient,
     args: anytype,
     writer: anytype,
 ) !void {
     const resolved = try resolveWalletOwner(allocator, args);
     defer if (resolved.owned) |o| allocator.free(o);
     
-    // Build objects query payload
-    const payload = try std.fmt.allocPrint(allocator, "[\"{s}\",null,null,null,null]", .{resolved.owner});
-    defer allocator.free(payload);
-    
-    const response = try rpc.sendJsonRpcRequest("suix_getOwnedObjects", payload);
-    defer rpc.allocator.free(response);
+    // Use new API
+    const objects = try rpc_new.getOwnedObjects(rpc, resolved.owner, null);
+    defer objects.deinit(allocator);
     
     if (args.account_info_json) {
-        try writer.print("{s}\n", .{response});
-    } else {
-        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, response, .{});
-        defer parsed.deinit();
-        
-        try writer.print("Objects for {s}:\n", .{resolved.owner});
-        
-        if (parsed.value.object.get("result")) |result| {
-            if (result.object.get("data")) |data| {
-                for (data.array.items) |obj| {
-                    if (obj.object.get("data")) |obj_data| {
-                        const obj_id = obj_data.object.get("objectId") orelse continue;
-                        try writer.print("  - {s}", .{obj_id.string});
-                        if (obj_data.object.get("type")) |obj_type| {
-                            try writer.print(" ({s})", .{obj_type.string});
-                        }
-                        try writer.writeAll("\n");
-                    }
-                }
+        // Output as JSON
+        try writer.writeAll("{\"objects\":[");
+        for (objects.data, 0..) |obj, i| {
+            if (i > 0) try writer.writeAll(",");
+            try writer.print("{{\"objectId\":\"{s}\"", .{obj.objectId});
+            if (obj.type) |t| {
+                try writer.print(",\"type\":\"{s}\"", .{t});
             }
+            try writer.writeAll("}");
+        }
+        try writer.writeAll("]}\n");
+    } else {
+        try writer.print("Objects for {s}:\n", .{resolved.owner});
+        for (objects.data) |obj| {
+            try writer.print("  - {s}", .{obj.objectId});
+            if (obj.type) |t| {
+                try writer.print(" ({s})", .{t});
+            }
+            try writer.writeAll("\n");
         }
     }
 }
@@ -323,7 +299,8 @@ test "getAccountInfo requires selector or wallet state" {
     var output: std.ArrayList(u8) = .{};
     defer output.deinit(testing.allocator);
 
-    var rpc = try client.SuiRpcClient.init(testing.allocator, "http://example.local");
+    // Use new API client
+    var rpc = try SuiRpcClient.init(testing.allocator, "http://example.local");
     defer rpc.deinit();
 
     // Should fail without selector or wallet state
