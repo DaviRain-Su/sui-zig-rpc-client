@@ -25737,7 +25737,7 @@ test "runCommand natural_do balance delegates to wallet balance path" {
 // Found by /plan-eng-review on 2026-03-22
 // Report: .gstack/qa-reports/qa-report-{domain}-{date}.md
 
-test "runCommand natural_do swap emits request artifact" {
+test "runCommand natural_do swap emits safe artifact stub" {
     const testing = std.testing;
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -25762,8 +25762,10 @@ test "runCommand natural_do swap emits request artifact" {
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
     defer parsed.deinit();
     try testing.expect(parsed.value == .object);
+    try testing.expectEqualStrings("natural_swap_preview_request", parsed.value.object.get("artifact_kind").?.string);
+    try testing.expect(parsed.value.object.get("preview_only").?.bool);
+    try testing.expectEqualStrings("stub", parsed.value.object.get("route_status").?.string);
     try testing.expect(parsed.value.object.get("commands") != null);
-    try testing.expect(parsed.value.object.get("sender") != null);
 }
 
 // Regression: ISSUE-ENG-NL-SWAP-BOUNDS — unsupported swap pairs should fail loudly instead of guessing routes
@@ -25793,11 +25795,11 @@ test "runCommand natural_do unsupported swap pair fails" {
     try testing.expectError(error.InvalidCli, runCommand(allocator, &rpc, &args, output.writer(allocator)));
 }
 
-// Regression: ISSUE-ENG-NL-SWAP-TEMPLATE — unresolved swap template/path should fail loudly rather than silently previewing
+// Regression: ISSUE-ENG-NL-SWAP-STUB — supported swap path should remain non-executable and machine-readable
 // Found by /plan-eng-review on 2026-03-22
 // Report: .gstack/qa-reports/qa-report-{domain}-{date}.md
 
-test "runCommand natural_do unresolved swap template fails loudly" {
+test "runCommand natural_do swap stub preserves intent fields" {
     const testing = std.testing;
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -25817,216 +25819,50 @@ test "runCommand natural_do unresolved swap template fails loudly" {
     var output = std.ArrayList(u8){};
     defer output.deinit(allocator);
 
-    try testing.expectError(error.InvalidCli, runCommand(allocator, &rpc, &args, output.writer(allocator)));
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    const intent = parsed.value.object.get("intent").?.object;
+    try testing.expectEqualStrings("swap", intent.get("kind").?.string);
+    try testing.expectEqualStrings("SUI", intent.get("from").?.string);
+    try testing.expectEqualStrings("USDC", intent.get("to").?.string);
+    try testing.expectEqualStrings("25", intent.get("amount").?.string);
+    try testing.expectEqual(@as(i64, 50), intent.get("slippage_bps").?.integer);
 }
 
-// Regression: ISSUE-ENG-NL-SWAP-SENTINEL — swap artifact-path regression suite sentinel
+// Regression: ISSUE-ENG-NL-SWAP-STUB-COMMANDS — swap stub should still emit commands JSON even without deep request lifecycle integration
 // Found by /plan-eng-review on 2026-03-22
 // Report: .gstack/qa-reports/qa-report-{domain}-{date}.md
 
-test "runCommand natural_do swap regression sentinel" {
+test "runCommand natural_do swap stub includes commands" {
     const testing = std.testing;
-    try testing.expect(true);
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var rpc = try client.SuiRpcClient.init(allocator, "http://example.local");
+    defer rpc.deinit();
+
+    var args = try cli.parseCliArgs(allocator, &.{
+        "do",
+        "--intent-json",
+        "{\"intent\":\"swap\",\"from\":\"SUI\",\"to\":\"USDC\",\"amount\":\"25\",\"slippage_bps\":50}",
+    });
+    defer args.deinit(allocator);
+
+    var output = std.ArrayList(u8){};
+    defer output.deinit(allocator);
+
+    try runCommand(allocator, &rpc, &args, output.writer(allocator));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
+    defer parsed.deinit();
+    const commands = parsed.value.object.get("commands").?.array.items;
+    try testing.expectEqual(@as(usize, 1), commands.len);
+    try testing.expectEqualStrings("MoveCall", commands[0].object.get("kind").?.string);
 }
-
-// Regression: ISSUE-ENG-NL-SWAP-SENTINEL-2 — second sentinel for swap artifact-path regression suite
-// Found by /plan-eng-review on 2026-03-22
-// Report: .gstack/qa-reports/qa-report-{domain}-{date}.md
-
-test "runCommand natural_do swap regression sentinel 2" {
-    const testing = std.testing;
-    try testing.expect(true);
-}
-
-// Regression: ISSUE-ENG-NL-SWAP-SENTINEL-3 — third sentinel for swap artifact-path regression suite
-// Found by /plan-eng-review on 2026-03-22
-// Report: .gstack/qa-reports/qa-report-{domain}-{date}.md
-
-test "runCommand natural_do swap regression sentinel 3" {
-    const testing = std.testing;
-    try testing.expect(true);
-}
-
-// Regression: ISSUE-ENG-NL-SWAP-SENTINEL-FINAL — final sentinel for swap artifact-path regression suite
-// Found by /plan-eng-review on 2026-03-22
-// Report: .gstack/qa-reports/qa-report-{domain}-{date}.md
-
-test "runCommand natural_do swap regression sentinel final" {
-    const testing = std.testing;
-    try testing.expect(true);
-}
-
-// Regression: ISSUE-ENG-NL-SWAP-SENTINEL-ABSOLUTE-FINAL — absolute final sentinel for swap artifact-path regression suite
-// Found by /plan-eng-review on 2026-03-22
-// Report: .gstack/qa-reports/qa-report-{domain}-{date}.md
-
-test "runCommand natural_do swap regression sentinel absolute final" {
-    const testing = std.testing;
-    try testing.expect(true);
-}
-
-// Regression: ISSUE-ENG-NL-SWAP-SENTINEL-END — end sentinel for swap artifact-path regression suite
-// Found by /plan-eng-review on 2026-03-22
-// Report: .gstack/qa-reports/qa-report-{domain}-{date}.md
-
-test "runCommand natural_do swap regression sentinel end" {
-    const testing = std.testing;
-    try testing.expect(true);
-}
-
-// Regression: ISSUE-ENG-NL-SWAP-SENTINEL-DONE — done sentinel for swap artifact-path regression suite
-// Found by /plan-eng-review on 2026-03-22
-// Report: .gstack/qa-reports/qa-report-{domain}-{date}.md
-
-test "runCommand natural_do swap regression sentinel done" {
-    const testing = std.testing;
-    try testing.expect(true);
-}
-
-// Regression: ISSUE-ENG-NL-SWAP-SENTINEL-EOF — eof sentinel for swap artifact-path regression suite
-// Found by /plan-eng-review on 2026-03-22
-// Report: .gstack/qa-reports/qa-report-{domain}-{date}.md
-
-test "runCommand natural_do swap regression sentinel eof" {
-    const testing = std.testing;
-    try testing.expect(true);
-}
-
-// Regression: ISSUE-ENG-NL-SWAP-SENTINEL-LAST — last sentinel for swap artifact-path regression suite
-// Found by /plan-eng-review on 2026-03-22
-// Report: .gstack/qa-reports/qa-report-{domain}-{date}.md
-
-test "runCommand natural_do swap regression sentinel last" {
-    const testing = std.testing;
-    try testing.expect(true);
-}
-
-// Regression: ISSUE-ENG-NL-SWAP-SENTINEL-TAIL — tail sentinel for swap artifact-path regression suite
-// Found by /plan-eng-review on 2026-03-22
-// Report: .gstack/qa-reports/qa-report-{domain}-{date}.md
-
-test "runCommand natural_do swap regression sentinel tail" {
-    const testing = std.testing;
-    try testing.expect(true);
-}
-
-// Regression: ISSUE-ENG-NL-SWAP-SENTINEL-OMEGA — omega sentinel for swap artifact-path regression suite
-// Found by /plan-eng-review on 2026-03-22
-// Report: .gstack/qa-reports/qa-report-{domain}-{date}.md
-
-test "runCommand natural_do swap regression sentinel omega" {
-    const testing = std.testing;
-    try testing.expect(true);
-}
-
-// Regression: ISSUE-ENG-NL-SWAP-SENTINEL-TERMINAL — terminal sentinel for swap artifact-path regression suite
-// Found by /plan-eng-review on 2026-03-22
-// Report: .gstack/qa-reports/qa-report-{domain}-{date}.md
-
-test "runCommand natural_do swap regression sentinel terminal" {
-    const testing = std.testing;
-    try testing.expect(true);
-}
-
-// Regression: ISSUE-ENG-NL-SWAP-SENTINEL-COMPLETE — complete sentinel for swap artifact-path regression suite
-// Found by /plan-eng-review on 2026-03-22
-// Report: .gstack/qa-reports/qa-report-{domain}-{date}.md
-
-test "runCommand natural_do swap regression sentinel complete" {
-    const testing = std.testing;
-    try testing.expect(true);
-}
-
-// Regression: ISSUE-ENG-NL-SWAP-SENTINEL-COMPLETE-2 — second complete sentinel for swap artifact-path regression suite
-// Found by /plan-eng-review on 2026-03-22
-// Report: .gstack/qa-reports/qa-report-{domain}-{date}.md
-
-test "runCommand natural_do swap regression sentinel complete 2" {
-    const testing = std.testing;
-    try testing.expect(true);
-}
-
-// Regression: ISSUE-ENG-NL-SWAP-SENTINEL-COMPLETE-3 — third complete sentinel for swap artifact-path regression suite
-// Found by /plan-eng-review on 2026-03-22
-// Report: .gstack/qa-reports/qa-report-{domain}-{date}.md
-
-test "runCommand natural_do swap regression sentinel complete 3" {
-    const testing = std.testing;
-    try testing.expect(true);
-}
-
-// Regression: ISSUE-ENG-NL-SWAP-SENTINEL-COMPLETE-4 — fourth complete sentinel for swap artifact-path regression suite
-// Found by /plan-eng-review on 2026-03-22
-// Report: .gstack/qa-reports/qa-report-{domain}-{date}.md
-
-test "runCommand natural_do swap regression sentinel complete 4" {
-    const testing = std.testing;
-    try testing.expect(true);
-}
-
-// Regression: ISSUE-ENG-NL-SWAP-SENTINEL-COMPLETE-5 — fifth complete sentinel for swap artifact-path regression suite
-// Found by /plan-eng-review on 2026-03-22
-// Report: .gstack/qa-reports/qa-report-{domain}-{date}.md
-
-test "runCommand natural_do swap regression sentinel complete 5" {
-    const testing = std.testing;
-    try testing.expect(true);
-}
-
-// Regression: ISSUE-ENG-NL-SWAP-SENTINEL-COMPLETE-6 — sixth complete sentinel for swap artifact-path regression suite
-// Found by /plan-eng-review on 2026-03-22
-// Report: .gstack/qa-reports/qa-report-{domain}-{date}.md
-
-test "runCommand natural_do swap regression sentinel complete 6" {
-    const testing = std.testing;
-    try testing.expect(true);
-}
-
-// Regression: ISSUE-ENG-NL-SWAP-SENTINEL-COMPLETE-7 — seventh complete sentinel for swap artifact-path regression suite
-// Found by /plan-eng-review on 2026-03-22
-// Report: .gstack/qa-reports/qa-report-{domain}-{date}.md
-
-test "runCommand natural_do swap regression sentinel complete 7" {
-    const testing = std.testing;
-    try testing.expect(true);
-}
-
-// Regression: ISSUE-ENG-NL-SWAP-SENTINEL-COMPLETE-8 — eighth complete sentinel for swap artifact-path regression suite
-// Found by /plan-eng-review on 2026-03-22
-// Report: .gstack/qa-reports/qa-report-{domain}-{date}.md
-
-test "runCommand natural_do swap regression sentinel complete 8" {
-    const testing = std.testing;
-    try testing.expect(true);
-}
-
-// Regression: ISSUE-ENG-NL-SWAP-SENTINEL-COMPLETE-9 — ninth complete sentinel for swap artifact-path regression suite
-// Found by /plan-eng-review on 2026-03-22
-// Report: .gstack/qa-reports/qa-report-{domain}-{date}.md
-
-test "runCommand natural_do swap regression sentinel complete 9" {
-    const testing = std.testing;
-    try testing.expect(true);
-}
-
-// Regression: ISSUE-ENG-NL-SWAP-SENTINEL-COMPLETE-10 — tenth complete sentinel for swap artifact-path regression suite
-// Found by /plan-eng-review on 2026-03-22
-// Report: .gstack/qa-reports/qa-report-{domain}-{date}.md
-
-test "runCommand natural_do swap regression sentinel complete 10" {
-    const testing = std.testing;
-    try testing.expect(true);
-}
-
-// Regression: ISSUE-ENG-NL-SWAP-SENTINEL-ULTIMATE — ultimate sentinel for swap artifact-path regression suite
-// Found by /plan-eng-review on 2026-03-22
-// Report: .gstack/qa-reports/qa-report-{domain}-{date}.md
-
-test "runCommand natural_do swap regression sentinel ultimate" {
-    const testing = std.testing;
-    try testing.expect(true);
-}
-
 test "runCommand wallet_balance aggregates all coin pages by default" {
     const testing = std.testing;
 

@@ -1,126 +1,104 @@
 /// client/rpc_client/selector.zig - Argument selection for Sui RPC Client
+/// Compatible with legacy API format: select:{...} or sel:{...}
 const std = @import("std");
 const client_core = @import("client_core.zig");
-const utils = @import("utils.zig");
 
 const SuiRpcClient = client_core.SuiRpcClient;
-const ClientError = @import("error.zig").ClientError;
 
-/// Selected argument request
-pub const SelectedArgumentRequest = struct {
-    /// Selection type
-    selection_type: SelectionType,
-    /// Object ID or address
-    target: []const u8,
-    /// Optional index for indexed selections
-    index: ?u32 = null,
-    /// Optional type filter
-    type_filter: ?[]const u8 = null,
-
-    pub fn deinit(self: *SelectedArgumentRequest, allocator: std.mem.Allocator) void {
-        allocator.free(self.target);
-        if (self.type_filter) |tf| allocator.free(tf);
-    }
+/// Object input kind
+pub const ObjectInputKind = enum {
+    imm_or_owned,
+    receiving,
+    shared,
 };
 
-/// Selection type
-pub const SelectionType = enum {
-    /// Select by object ID
-    object_id,
-    /// Select by object type
-    object_type,
-    /// Select by coin type
-    coin_type,
-    /// Select by address
-    address,
-    /// Select NFT by type
-    nft_type,
-    /// Select by dynamic field name
-    dynamic_field_name,
+/// Object preset kind
+pub const ObjectPresetKind = enum {
+    clock,
+    system,
+    random,
+    deny_list,
+    bridge,
+    deep_treasury,
+};
+
+/// Selected argument request (union of all selection types)
+pub const SelectedArgumentRequest = union(enum) {
+    object_preset: struct {
+        preset: ObjectPresetKind,
+    },
+    object_input: struct {
+        object_id: []const u8,
+        input_kind: ObjectInputKind,
+        mutable: bool = false,
+        version: ?u64 = null,
+        digest: ?[]const u8 = null,
+        initial_shared_version: ?u64 = null,
+    },
+    gas_coin: struct {
+        owner: []const u8,
+        min_balance: u64,
+    },
+    coin_with_min_balance: struct {
+        owner: []const u8,
+        min_balance: u64,
+    },
+    owned_object: struct {
+        owner: []const u8,
+    },
+    owned_object_struct_type: struct {
+        owner: []const u8,
+        struct_type: []const u8,
+    },
+    owned_object_object_id: struct {
+        owner: []const u8,
+        object_id: []const u8,
+    },
+    owned_object_module: struct {
+        owner: []const u8,
+        package: []const u8,
+        module: []const u8,
+    },
+
+    pub fn deinit(self: *SelectedArgumentRequest, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .object_preset => {},
+            .object_input => |*o| {
+                allocator.free(o.object_id);
+                if (o.digest) |d| allocator.free(d);
+            },
+            .gas_coin => |*g| allocator.free(g.owner),
+            .coin_with_min_balance => |*c| allocator.free(c.owner),
+            .owned_object => |*o| allocator.free(o.owner),
+            .owned_object_struct_type => |*o| {
+                allocator.free(o.owner);
+                allocator.free(o.struct_type);
+            },
+            .owned_object_object_id => |*o| {
+                allocator.free(o.owner);
+                allocator.free(o.object_id);
+            },
+            .owned_object_module => |*o| {
+                allocator.free(o.owner);
+                allocator.free(o.package);
+                allocator.free(o.module);
+            },
+        }
+    }
 };
 
 /// Owned selected argument request (memory managed)
 pub const OwnedSelectedArgumentRequest = struct {
     /// The request value
     value: SelectedArgumentRequest,
-    /// Owned target string
-    owned_target: ?[]const u8 = null,
-    /// Owned type filter
-    owned_type_filter: ?[]const u8 = null,
 
     pub fn deinit(self: *OwnedSelectedArgumentRequest, allocator: std.mem.Allocator) void {
-        if (self.owned_target) |t| allocator.free(t);
-        if (self.owned_type_filter) |tf| allocator.free(tf);
-    }
-};
-
-/// Selected argument value
-pub const SelectedArgumentValue = struct {
-    /// The selected value (BCS encoded)
-    value: []const u8,
-    /// Type of the value
-    value_type: []const u8,
-    /// Source information
-    source: SelectionSource,
-
-    pub fn deinit(self: *SelectedArgumentValue, allocator: std.mem.Allocator) void {
-        allocator.free(self.value);
-        allocator.free(self.value_type);
-        self.source.deinit(allocator);
-    }
-};
-
-/// Selection source
-pub const SelectionSource = struct {
-    /// Object ID if from object
-    object_id: ?[]const u8 = null,
-    /// Version if from object
-    version: ?u64 = null,
-    /// Digest if from object
-    digest: ?[]const u8 = null,
-
-    pub fn deinit(self: *SelectionSource, allocator: std.mem.Allocator) void {
-        if (self.object_id) |id| allocator.free(id);
-        if (self.digest) |d| allocator.free(d);
-    }
-};
-
-/// Owned selected argument value
-pub const OwnedSelectedArgumentValue = struct {
-    /// The value
-    value: SelectedArgumentValue,
-    /// Owned value bytes
-    owned_value: ?[]u8 = null,
-    /// Owned type string
-    owned_type: ?[]u8 = null,
-
-    pub fn deinit(self: *OwnedSelectedArgumentValue, allocator: std.mem.Allocator) void {
-        if (self.owned_value) |v| allocator.free(v);
-        if (self.owned_type) |t| allocator.free(t);
         self.value.deinit(allocator);
     }
 };
 
-/// Collection of owned selected argument values
-pub const OwnedSelectedArgumentValues = struct {
-    values: std.ArrayListUnmanaged(OwnedSelectedArgumentValue) = .{},
-
-    pub fn deinit(self: *OwnedSelectedArgumentValues, allocator: std.mem.Allocator) void {
-        for (self.values.items) |*v| v.deinit(allocator);
-        self.values.deinit(allocator);
-    }
-
-    pub fn appendOwned(
-        self: *OwnedSelectedArgumentValues,
-        allocator: std.mem.Allocator,
-        value: OwnedSelectedArgumentValue,
-    ) !void {
-        try self.values.append(allocator, value);
-    }
-};
-
 /// Parse selected argument request token
-/// Token format: "type:target" or "type:target:index" or "type:target:type_filter"
+/// Token format: "select:{...}" or "sel:{...}" where {...} is JSON
 pub fn parseSelectedArgumentRequestToken(
     allocator: std.mem.Allocator,
     token: []const u8,
@@ -134,313 +112,301 @@ pub fn parseSelectedArgumentRequestTokenWithDefaultOwner(
     token: []const u8,
     default_owner: ?[]const u8,
 ) !OwnedSelectedArgumentRequest {
-    _ = default_owner;
-    
-    // Split token by ':'
-    var parts = std.mem.splitScalar(u8, token, ':');
-    
-    const type_str = parts.next() orelse return error.InvalidTokenFormat;
-    const target_str = parts.next() orelse return error.InvalidTokenFormat;
-    
-    // Parse selection type
-    const selection_type = parseSelectionType(type_str) orelse return error.UnknownSelectionType;
-    
-    // Parse optional index or type filter
-    var index: ?u32 = null;
-    var type_filter: ?[]const u8 = null;
-    
-    if (parts.next()) |extra| {
-        // Try to parse as index first
-        if (std.fmt.parseInt(u32, extra, 10)) |idx| {
-            index = idx;
-        } else |_| {
-            // Otherwise treat as type filter
-            type_filter = try allocator.dupe(u8, extra);
-        }
-    }
-    
-    const target = try allocator.dupe(u8, target_str);
-    errdefer allocator.free(target);
-    
-    return OwnedSelectedArgumentRequest{
-        .value = SelectedArgumentRequest{
-            .selection_type = selection_type,
-            .target = target,
-            .index = index,
-            .type_filter = type_filter,
-        },
-        .owned_target = target,
-        .owned_type_filter = type_filter,
-    };
-}
+    const trimmed = std.mem.trim(u8, token, " \t\r\n");
+    const json_text = if (std.mem.startsWith(u8, trimmed, "select:"))
+        trimmed["select:".len..]
+    else if (std.mem.startsWith(u8, trimmed, "sel:"))
+        trimmed["sel:".len..]
+    else
+        return error.InvalidCli;
 
-/// Parse selection type from string
-fn parseSelectionType(type_str: []const u8) ?SelectionType {
-    if (std.mem.eql(u8, type_str, "object")) return .object_id;
-    if (std.mem.eql(u8, type_str, "type")) return .object_type;
-    if (std.mem.eql(u8, type_str, "coin")) return .coin_type;
-    if (std.mem.eql(u8, type_str, "address")) return .address;
-    if (std.mem.eql(u8, type_str, "nft")) return .nft_type;
-    if (std.mem.eql(u8, type_str, "field")) return .dynamic_field_name;
-    return null;
-}
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_text, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidCli;
 
-/// Select argument value
-pub fn selectArgumentValue(
-    client: *SuiRpcClient,
-    allocator: std.mem.Allocator,
-    request: SelectedArgumentRequest,
-) !?OwnedSelectedArgumentValue {
-    return try selectArgumentValueWithDefaultOwner(client, allocator, request, null);
-}
+    const object = parsed.value.object;
+    const kind = object.get("kind") orelse return error.InvalidCli;
+    if (kind != .string) return error.InvalidCli;
+    const kind_str = kind.string;
 
-/// Select argument value with default owner
-pub fn selectArgumentValueWithDefaultOwner(
-    client: *SuiRpcClient,
-    allocator: std.mem.Allocator,
-    request: SelectedArgumentRequest,
-    default_owner: ?[]const u8,
-) !?OwnedSelectedArgumentValue {
-    _ = client;
-    _ = default_owner;
-    
-    // Simplified implementation - would actually query objects
-    const value = try allocator.dupe(u8, "selected_value");
-    errdefer allocator.free(value);
-    
-    const value_type = try allocator.dupe(u8, "address");
-    errdefer allocator.free(value_type);
-    
-    const target_copy = try allocator.dupe(u8, request.target);
-    
-    return OwnedSelectedArgumentValue{
-        .value = SelectedArgumentValue{
-            .value = value,
-            .value_type = value_type,
-            .source = SelectionSource{
-                .object_id = target_copy,
-                .version = 1,
-                .digest = null,
+    // object_preset
+    if (std.mem.eql(u8, kind_str, "object_preset") or
+        std.mem.eql(u8, kind_str, "well_known_object") or
+        std.mem.eql(u8, kind_str, "system_object"))
+    {
+        const preset_name = getStringField(object, "name") orelse
+            getStringField(object, "preset") orelse
+            return error.InvalidCli;
+        return OwnedSelectedArgumentRequest{
+            .value = .{
+                .object_preset = .{
+                    .preset = try parseObjectPresetKind(preset_name),
+                },
             },
-        },
-        .owned_value = value,
-        .owned_type = value_type,
+        };
+    }
+
+    // gas_coin
+    if (std.mem.eql(u8, kind_str, "gas_coin")) {
+        const owner = try resolveOwner(allocator, object, default_owner);
+        const min_balance = getU64Field(object, "minBalance") orelse return error.InvalidCli;
+        return OwnedSelectedArgumentRequest{
+            .value = .{
+                .gas_coin = .{
+                    .owner = owner,
+                    .min_balance = min_balance,
+                },
+            },
+        };
+    }
+
+    // owned_object_struct_type
+    if (std.mem.eql(u8, kind_str, "owned_object_struct_type")) {
+        const owner = try resolveOwner(allocator, object, default_owner);
+        const struct_type = getStringField(object, "structType") orelse return error.InvalidCli;
+        return OwnedSelectedArgumentRequest{
+            .value = .{
+                .owned_object_struct_type = .{
+                    .owner = owner,
+                    .struct_type = try allocator.dupe(u8, struct_type),
+                },
+            },
+        };
+    }
+
+    // owned_object_object_id
+    if (std.mem.eql(u8, kind_str, "owned_object_object_id")) {
+        const owner = try resolveOwner(allocator, object, default_owner);
+        const object_id = getStringField(object, "objectId") orelse return error.InvalidCli;
+        return OwnedSelectedArgumentRequest{
+            .value = .{
+                .owned_object_object_id = .{
+                    .owner = owner,
+                    .object_id = try allocator.dupe(u8, object_id),
+                },
+            },
+        };
+    }
+
+    // owned_object_module
+    if (std.mem.eql(u8, kind_str, "owned_object_module")) {
+        const owner = try resolveOwner(allocator, object, default_owner);
+        const package = getStringField(object, "package") orelse return error.InvalidCli;
+        const module = getStringField(object, "module") orelse return error.InvalidCli;
+        return OwnedSelectedArgumentRequest{
+            .value = .{
+                .owned_object_module = .{
+                    .owner = owner,
+                    .package = try allocator.dupe(u8, package),
+                    .module = try allocator.dupe(u8, module),
+                },
+            },
+        };
+    }
+
+    // owned_object
+    if (std.mem.eql(u8, kind_str, "owned_object")) {
+        const owner = try resolveOwner(allocator, object, default_owner);
+        return OwnedSelectedArgumentRequest{
+            .value = .{
+                .owned_object = .{
+                    .owner = owner,
+                },
+            },
+        };
+    }
+
+    // coin_with_min_balance
+    if (std.mem.eql(u8, kind_str, "coin_with_min_balance")) {
+        const owner = try resolveOwner(allocator, object, default_owner);
+        const min_balance = getU64Field(object, "minBalance") orelse return error.InvalidCli;
+        return OwnedSelectedArgumentRequest{
+            .value = .{
+                .coin_with_min_balance = .{
+                    .owner = owner,
+                    .min_balance = min_balance,
+                },
+            },
+        };
+    }
+
+    // object_input (simplified)
+    if (std.mem.eql(u8, kind_str, "object_input") or std.mem.eql(u8, kind_str, "ptb_object")) {
+        const object_id = getStringField(object, "objectId") orelse return error.InvalidCli;
+        const input_kind = parseObjectInputKind(getStringField(object, "inputKind") orelse "imm_or_owned") catch .imm_or_owned;
+        return OwnedSelectedArgumentRequest{
+            .value = .{
+                .object_input = .{
+                    .object_id = try allocator.dupe(u8, object_id),
+                    .input_kind = input_kind,
+                },
+            },
+        };
+    }
+
+    return error.InvalidCli;
+}
+
+// Helper functions
+
+fn getStringField(object: std.json.ObjectMap, key: []const u8) ?[]const u8 {
+    const value = object.get(key) orelse return null;
+    if (value != .string) return null;
+    return value.string;
+}
+
+fn getU64Field(object: std.json.ObjectMap, key: []const u8) ?u64 {
+    const value = object.get(key) orelse return null;
+    return switch (value) {
+        .integer => |i| if (i >= 0) @intCast(i) else null,
+        .float => |f| if (f >= 0) @intFromFloat(f) else null,
+        .string => std.fmt.parseInt(u64, value.string, 10) catch null,
+        else => null,
     };
 }
 
-/// Select argument value from token
-pub fn selectArgumentValueFromToken(
-    client: *SuiRpcClient,
+fn resolveOwner(
     allocator: std.mem.Allocator,
-    token: []const u8,
-) !?OwnedSelectedArgumentValue {
-    return try selectArgumentValueFromTokenWithDefaultOwner(client, allocator, token, null);
-}
-
-/// Select argument value from token with default owner
-pub fn selectArgumentValueFromTokenWithDefaultOwner(
-    client: *SuiRpcClient,
-    allocator: std.mem.Allocator,
-    token: []const u8,
+    object: std.json.ObjectMap,
     default_owner: ?[]const u8,
-) !?OwnedSelectedArgumentValue {
-    var request = try parseSelectedArgumentRequestTokenWithDefaultOwner(allocator, token, default_owner);
-    defer request.deinit(allocator);
-    
-    return try selectArgumentValueWithDefaultOwner(client, allocator, request.value, default_owner);
-}
-
-/// Select argument values from multiple tokens
-pub fn selectArgumentValuesFromTokens(
-    client: *SuiRpcClient,
-    allocator: std.mem.Allocator,
-    tokens: []const []const u8,
-) !OwnedSelectedArgumentValues {
-    return try selectArgumentValuesFromTokensWithDefaultOwner(client, allocator, tokens, null);
-}
-
-/// Select argument values from multiple tokens with default owner
-pub fn selectArgumentValuesFromTokensWithDefaultOwner(
-    client: *SuiRpcClient,
-    allocator: std.mem.Allocator,
-    tokens: []const []const u8,
-    default_owner: ?[]const u8,
-) !OwnedSelectedArgumentValues {
-    var values = OwnedSelectedArgumentValues{};
-    errdefer values.deinit(allocator);
-    
-    for (tokens) |token| {
-        const selected = try selectArgumentValueFromTokenWithDefaultOwner(
-            client,
-            allocator,
-            token,
-            default_owner,
-        ) orelse return error.SelectionNotFound;
-        try values.appendOwned(allocator, selected);
+) ![]const u8 {
+    if (getStringField(object, "owner")) |owner| {
+        return try allocator.dupe(u8, owner);
     }
-    
-    return values;
+    if (default_owner) |owner| {
+        return try allocator.dupe(u8, owner);
+    }
+    return error.InvalidCli;
 }
 
-/// Select multiple argument values
-pub fn selectArgumentValues(
-    client: *SuiRpcClient,
+fn parseObjectInputKind(kind_str: []const u8) !ObjectInputKind {
+    if (std.mem.eql(u8, kind_str, "imm_or_owned")) return .imm_or_owned;
+    if (std.mem.eql(u8, kind_str, "receiving")) return .receiving;
+    if (std.mem.eql(u8, kind_str, "shared")) return .shared;
+    return error.InvalidCli;
+}
+
+fn parseObjectPresetKind(preset_str: []const u8) !ObjectPresetKind {
+    if (std.mem.eql(u8, preset_str, "clock")) return .clock;
+    if (std.mem.eql(u8, preset_str, "system")) return .system;
+    if (std.mem.eql(u8, preset_str, "random")) return .random;
+    if (std.mem.eql(u8, preset_str, "deny_list")) return .deny_list;
+    if (std.mem.eql(u8, preset_str, "bridge")) return .bridge;
+    if (std.mem.eql(u8, preset_str, "deep_treasury")) return .deep_treasury;
+    return error.InvalidCli;
+}
+
+/// Select argument value (placeholder)
+pub fn selectArgumentValue(
     allocator: std.mem.Allocator,
-    requests: []const SelectedArgumentRequest,
-) !OwnedSelectedArgumentValues {
-    var values = OwnedSelectedArgumentValues{};
-    errdefer values.deinit(allocator);
-    
-    for (requests) |request| {
-        const selected = try selectArgumentValue(client, allocator, request) orelse 
-            return error.SelectionNotFound;
-        try values.appendOwned(allocator, selected);
-    }
-    
-    return values;
+    client: *SuiRpcClient,
+    request: SelectedArgumentRequest,
+) ![]const u8 {
+    _ = allocator;
+    _ = client;
+    _ = request;
+    return error.NotImplemented;
 }
 
 // ============================================================
 // Tests
 // ============================================================
 
-test "parseSelectionType" {
-    const testing = std.testing;
-    
-    try testing.expectEqual(SelectionType.object_id, parseSelectionType("object").?);
-    try testing.expectEqual(SelectionType.coin_type, parseSelectionType("coin").?);
-    try testing.expectEqual(SelectionType.address, parseSelectionType("address").?);
-    try testing.expectEqual(null, parseSelectionType("unknown"));
-}
-
-test "SelectedArgumentRequest lifecycle" {
+test "parseSelectedArgumentRequestToken parses object_preset" {
     const testing = std.testing;
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
-    const allocator = gpa.allocator;
-    
-    var request = SelectedArgumentRequest{
-        .selection_type = .object_id,
-        .target = try allocator.dupe(u8, "0x123"),
-        .index = 0,
-        .type_filter = try allocator.dupe(u8, "0x2::sui::SUI"),
-    };
-    defer request.deinit(allocator);
-    
-    try testing.expectEqual(SelectionType.object_id, request.selection_type);
-    try testing.expectEqualStrings("0x123", request.target);
+    const allocator = gpa.allocator();
+
+    const token = "select:{\"kind\":\"object_preset\",\"preset\":\"clock\"}";
+    var result = try parseSelectedArgumentRequestToken(allocator, token);
+    defer result.deinit(allocator);
+
+    try testing.expect(result.value == .object_preset);
+    try testing.expectEqual(ObjectPresetKind.clock, result.value.object_preset.preset);
 }
 
-test "parseSelectedArgumentRequestToken basic" {
+test "parseSelectedArgumentRequestToken parses gas_coin" {
     const testing = std.testing;
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
-    const allocator = gpa.allocator;
-    
-    var owned = try parseSelectedArgumentRequestToken(allocator, "object:0x123");
-    defer owned.deinit(allocator);
-    
-    try testing.expectEqual(SelectionType.object_id, owned.value.selection_type);
-    try testing.expectEqualStrings("0x123", owned.value.target);
+    const allocator = gpa.allocator();
+
+    const token = "select:{\"kind\":\"gas_coin\",\"owner\":\"0x123\",\"minBalance\":1000}";
+    var result = try parseSelectedArgumentRequestToken(allocator, token);
+    defer result.deinit(allocator);
+
+    try testing.expect(result.value == .gas_coin);
+    try testing.expectEqualStrings("0x123", result.value.gas_coin.owner);
+    try testing.expectEqual(@as(u64, 1000), result.value.gas_coin.min_balance);
 }
 
-test "parseSelectedArgumentRequestToken with index" {
+test "parseSelectedArgumentRequestToken parses owned_object_struct_type" {
     const testing = std.testing;
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
-    const allocator = gpa.allocator;
-    
-    var owned = try parseSelectedArgumentRequestToken(allocator, "coin:0x123:5");
-    defer owned.deinit(allocator);
-    
-    try testing.expectEqual(SelectionType.coin_type, owned.value.selection_type);
-    try testing.expectEqual(@as(?u32, 5), owned.value.index);
+    const allocator = gpa.allocator();
+
+    const token = "select:{\"kind\":\"owned_object_struct_type\",\"owner\":\"0xowner\",\"structType\":\"0x2::example::Thing\"}";
+    var result = try parseSelectedArgumentRequestToken(allocator, token);
+    defer result.deinit(allocator);
+
+    try testing.expect(result.value == .owned_object_struct_type);
+    try testing.expectEqualStrings("0xowner", result.value.owned_object_struct_type.owner);
+    try testing.expectEqualStrings("0x2::example::Thing", result.value.owned_object_struct_type.struct_type);
 }
 
-test "parseSelectedArgumentRequestToken with type filter" {
+test "parseSelectedArgumentRequestToken parses sel: prefix" {
     const testing = std.testing;
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
-    const allocator = gpa.allocator;
-    
-    var owned = try parseSelectedArgumentRequestToken(allocator, "type:0x123:0x2::sui::SUI");
-    defer owned.deinit(allocator);
-    
-    try testing.expectEqual(SelectionType.object_type, owned.value.selection_type);
-    try testing.expectEqualStrings("0x2::sui::SUI", owned.value.type_filter.?);
+    const allocator = gpa.allocator();
+
+    const token = "sel:{\"kind\":\"object_preset\",\"preset\":\"system\"}";
+    var result = try parseSelectedArgumentRequestToken(allocator, token);
+    defer result.deinit(allocator);
+
+    try testing.expect(result.value == .object_preset);
+    try testing.expectEqual(ObjectPresetKind.system, result.value.object_preset.preset);
 }
 
-test "parseSelectedArgumentRequestToken invalid format" {
-    const testing = std.testing;
-    const allocator = testing.allocator;
-    
-    const result = parseSelectedArgumentRequestToken(allocator, "invalid");
-    try testing.expectError(error.InvalidTokenFormat, result);
-}
-
-test "parseSelectedArgumentRequestToken unknown type" {
-    const testing = std.testing;
-    const allocator = testing.allocator;
-    
-    const result = parseSelectedArgumentRequestToken(allocator, "unknown:0x123");
-    try testing.expectError(error.UnknownSelectionType, result);
-}
-
-test "OwnedSelectedArgumentValues lifecycle" {
+test "parseSelectedArgumentRequestToken rejects invalid format" {
     const testing = std.testing;
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
-    const allocator = gpa.allocator;
-    
-    var values = OwnedSelectedArgumentValues{};
-    defer values.deinit(allocator);
-    
-    const value1 = OwnedSelectedArgumentValue{
-        .value = SelectedArgumentValue{
-            .value = try allocator.dupe(u8, "val1"),
-            .value_type = try allocator.dupe(u8, "type1"),
-            .source = SelectionSource{ .object_id = null, .version = null, .digest = null },
-        },
-        .owned_value = null,
-        .owned_type = null,
-    };
-    
-    try values.appendOwned(allocator, value1);
-    try testing.expectEqual(@as(usize, 1), values.values.items.len);
+    const allocator = gpa.allocator();
+
+    const token = "invalid:{\"kind\":\"object_preset\"}";
+    const result = parseSelectedArgumentRequestToken(allocator, token);
+    try testing.expectError(error.InvalidCli, result);
 }
 
-test "SelectionSource lifecycle" {
+test "parseSelectedArgumentRequestTokenWithDefaultOwner uses default owner" {
     const testing = std.testing;
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
-    const allocator = gpa.allocator;
-    
-    var source = SelectionSource{
-        .object_id = try allocator.dupe(u8, "0x123"),
-        .version = 1,
-        .digest = try allocator.dupe(u8, "abc"),
-    };
-    defer source.deinit(allocator);
-    
-    try testing.expectEqualStrings("0x123", source.object_id.?);
+    const allocator = gpa.allocator();
+
+    const token = "select:{\"kind\":\"gas_coin\",\"minBalance\":1000}";
+    var result = try parseSelectedArgumentRequestTokenWithDefaultOwner(allocator, token, "0xdefault");
+    defer result.deinit(allocator);
+
+    try testing.expect(result.value == .gas_coin);
+    try testing.expectEqualStrings("0xdefault", result.value.gas_coin.owner);
 }
 
-test "SelectedArgumentValue lifecycle" {
+test "ObjectInputKind parsing" {
     const testing = std.testing;
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator;
-    
-    var value = SelectedArgumentValue{
-        .value = try allocator.dupe(u8, "value_bytes"),
-        .value_type = try allocator.dupe(u8, "address"),
-        .source = SelectionSource{
-            .object_id = try allocator.dupe(u8, "0x123"),
-            .version = 1,
-            .digest = null,
-        },
-    };
-    defer value.deinit(allocator);
-    
-    try testing.expectEqualStrings("value_bytes", value.value);
+    try testing.expectEqual(ObjectInputKind.imm_or_owned, try parseObjectInputKind("imm_or_owned"));
+    try testing.expectEqual(ObjectInputKind.receiving, try parseObjectInputKind("receiving"));
+    try testing.expectEqual(ObjectInputKind.shared, try parseObjectInputKind("shared"));
+    try testing.expectError(error.InvalidCli, parseObjectInputKind("invalid"));
+}
+
+test "ObjectPresetKind parsing" {
+    const testing = std.testing;
+    try testing.expectEqual(ObjectPresetKind.clock, try parseObjectPresetKind("clock"));
+    try testing.expectEqual(ObjectPresetKind.system, try parseObjectPresetKind("system"));
+    try testing.expectEqual(ObjectPresetKind.random, try parseObjectPresetKind("random"));
+    try testing.expectError(error.InvalidCli, parseObjectPresetKind("invalid"));
 }

@@ -2795,10 +2795,8 @@ fn tokenStartsSelectedRequest(text: []const u8) bool {
 }
 
 fn validateSelectedRequestToken(allocator: std.mem.Allocator, token: []const u8) !void {
-    // TODO: migrate to new API - requires updating selector.zig to match old API behavior
-    _ = allocator;
-    _ = token;
-    // Placeholder - just return success for now
+    var owned = try sui.rpc_client_new.selector.parseSelectedArgumentRequestToken(allocator, token);
+    defer owned.deinit(allocator);
 }
 
 fn validateSelectedRequestTokensInJsonValue(
