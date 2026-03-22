@@ -1,5 +1,6 @@
 // cmd_passkey.zig - Passkey/WebAuthn commands for Sui CLI
 // Uses file-based encrypted keystore (AES-256-GCM + PBKDF2)
+// Supports macOS (Touch ID) and Linux (libfido2/YubiKey)
 // No Apple Developer required! Completely free!
 
 const std = @import("std");
@@ -8,9 +9,13 @@ const Allocator = std.mem.Allocator;
 // Platform check
 const builtin = @import("builtin");
 const is_macos = builtin.os.tag == .macos;
+const is_linux = builtin.os.tag == .linux;
 
 // Import C bridge on macOS for Touch ID
 const c = if (is_macos) @import("webauthn/c_bridge.zig") else struct {};
+
+// Import Linux WebAuthn support
+const LinuxWebAuthn = if (is_linux) @import("webauthn/linux.zig").LinuxWebAuthn else struct {};
 
 // Import file keystore
 const FileKeystore = @import("webauthn/file_keystore.zig").FileKeystore;
@@ -39,6 +44,8 @@ pub fn execute(allocator: Allocator, args: []const []const u8) !void {
         try cmdTest(allocator);
     } else if (std.mem.eql(u8, action, "list")) {
         try cmdList(allocator);
+    } else if (std.mem.eql(u8, action, "devices")) {
+        try cmdDevices(allocator);
     } else {
         std.log.err("Unknown passkey action: {s}", .{action});
         printUsage();
@@ -53,7 +60,8 @@ fn printUsage() void {
     std.log.info("  create-browser --name <name> Create Passkey via browser (WebAuthn)", .{});
     std.log.info("  list                         List stored credentials", .{});
     std.log.info("  platform                     Show platform info", .{});
-    std.log.info("  test                         Test Touch ID authentication", .{});
+    std.log.info("  test                         Test biometric/hardware authentication", .{});
+    std.log.info("  devices                      List connected hardware keys (Linux)", .{});
 }
 
 fn getKeystoreDir(allocator: Allocator) ![]const u8 {
@@ -384,21 +392,115 @@ fn cmdPlatform() !void {
         std.log.info("  - AES-256-GCM encryption", .{});
         std.log.info("  - PBKDF2 key derivation", .{});
         std.log.info("  - File-based storage (no Apple Developer needed!)", .{});
+    } else if (is_linux) {
+        std.log.info("Platform: Linux", .{});
+        std.log.info("", .{});
+        
+        // Check for libfido2 support
+        var webauthn = LinuxWebAuthn.init(std.heap.page_allocator);
+        defer webauthn.deinit();
+        
+        const available = webauthn.isAvailable();
+        std.log.info("Hardware Key Support: {s}", .{if (available) "✓ Available" else "✗ Not Available"});
+        
+        if (available) {
+            const devices = webauthn.listDevices() catch |err| {
+                std.log.info("  Error listing devices: {s}", .{@errorName(err)});
+                return;
+            };
+            defer {
+                for (devices) |dev| {
+                    std.heap.page_allocator.free(dev.path);
+                    std.heap.page_allocator.free(dev.manufacturer);
+                    std.heap.page_allocator.free(dev.product);
+                }
+                std.heap.page_allocator.free(devices);
+            }
+            
+            std.log.info("  Connected devices: {d}", .{devices.len});
+            for (devices) |dev| {
+                std.log.info("    - {s} ({s})", .{dev.product, dev.manufacturer});
+            }
+        }
+
+        std.log.info("", .{});
+        std.log.info("Features:", .{});
+        std.log.info("  - YubiKey/hardware key support (libfido2)", .{});
+        std.log.info("  - AES-256-GCM encryption", .{});
+        std.log.info("  - PBKDF2 key derivation", .{});
+        std.log.info("  - File-based storage", .{});
     } else {
         std.log.info("Platform: {s}", .{@tagName(builtin.os.tag)});
         std.log.info("", .{});
-        std.log.info("WebAuthn is only supported on macOS currently.", .{});
+        std.log.info("WebAuthn is supported on macOS and Linux.", .{});
+    }
+}
+
+fn cmdDevices(allocator: Allocator) !void {
+    std.log.info("=== Hardware Key Devices ===", .{});
+    std.log.info("", .{});
+    
+    if (!is_linux) {
+        std.log.info("Device listing is only available on Linux with libfido2.", .{});
+        std.log.info("On macOS, hardware keys are automatically detected.", .{});
+        return;
+    }
+    
+    var webauthn = LinuxWebAuthn.init(allocator);
+    defer webauthn.deinit();
+    
+    const devices = webauthn.listDevices() catch |err| {
+        std.log.err("Failed to list devices: {s}", .{@errorName(err)});
+        std.process.exit(1);
+    };
+    defer {
+        for (devices) |dev| {
+            allocator.free(dev.path);
+            allocator.free(dev.manufacturer);
+            allocator.free(dev.product);
+        }
+        allocator.free(devices);
+    }
+    
+    if (devices.len == 0) {
+        std.log.info("No hardware keys detected.", .{});
+        std.log.info("", .{});
+        std.log.info("Make sure you have:", .{});
+        std.log.info("  - libfido2 installed (sudo apt install libfido2-1)", .{});
+        std.log.info("  - A FIDO2-compatible key (YubiKey, etc.) plugged in", .{});
+        std.log.info("  - Proper udev rules for USB access", .{});
+    } else {
+        std.log.info("Found {d} device(s):", .{devices.len});
+        std.log.info("", .{});
+        for (devices, 0..) |dev, i| {
+            std.log.info("Device {d}:", .{i + 1});
+            std.log.info("  Path: {s}", .{dev.path});
+            std.log.info("  Manufacturer: {s}", .{dev.manufacturer});
+            std.log.info("  Product: {s}", .{dev.product});
+            std.log.info("", .{});
+        }
     }
 }
 
 fn cmdTest(allocator: Allocator) !void {
     _ = allocator;
     
-    std.log.info("=== Touch ID Test ===", .{});
+    std.log.info("=== Authentication Test ===", .{});
     std.log.info("", .{});
 
+    if (is_linux) {
+        std.log.info("Platform: Linux", .{});
+        std.log.info("", .{});
+        std.log.info("On Linux, hardware key authentication is used during:", .{});
+        std.log.info("  - passkey create (with hardware key option)", .{});
+        std.log.info("  - Transaction signing", .{});
+        std.log.info("", .{});
+        std.log.info("Use 'passkey devices' to list connected hardware keys.", .{});
+        return;
+    }
+    
     if (!is_macos) {
-        std.log.err("This test is only available on macOS", .{});
+        std.log.err("This test is only available on macOS and Linux", .{});
         std.process.exit(1);
     }
 

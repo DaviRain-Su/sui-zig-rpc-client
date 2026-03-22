@@ -39,13 +39,13 @@ pub const AssertionResult = struct {
 /// Platform-specific WebAuthn implementation
 pub const WebAuthnPlatform = union(Platform) {
     macos: MacOSWebAuthnPlaceholder,
-    linux: LinuxWebAuthn,
+    linux: LinuxWebAuthnPlaceholder,
     unsupported: UnsupportedWebAuthn,
 
     pub fn init(allocator: Allocator) !WebAuthnPlatform {
         return switch (Platform.current()) {
             .macos => .{ .macos = try MacOSWebAuthnPlaceholder.init(allocator) },
-            .linux => .{ .linux = try LinuxWebAuthn.init(allocator) },
+            .linux => .{ .linux = try LinuxWebAuthnPlaceholder.init(allocator) },
             .unsupported => .{ .unsupported = UnsupportedWebAuthn.init() },
         };
     }
@@ -140,34 +140,24 @@ const MacOSWebAuthnPlaceholder = struct {
     }
 };
 
-// ============================================================================
-// Linux Implementation (libfido2)
-// ============================================================================
-
-const LinuxWebAuthn = struct {
+const LinuxWebAuthnPlaceholder = struct {
     allocator: Allocator,
-    fido2_available: bool,
 
-    pub fn init(allocator: Allocator) !LinuxWebAuthn {
-        // Check if libfido2 is available
-        const available = checkFido2Available();
-
-        return .{
-            .allocator = allocator,
-            .fido2_available = available,
-        };
+    pub fn init(allocator: Allocator) !LinuxWebAuthnPlaceholder {
+        return .{ .allocator = allocator };
     }
 
-    pub fn deinit(self: *LinuxWebAuthn) void {
+    pub fn deinit(self: *LinuxWebAuthnPlaceholder) void {
         _ = self;
     }
 
-    pub fn isAvailable(self: *const LinuxWebAuthn) bool {
-        return self.fido2_available;
+    pub fn isAvailable(self: *const LinuxWebAuthnPlaceholder) bool {
+        _ = self;
+        return false; // Placeholder
     }
 
     pub fn createCredential(
-        self: *LinuxWebAuthn,
+        self: *LinuxWebAuthnPlaceholder,
         rp_id: []const u8,
         user_name: []const u8,
         user_display_name: []const u8,
@@ -176,19 +166,11 @@ const LinuxWebAuthn = struct {
         _ = rp_id;
         _ = user_name;
         _ = user_display_name;
-
-        // This would:
-        // 1. Call fido_dev_open() to find authenticator
-        // 2. Call fido_cred_new() and fido_cred_set_*()
-        // 3. Call fido_dev_make_cred()
-        // 4. Extract credential ID and public key
-
-        std.log.info("Linux: Creating credential with libfido2...", .{});
         return error.NotImplemented;
     }
 
     pub fn getAssertion(
-        self: *LinuxWebAuthn,
+        self: *LinuxWebAuthnPlaceholder,
         rp_id: []const u8,
         challenge: []const u8,
         credential_id: ?[]const u8,
@@ -197,21 +179,7 @@ const LinuxWebAuthn = struct {
         _ = rp_id;
         _ = challenge;
         _ = credential_id;
-
-        // This would:
-        // 1. Call fido_assert_new() and fido_assert_set_*()
-        // 2. Call fido_dev_get_assert()
-        // 3. User touches authenticator
-        // 4. Extract assertion data
-
-        std.log.info("Linux: Getting assertion with libfido2...", .{});
         return error.NotImplemented;
-    }
-
-    fn checkFido2Available() bool {
-        // Check if libfido2.so is available
-        // This would try to dlopen("libfido2.so.1")
-        return false; // Placeholder
     }
 };
 
@@ -225,29 +193,13 @@ const UnsupportedWebAuthn = struct {
     }
 };
 
-// ============================================================================
-// C Bindings (for libfido2)
-// ============================================================================
-
-pub const c = struct {
-    // libfido2 types (simplified)
-    pub const fido_dev_t = opaque {};
-    pub const fido_cred_t = opaque {};
-    pub const fido_assert_t = opaque {};
-
-    // libfido2 functions (would be extern)
-    pub extern "fido2" fn fido_init(flags: c_int) void;
-    pub extern "fido2" fn fido_dev_new() ?*fido_dev_t;
-    pub extern "fido2" fn fido_dev_free(dev: **fido_dev_t) void;
-    pub extern "fido2" fn fido_dev_open(dev: *fido_dev_t, path: [*:0]const u8) c_int;
-    pub extern "fido2" fn fido_dev_close(dev: *fido_dev_t) c_int;
-    pub extern "fido2" fn fido_cred_new() ?*fido_cred_t;
-    pub extern "fido2" fn fido_cred_free(cred: **fido_cred_t) void;
-    pub extern "fido2" fn fido_assert_new() ?*fido_assert_t;
-    pub extern "fido2" fn fido_assert_free(assert: **fido_assert_t) void;
-};
-
-// Re-export macOS implementation
+// Re-export platform implementations
 pub const MacOSWebAuthn = @import("macos_impl.zig").MacOSWebAuthn;
 pub const BiometryType = @import("macos_impl.zig").BiometryType;
 pub const Credential = @import("macos_impl.zig").Credential;
+
+// Linux implementation (libfido2)
+pub const LinuxWebAuthn = @import("linux.zig").LinuxWebAuthn;
+pub const LinuxCredential = @import("linux.zig").Credential;
+pub const LinuxSignature = @import("linux.zig").Signature;
+pub const LinuxDeviceInfo = @import("linux.zig").DeviceInfo;
