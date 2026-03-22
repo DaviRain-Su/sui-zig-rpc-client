@@ -4,7 +4,7 @@
 
 This document tracks features that are partially implemented or need further improvement in the Sui Zig CLI.
 
-## Last Updated: 2026-03-21
+## Last Updated: 2026-03-22
 
 ## ✅ Recently Completed
 
@@ -70,91 +70,77 @@ This document tracks features that are partially implemented or need further imp
 
 **Verified**: key generate --mnemonic works
 
+### 6. SLIP-0010 Path Derivation ✅
+
+**Status**: Fully implemented
+
+**Completed**:
+- [x] Full SLIP-0010 path parsing
+- [x] Master key derivation
+- [x] Hardened child key derivation
+- [x] Standard Sui path support (m/44'/784'/0'/0'/0')
+- [x] Multiple address derivation
+
+**Verified**: All test vectors pass
+
+### 7. WebAuthn Browser Bridge ✅
+
+**Status**: Fully implemented
+
+**Completed**:
+- [x] HTTP server-based credential creation
+- [x] File-based credential creation
+- [x] Browser automation
+- [x] Response handling
+- [x] Unified interface
+
+**Verified**: Browser bridge tests pass
+
+### 8. Intent Parser Enhancement ✅
+
+**Status**: Fully implemented
+
+**Completed**:
+- [x] 6 intent types: swap, transfer, balance, stake, unstake, claim_rewards
+- [x] Natural language detection
+- [x] JSON parsing for all intent types
+- [x] typeName() method
+- [x] Comprehensive test coverage (140+ tests)
+
+**Verified**: All intent parser tests pass
+
 ## 🟡 Partially Implemented / Needs Improvement
 
-### 1. SLIP-0010 Path Derivation
+### 1. Secure Enclave Key Generation (macOS)
 
-**File**: `src/bip39.zig:161`
-
-**Current State**: Basic derivation, ignores path parameter
-
-```zig
-pub fn deriveEd25519Key(seed: [64]u8, path: []const u8) ![32]u8 {
-    _ = path; // TODO: Implement full SLIP-0010 path derivation
-    // Currently returns first 32 bytes of seed
-}
-```
-
-**Impact**: Cannot use hierarchical deterministic wallets with custom paths
-
-**Priority**: Medium
-
-### 2. Secure Enclave Key Generation (macOS)
-
-**File**: `src/webauthn/macos_impl.zig:201`
+**File**: `src/webauthn/macos_impl.zig`
 
 **Current State**: Touch ID authentication works, Secure Enclave key generation needs Apple Developer certificate
-
-```zig
-// TODO: Implement keychain query to list all credentials
-// Requires Apple Developer Program ($99/year) for production use
-```
 
 **Workaround**: File-based encrypted keystore works perfectly
 
 **Priority**: Low (workaround available)
 
-### 3. CLI Parser Flag Integration
+### 2. CLI Parser Flag Integration
 
 **Files**: 
-- `src/cli/parser.zig:193`
-- `src/cli/parser.zig:373`
-- `src/cli/parser.zig:379`
-- `src/cli/parser.zig:958`
+- `src/cli/parser.zig`
 
-**Current State**: Flags parsed but not fully integrated
-
-```zig
-// TODO: Add summarize flag to ParsedArgs
-// TODO: Add wallet_fund_amount to ParsedArgs
-// TODO: Add wallet_fund_dry_run to ParsedArgs
-// TODO: Add object_dynamic_fields_limit to ParsedArgs
-```
+**Current State**: Flags parsed but some not fully integrated
 
 **Impact**: Some advanced features not accessible via CLI
 
 **Priority**: Low
 
-### 4. WebAuthn Platform Placeholders
+### 3. WebAuthn Platform Placeholders
 
 **File**: `src/webauthn/platform.zig`
 
 **Current State**: Placeholder implementations for cross-platform abstraction
 
-```zig
-pub fn createCredential(...) !CredentialInfo {
-    return error.NotImplemented; // Uses actual implementation in macos_impl.zig or linux.zig
-}
-```
-
 **Note**: Actual implementations exist in platform-specific files
 
 **Priority**: Low (abstraction layer, concrete implementations work)
-
-### 5. Browser Bridge Completion
-
-**File**: `src/webauthn/browser_bridge.zig:307,313`
-
-**Current State**: Browser WebAuthn works via browser_server.zig, browser_bridge.zig has placeholder methods
-
-```zig
-// TODO: Implement credential parsing
-// TODO: Implement assertion parsing
-```
-
-**Note**: browser_server.zig has working implementation
-
-**Priority**: Low (alternative implementation works)
 
 ## 🔴 Not Implemented / Future Work
 
@@ -209,12 +195,11 @@ pub fn createCredential(...) !CredentialInfo {
 
 ### 5. Intent Parser HTTP Integration
 
-**File**: `src/intent_parser.zig:206`
+**File**: `src/intent_parser.zig`
 
-```zig
-// TODO: Implement HTTP call using the project's transport infrastructure
-// Currently placeholder for natural language intent parsing
-```
+**Current State**: Mock implementation works, HTTP integration placeholder
+
+**Note**: Natural language parsing works locally without API
 
 **Priority**: Low (experimental feature)
 
@@ -228,9 +213,10 @@ pub fn createCredential(...) !CredentialInfo {
 | Passkey (Linux) | ✅ Complete | 100% |
 | Browser WebAuthn | ✅ Complete | 100% |
 | BIP-39 Mnemonic | ✅ Complete | 100% |
+| SLIP-0010 Paths | ✅ Complete | 100% |
 | Caching System | ✅ Complete | 100% |
 | WebSocket | ✅ Complete | 100% |
-| SLIP-0010 Paths | 🟡 Partial | 80% |
+| Intent Parser | ✅ Complete | 100% |
 | Secure Enclave | 🟡 Needs Cert | 90% |
 | Advanced Wallet | 🔴 Not Started | 0% |
 | GraphQL | 🔴 Not Started | 0% |
@@ -240,21 +226,20 @@ pub fn createCredential(...) !CredentialInfo {
 ## 🎯 Recommended Next Steps
 
 ### High Priority
-1. **SLIP-0010 Path Derivation** - Enable HD wallet functionality
-2. **Advanced Wallet Features** - Session management, policies
+1. **Advanced Wallet Features** - Session management, policies
 
 ### Medium Priority
-3. **GraphQL Integration** - Better query capabilities
-4. **REPL Mode** - Improved developer experience
+2. **GraphQL Integration** - Better query capabilities
+3. **Documentation** - API docs, tutorials
 
 ### Low Priority
-5. **Plugin System** - Extensibility framework
+4. **Plugin System** - Extensibility framework
+5. **REPL Mode** - Improved developer experience
 6. **Secure Enclave** - Requires Apple Developer investment
 
 ## 🤝 Contributing
 
 Priority areas for contributions:
-- SLIP-0010 hierarchical derivation
 - Advanced wallet lifecycle management
 - GraphQL query builder
 - REPL with readline support
