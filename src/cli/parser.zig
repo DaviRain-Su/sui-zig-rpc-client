@@ -190,7 +190,7 @@ fn parseRpcCommand(
         const token = args[i.*];
 
         if (std.mem.eql(u8, token, "--summarize")) {
-            // TODO: Add summarize flag to ParsedArgs
+            parsed.summarize = true;
             i.* += 1;
             continue;
         }
@@ -370,13 +370,13 @@ fn parseWalletFundArgs(
 
         if (std.mem.eql(u8, token, "--amount")) {
             if (i.* + 1 >= args.len) return error.InvalidCli;
-            // TODO: Add wallet_fund_amount to ParsedArgs
+            parsed.wallet_fund_amount = try parseIntValue(args[i.* + 1]);
             i.* += 2;
             continue;
         }
 
         if (std.mem.eql(u8, token, "--dry-run")) {
-            // TODO: Add wallet_fund_dry_run to ParsedArgs
+            parsed.wallet_fund_dry_run = true;
             i.* += 1;
             continue;
         }
@@ -955,7 +955,7 @@ fn parseObjectDynamicFieldsArgs(
 
         if (std.mem.eql(u8, token, "--limit")) {
             if (i.* + 1 >= args.len) return error.InvalidCli;
-            // TODO: Add object_dynamic_fields_limit to ParsedArgs
+            parsed.object_dynamic_fields_limit = try std.fmt.parseInt(u32, args[i.* + 1], 10);
             i.* += 2;
             continue;
         }

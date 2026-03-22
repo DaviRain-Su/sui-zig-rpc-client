@@ -60,6 +60,16 @@ pub const ParsedArgs = struct {
     move_function_template_output: ?types.MoveFunctionTemplateOutput = null,
     move_summarize: bool = false,
 
+    // Summarize option (global)
+    summarize: bool = false,
+
+    // Wallet fund options
+    wallet_fund_amount: ?u64 = null,
+    wallet_fund_dry_run: bool = false,
+
+    // Object dynamic fields options
+    object_dynamic_fields_limit: ?u32 = null,
+
     // Object options
     object_id: ?[]const u8 = null,
     object_options: ?[]const u8 = null,
