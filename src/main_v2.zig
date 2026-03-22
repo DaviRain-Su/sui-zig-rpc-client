@@ -40,6 +40,8 @@ pub fn main() !void {
         try cmdGas(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "chain")) {
         try cmdChain(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "transfer")) {
+        try cmdTransfer(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "help") or std.mem.eql(u8, command, "--help")) {
         printUsage(args[0]);
     } else {
@@ -61,6 +63,7 @@ fn printUsage(prog_name: []const u8) void {
     std.log.info("  epoch                       Get current epoch info", .{});
     std.log.info("  gas <address>               Get gas objects for address", .{});
     std.log.info("  chain                       Get chain identifier", .{});
+    std.log.info("  transfer <from> <to> <amt>  Build transfer transaction (dry-run)", .{});
     std.log.info("  help                        Show this help", .{});
 }
 
@@ -513,4 +516,91 @@ fn cmdChain(allocator: Allocator, _: []const []const u8) !void {
             std.log.info("Chain Identifier: {s}", .{result.string});
         }
     }
+}
+
+fn cmdTransfer(allocator: Allocator, args: []const []const u8) !void {
+    if (args.len < 3) {
+        std.log.err("Usage: transfer <from_address> <to_address> <amount_mist>", .{});
+        std.log.info("Note: This is a dry-run command that builds but does not send the transaction.", .{});
+        std.process.exit(1);
+    }
+
+    const from = args[0];
+    const to = args[1];
+    const amount = try std.fmt.parseInt(u64, args[2], 10);
+
+    const rpc_url = getRpcUrl() orelse "https://fullnode.mainnet.sui.io:443";
+
+    var rpc_client = try SuiRpcClient.init(allocator, rpc_url);
+    defer rpc_client.deinit();
+
+    std.log.info("Building transfer transaction (DRY RUN - not sending):", .{});
+    std.log.info("  From: {s}", .{from});
+    std.log.info("  To: {s}", .{to});
+    std.log.info("  Amount: {d} MIST ({d}.{d} SUI)", .{
+        amount,
+        amount / 1_000_000_000,
+        amount % 1_000_000_000,
+    });
+
+    // Step 1: Get gas coins for the sender
+    const gas_params = try std.fmt.allocPrint(
+        allocator,
+        "[\"{s}\",\"0x2::sui::SUI\",null,10]",
+        .{from},
+    );
+    defer allocator.free(gas_params);
+
+    const gas_response = try rpc_client.call("suix_getCoins", gas_params);
+    defer allocator.free(gas_response);
+
+    const gas_parsed = try std.json.parseFromSlice(std.json.Value, allocator, gas_response, .{});
+    defer gas_parsed.deinit();
+
+    var gas_coin_id: ?[]const u8 = null;
+    var gas_balance: u64 = 0;
+
+    if (gas_parsed.value.object.get("result")) |result| {
+        if (result.object.get("data")) |data| {
+            if (data == .array and data.array.items.len > 0) {
+                const first_coin = data.array.items[0];
+                if (first_coin.object.get("coinObjectId")) |id| {
+                    gas_coin_id = id.string;
+                }
+                if (first_coin.object.get("balance")) |bal| {
+                    gas_balance = if (bal == .integer)
+                        @intCast(bal.integer)
+                    else
+                        std.fmt.parseInt(u64, bal.string, 10) catch 0;
+                }
+            }
+        }
+    }
+
+    if (gas_coin_id) |id| {
+        std.log.info("  Gas Coin: {s} (balance: {d} MIST)", .{ id, gas_balance });
+    } else {
+        std.log.err("  Error: No gas coins found for sender", .{});
+        return;
+    }
+
+    // Step 2: Build the transaction block (simplified representation)
+    std.log.info("  PTB Structure:", .{});
+    std.log.info("    Version: 1", .{});
+    std.log.info("    Sender: {s}", .{from});
+    std.log.info("    Gas Data:", .{});
+    std.log.info("      Payment: {s}", .{gas_coin_id.?});
+    std.log.info("      Budget: 5000000 MIST", .{});
+    std.log.info("    Inputs:", .{});
+    std.log.info("      0: Amount = {d} MIST", .{amount});
+    std.log.info("      1: Recipient = {s}", .{to});
+    std.log.info("    Commands:", .{});
+    std.log.info("      0: TransferObjects([Input(0)], Input(1))", .{});
+
+    std.log.info("", .{});
+    std.log.info("Note: This is a demonstration. Full implementation requires:", .{});
+    std.log.info("  - BCS serialization of the transaction", .{});
+    std.log.info("  - Signing with sender's private key", .{});
+    std.log.info("  - Calling sui_executeTransactionBlock", .{});
+    std.log.info("  - Transaction simulation before execution", .{});
 }
