@@ -82,7 +82,7 @@ pub const TypeTag = union(enum) {
     address,
     signer,
     vector: *TypeTag,
-    struct: StructTag,
+    struct_tag: StructTag,
     type_param: u16,
 
     pub fn deinit(self: *TypeTag, allocator: std.mem.Allocator) void {
@@ -91,7 +91,7 @@ pub const TypeTag = union(enum) {
                 v.deinit(allocator);
                 allocator.destroy(v);
             },
-            .struct => |*s| s.deinit(allocator),
+            .struct_tag => |*s| s.deinit(allocator),
             else => {},
         }
     }

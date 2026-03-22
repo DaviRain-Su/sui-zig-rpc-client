@@ -64,8 +64,6 @@ test "ptb_bytes_builder module imports successfully" {
 }
 
 test "re-exports work correctly" {
-    const testing = std.testing;
-
     // Test types
     _ = Address{0} ** 32;
     _ = ObjectRef{ .object_id = Address{0} ** 32, .version = 1, .digest = ObjectDigest{0} ** 32 };

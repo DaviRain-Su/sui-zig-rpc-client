@@ -155,7 +155,8 @@ fn parseHexDigit(c: u8) !u8 {
 }
 
 /// Parse hex address to 32 bytes
-fn parseHexAddress32Bytes(allocator: std.mem.Allocator, value: []const u8) ![32]u8 {
+fn parseHexAddress32Bytes(_allocator: std.mem.Allocator, value: []const u8) ![32]u8 {
+    _ = _allocator;
     const start = if (std.mem.startsWith(u8, value, "0x")) 2 else 0;
     const hex_part = value[start..];
 
@@ -206,7 +207,7 @@ pub fn encodeTypeTag(allocator: std.mem.Allocator, tag: TypeTag) ![]u8 {
             defer allocator.free(inner);
             try result.appendSlice(inner);
         },
-        .struct => |s| {
+        .struct_tag => |s| {
             try result.append(10);
             try result.appendSlice(&s.address);
             const module_len = try std.fmt.allocPrint(allocator, "{d}", .{s.module.len});

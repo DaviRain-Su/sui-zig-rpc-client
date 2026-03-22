@@ -3,7 +3,7 @@ const std = @import("std");
 const sui_client = @import("sui_client_zig");
 
 // Use new API only
-const SuiRpcClient = sui_client.rpc_client_new.SuiRpcClient;
+const SuiRpcClient = sui_client.rpc_client.SuiRpcClient;
 
 const Allocator = std.mem.Allocator;
 
@@ -195,7 +195,7 @@ fn cmdBalance(allocator: Allocator, args: []const []const u8) !void {
     var rpc_client = try SuiRpcClient.init(allocator, rpc_url);
     defer rpc_client.deinit();
 
-    const balance = try sui_client.rpc_client_new.getBalance(
+    const balance = try sui_client.rpc_client.getBalance(
         &rpc_client,
         address,
         null,
@@ -1433,7 +1433,7 @@ fn cmdSearch(allocator: Allocator, args: []const []const u8) !void {
 
     // Search 1: Get balance
     std.log.info("=== Balance ===", .{});
-    const balance = sui_client.rpc_client_new.getBalance(
+    const balance = sui_client.rpc_client.getBalance(
         &rpc_client,
         address,
         null,
@@ -2070,7 +2070,7 @@ fn cmdAnalytics(allocator: Allocator, args: []const []const u8) !void {
         }
 
         // Get balance for comparison
-        const balance = sui_client.rpc_client_new.getBalance(
+        const balance = sui_client.rpc_client.getBalance(
             &rpc_client,
             address,
             null,
@@ -2253,13 +2253,13 @@ fn cmdCompare(allocator: Allocator, args: []const []const u8) !void {
     std.log.info("---", .{});
 
     // Compare balances
-    const balance1 = sui_client.rpc_client_new.getBalance(
+    const balance1 = sui_client.rpc_client.getBalance(
         &rpc_client,
         addr1,
         null,
     ) catch 0;
 
-    const balance2 = sui_client.rpc_client_new.getBalance(
+    const balance2 = sui_client.rpc_client.getBalance(
         &rpc_client,
         addr2,
         null,
@@ -2436,7 +2436,7 @@ fn cmdMonitor(allocator: Allocator, args: []const []const u8) !void {
 
         while (poll_count < 20) : (poll_count += 1) {
             // Get balance
-            const balance = sui_client.rpc_client_new.getBalance(
+            const balance = sui_client.rpc_client.getBalance(
                 &rpc_client,
                 address,
                 null,
@@ -2781,7 +2781,7 @@ fn cmdExport(allocator: Allocator, args: []const []const u8) !void {
         std.log.info("Exporting balance snapshot for {s} to {s}...", .{ target, output_file });
 
         // Get balance
-        const balance = sui_client.rpc_client_new.getBalance(
+        const balance = sui_client.rpc_client.getBalance(
             &rpc_client,
             target,
             null,
@@ -2902,7 +2902,7 @@ fn cmdStats(allocator: Allocator, args: []const []const u8) !void {
         std.log.info("---", .{});
 
         // Get balance
-        const balance = sui_client.rpc_client_new.getBalance(
+        const balance = sui_client.rpc_client.getBalance(
             &rpc_client,
             address,
             null,

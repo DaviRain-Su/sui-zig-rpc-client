@@ -85,7 +85,7 @@ fn parseStructTypeTag(allocator: std.mem.Allocator, type_str: []const u8) !TypeT
     errdefer allocator.free(name_dup);
 
     return TypeTag{
-        .struct = .{
+        .struct_tag = .{
             .address = addr,
             .module = module_dup,
             .name = name_dup,
@@ -213,9 +213,9 @@ test "parseSimplifiedTypeTag struct" {
     var tag = try parseSimplifiedTypeTag(allocator, "0x2::sui::SUI");
     defer tag.deinit(allocator);
 
-    try testing.expect(tag == .struct);
-    try testing.expectEqualStrings("sui", tag.struct.module);
-    try testing.expectEqualStrings("SUI", tag.struct.name);
+    try testing.expect(tag == .struct_tag);
+    try testing.expectEqualStrings("sui", tag.struct_tag.module);
+    try testing.expectEqualStrings("SUI", tag.struct_tag.name);
 }
 
 test "parseSimplifiedTypeTag struct with type params" {
@@ -227,9 +227,9 @@ test "parseSimplifiedTypeTag struct with type params" {
     var tag = try parseSimplifiedTypeTag(allocator, "0x2::coin::Coin<0x2::sui::SUI>");
     defer tag.deinit(allocator);
 
-    try testing.expect(tag == .struct);
-    try testing.expectEqualStrings("coin", tag.struct.module);
-    try testing.expectEqual(@as(usize, 1), tag.struct.type_params.len);
+    try testing.expect(tag == .struct_tag);
+    try testing.expectEqualStrings("coin", tag.struct_tag.module);
+    try testing.expectEqual(@as(usize, 1), tag.struct_tag.type_params.len);
 }
 
 test "parseAddress" {
