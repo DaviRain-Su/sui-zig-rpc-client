@@ -374,3 +374,143 @@ fn cmdCoins(allocator: Allocator, args: []const []const u8) !void {
         }
     }
 }
+
+fn cmdCheckpoint(allocator: Allocator, args: []const []const u8) !void {
+    const rpc_url = getRpcUrl() orelse "https://fullnode.mainnet.sui.io:443";
+
+    var rpc_client = try SuiRpcClient.init(allocator, rpc_url);
+    defer rpc_client.deinit();
+
+    const params = if (args.len >= 1)
+        try std.fmt.allocPrint(allocator, "[{s}]", .{args[0]})
+    else
+        "[]";
+    defer if (args.len >= 1) allocator.free(params);
+
+    const response = try rpc_client.call("sui_getLatestCheckpointSequenceNumber", "[]");
+    defer allocator.free(response);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, response, .{});
+    defer parsed.deinit();
+
+    if (parsed.value.object.get("result")) |result| {
+        const seq_num: u64 = if (result == .integer)
+            @intCast(result.integer)
+        else
+            std.fmt.parseInt(u64, result.string, 10) catch 0;
+        std.log.info("Latest Checkpoint: {d}", .{seq_num});
+    }
+}
+
+fn cmdEpoch(allocator: Allocator, _: []const []const u8) !void {
+    const rpc_url = getRpcUrl() orelse "https://fullnode.mainnet.sui.io:443";
+
+    var rpc_client = try SuiRpcClient.init(allocator, rpc_url);
+    defer rpc_client.deinit();
+
+    const response = try rpc_client.call("suix_getLatestSuiSystemState", "[]");
+    defer allocator.free(response);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, response, .{});
+    defer parsed.deinit();
+
+    if (parsed.value.object.get("result")) |result| {
+        if (result.object.get("epoch")) |epoch| {
+            const epoch_num: u64 = if (epoch == .integer)
+                @intCast(epoch.integer)
+            else
+                std.fmt.parseInt(u64, epoch.string, 10) catch 0;
+            std.log.info("Current Epoch: {d}", .{epoch_num});
+        }
+        if (result.object.get("epochDurationMs")) |duration| {
+            const duration_num: u64 = if (duration == .integer)
+                @intCast(duration.integer)
+            else
+                std.fmt.parseInt(u64, duration.string, 10) catch 0;
+            std.log.info("Epoch Duration: {d} ms", .{duration_num});
+        }
+        if (result.object.get("epochStartTimestampMs")) |start| {
+            const start_num: u64 = if (start == .integer)
+                @intCast(start.integer)
+            else
+                std.fmt.parseInt(u64, start.string, 10) catch 0;
+            std.log.info("Epoch Start: {d} ms", .{start_num});
+        }
+        if (result.object.get("protocolVersion")) |protocol| {
+            const protocol_num: u64 = if (protocol == .integer)
+                @intCast(protocol.integer)
+            else
+                std.fmt.parseInt(u64, protocol.string, 10) catch 0;
+            std.log.info("Protocol Version: {d}", .{protocol_num});
+        }
+    }
+}
+
+fn cmdGas(allocator: Allocator, args: []const []const u8) !void {
+    if (args.len < 1) {
+        std.log.err("Usage: gas <address>", .{});
+        std.process.exit(1);
+    }
+
+    const address = args[0];
+    const rpc_url = getRpcUrl() orelse "https://fullnode.mainnet.sui.io:443";
+
+    var rpc_client = try SuiRpcClient.init(allocator, rpc_url);
+    defer rpc_client.deinit();
+
+    // Use suix_getCoins with SUI type to get gas objects
+    const params = try std.fmt.allocPrint(
+        allocator,
+        "[\"{s}\",\"0x2::sui::SUI\",null,50]",
+        .{address},
+    );
+    defer allocator.free(params);
+
+    const response = try rpc_client.call("suix_getCoins", params);
+    defer allocator.free(response);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, response, .{});
+    defer parsed.deinit();
+
+    std.log.info("Address: {s}", .{address});
+
+    if (parsed.value.object.get("result")) |result| {
+        if (result.object.get("data")) |data| {
+            if (data == .array) {
+                std.log.info("Gas Objects (SUI): {d}", .{data.array.items.len});
+
+                for (data.array.items, 0..) |item, i| {
+                    const coin_object_id = item.object.get("coinObjectId") orelse continue;
+                    const balance = item.object.get("balance") orelse continue;
+
+                    const balance_num: u64 = if (balance == .integer)
+                        @intCast(balance.integer)
+                    else
+                        std.fmt.parseInt(u64, balance.string, 10) catch 0;
+
+                    std.log.info("  {d}. {s}", .{ i + 1, coin_object_id.string });
+                    std.log.info("      Balance: {d} MIST", .{balance_num});
+                }
+            }
+        }
+    }
+}
+
+fn cmdChain(allocator: Allocator, _: []const []const u8) !void {
+    const rpc_url = getRpcUrl() orelse "https://fullnode.mainnet.sui.io:443";
+
+    var rpc_client = try SuiRpcClient.init(allocator, rpc_url);
+    defer rpc_client.deinit();
+
+    const response = try rpc_client.call("sui_getChainIdentifier", "[]");
+    defer allocator.free(response);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, response, .{});
+    defer parsed.deinit();
+
+    if (parsed.value.object.get("result")) |result| {
+        if (result == .string) {
+            std.log.info("Chain Identifier: {s}", .{result.string});
+        }
+    }
+}
