@@ -5,7 +5,7 @@ const parsed_args = @import("parsed_args.zig");
 
 const ParsedArgs = parsed_args.ParsedArgs;
 
-/// Validation error
+/// Validation error with detailed messages
 pub const ValidationError = error{
     MissingRequiredArgument,
     InvalidArgumentValue,
@@ -16,6 +16,118 @@ pub const ValidationError = error{
     InvalidJson,
     InvalidCommandCombination,
 };
+
+/// Error details for user-friendly messages
+pub const ErrorDetails = struct {
+    error_type: ValidationError,
+    field: ?[]const u8 = null,
+    value: ?[]const u8 = null,
+    suggestion: ?[]const u8 = null,
+
+    /// Format error message for display
+    pub fn format(self: ErrorDetails, allocator: std.mem.Allocator) ![]const u8 {
+        var parts = std.ArrayList([]const u8).init(allocator);
+        defer parts.deinit();
+
+        // Error type message
+        const type_msg = switch (self.error_type) {
+            ValidationError.MissingRequiredArgument => "Missing required argument",
+            ValidationError.InvalidArgumentValue => "Invalid argument value",
+            ValidationError.InvalidAddress => "Invalid Sui address format",
+            ValidationError.InvalidObjectId => "Invalid object ID format",
+            ValidationError.InvalidPackageId => "Invalid package ID format",
+            ValidationError.InvalidHexString => "Invalid hexadecimal string",
+            ValidationError.InvalidJson => "Invalid JSON format",
+            ValidationError.InvalidCommandCombination => "Invalid command combination",
+        };
+        try parts.append(type_msg);
+
+        // Field info
+        if (self.field) |field| {
+            try parts.append(try std.fmt.allocPrint(allocator, " for field: {s}", .{field}));
+        }
+
+        // Value info
+        if (self.value) |value| {
+            try parts.append(try std.fmt.allocPrint(allocator, " (got: '{s}')", .{value}));
+        }
+
+        // Suggestion
+        if (self.suggestion) |suggestion| {
+            try parts.append(try std.fmt.allocPrint(allocator, "\n💡 {s}", .{suggestion}));
+        }
+
+        return std.mem.join(allocator, "", parts.items);
+    }
+};
+
+/// Create error details for missing argument
+pub fn missingArgumentError(field: []const u8, suggestion: ?[]const u8) ErrorDetails {
+    return .{
+        .error_type = ValidationError.MissingRequiredArgument,
+        .field = field,
+        .suggestion = suggestion,
+    };
+}
+
+/// Create error details for invalid value
+pub fn invalidValueError(field: []const u8, value: []const u8, suggestion: ?[]const u8) ErrorDetails {
+    return .{
+        .error_type = ValidationError.InvalidArgumentValue,
+        .field = field,
+        .value = value,
+        .suggestion = suggestion,
+    };
+}
+
+/// Create error details for invalid address
+pub fn invalidAddressError(value: []const u8) ErrorDetails {
+    return .{
+        .error_type = ValidationError.InvalidAddress,
+        .field = "address",
+        .value = value,
+        .suggestion = "Address must be 0x followed by 64 hex characters (e.g., 0x1234...)",
+    };
+}
+
+/// Create error details for invalid object ID
+pub fn invalidObjectIdError(value: []const u8) ErrorDetails {
+    return .{
+        .error_type = ValidationError.InvalidObjectId,
+        .field = "object_id",
+        .value = value,
+        .suggestion = "Object ID must be 0x followed by 64 hex characters",
+    };
+}
+
+/// Create error details for invalid package ID
+pub fn invalidPackageIdError(value: []const u8) ErrorDetails {
+    return .{
+        .error_type = ValidationError.InvalidPackageId,
+        .field = "package",
+        .value = value,
+        .suggestion = "Package ID must be 0x followed by 64 hex characters",
+    };
+}
+
+/// Create error details for invalid JSON
+pub fn invalidJsonError(value: []const u8) ErrorDetails {
+    return .{
+        .error_type = ValidationError.InvalidJson,
+        .field = "json",
+        .value = if (value.len > 50) value[0..50] else value,
+        .suggestion = "Ensure the JSON is properly formatted with matching braces and quotes",
+    };
+}
+
+/// Create error details for invalid command combination
+pub fn invalidCommandCombinationError(flags: []const u8, suggestion: ?[]const u8) ErrorDetails {
+    return .{
+        .error_type = ValidationError.InvalidCommandCombination,
+        .value = flags,
+        .suggestion = suggestion,
+    };
+}
 
 /// Validate parsed arguments
 pub fn validateArgs(args: *const ParsedArgs) ValidationError!void {
@@ -473,4 +585,220 @@ test "validateTimeout validates ranges" {
 
     try testing.expectError(ValidationError.InvalidArgumentValue, validateTimeout(0));
     try testing.expectError(ValidationError.InvalidArgumentValue, validateTimeout(601_000));
+}
+
+// Error details tests
+
+test "ErrorDetails format includes all fields" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const error_details = ErrorDetails{
+        .error_type = ValidationError.InvalidAddress,
+        .field = "sender",
+        .value = "invalid_addr",
+        .suggestion = "Use a valid Sui address",
+    };
+
+    const msg = try error_details.format(allocator);
+    defer allocator.free(msg);
+
+    try testing.expect(std.mem.indexOf(u8, msg, "Invalid Sui address format") != null);
+    try testing.expect(std.mem.indexOf(u8, msg, "sender") != null);
+    try testing.expect(std.mem.indexOf(u8, msg, "invalid_addr") != null);
+    try testing.expect(std.mem.indexOf(u8, msg, "Use a valid Sui address") != null);
+}
+
+test "missingArgumentError creates correct error" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const error_details = missingArgumentError("private_key", "Use --private-key to provide the key");
+    const msg = try error_details.format(allocator);
+    defer allocator.free(msg);
+
+    try testing.expect(std.mem.indexOf(u8, msg, "Missing required argument") != null);
+    try testing.expect(std.mem.indexOf(u8, msg, "private_key") != null);
+}
+
+test "invalidAddressError creates correct error" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const error_details = invalidAddressError("bad_addr");
+    const msg = try error_details.format(allocator);
+    defer allocator.free(msg);
+
+    try testing.expect(std.mem.indexOf(u8, msg, "Invalid Sui address format") != null);
+    try testing.expect(std.mem.indexOf(u8, msg, "bad_addr") != null);
+    try testing.expect(std.mem.indexOf(u8, msg, "64 hex characters") != null);
+}
+
+test "invalidJsonError truncates long values" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const long_json = "{" ++ "a" ** 100 ++ "}";
+    const error_details = invalidJsonError(long_json);
+    const msg = try error_details.format(allocator);
+    defer allocator.free(msg);
+
+    // Should be truncated to 50 chars
+    try testing.expect(msg.len < long_json.len + 100);
+}
+
+// Additional validation tests
+
+test "isValidHexOrBase64 rejects invalid characters" {
+    const testing = std.testing;
+
+    try testing.expect(!isValidHexOrBase64("0x123g")); // Invalid hex
+    try testing.expect(!isValidHexOrBase64("0x")); // Empty hex
+    try testing.expect(!isValidHexOrBase64("test@#$")); // Invalid base64 chars
+}
+
+test "isValidJson handles nested structures" {
+    const testing = std.testing;
+
+    try testing.expect(isValidJson("{\"a\":{\"b\":{\"c\":1}}}"));
+    try testing.expect(isValidJson("[{\"a\":1},{\"b\":2}]"));
+    try testing.expect(isValidJson("null"));
+    try testing.expect(isValidJson("true"));
+    try testing.expect(isValidJson("123.456"));
+}
+
+test "isValidJson rejects malformed structures" {
+    const testing = std.testing;
+
+    try testing.expect(!isValidJson("{\"a\":}")); // Missing value
+    try testing.expect(!isValidJson("{\"a\":1,}")); // Trailing comma
+    try testing.expect(!isValidJson("[1,2,}")); // Mismatched brackets
+    try testing.expect(!isValidJson("\"unclosed string")); // Unclosed quote
+}
+
+test "validateAccountInfoArgs with valid address" {
+    const testing = std.testing;
+
+    const args = ParsedArgs{
+        .command = .account_info,
+        .account_selector = "0x" ++ "1" ** 64,
+    };
+    try validateAccountInfoArgs(&args);
+}
+
+test "validateAccountInfoArgs with invalid address" {
+    const testing = std.testing;
+
+    const args = ParsedArgs{
+        .command = .account_info,
+        .account_selector = "invalid_address",
+    };
+    try testing.expectError(ValidationError.InvalidAddress, validateAccountInfoArgs(&args));
+}
+
+test "validateTxSendArgs with valid tx_bytes" {
+    const testing = std.testing;
+
+    const args = ParsedArgs{
+        .command = .tx_send,
+        .tx_bytes = "0x" ++ "1" ** 64,
+    };
+    try validateTxSendArgs(&args);
+}
+
+test "validateTxSendArgs with invalid tx_bytes" {
+    const testing = std.testing;
+
+    const args = ParsedArgs{
+        .command = .tx_send,
+        .tx_bytes = "not_valid!!!",
+    };
+    try testing.expectError(ValidationError.InvalidArgumentValue, validateTxSendArgs(&args));
+}
+
+test "validateMoveModuleArgs validates package ID" {
+    const testing = std.testing;
+
+    const args = ParsedArgs{
+        .command = .move_module,
+        .move_package = "invalid_package",
+        .move_module = "test",
+    };
+    try testing.expectError(ValidationError.InvalidPackageId, validateMoveModuleArgs(&args));
+}
+
+test "validateMoveFunctionArgs validates all IDs" {
+    const testing = std.testing;
+
+    const args = ParsedArgs{
+        .command = .move_function,
+        .move_package = "invalid",
+        .move_module = "test",
+        .move_function = "func",
+    };
+    try testing.expectError(ValidationError.InvalidPackageId, validateMoveFunctionArgs(&args));
+}
+
+test "validateObjectGetArgs validates object ID format" {
+    const testing = std.testing;
+
+    const args = ParsedArgs{
+        .command = .object_get,
+        .object_id = "too_short",
+    };
+    try testing.expectError(ValidationError.InvalidObjectId, validateObjectGetArgs(&args));
+}
+
+test "validateRpcArgs validates JSON params" {
+    const testing = std.testing;
+
+    const args = ParsedArgs{
+        .command = .rpc,
+        .method = "test_method",
+        .params = "not valid json",
+    };
+    try testing.expectError(ValidationError.InvalidJson, validateRpcArgs(&args));
+}
+
+test "validateCommandCombination with valid combos" {
+    const testing = std.testing;
+
+    const args1 = ParsedArgs{
+        .command = .tx_send,
+        .tx_send_wait = true,
+        .tx_send_summarize = true,
+    };
+    try validateCommandCombination(&args1);
+
+    const args2 = ParsedArgs{
+        .command = .tx_send,
+        .tx_send_observe = true,
+    };
+    try validateCommandCombination(&args2);
+}
+
+test "validateGasBudget boundary values" {
+    const testing = std.testing;
+
+    // Minimum valid
+    try validateGasBudget(1);
+
+    // Maximum valid
+    try validateGasBudget(1_000_000_000);
+
+    // Just over limit
+    try testing.expectError(ValidationError.InvalidArgumentValue, validateGasBudget(1_000_000_001));
+}
+
+test "validateTimeout boundary values" {
+    const testing = std.testing;
+
+    // Minimum valid
+    try validateTimeout(1);
+
+    // Maximum valid
+    try validateTimeout(600_000);
+
+    // Just over limit
+    try testing.expectError(ValidationError.InvalidArgumentValue, validateTimeout(600_001));
 }

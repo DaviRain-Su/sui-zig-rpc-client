@@ -3,6 +3,102 @@ const std = @import("std");
 
 pub const default_rpc_url = "https://fullnode.mainnet.sui.io:443";
 
+/// Detailed CLI error types with descriptive messages
+pub const CliError = error{
+    /// Invalid command line arguments
+    InvalidCli,
+    /// Missing required argument
+    MissingArgument,
+    /// Invalid argument value
+    InvalidArgumentValue,
+    /// Unknown command
+    UnknownCommand,
+    /// Missing command
+    MissingCommand,
+    /// Invalid address format
+    InvalidAddress,
+    /// Invalid object ID format
+    InvalidObjectId,
+    /// Invalid package ID format
+    InvalidPackageId,
+    /// Invalid JSON format
+    InvalidJson,
+    /// Network error
+    NetworkError,
+    /// Timeout error
+    Timeout,
+    /// Out of memory
+    OutOfMemory,
+};
+
+/// Error context for detailed error messages
+pub const ErrorContext = struct {
+    error_type: CliError,
+    message: []const u8,
+    suggestion: ?[]const u8 = null,
+
+    /// Format error message for display
+    pub fn format(self: ErrorContext, allocator: std.mem.Allocator) ![]const u8 {
+        if (self.suggestion) |suggestion| {
+            return std.fmt.allocPrint(allocator, "Error: {s}\n{s}\nSuggestion: {s}", .{
+                @errorName(self.error_type),
+                self.message,
+                suggestion,
+            });
+        } else {
+            return std.fmt.allocPrint(allocator, "Error: {s}\n{s}", .{
+                @errorName(self.error_type),
+                self.message,
+            });
+        }
+    }
+};
+
+/// Create error context for missing argument
+pub fn missingArgumentError(arg_name: []const u8) ErrorContext {
+    return .{
+        .error_type = CliError.MissingArgument,
+        .message = std.fmt.comptimePrint("Missing required argument: {s}", .{arg_name}),
+        .suggestion = std.fmt.comptimePrint("Use --{s} <value> to provide this argument", .{arg_name}),
+    };
+}
+
+/// Create error context for invalid value
+pub fn invalidValueError(arg_name: []const u8, value: []const u8, expected: []const u8) ErrorContext {
+    return .{
+        .error_type = CliError.InvalidArgumentValue,
+        .message = std.fmt.comptimePrint("Invalid value '{s}' for argument {s}", .{ value, arg_name }),
+        .suggestion = std.fmt.comptimePrint("Expected: {s}", .{expected}),
+    };
+}
+
+/// Create error context for unknown command
+pub fn unknownCommandError(cmd: []const u8) ErrorContext {
+    return .{
+        .error_type = CliError.UnknownCommand,
+        .message = std.fmt.comptimePrint("Unknown command: {s}", .{cmd}),
+        .suggestion = "Use 'help' to see available commands",
+    };
+}
+
+/// Create error context for invalid address
+pub fn invalidAddressError(addr: []const u8) ErrorContext {
+    return .{
+        .error_type = CliError.InvalidAddress,
+        .message = std.fmt.comptimePrint("Invalid Sui address format: {s}", .{addr}),
+        .suggestion = "Address must start with '0x' followed by 64 hex characters",
+    };
+}
+
+/// Create error context for invalid object ID
+pub fn invalidObjectIdError(id: []const u8) ErrorContext {
+    return .{
+        .error_type = CliError.InvalidObjectId,
+        .message = std.fmt.comptimePrint("Invalid object ID format: {s}", .{id}),
+        .suggestion = "Object ID must start with '0x' followed by hex characters",
+    };
+}
+
 /// Main command enum
 pub const Command = enum {
     help,
