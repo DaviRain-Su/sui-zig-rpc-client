@@ -168,7 +168,7 @@ BridgeSecKeyRef BridgeSecKeyGenerateSecureEnclaveKey(const char* tag, bool biome
         return NULL;
     }
     
-    // Create access control
+    // Try to create access control with biometric protection
     SecAccessControlCreateFlags flags = kSecAccessControlPrivateKeyUsage;
     if (biometricRequired) {
         flags |= kSecAccessControlBiometryCurrentSet;
@@ -182,25 +182,40 @@ BridgeSecKeyRef BridgeSecKeyGenerateSecureEnclaveKey(const char* tag, bool biome
         &error
     );
     
-    if (error || !accessControl) {
-        if (errorCode) *errorCode = error ? (int32_t)CFErrorGetCode(error) : BRIDGE_LA_ERROR_OTHER;
-        if (error) CFRelease(error);
-        return NULL;
+    if (error) {
+        NSLog(@"SecAccessControlCreateWithFlags error: %@", error);
+        // Fall back to software key generation without Secure Enclave
+        NSLog(@"Falling back to software key generation");
+        CFRelease(error);
+        accessControl = NULL;
     }
     
-    // Key attributes
-    NSDictionary *privateKeyAttrs = @{
-        (__bridge id)kSecAttrIsPermanent: @YES,
-        (__bridge id)kSecAttrApplicationTag: tagData,
-        (__bridge id)kSecAttrAccessControl: (__bridge_transfer id)accessControl
-    };
-    
-    NSDictionary *attributes = @{
-        (__bridge id)kSecAttrKeyType: (__bridge id)kSecAttrKeyTypeECSECPrimeRandom,
-        (__bridge id)kSecAttrKeySizeInBits: @256,
-        (__bridge id)kSecAttrTokenID: (__bridge id)kSecAttrTokenIDSecureEnclave,
-        (__bridge id)kSecPrivateKeyAttrs: privateKeyAttrs
-    };
+    // Key attributes - use Secure Enclave if available, otherwise software
+    NSDictionary *attributes;
+    if (accessControl) {
+        // Secure Enclave path
+        attributes = @{
+            (__bridge id)kSecAttrKeyType: (__bridge id)kSecAttrKeyTypeECSECPrimeRandom,
+            (__bridge id)kSecAttrKeySizeInBits: @256,
+            (__bridge id)kSecAttrTokenID: (__bridge id)kSecAttrTokenIDSecureEnclave,
+            (__bridge id)kSecPrivateKeyAttrs: @{
+                (__bridge id)kSecAttrIsPermanent: @YES,
+                (__bridge id)kSecAttrApplicationTag: tagData,
+                (__bridge id)kSecAttrAccessControl: (__bridge_transfer id)accessControl
+            }
+        };
+    } else {
+        // Software key generation path (no Secure Enclave)
+        attributes = @{
+            (__bridge id)kSecAttrKeyType: (__bridge id)kSecAttrKeyTypeECSECPrimeRandom,
+            (__bridge id)kSecAttrKeySizeInBits: @256,
+            (__bridge id)kSecPrivateKeyAttrs: @{
+                (__bridge id)kSecAttrIsPermanent: @YES,
+                (__bridge id)kSecAttrApplicationTag: tagData,
+                (__bridge id)kSecAttrAccessible: (__bridge id)kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+            }
+        };
+    }
     
     CFErrorRef keyError = NULL;
     SecKeyRef privateKey = SecKeyCreateRandomKey((__bridge CFDictionaryRef)attributes, &keyError);

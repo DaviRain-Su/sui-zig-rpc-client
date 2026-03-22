@@ -166,14 +166,20 @@ fn cmdCreate(allocator: Allocator, args: []const []const u8) !void {
     if (private_key == null) {
         const err_msg = c.GetErrorMessage(error_code);
         defer c.FreeString(err_msg);
-        std.log.err("Failed to generate key: {s}", .{err_msg});
+        std.log.err("Failed to generate key: {s} (code: {d})", .{ err_msg, error_code });
         std.log.info("", .{});
-        std.log.info("Note: Secure Enclave key generation requires:", .{});
-        std.log.info("  - Signed binary with proper entitlements", .{});
-        std.log.info("  - Or running as a proper app bundle", .{});
+        std.log.info("Note: Key generation failed. Error code {d} indicates:", .{error_code});
+        if (error_code == -34018) {
+            std.log.info("  - Missing entitlements for Secure Enclave", .{});
+            std.log.info("  - Requires Apple Developer certificate (not ad-hoc)", .{});
+        } else if (error_code == -50) {
+            std.log.info("  - Invalid parameters (likely nil in dictionary)", .{});
+        } else {
+            std.log.info("  - See Security/SecBase.h for error code details", .{});
+        }
         std.log.info("", .{});
         std.log.info("Touch ID authentication is working correctly!", .{});
-        std.log.info("Key generation requires additional setup.", .{});
+        std.log.info("Key generation requires proper code signing.", .{});
         return;
     }
     defer c.BridgeSecKeyRelease(private_key);
