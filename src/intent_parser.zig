@@ -205,7 +205,7 @@ fn callClaudeApi(
     defer allocator.free(request_body);
 
     // Try to call Claude API using project's HTTP infrastructure
-    const api_result = callClaudeApi(allocator, request_body, api_key) catch |err| {
+    var api_result = callHttpClaudeApi(allocator, request_body, api_key) catch |err| {
         std.log.warn("Claude API call failed ({}), falling back to mock parser", .{err});
         // Fall back to mock response for common queries
         return try mockParseIntent(allocator, query);
@@ -213,7 +213,7 @@ fn callClaudeApi(
     defer {
         allocator.free(api_result.body);
         if (api_result.response) |r| r.deinit();
-    };
+    }
 
     // Parse Claude API response
     return parseClaudeResponse(allocator, api_result.body) catch |err| {
@@ -229,7 +229,7 @@ const ApiResult = struct {
 };
 
 /// Call Claude API using std.http.Client
-fn callClaudeApi(
+fn callHttpClaudeApi(
     allocator: std.mem.Allocator,
     request_body: []const u8,
     api_key: []const u8,
@@ -294,16 +294,16 @@ fn parseClaudeResponse(allocator: std.mem.Allocator, response_body: []const u8) 
 
     // Try to parse as JSON intent
     const intent = std.json.parseFromSlice(IntentResult, allocator, text, .{}) catch {
-        // If not valid JSON, treat as raw text and try to extract intent
-        return try extractIntentFromText(allocator, text);
+        // If not valid JSON, return unsupported
+        return IntentResult{
+            .unsupported = try allocator.dupe(u8, "failed to parse intent from response"),
+        };
     };
     defer intent.deinit();
 
-    // Clone the result to return owned memory
-    return try cloneIntentResult(allocator, intent.value);
+    // Return the parsed intent
+    return intent.value;
 }
-
-
 
 /// 构建 prompt
 fn buildPrompt(allocator: std.mem.Allocator, query: []const u8) ![]u8 {

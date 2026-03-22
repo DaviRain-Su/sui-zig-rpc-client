@@ -21,8 +21,8 @@ pub const KeychainError = error{
 /// Software key pair stored in Keychain
 pub const SoftwareKeyPair = struct {
     tag: []const u8,
-    public_key: [32]u8,  // Ed25519 public key
-    secret_key: [32]u8,  // Ed25519 secret key (encrypted in Keychain)
+    public_key: [32]u8, // Ed25519 public key
+    secret_key: [32]u8, // Ed25519 secret key (encrypted in Keychain)
 };
 
 /// Generate a new software key pair protected by Keychain
@@ -33,21 +33,21 @@ pub fn generateSoftwareKeyPair(
 ) !SoftwareKeyPair {
     // Generate Ed25519 key pair using Zig's crypto
     const Ed25519 = std.crypto.sign.Ed25519;
-    
+
     // Generate random seed
     var seed: [32]u8 = undefined;
     std.crypto.random.bytes(&seed);
-    
+
     // Create key pair
     const kp = try Ed25519.KeyPair.generateDeterministic(seed);
-    
+
     // Store in Keychain
     try storeKeyInKeychain(tag, &seed, require_touch_id);
-    
+
     return SoftwareKeyPair{
         .tag = try allocator.dupe(u8, tag),
         .public_key = kp.public_key.bytes,
-        .secret_key = seed,  // Keep seed for now (should encrypt)
+        .secret_key = seed, // Keep seed for now (should encrypt)
     };
 }
 
@@ -57,12 +57,12 @@ fn storeKeyInKeychain(tag: []const u8, seed: *[32]u8, require_touch_id: bool) !v
     const tag_ns = c.NSStringCreateWithUTF8(tag.ptr);
     if (tag_ns == null) return KeychainError.KeyStorageFailed;
     defer c.NSStringRelease(tag_ns);
-    
+
     // Convert seed to NSData
     const seed_data = c.NSDataCreateWithBytes(seed.ptr, seed.len);
     if (seed_data == null) return KeychainError.KeyStorageFailed;
     defer c.NSDataRelease(seed_data);
-    
+
     // Create query for Keychain
     var error_code: c_int = 0;
     const success = c.StoreKeyInKeychain(
@@ -71,7 +71,7 @@ fn storeKeyInKeychain(tag: []const u8, seed: *[32]u8, require_touch_id: bool) !v
         require_touch_id,
         &error_code,
     );
-    
+
     if (!success) {
         std.log.err("Keychain storage failed with error: {d}", .{error_code});
         return KeychainError.KeyStorageFailed;
@@ -86,23 +86,23 @@ pub fn loadKeyFromKeychain(
     const tag_ns = c.NSStringCreateWithUTF8(tag.ptr);
     if (tag_ns == null) return KeychainError.KeyRetrievalFailed;
     defer c.NSStringRelease(tag_ns);
-    
+
     var error_code: c_int = 0;
     const seed_data = c.LoadKeyFromKeychain(tag_ns, &error_code);
-    
+
     if (seed_data == null) {
         std.log.err("Keychain retrieval failed with error: {d}", .{error_code});
         return KeychainError.KeyRetrievalFailed;
     }
     defer c.NSDataRelease(seed_data);
-    
+
     const len = c.NSDataGetLength(seed_data);
     if (len != 32) return KeychainError.InvalidKeyFormat;
-    
+
     const bytes = c.NSDataGetBytes(seed_data);
     var seed: [32]u8 = undefined;
     @memcpy(&seed, bytes[0..32]);
-    
+
     return seed;
 }
 
@@ -111,10 +111,10 @@ pub fn deleteKeyFromKeychain(tag: []const u8) !void {
     const tag_ns = c.NSStringCreateWithUTF8(tag.ptr);
     if (tag_ns == null) return KeychainError.KeyDeletionFailed;
     defer c.NSStringRelease(tag_ns);
-    
+
     var error_code: c_int = 0;
     const success = c.DeleteKeyFromKeychain(tag_ns, &error_code);
-    
+
     if (!success) {
         std.log.err("Keychain deletion failed with error: {d}", .{error_code});
         return KeychainError.KeyDeletionFailed;
@@ -126,7 +126,7 @@ pub fn isTouchIDAvailable() bool {
     const context = c.LAContextCreate();
     if (context == null) return false;
     defer c.LAContextRelease(context);
-    
+
     var error_code: c_int = 0;
     return c.LAContextCanEvaluatePolicy(
         context,
@@ -153,14 +153,14 @@ pub fn promptTouchID(reason: []const u8) !bool {
 // Test functions
 test "Software key generation" {
     const allocator = std.testing.allocator;
-    
+
     const tag = "test-key-" ++ std.time.milliTimestamp();
     const keypair = try generateSoftwareKeyPair(allocator, tag, false);
     defer allocator.free(keypair.tag);
-    
+
     try std.testing.expectEqual(keypair.public_key.len, 32);
     try std.testing.expectEqual(keypair.secret_key.len, 32);
-    
+
     // Clean up
     deleteKeyFromKeychain(tag) catch {};
 }
