@@ -6,123 +6,115 @@
 #import <Foundation/Foundation.h>
 #import "macos_bridge.h"
 
-// MARK: - Type Mappings
-
-// Map our bridge types to system types
-static LAPolicy MapPolicy(BridgeLAPolicy policy) {
-    switch (policy) {
-        case BRIDGE_POLICY_DEVICE_OWNER_AUTHENTICATION:
-            return LAPolicyDeviceOwnerAuthentication;
-        case BRIDGE_POLICY_DEVICE_OWNER_AUTHENTICATION_WITH_BIOMETRICS:
-            return LAPolicyDeviceOwnerAuthenticationWithBiometrics;
-        case BRIDGE_POLICY_DEVICE_OWNER_AUTHENTICATION_WITH_WATCH:
-            return LAPolicyDeviceOwnerAuthenticationWithWatch;
-        default:
-            return LAPolicyDeviceOwnerAuthentication;
-    }
-}
-
-static BridgeBiometryType MapBiometryType(LABiometryType type) {
-    switch (type) {
-        case LABiometryTypeTouchID:
-            return BRIDGE_BIOMETRY_TYPE_TOUCH_ID;
-        case LABiometryTypeFaceID:
-            return BRIDGE_BIOMETRY_TYPE_FACE_ID;
-        case LABiometryTypeOpticID:
-            return BRIDGE_BIOMETRY_TYPE_OPTIC_ID;
-        default:
-            return BRIDGE_BIOMETRY_TYPE_NONE;
-    }
-}
-
-static int32_t MapErrorCode(NSError *error) {
-    if (!error) return BRIDGE_LA_ERROR_SUCCESS;
-    
-    switch (error.code) {
-        case LAErrorAuthenticationFailed:
-            return BRIDGE_LA_ERROR_AUTHENTICATION_FAILED;
-        case LAErrorUserCancel:
-            return BRIDGE_LA_ERROR_USER_CANCEL;
-        case LAErrorUserFallback:
-            return BRIDGE_LA_ERROR_USER_FALLBACK;
-        case LAErrorBiometryNotAvailable:
-            return BRIDGE_LA_ERROR_BIOMETRY_NOT_AVAILABLE;
-        case LAErrorBiometryNotEnrolled:
-            return BRIDGE_LA_ERROR_BIOMETRY_NOT_ENROLLED;
-        case LAErrorBiometryLockout:
-            return BRIDGE_LA_ERROR_BIOMETRY_LOCKOUT;
-        case LAErrorInvalidContext:
-            return BRIDGE_LA_ERROR_INVALID_CONTEXT;
-        case LAErrorNotInteractive:
-            return BRIDGE_LA_ERROR_NOT_INTERACTIVE;
-        case LAErrorWatchNotAvailable:
-            return BRIDGE_LA_ERROR_WATCH_NOT_AVAILABLE;
-        case LAErrorBiometryNotPaired:
-            return BRIDGE_LA_ERROR_BIOMETRY_NOT_PREFERRED;
-        case LAErrorPasscodeNotSet:
-            return BRIDGE_LA_ERROR_PASSCODE_NOT_SET;
-        case LAErrorSystemCancel:
-            return BRIDGE_LA_ERROR_SYSTEM_CANCEL;
-        default:
-            return BRIDGE_LA_ERROR_OTHER;
-    }
-}
-
 // MARK: - LAContext Implementation
 
 LAContextRef LAContextCreate(void) {
     LAContext *context = [[LAContext alloc] init];
-    return (LAContextRef)CFBridgingRetain(context);
+    return (__bridge_retained LAContextRef)context;
 }
 
 void LAContextRelease(LAContextRef context) {
     if (context) {
-        CFRelease(context);
+        LAContext *ctx = (__bridge_transfer LAContext *)context;
+        (void)ctx; // ARC handles release
     }
 }
 
-bool LAContextCanEvaluatePolicy(LAContextRef context, BridgeLAPolicy policy, int32_t* errorCode) {
+bool LAContextCanEvaluatePolicy(LAContextRef context, LAPolicy policy, int32_t* errorCode) {
     if (!context) return false;
     
     LAContext *ctx = (__bridge LAContext *)context;
     NSError *error = nil;
     
-    BOOL canEvaluate = [ctx canEvaluatePolicy:MapPolicy(policy) error:&error];
+    LAPolicy laPolicy;
+    switch (policy) {
+        case POLICY_DEVICE_OWNER_AUTHENTICATION:
+            laPolicy = LAPolicyDeviceOwnerAuthentication;
+            break;
+        case POLICY_DEVICE_OWNER_AUTHENTICATION_WITH_BIOMETRICS:
+            laPolicy = LAPolicyDeviceOwnerAuthenticationWithBiometrics;
+            break;
+        case POLICY_DEVICE_OWNER_AUTHENTICATION_WITH_WATCH:
+            laPolicy = LAPolicyDeviceOwnerAuthenticationWithWatch;
+            break;
+        default:
+            if (errorCode) *errorCode = LA_ERROR_INVALID_CONTEXT;
+            return false;
+    }
     
-    if (errorCode) {
-        *errorCode = MapErrorCode(error);
+    BOOL canEvaluate = [ctx canEvaluatePolicy:laPolicy error:&error];
+    
+    if (error && errorCode) {
+        *errorCode = (int32_t)error.code;
+    } else if (!canEvaluate && errorCode) {
+        *errorCode = LA_ERROR_BIOMETRY_NOT_AVAILABLE;
+    } else if (errorCode) {
+        *errorCode = LA_ERROR_SUCCESS;
     }
     
     return canEvaluate ? true : false;
 }
 
-void LAContextEvaluatePolicy(LAContextRef context, BridgeLAPolicy policy, const char* localizedReason, 
+void LAContextEvaluatePolicy(LAContextRef context, LAPolicy policy, const char* localizedReason, 
                               void (*completion)(bool success, int32_t errorCode)) {
     if (!context || !localizedReason || !completion) {
-        if (completion) completion(false, BRIDGE_LA_ERROR_INVALID_CONTEXT);
+        if (completion) completion(false, LA_ERROR_INVALID_CONTEXT);
         return;
     }
     
     LAContext *ctx = (__bridge LAContext *)context;
     NSString *reason = [NSString stringWithUTF8String:localizedReason];
     
-    [ctx evaluatePolicy:MapPolicy(policy) localizedReason:reason reply:^(BOOL success, NSError *error) {
-        completion(success ? true : false, MapErrorCode(error));
+    LAPolicy laPolicy;
+    switch (policy) {
+        case POLICY_DEVICE_OWNER_AUTHENTICATION:
+            laPolicy = LAPolicyDeviceOwnerAuthentication;
+            break;
+        case POLICY_DEVICE_OWNER_AUTHENTICATION_WITH_BIOMETRICS:
+            laPolicy = LAPolicyDeviceOwnerAuthenticationWithBiometrics;
+            break;
+        case POLICY_DEVICE_OWNER_AUTHENTICATION_WITH_WATCH:
+            laPolicy = LAPolicyDeviceOwnerAuthenticationWithWatch;
+            break;
+        default:
+            completion(false, LA_ERROR_INVALID_CONTEXT);
+            return;
+    }
+    
+    [ctx evaluatePolicy:laPolicy localizedReason:reason reply:^(BOOL success, NSError *error) {
+        int32_t errorCode = LA_ERROR_SUCCESS;
+        if (error) {
+            errorCode = (int32_t)error.code;
+        } else if (!success) {
+            errorCode = LA_ERROR_AUTHENTICATION_FAILED;
+        }
+        completion(success ? true : false, errorCode);
     }];
 }
 
-BridgeBiometryType LAContextGetBiometryType(LAContextRef context) {
-    if (!context) return BRIDGE_BIOMETRY_TYPE_NONE;
+BiometryType LAContextGetBiometryType(LAContextRef context) {
+    if (!context) return BIOMETRY_TYPE_NONE;
     
     LAContext *ctx = (__bridge LAContext *)context;
-    return MapBiometryType(ctx.biometryType);
+    LABiometryType type = ctx.biometryType;
+    
+    switch (type) {
+        case LABiometryTypeTouchID:
+            return BIOMETRY_TYPE_TOUCH_ID;
+        case LABiometryTypeFaceID:
+            return BIOMETRY_TYPE_FACE_ID;
+        case LABiometryTypeOpticID:
+            return BIOMETRY_TYPE_OPTIC_ID;
+        default:
+            return BIOMETRY_TYPE_NONE;
+    }
 }
 
 // MARK: - Secure Enclave Key Generation
 
-BridgeSecKeyRef BridgeSecKeyGenerateSecureEnclaveKey(const char* tag, bool biometricRequired, int32_t* errorCode) {
+SecKeyRef SecKeyGenerateSecureEnclaveKey(const char* tag, bool biometricRequired, int32_t* errorCode) {
     if (!tag) {
-        if (errorCode) *errorCode = BRIDGE_LA_ERROR_INVALID_CONTEXT;
+        if (errorCode) *errorCode = LA_ERROR_INVALID_CONTEXT;
         return NULL;
     }
     
@@ -170,35 +162,39 @@ BridgeSecKeyRef BridgeSecKeyGenerateSecureEnclaveKey(const char* tag, bool biome
         return NULL;
     }
     
-    if (errorCode) *errorCode = BRIDGE_LA_ERROR_SUCCESS;
-    return (BridgeSecKeyRef)privateKey;
+    if (errorCode) *errorCode = LA_ERROR_SUCCESS;
+    return (__bridge_retained SecKeyRef)privateKey;
 }
 
-void BridgeSecKeyRelease(BridgeSecKeyRef key) {
+void SecKeyRelease(SecKeyRef key) {
     if (key) {
-        CFRelease((SecKeyRef)key);
+        SecKeyRef k = (__bridge_transfer SecKeyRef)key;
+        (void)k; // ARC handles release for NSObject, but SecKey is CFType
+        CFRelease(k);
     }
 }
 
-BridgeSecKeyRef BridgeSecKeyCopyPublicKey(BridgeSecKeyRef privateKey) {
+SecKeyRef SecKeyCopyPublicKey(SecKeyRef privateKey) {
     if (!privateKey) return NULL;
     
-    SecKeyRef publicKey = SecKeyCopyPublicKey((SecKeyRef)privateKey);
+    SecKeyRef key = (__bridge SecKeyRef)privateKey;
+    SecKeyRef publicKey = SecKeyCopyPublicKey(key);
     
     if (publicKey) {
-        return (BridgeSecKeyRef)publicKey;
+        return (__bridge_retained SecKeyRef)publicKey;
     }
     return NULL;
 }
 
-NSDataRef BridgeSecKeyCopyExternalRepresentation(BridgeSecKeyRef key, int32_t* errorCode) {
+NSDataRef SecKeyCopyExternalRepresentation(SecKeyRef key, int32_t* errorCode) {
     if (!key) {
-        if (errorCode) *errorCode = BRIDGE_LA_ERROR_INVALID_CONTEXT;
+        if (errorCode) *errorCode = LA_ERROR_INVALID_CONTEXT;
         return NULL;
     }
     
+    SecKeyRef k = (__bridge SecKeyRef)key;
     CFErrorRef error = NULL;
-    CFDataRef data = SecKeyCopyExternalRepresentation((SecKeyRef)key, &error);
+    CFDataRef data = SecKeyCopyExternalRepresentation(k, &error);
     
     if (error) {
         if (errorCode) *errorCode = (int32_t)CFErrorGetCode(error);
@@ -206,23 +202,24 @@ NSDataRef BridgeSecKeyCopyExternalRepresentation(BridgeSecKeyRef key, int32_t* e
         return NULL;
     }
     
-    if (errorCode) *errorCode = BRIDGE_LA_ERROR_SUCCESS;
-    return (NSDataRef)data;
+    if (errorCode) *errorCode = LA_ERROR_SUCCESS;
+    return (__bridge_retained NSDataRef)data;
 }
 
 // MARK: - Signing
 
-NSDataRef BridgeSecKeyCreateSignature(BridgeSecKeyRef key, const uint8_t* data, size_t dataLen, int32_t* errorCode) {
+NSDataRef SecKeyCreateSignature(SecKeyRef key, const uint8_t* data, size_t dataLen, int32_t* errorCode) {
     if (!key || !data || dataLen == 0) {
-        if (errorCode) *errorCode = BRIDGE_LA_ERROR_INVALID_CONTEXT;
+        if (errorCode) *errorCode = LA_ERROR_INVALID_CONTEXT;
         return NULL;
     }
     
+    SecKeyRef k = (__bridge SecKeyRef)key;
     NSData *dataToSign = [NSData dataWithBytes:data length:dataLen];
     
     CFErrorRef error = NULL;
     CFDataRef signature = SecKeyCreateSignature(
-        (SecKeyRef)key,
+        k,
         kSecKeyAlgorithmECDSASignatureMessageX962SHA256,
         (__bridge CFDataRef)dataToSign,
         &error
@@ -234,8 +231,8 @@ NSDataRef BridgeSecKeyCreateSignature(BridgeSecKeyRef key, const uint8_t* data, 
         return NULL;
     }
     
-    if (errorCode) *errorCode = BRIDGE_LA_ERROR_SUCCESS;
-    return (NSDataRef)signature;
+    if (errorCode) *errorCode = LA_ERROR_SUCCESS;
+    return (__bridge_retained NSDataRef)signature;
 }
 
 // MARK: - NSString Helpers
@@ -243,7 +240,7 @@ NSDataRef BridgeSecKeyCreateSignature(BridgeSecKeyRef key, const uint8_t* data, 
 NSStringRef NSStringCreateWithUTF8(const char* str) {
     if (!str) return NULL;
     NSString *nsstr = [NSString stringWithUTF8String:str];
-    return (NSStringRef)CFBridgingRetain(nsstr);
+    return (__bridge_retained NSStringRef)nsstr;
 }
 
 const char* NSStringGetUTF8(NSStringRef str) {
@@ -254,7 +251,8 @@ const char* NSStringGetUTF8(NSStringRef str) {
 
 void NSStringRelease(NSStringRef str) {
     if (str) {
-        CFRelease(str);
+        NSString *nsstr = (__bridge_transfer NSString *)str;
+        (void)nsstr; // ARC handles release
     }
 }
 
@@ -274,23 +272,25 @@ const uint8_t* NSDataGetBytes(NSDataRef data) {
 
 void NSDataRelease(NSDataRef data) {
     if (data) {
-        CFRelease(data);
+        NSData *d = (__bridge_transfer NSData *)data;
+        (void)d; // ARC handles release
     }
 }
 
 // MARK: - Keychain Storage
 
-bool StoreCredentialInKeychain(const char* tag, BridgeSecKeyRef privateKey, int32_t* errorCode) {
+bool StoreCredentialInKeychain(const char* tag, SecKeyRef privateKey, int32_t* errorCode) {
     // Key is already stored in keychain via kSecAttrIsPermanent during generation
+    // This function is mainly for additional metadata storage if needed
     (void)tag;
     (void)privateKey;
-    if (errorCode) *errorCode = BRIDGE_LA_ERROR_SUCCESS;
+    if (errorCode) *errorCode = LA_ERROR_SUCCESS;
     return true;
 }
 
-BridgeSecKeyRef LoadCredentialFromKeychain(const char* tag, int32_t* errorCode) {
+SecKeyRef LoadCredentialFromKeychain(const char* tag, int32_t* errorCode) {
     if (!tag) {
-        if (errorCode) *errorCode = BRIDGE_LA_ERROR_INVALID_CONTEXT;
+        if (errorCode) *errorCode = LA_ERROR_INVALID_CONTEXT;
         return NULL;
     }
     
@@ -312,13 +312,13 @@ BridgeSecKeyRef LoadCredentialFromKeychain(const char* tag, int32_t* errorCode) 
         return NULL;
     }
     
-    if (errorCode) *errorCode = BRIDGE_LA_ERROR_SUCCESS;
-    return (BridgeSecKeyRef)key;
+    if (errorCode) *errorCode = LA_ERROR_SUCCESS;
+    return (__bridge_retained SecKeyRef)key;
 }
 
 bool DeleteCredentialFromKeychain(const char* tag, int32_t* errorCode) {
     if (!tag) {
-        if (errorCode) *errorCode = BRIDGE_LA_ERROR_INVALID_CONTEXT;
+        if (errorCode) *errorCode = LA_ERROR_INVALID_CONTEXT;
         return false;
     }
     
@@ -338,7 +338,7 @@ bool DeleteCredentialFromKeychain(const char* tag, int32_t* errorCode) {
         return false;
     }
     
-    if (errorCode) *errorCode = BRIDGE_LA_ERROR_SUCCESS;
+    if (errorCode) *errorCode = LA_ERROR_SUCCESS;
     return true;
 }
 
@@ -348,37 +348,37 @@ const char* GetErrorMessage(int32_t errorCode) {
     NSString *message = nil;
     
     switch (errorCode) {
-        case BRIDGE_LA_ERROR_SUCCESS:
+        case LA_ERROR_SUCCESS:
             message = @"Success";
             break;
-        case BRIDGE_LA_ERROR_AUTHENTICATION_FAILED:
+        case LA_ERROR_AUTHENTICATION_FAILED:
             message = @"Authentication failed";
             break;
-        case BRIDGE_LA_ERROR_USER_CANCEL:
+        case LA_ERROR_USER_CANCEL:
             message = @"User cancelled";
             break;
-        case BRIDGE_LA_ERROR_USER_FALLBACK:
+        case LA_ERROR_USER_FALLBACK:
             message = @"User chose to use fallback";
             break;
-        case BRIDGE_LA_ERROR_BIOMETRY_NOT_AVAILABLE:
+        case LA_ERROR_BIOMETRY_NOT_AVAILABLE:
             message = @"Biometry is not available on this device";
             break;
-        case BRIDGE_LA_ERROR_BIOMETRY_NOT_ENROLLED:
+        case LA_ERROR_BIOMETRY_NOT_ENROLLED:
             message = @"No biometric credentials are enrolled";
             break;
-        case BRIDGE_LA_ERROR_BIOMETRY_LOCKOUT:
+        case LA_ERROR_BIOMETRY_LOCKOUT:
             message = @"Biometry is locked out";
             break;
-        case BRIDGE_LA_ERROR_INVALID_CONTEXT:
+        case LA_ERROR_INVALID_CONTEXT:
             message = @"Invalid context";
             break;
-        case BRIDGE_LA_ERROR_NOT_INTERACTIVE:
+        case LA_ERROR_NOT_INTERACTIVE:
             message = @"Not interactive";
             break;
-        case BRIDGE_LA_ERROR_WATCH_NOT_AVAILABLE:
+        case LA_ERROR_WATCH_NOT_AVAILABLE:
             message = @"Apple Watch is not available";
             break;
-        case BRIDGE_LA_ERROR_PASSCODE_NOT_SET:
+        case LA_ERROR_PASSCODE_NOT_SET:
             message = @"Passcode is not set";
             break;
         default:
