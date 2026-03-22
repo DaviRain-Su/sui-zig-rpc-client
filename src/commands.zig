@@ -25859,7 +25859,11 @@ test "runCommand natural_do swap stub includes commands" {
 
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.items, .{});
     defer parsed.deinit();
-    const commands = parsed.value.object.get("commands").?.array.items;
+    const commands_value = parsed.value.object.get("commands").?;
+    if (commands_value != .string) return error.TestUnexpectedResult;
+    const parsed_commands = try std.json.parseFromSlice(std.json.Value, allocator, commands_value.string, .{});
+    defer parsed_commands.deinit();
+    const commands = parsed_commands.value.array.items;
     try testing.expectEqual(@as(usize, 1), commands.len);
     try testing.expectEqualStrings("MoveCall", commands[0].object.get("kind").?.string);
 }
