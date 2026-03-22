@@ -7,54 +7,56 @@ on:
     branches: [ main ]
 
 env:
-  ZIG_VERSION: 0.15.2
+  ZIG_VERSION: 0.14.0
 
 jobs:
   test:
     name: Test
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        include:
-          - os: ubuntu-latest
-            target: x86_64-linux-gnu
-          - os: macos-latest
-            target: x86_64-macos
 
     steps:
     - name: Checkout
       uses: actions/checkout@v4
 
     - name: Setup Zig
-      uses: goto-bus-stop/setup-zig@v2
+      uses: mlugg/setup-zig@v1
       with:
         version: ${{ env.ZIG_VERSION }}
 
     - name: Cache Zig dependencies
-      uses: actions/cache@v3
+      uses: actions/cache@v4
       with:
         path: |
           ~/.cache/zig
           .zig-cache
-        key: ${{ runner.os }}-zig-${{ hashFiles('build.zig') }}
+        key: ${{ runner.os }}-zig-${{ hashFiles('build.zig') }}-${{ github.sha }}
         restore-keys: |
+          ${{ runner.os }}-zig-${{ hashFiles('build.zig') }}-
           ${{ runner.os }}-zig-
 
     - name: Check formatting
       run: zig fmt --check src/
 
+    - name: Build debug
+      run: zig build
+
     - name: Run tests
+      timeout-minutes: 10
       run: zig build test --summary all
 
     - name: Build release
       run: zig build -Doptimize=ReleaseFast
 
     - name: Upload artifact
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
-        name: sui-zig-${{ matrix.target }}
+        name: sui-zig-${{ matrix.os }}
         path: zig-out/bin/sui-zig-rpc-client
+        retention-days: 7
 
   lint:
     name: Lint
@@ -65,7 +67,7 @@ jobs:
       uses: actions/checkout@v4
 
     - name: Setup Zig
-      uses: goto-bus-stop/setup-zig@v2
+      uses: mlugg/setup-zig@v1
       with:
         version: ${{ env.ZIG_VERSION }}
 
@@ -85,15 +87,16 @@ jobs:
       uses: actions/checkout@v4
 
     - name: Setup Zig
-      uses: goto-bus-stop/setup-zig@v2
+      uses: mlugg/setup-zig@v1
       with:
         version: ${{ env.ZIG_VERSION }}
 
     - name: Build with WebAuthn
-      run: zig build -Dwebauthn=true
+      run: zig build -Dwebauthn
 
     - name: Upload artifact
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: sui-zig-macos-webauthn
         path: zig-out/bin/sui-zig-rpc-client
+        retention-days: 7
