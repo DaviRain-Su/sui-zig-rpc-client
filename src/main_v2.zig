@@ -24,6 +24,8 @@ pub fn main() !void {
 
     if (std.mem.eql(u8, command, "balance")) {
         try cmdBalance(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "objects")) {
+        try cmdObjects(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "help") or std.mem.eql(u8, command, "--help")) {
         printUsage(args[0]);
     } else {
@@ -37,6 +39,7 @@ fn printUsage(prog_name: []const u8) void {
     std.log.info("Usage: {s} <command> [options]", .{prog_name});
     std.log.info("Commands:", .{});
     std.log.info("  balance <address>           Get SUI balance for address", .{});
+    std.log.info("  objects <address>           List owned objects for address", .{});
     std.log.info("  help                        Show this help", .{});
 }
 
@@ -68,4 +71,73 @@ fn cmdBalance(allocator: Allocator, args: []const []const u8) !void {
         balance / 1_000_000_000,
         balance % 1_000_000_000,
     });
+}
+
+fn cmdObjects(allocator: Allocator, args: []const []const u8) !void {
+    if (args.len < 1) {
+        std.log.err("Usage: objects <address>", .{});
+        std.process.exit(1);
+    }
+
+    const address = args[0];
+    const rpc_url = getRpcUrl() orelse "https://fullnode.mainnet.sui.io:443";
+
+    var rpc_client = try SuiRpcClient.init(allocator, rpc_url);
+    defer rpc_client.deinit();
+
+    // Query objects with pagination
+    const params = try std.fmt.allocPrint(
+        allocator,
+        "[\"{s}\",{{\"options\":{{\"showType\":true}}}},null,50]",
+        .{address},
+    );
+    defer allocator.free(params);
+
+    const response = try rpc_client.call("suix_getOwnedObjects", params);
+    defer allocator.free(response);
+
+    // Parse response manually to avoid complex Object struct
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, response, .{});
+    defer parsed.deinit();
+
+    std.log.info("Address: {s}", .{address});
+
+    if (parsed.value.object.get("result")) |result| {
+        if (result.object.get("data")) |data| {
+            if (data == .array) {
+                std.log.info("Objects: {d}", .{data.array.items.len});
+
+                for (data.array.items, 0..) |item, i| {
+                    if (item.object.get("data")) |obj_data| {
+                        const object_id = obj_data.object.get("objectId") orelse continue;
+                        std.log.info("  {d}. {s}", .{ i + 1, object_id.string });
+
+                        if (obj_data.object.get("type")) |t| {
+                            if (t == .string) {
+                                std.log.info("      Type: {s}", .{t.string});
+                            }
+                        }
+
+                        if (obj_data.object.get("version")) |v| {
+                            const version_num: u64 = if (v == .integer)
+                                @intCast(v.integer)
+                            else
+                                std.fmt.parseInt(u64, v.string, 10) catch 0;
+                            std.log.info("      Version: {d}", .{version_num});
+                        }
+                    }
+                }
+
+                if (result.object.get("hasNextPage")) |has_next| {
+                    if (has_next == .bool and has_next.bool) {
+                        if (result.object.get("nextCursor")) |cursor| {
+                            if (cursor == .string) {
+                                std.log.info("  (More objects available, next cursor: {s})", .{cursor.string});
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
