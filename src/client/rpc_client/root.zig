@@ -14,6 +14,7 @@ pub const transaction = @import("transaction.zig");
 pub const object = @import("object.zig");
 pub const event = @import("event.zig");
 pub const move_module = @import("move.zig");
+pub const builder = @import("builder.zig");
 
 // Re-export commonly used types
 pub const ClientError = errors.ClientError;
@@ -92,6 +93,15 @@ pub const MoveTypeTag = move_module.MoveTypeTag;
 pub const MoveVisibility = move_module.MoveVisibility;
 pub const getNormalizedMoveModule = move_module.getNormalizedMoveModule;
 
+// Re-export builder types and functions
+pub const MoveCallParams = builder.MoveCallParams;
+pub const BatchItem = builder.BatchItem;
+pub const TransferParams = builder.TransferParams;
+pub const SplitCoinsParams = builder.SplitCoinsParams;
+pub const MergeCoinsParams = builder.MergeCoinsParams;
+pub const buildMoveCallTxBytes = builder.buildMoveCallTxBytes;
+pub const buildBatchTransactionTxBytes = builder.buildBatchTransactionTxBytes;
+
 // Re-export utilities
 pub const dupeOptionalString = utils.dupeOptionalString;
 pub const dupeStringList = utils.dupeStringList;
@@ -116,6 +126,7 @@ test "rpc_client module imports successfully" {
     _ = object;
     _ = event;
     _ = move_module;
+    _ = builder;
 }
 
 // Import integration tests
@@ -158,4 +169,8 @@ test "re-exports work correctly" {
     // Test move module types exist
     _ = NormalizedMoveModule;
     _ = MoveVisibility;
+
+    // Test builder types exist
+    _ = MoveCallParams;
+    _ = BatchItem;
 }

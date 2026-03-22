@@ -7721,49 +7721,41 @@ pub fn runCommandWithProgrammaticProvider(
                         return error.InvalidCli;
                     }
 
-                    var move_args = cli.ParsedArgs{
-                        .command = .move_function,
-                        .has_command = true,
-                        .pretty = args.pretty,
-                        .move_package = client.package_preset.cetus_clmm_mainnet,
-                        .move_module = "pool",
-                        .move_function = "swap",
-                        .tx_send_summarize = true,
-                    };
-                    defer move_args.deinit(allocator);
+                    const amount_json = if (swap_intent.amount) |amount|
+                        try std.fmt.allocPrint(allocator, "{s}", .{amount})
+                    else
+                        try allocator.dupe(u8, "100");
+                    defer allocator.free(amount_json);
 
-                    var result = try rpc.runReadQueryAction(
+                    const commands_json = try std.fmt.allocPrint(
                         allocator,
-                        .{ .move = try moveQueryFromArgs(allocator, &move_args) },
-                        .summarize,
-                    );
-                    defer result.deinit(allocator);
-
-                    const request_selection = moveFunctionExecutionRequestArtifact(
-                        allocator,
-                        result,
-                        .tx_dry_run,
-                    ) catch |err| switch (err) {
-                        error.UnresolvedMoveFunctionExecutionTemplate => {
-                            try recordUnresolvedMoveFunctionExecutionError(allocator, rpc, result);
-                            return err;
+                        "[{{\"kind\":\"MoveCall\",\"package\":\"{s}\",\"module\":\"pool\",\"function\":\"swap\",\"typeArguments\":[],\"arguments\":[\"{s}\",\"{s}\",\"{s}\",{d}]}}]",
+                        .{
+                            client.package_preset.cetus_clmm_mainnet,
+                            swap_intent.from_token,
+                            swap_intent.to_token,
+                            amount_json,
+                            swap_intent.slippage_bps,
                         },
-                        else => return err,
-                    };
+                    );
+                    defer allocator.free(commands_json);
 
-                    var derived_args = try buildDerivedMoveFunctionRequestBuildArgs(
-                        allocator,
-                        args,
-                        request_selection.request_json,
-                    );
-                    defer derived_args.deinit(allocator);
-                    try runCommandWithProgrammaticProvider(
-                        allocator,
-                        rpc,
-                        &derived_args,
-                        writer,
-                        effective_programmatic_provider,
-                    );
+                    const stub = .{
+                        .artifact_kind = "natural_swap_preview_request",
+                        .intent = .{
+                            .kind = "swap",
+                            .from = swap_intent.from_token,
+                            .to = swap_intent.to_token,
+                            .amount = swap_intent.amount orelse "100",
+                            .slippage_bps = swap_intent.slippage_bps,
+                        },
+                        .commands = std.json.RawValue{ .bytes = commands_json },
+                        .sender = args.tx_build_sender orelse "0x<sender>",
+                        .preview_only = true,
+                        .route_status = "stub",
+                        .next_step = "convert this stub into a formal request artifact in a later step",
+                    };
+                    try printStructuredJson(writer, stub, args.pretty);
                     return;
                 },
                 .unsupported => |unsupported| {
