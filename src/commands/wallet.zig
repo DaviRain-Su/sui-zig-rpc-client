@@ -137,9 +137,7 @@ fn formatWalletLifecycleSummary(
                 \\}}
             , .{ summary.action, summary.selector, summary.address, summary.activated });
         } else {
-            try writer.print(
-                "{{\"action\":\"{s}\",\"selector\":\"{s}\",\"address\":\"{s}\",\"activated\":{}}}"
-            , .{ summary.action, summary.selector, summary.address, summary.activated });
+            try writer.print("{{\"action\":\"{s}\",\"selector\":\"{s}\",\"address\":\"{s}\",\"activated\":{}}}", .{ summary.action, summary.selector, summary.address, summary.activated });
         }
     } else {
         try writer.print("Wallet {s}: {s} ({s})\n", .{
@@ -447,7 +445,7 @@ test "WalletLifecycleSummary deinit handles all fields" {
 
 test "getWalletBalance uses new API" {
     const testing = std.testing;
-    
+
     // Just verify the function exists and has correct signature
     // Actual RPC call would require network
     _ = getWalletBalance;
@@ -455,7 +453,7 @@ test "getWalletBalance uses new API" {
 
 test "getWalletCoins uses new API" {
     const testing = std.testing;
-    
+
     // Just verify the function exists and has correct signature
     _ = getWalletCoins;
 }

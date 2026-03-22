@@ -12,9 +12,6 @@ pub const help = @import("help.zig");
 pub const validator = @import("validator.zig");
 pub const utils = @import("utils.zig");
 
-// Import tests
-_ = @import("e2e_test.zig");
-
 // Re-export commonly used types
 pub const Command = types.Command;
 pub const TxBuildKind = types.TxBuildKind;
@@ -59,7 +56,6 @@ test "cli module imports successfully" {
     _ = help;
     _ = validator;
     _ = utils;
-    // e2e_test is imported with _ = @import("e2e_test.zig");
 }
 
 test "re-exports work correctly" {
@@ -75,4 +71,9 @@ test "re-exports work correctly" {
     // Test function re-exports
     try testing.expect(isWalletCommand(.wallet_create));
     try testing.expect(!isWalletCommand(.account_list));
+}
+
+// Import tests from e2e_test.zig
+comptime {
+    _ = @import("e2e_test.zig");
 }

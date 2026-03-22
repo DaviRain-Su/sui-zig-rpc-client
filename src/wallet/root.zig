@@ -19,7 +19,7 @@ pub const Wallet = struct {
     address: []const u8,
     session_manager: SessionManager,
     policy_engine: PolicyEngine,
-    
+
     pub fn init(
         allocator: std.mem.Allocator,
         address: []const u8,
@@ -32,12 +32,12 @@ pub const Wallet = struct {
             .policy_engine = PolicyEngine.init(config),
         };
     }
-    
+
     pub fn deinit(self: *Wallet) void {
         self.allocator.free(self.address);
         self.session_manager.deinit();
     }
-    
+
     /// Start new session
     pub fn startSession(
         self: *Wallet,
@@ -49,7 +49,7 @@ pub const Wallet = struct {
             auth_method,
         );
     }
-    
+
     /// Check if can perform transaction
     pub fn canTransact(
         self: *Wallet,
@@ -59,18 +59,18 @@ pub const Wallet = struct {
         const session = self.session_manager.getActiveSession(self.address);
         return self.policy_engine.checkTransaction(session, recipient, amount);
     }
-    
+
     /// Record transaction
     pub fn recordTransaction(self: *Wallet, amount: u64) void {
         if (self.session_manager.getActiveSession(self.address)) |session| {
             self.policy_engine.recordTransaction(session, amount);
         }
     }
-    
+
     /// Get wallet status
     pub fn getStatus(self: *Wallet) WalletStatus {
         const session = self.session_manager.getActiveSession(self.address);
-        
+
         return .{
             .address = self.address,
             .session_active = session != null,
@@ -95,23 +95,23 @@ pub const WalletStatus = struct {
 
 test "Wallet lifecycle" {
     const allocator = std.testing.allocator;
-    
+
     const config = WalletConfig{
         .max_single_tx_amount = 1000,
         .session_duration_secs = 3600,
     };
-    
+
     var wallet = try Wallet.init(allocator, "0x1234", config);
     defer wallet.deinit();
-    
+
     // Start session
     const session = try wallet.startSession(.password);
     try std.testing.expect(session.isValid());
-    
+
     // Check transaction
     const result = wallet.canTransact("0x5678", 500);
     try std.testing.expect(result.allowed);
-    
+
     // Get status
     const status = wallet.getStatus();
     try std.testing.expect(status.session_active);

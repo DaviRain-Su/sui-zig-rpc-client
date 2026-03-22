@@ -139,14 +139,12 @@ fn cmdWalletSession(allocator: Allocator, args: []const []const u8) !void {
         std.log.info("Expires: {d} minutes", .{@divTrunc(session.remainingSecs(), 60)});
         std.log.info("", .{});
         std.log.info("You can now perform transactions within policy limits.", .{});
-
     } else if (std.mem.eql(u8, subaction, "end")) {
         wallet_ptr.session_manager.invalidateSessions(wallet_ptr.address);
         std.log.info("=== Session Ended ===", .{});
         std.log.info("", .{});
         std.log.info("All sessions for this wallet have been invalidated.", .{});
         std.log.info("Run 'wallet session start' to create a new session.", .{});
-
     } else {
         std.log.err("Unknown session action: {s}", .{subaction});
     }

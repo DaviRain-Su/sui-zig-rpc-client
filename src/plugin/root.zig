@@ -34,16 +34,12 @@ pub const PluginConfig = struct {
     /// Auto-load plugins
     auto_load: bool = true,
     /// Allowed plugin sources
-    allowed_sources: []const []const u8 = &.{"builtin", "official"},
+    allowed_sources: []const []const u8 = &.{ "builtin", "official" },
 };
 
 /// Initialize plugin system
 pub fn init(allocator: std.mem.Allocator, config: PluginConfig) !PluginManager {
-    const plugins_dir = try std.fs.path.join(allocator, &.{ 
-        std.process.getEnvVarOwned(allocator, "HOME") catch ".", 
-        ".sui", 
-        "plugins" 
-    });
+    const plugins_dir = try std.fs.path.join(allocator, &.{ std.process.getEnvVarOwned(allocator, "HOME") catch ".", ".sui", "plugins" });
     defer allocator.free(plugins_dir);
 
     var mgr = PluginManager.init(allocator, plugins_dir);
@@ -52,7 +48,7 @@ pub fn init(allocator: std.mem.Allocator, config: PluginConfig) !PluginManager {
     const builtins = getBuiltinPlugins();
     for (builtins) |iface| {
         const info = iface.get_info();
-        
+
         // Create data directory for plugin
         const data_dir = try std.fs.path.join(allocator, &.{ plugins_dir, info.name });
         defer allocator.free(data_dir);

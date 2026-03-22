@@ -237,16 +237,16 @@ pub fn isValidJson(value: []const u8) bool {
 /// Check if character is a hex digit
 fn isHexDigit(c: u8) bool {
     return (c >= '0' and c <= '9') or
-           (c >= 'a' and c <= 'f') or
-           (c >= 'A' and c <= 'F');
+        (c >= 'a' and c <= 'f') or
+        (c >= 'A' and c <= 'F');
 }
 
 /// Check if character is a base64 character
 fn isBase64Char(c: u8) bool {
     return (c >= 'A' and c <= 'Z') or
-           (c >= 'a' and c <= 'z') or
-           (c >= '0' and c <= '9') or
-           c == '+' or c == '/' or c == '=';
+        (c >= 'a' and c <= 'z') or
+        (c >= '0' and c <= '9') or
+        c == '+' or c == '/' or c == '=';
 }
 
 /// Validate that command combination is valid

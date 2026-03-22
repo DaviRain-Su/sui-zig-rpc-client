@@ -1504,8 +1504,7 @@ test "listAccountEntriesFromContents summarizes mixed keystore entries" {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var accounts = try listAccountEntriesFromContents(
-        allocator,
+    var accounts = try listAccountEntriesFromContents(allocator,
         \\[
         \\  "raw-selector",
         \\  {

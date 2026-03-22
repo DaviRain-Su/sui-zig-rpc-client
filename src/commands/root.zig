@@ -12,13 +12,10 @@ pub const shared = @import("shared.zig");
 pub const provider = @import("provider.zig");
 pub const wallet = @import("wallet.zig");
 pub const tx = @import("tx.zig");
-pub const move = @import("move.zig");
+pub const move_cmd = @import("move.zig");
 pub const account = @import("account.zig");
 pub const dispatch = @import("dispatch.zig");
 
-// Import integration tests
-_ = @import("integration_test.zig");
-
 // Re-export main entry points for backward compatibility
 pub const runCommand = dispatch.runCommand;
 pub const runCommandWithProgrammaticProvider = dispatch.runCommand;
@@ -26,19 +23,7 @@ pub const runCommandWithProgrammaticProvider = dispatch.runCommand;
 // Re-export types for backward compatibility
 pub const CommandResult = types.CommandResult;
 pub const TxBuildError = types.TxBuildError;
-pub const MoveFunctionTemplateOutput = move.MoveFunctionTemplateOutput;
-pub const WalletLifecycleSummary = wallet_types.WalletLifecycleSummary;
-pub const WalletAccountEntry = wallet_types.WalletAccountEntry;
-pub const WalletAccountsSummary = wallet_types.WalletAccountsSummary;
-
-// Re-export main entry points for backward compatibility
-pub const runCommand = dispatch.runCommand;
-pub const runCommandWithProgrammaticProvider = dispatch.runCommand;
-
-// Re-export types for backward compatibility
-pub const CommandResult = types.CommandResult;
-pub const TxBuildError = types.TxBuildError;
-pub const MoveFunctionTemplateOutput = move.MoveFunctionTemplateOutput;
+pub const MoveFunctionTemplateOutput = move_cmd.MoveFunctionTemplateOutput;
 pub const WalletLifecycleSummary = wallet_types.WalletLifecycleSummary;
 pub const WalletAccountEntry = wallet_types.WalletAccountEntry;
 pub const WalletAccountsSummary = wallet_types.WalletAccountsSummary;
@@ -54,7 +39,7 @@ test "commands module imports successfully" {
     _ = provider;
     _ = wallet;
     _ = tx;
-    _ = move;
+    _ = move_cmd;
     _ = account;
     _ = dispatch;
 }
@@ -69,4 +54,9 @@ test "backward compatibility exports work" {
     // Verify error type export
     const err: TxBuildError = error.InvalidCli;
     try testing.expectEqual(error.InvalidCli, err);
+}
+
+// Import integration tests
+comptime {
+    _ = @import("integration_test.zig");
 }

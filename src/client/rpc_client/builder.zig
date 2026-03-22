@@ -71,7 +71,7 @@ pub fn buildMoveCallTxBytes(
 
     try tx_data.put("sender", .{ .string = sender });
     try tx_data.put("txKind", .{ .object = tx_kind });
-    
+
     if (params.gas_budget) |budget| {
         const budget_str = try std.fmt.allocPrint(client.allocator, "{d}", .{budget});
         defer client.allocator.free(budget_str);
@@ -163,7 +163,7 @@ pub fn buildBatchTransactionTxBytes(
 
     for (items) |item| {
         var tx_obj = std.json.ObjectMap.init(client.allocator);
-        
+
         switch (item) {
             .move_call => |mc| {
                 try tx_obj.put("kind", .{ .string = "moveCall" });
@@ -199,7 +199,7 @@ pub fn buildBatchTransactionTxBytes(
                 try tx_obj.put("sources", .{ .array = sources });
             },
         }
-        
+
         try transactions.append(.{ .object = tx_obj });
     }
 
@@ -209,7 +209,7 @@ pub fn buildBatchTransactionTxBytes(
 
     try tx_data.put("sender", .{ .string = sender });
     try tx_data.put("transactions", .{ .array = transactions });
-    
+
     if (gas_budget) |budget| {
         const budget_str = try std.fmt.allocPrint(client.allocator, "{d}", .{budget});
         defer client.allocator.free(budget_str);
@@ -309,12 +309,12 @@ test "MergeCoinsParams lifecycle" {
 
 test "BatchItem union" {
     const testing = std.testing;
-    
+
     const item = BatchItem{ .move_call = .{
         .package = "0x2",
         .module = "sui",
         .function = "transfer",
-    }};
-    
+    } };
+
     try testing.expect(item == .move_call);
 }

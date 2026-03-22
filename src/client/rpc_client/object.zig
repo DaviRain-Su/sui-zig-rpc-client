@@ -391,7 +391,7 @@ fn parseObjectPage(allocator: std.mem.Allocator, value: std.json.Value) !ObjectP
 
     const result = try allocator.dupe(Object, objects.items);
     allocator.free(objects.items);
-    
+
     return ObjectPage{
         .data = result,
         .next_cursor = next_cursor,

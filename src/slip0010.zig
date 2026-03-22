@@ -21,29 +21,29 @@ pub const ExtendedKey = struct {
 pub fn parsePath(path: []const u8, allocator: std.mem.Allocator) !std.ArrayListUnmanaged(u32) {
     var indices: std.ArrayListUnmanaged(u32) = .{};
     errdefer indices.deinit(allocator);
-    
+
     // Path must start with "m/"
     if (!std.mem.startsWith(u8, path, "m/")) {
         return error.InvalidPath;
     }
-    
+
     // Skip "m/"
     const rest = path[2..];
-    
+
     // Split by '/'
     var start: usize = 0;
     while (start <= rest.len) {
         const end = std.mem.indexOf(u8, rest[start..], "/") orelse rest.len - start;
-        const component = rest[start..start + end];
-        
+        const component = rest[start .. start + end];
+
         if (component.len > 0) {
             // Check if hardened (ends with ')
             const is_hardened = component[component.len - 1] == '\'';
             const num_str = if (is_hardened) component[0 .. component.len - 1] else component;
-            
+
             // Parse number
             const index = try std.fmt.parseInt(u32, num_str, 10);
-            
+
             // Add hardened offset if needed
             if (is_hardened) {
                 if (index >= HARDENED_OFFSET) return error.InvalidPath;
@@ -52,10 +52,10 @@ pub fn parsePath(path: []const u8, allocator: std.mem.Allocator) !std.ArrayListU
                 try indices.append(allocator, index);
             }
         }
-        
+
         start += end + 1;
     }
-    
+
     return indices;
 }
 
@@ -63,10 +63,10 @@ pub fn parsePath(path: []const u8, allocator: std.mem.Allocator) !std.ArrayListU
 pub fn deriveMasterKey(seed: []const u8) ExtendedKey {
     var hmac = std.crypto.auth.hmac.sha2.HmacSha512.init(ED25519_CURVE);
     hmac.update(seed);
-    
+
     var result: [64]u8 = undefined;
     hmac.final(&result);
-    
+
     return ExtendedKey{
         .key = result[0..32].*,
         .chain_code = result[32..64].*,
@@ -78,9 +78,9 @@ pub fn deriveMasterKey(seed: []const u8) ExtendedKey {
 pub fn deriveChildKey(parent: ExtendedKey, index: u32) ExtendedKey {
     // Ed25519 only supports hardened derivation
     const is_hardened = index >= HARDENED_OFFSET;
-    
+
     var hmac = std.crypto.auth.hmac.sha2.HmacSha512.init(&parent.chain_code);
-    
+
     if (is_hardened) {
         // Hardened derivation: HMAC(chain_code, 0x00 || key || index)
         hmac.update(&[_]u8{0x00});
@@ -92,15 +92,15 @@ pub fn deriveChildKey(parent: ExtendedKey, index: u32) ExtendedKey {
         hmac.update(&[_]u8{0x00});
         hmac.update(&parent.key);
     }
-    
+
     // Append index as big-endian
     var index_bytes: [4]u8 = undefined;
     std.mem.writeInt(u32, &index_bytes, index, .big);
     hmac.update(&index_bytes);
-    
+
     var result: [64]u8 = undefined;
     hmac.final(&result);
-    
+
     return ExtendedKey{
         .key = result[0..32].*,
         .chain_code = result[32..64].*,
@@ -113,15 +113,15 @@ pub fn derivePath(seed: []const u8, path: []const u8, allocator: std.mem.Allocat
     // Parse path
     var indices = try parsePath(path, allocator);
     defer indices.deinit(allocator);
-    
+
     // Derive master key
     var key = deriveMasterKey(seed);
-    
+
     // Derive through path
     for (indices.items) |index| {
         key = deriveChildKey(key, index);
     }
-    
+
     return key.key;
 }
 
@@ -131,7 +131,7 @@ pub fn deriveSuiAddressKey(seed: []const u8, account: u32, change: u32, address_
     const path = try std.fmt.bufPrint(&path_buf, "m/44'/784'/{d}'/{d}'/{d}'", .{
         account, change, address_index,
     });
-    
+
     return try derivePath(seed, path, std.heap.page_allocator);
 }
 
@@ -139,11 +139,11 @@ pub fn deriveSuiAddressKey(seed: []const u8, account: u32, change: u32, address_
 pub fn deriveSuiAddresses(seed: []const u8, count: u8) ![][32]u8 {
     var addresses = try std.heap.page_allocator.alloc([32]u8, count);
     errdefer std.heap.page_allocator.free(addresses);
-    
+
     for (0..count) |i| {
         addresses[i] = try deriveSuiAddressKey(seed, 0, 0, @intCast(i));
     }
-    
+
     return addresses;
 }
 
@@ -155,13 +155,13 @@ test "SLIP-0010 master key derivation" {
     const seed_hex = "000102030405060708090a0b0c0d0e0f";
     var seed: [16]u8 = undefined;
     _ = try std.fmt.hexToBytes(&seed, seed_hex);
-    
+
     const master = deriveMasterKey(&seed);
-    
+
     // Expected values from test vector
     const expected_key = "171deb7a6bb42f38d639471b0a0b4a75e1a5d1e5e8a5d7e5e5e5e5e5e5e5e5e5e";
     _ = expected_key;
-    
+
     // Just verify it doesn't crash and produces consistent output
     const master2 = deriveMasterKey(&seed);
     try std.testing.expectEqualSlices(u8, &master.key, &master2.key);
@@ -172,7 +172,7 @@ test "SLIP-0010 path parsing" {
     const path = "m/44'/784'/0'/0'/0'";
     var indices = try parsePath(path, std.testing.allocator);
     defer indices.deinit(std.testing.allocator);
-    
+
     try std.testing.expectEqual(indices.items.len, 5);
     try std.testing.expectEqual(indices.items[0], 44 + HARDENED_OFFSET);
     try std.testing.expectEqual(indices.items[1], 784 + HARDENED_OFFSET);
@@ -185,10 +185,10 @@ test "SLIP-0010 child key derivation" {
     const seed_hex = "000102030405060708090a0b0c0d0e0f";
     var seed: [16]u8 = undefined;
     _ = try std.fmt.hexToBytes(&seed, seed_hex);
-    
+
     const master = deriveMasterKey(&seed);
     const child = deriveChildKey(master, 44 + HARDENED_OFFSET);
-    
+
     // Child key should be different from master
     var different = false;
     for (master.key, child.key) |a, b| {
@@ -204,14 +204,14 @@ test "SLIP-0010 full path derivation" {
     // Use a test seed
     var seed: [64]u8 = undefined;
     std.crypto.random.bytes(&seed);
-    
+
     // Derive with standard Sui path
     const key1 = try derivePath(&seed, "m/44'/784'/0'/0'/0'", std.testing.allocator);
     const key2 = try derivePath(&seed, "m/44'/784'/0'/0'/0'", std.testing.allocator);
-    
+
     // Same path should produce same key
     try std.testing.expectEqualSlices(u8, &key1, &key2);
-    
+
     // Different path should produce different key
     const key3 = try derivePath(&seed, "m/44'/784'/0'/0'/1'", std.testing.allocator);
     var different = false;
@@ -227,12 +227,12 @@ test "SLIP-0010 full path derivation" {
 test "Sui address derivation" {
     var seed: [64]u8 = undefined;
     std.crypto.random.bytes(&seed);
-    
+
     // Derive multiple addresses
     const key0 = try deriveSuiAddressKey(&seed, 0, 0, 0);
     const key1 = try deriveSuiAddressKey(&seed, 0, 0, 1);
     const key2 = try deriveSuiAddressKey(&seed, 0, 0, 2);
-    
+
     // All should be different
     var diff1 = false;
     var diff2 = false;

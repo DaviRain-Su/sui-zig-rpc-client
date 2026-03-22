@@ -1,7 +1,6 @@
 /// client/rpc_client/root.zig - RPC client module root
 ///
 /// This module provides the RPC client for interacting with Sui nodes.
-
 const std = @import("std");
 
 // Import sub-modules

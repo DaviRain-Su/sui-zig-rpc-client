@@ -58,12 +58,12 @@ fn printUsage() void {
 fn cmdPluginList() void {
     std.log.info("=== Built-in Plugin Commands ===", .{});
     std.log.info(" ", .{});
-    
+
     for (plugins) |cmd| {
         std.log.info("  {s}", .{cmd.name});
         std.log.info("    {s}", .{cmd.description});
     }
-    
+
     std.log.info(" ", .{});
     std.log.info("Total: {d} commands", .{plugins.len});
     std.log.info(" ", .{});

@@ -81,7 +81,7 @@ pub fn extractHttpErrorMessage(allocator: std.mem.Allocator, response_body: []co
 /// Check if value is valid hex string
 pub fn isValidHex(value: []const u8) bool {
     if (value.len == 0) return false;
-    
+
     const start: usize = if (std.mem.startsWith(u8, value, "0x")) 2 else 0;
     if (start == value.len) return false;
 
@@ -94,8 +94,8 @@ pub fn isValidHex(value: []const u8) bool {
 /// Check if character is hex digit
 fn isHexDigit(c: u8) bool {
     return (c >= '0' and c <= '9') or
-           (c >= 'a' and c <= 'f') or
-           (c >= 'A' and c <= 'F');
+        (c >= 'a' and c <= 'f') or
+        (c >= 'A' and c <= 'F');
 }
 
 /// Check if value is valid Sui address

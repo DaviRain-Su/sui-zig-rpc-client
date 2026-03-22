@@ -6,11 +6,11 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 // AES-256-GCM constants
-const KEY_LEN: usize = 32;  // 256 bits
-const NONCE_LEN: usize = 12;  // 96 bits for GCM
-const TAG_LEN: usize = 16;  // 128 bits authentication tag
-const SALT_LEN: usize = 32;  // 256 bits salt for PBKDF2
-const ITERATIONS: u32 = 100_000;  // PBKDF2 iterations
+const KEY_LEN: usize = 32; // 256 bits
+const NONCE_LEN: usize = 12; // 96 bits for GCM
+const TAG_LEN: usize = 16; // 128 bits authentication tag
+const SALT_LEN: usize = 32; // 256 bits salt for PBKDF2
+const ITERATIONS: u32 = 100_000; // PBKDF2 iterations
 
 /// Encrypted credential stored in file
 pub const EncryptedCredential = struct {
@@ -19,7 +19,7 @@ pub const EncryptedCredential = struct {
     nonce: [NONCE_LEN]u8,
     encrypted_seed: []const u8,
     public_key: [32]u8,
-    algorithm: []const u8,  // "Ed25519"
+    algorithm: []const u8, // "Ed25519"
     created_at: i64,
 };
 
@@ -50,7 +50,7 @@ pub const FileKeystore = struct {
     /// Derive encryption key from password using PBKDF2-HMAC-SHA256
     fn deriveKey(password: []const u8, salt: [SALT_LEN]u8) ![KEY_LEN]u8 {
         var key: [KEY_LEN]u8 = undefined;
-        
+
         // Use PBKDF2 to derive key from password
         try std.crypto.pwhash.pbkdf2(
             &key,
@@ -59,7 +59,7 @@ pub const FileKeystore = struct {
             ITERATIONS,
             std.crypto.auth.hmac.sha2.HmacSha256,
         );
-        
+
         return key;
     }
 
@@ -80,12 +80,12 @@ pub const FileKeystore = struct {
         var ciphertext: [32 + TAG_LEN]u8 = undefined;
         const Aes256Gcm = std.crypto.aead.aes_gcm.Aes256Gcm;
         Aes256Gcm.encrypt(
-            ciphertext[0..32],  // ciphertext
-            ciphertext[32..],   // tag
-            &seed,              // plaintext
-            &.{},               // associated data (none)
-            nonce,              // nonce
-            key,                // key
+            ciphertext[0..32], // ciphertext
+            ciphertext[32..], // tag
+            &seed, // plaintext
+            &.{}, // associated data (none)
+            nonce, // nonce
+            key, // key
         );
 
         return .{
@@ -104,12 +104,12 @@ pub const FileKeystore = struct {
         var seed: [32]u8 = undefined;
         const Aes256Gcm = std.crypto.aead.aes_gcm.Aes256Gcm;
         try Aes256Gcm.decrypt(
-            &seed,              // plaintext
-            encrypted[0..32],   // ciphertext
-            encrypted[32..],    // tag
-            nonce,              // nonce
-            key,                // key
-            &.{},               // associated data (none)
+            &seed, // plaintext
+            encrypted[0..32], // ciphertext
+            encrypted[32..], // tag
+            nonce, // nonce
+            key, // key
+            &.{}, // associated data (none)
         );
 
         return seed;
@@ -173,7 +173,7 @@ pub const FileKeystore = struct {
         // Decrypt seed
         var encrypted_arr: [32 + TAG_LEN]u8 = undefined;
         @memcpy(&encrypted_arr, credential.encrypted_seed);
-        
+
         const seed = try decryptSeed(encrypted_arr, credential.salt, credential.nonce, password);
 
         return .{
@@ -192,7 +192,7 @@ pub const FileKeystore = struct {
 
     /// List all credentials
     pub fn listCredentials(self: *Self, allocator: Allocator) ![][]const u8 {
-        var list = try allocator.alloc([]const u8, 100);  // Max 100 credentials
+        var list = try allocator.alloc([]const u8, 100); // Max 100 credentials
         var count: usize = 0;
         errdefer {
             for (0..count) |i| allocator.free(list[i]);
@@ -222,41 +222,41 @@ pub const FileKeystore = struct {
         // Manual JSON serialization
         var buf = try self.allocator.alloc(u8, 4096);
         defer self.allocator.free(buf);
-        
+
         var stream = std.io.fixedBufferStream(buf);
         const writer = stream.writer();
 
         try writer.writeAll("{\n");
-        
+
         // tag
         try writer.print("  \"tag\": \"{s}\",\n", .{cred.tag});
-        
+
         // salt (hex)
         try writer.writeAll("  \"salt\": \"");
         for (cred.salt) |b| try writer.print("{x:0>2}", .{b});
         try writer.writeAll("\",\n");
-        
+
         // nonce (hex)
         try writer.writeAll("  \"nonce\": \"");
         for (cred.nonce) |b| try writer.print("{x:0>2}", .{b});
         try writer.writeAll("\",\n");
-        
+
         // encrypted_seed (hex)
         try writer.writeAll("  \"encrypted_seed\": \"");
         for (cred.encrypted_seed) |b| try writer.print("{x:0>2}", .{b});
         try writer.writeAll("\",\n");
-        
+
         // public_key (hex)
         try writer.writeAll("  \"public_key\": \"");
         for (cred.public_key) |b| try writer.print("{x:0>2}", .{b});
         try writer.writeAll("\",\n");
-        
+
         // algorithm
         try writer.print("  \"algorithm\": \"{s}\",\n", .{cred.algorithm});
-        
+
         // created_at
         try writer.print("  \"created_at\": {d}\n", .{cred.created_at});
-        
+
         try writer.writeAll("}\n");
 
         const written = stream.getWritten().len;
@@ -271,7 +271,7 @@ pub const FileKeystore = struct {
 
         // Parse fields manually (simplified)
         // In production, use std.json.parseFromSlice
-        
+
         // For now, use std.json
         const parsed = try std.json.parseFromSlice(struct {
             tag: []const u8,
@@ -285,7 +285,7 @@ pub const FileKeystore = struct {
         defer parsed.deinit();
 
         result.tag = try self.allocator.dupe(u8, parsed.value.tag);
-        
+
         // Parse hex strings
         result.salt = try parseHex(parsed.value.salt);
         result.nonce = try parseHex(parsed.value.nonce);
@@ -301,36 +301,36 @@ pub const FileKeystore = struct {
 /// Parse hex string to fixed-size array
 fn parseHex(hex: []const u8) ![32]u8 {
     var result: [32]u8 = undefined;
-    
+
     if (hex.len != 64) return error.InvalidHexLength;
-    
+
     var i: usize = 0;
     while (i < 32) : (i += 1) {
         result[i] = try std.fmt.parseInt(u8, hex[i * 2 .. i * 2 + 2], 16);
     }
-    
+
     return result;
 }
 
 /// Parse hex string to allocated slice
 fn parseHexAlloc(allocator: Allocator, hex: []const u8) ![]const u8 {
     if (hex.len % 2 != 0) return error.InvalidHexLength;
-    
+
     const len = hex.len / 2;
     const result = try allocator.alloc(u8, len);
-    
+
     var i: usize = 0;
     while (i < len) : (i += 1) {
         result[i] = try std.fmt.parseInt(u8, hex[i * 2 .. i * 2 + 2], 16);
     }
-    
+
     return result;
 }
 
 // Test functions
 test "FileKeystore init" {
     const allocator = std.testing.allocator;
-    
+
     const keystore = try FileKeystore.init(allocator, ".test_keystore");
     defer {
         var k = keystore;
@@ -342,13 +342,13 @@ test "FileKeystore init" {
 test "Encrypt and decrypt seed" {
     const seed: [32]u8 = .{0x01} ** 32;
     const password = "test_password_123";
-    
+
     // Encrypt
     const encrypted = try FileKeystore.encryptSeed(seed, password);
-    
+
     // Decrypt
     const decrypted = try FileKeystore.decryptSeed(encrypted.ciphertext, encrypted.salt, encrypted.nonce, password);
-    
+
     // Verify
     try std.testing.expectEqualSlices(u8, &seed, &decrypted);
 }
@@ -357,10 +357,10 @@ test "Wrong password fails decryption" {
     const seed: [32]u8 = .{0x01} ** 32;
     const password = "correct_password";
     const wrong_password = "wrong_password";
-    
+
     // Encrypt
     const encrypted = try FileKeystore.encryptSeed(seed, password);
-    
+
     // Decrypt with wrong password should fail
     const result = FileKeystore.decryptSeed(encrypted.ciphertext, encrypted.salt, encrypted.nonce, wrong_password);
     try std.testing.expectError(error.AuthenticationFailed, result);

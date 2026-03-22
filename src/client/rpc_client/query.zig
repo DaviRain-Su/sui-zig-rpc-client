@@ -324,7 +324,7 @@ fn parseDynamicField(allocator: std.mem.Allocator, value: std.json.Value) !Dynam
 
     // Zig 0.15.2 doesn't have stringifyAlloc, use placeholder
     const name_str = if (name == .string) name.string else "complex_name";
-    
+
     return DynamicField{
         .name = try allocator.dupe(u8, name_str),
         .type = try allocator.dupe(u8, object_type.string),

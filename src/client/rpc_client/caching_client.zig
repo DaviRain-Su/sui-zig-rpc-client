@@ -1,6 +1,5 @@
 /// Caching RPC Client for Sui
 /// Wraps SuiRpcClient with intelligent caching to reduce network calls
-
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const SuiRpcClient = @import("client_core.zig").SuiRpcClient;
@@ -52,12 +51,12 @@ pub fn Cache(comptime K: type, comptime V: type) type {
         /// Get value from cache
         pub fn get(self: *Self, key: K) ?V {
             const entry = self.map.get(key) orelse return null;
-            
+
             if (entry.isExpired()) {
                 _ = self.map.remove(key);
                 return null;
             }
-            
+
             return entry.data;
         }
 
@@ -135,29 +134,29 @@ fn getContext(comptime K: type) type {
 pub const CachingSuiRpcClient = struct {
     allocator: Allocator,
     inner: *SuiRpcClient,
-    
+
     // Caches with different TTLs
     object_cache: Cache([]const u8, []const u8),
     balance_cache: Cache([]const u8, []const u8),
     owned_objects_cache: Cache([]const u8, []const u8),
     transaction_cache: Cache([]const u8, []const u8),
     gas_price_cache: Cache([]const u8, u64),
-    
+
     // Cache statistics
     hits: u64,
     misses: u64,
-    
+
     const Self = @This();
-    
+
     // TTL configurations (milliseconds)
-    const OBJECT_TTL = 30_000;        // 30 seconds
-    const BALANCE_TTL = 10_000;       // 10 seconds  
+    const OBJECT_TTL = 30_000; // 30 seconds
+    const BALANCE_TTL = 10_000; // 10 seconds
     const OWNED_OBJECTS_TTL = 15_000; // 15 seconds
-    const TRANSACTION_TTL = 300_000;  // 5 minutes
-    const GAS_PRICE_TTL = 60_000;     // 1 minute
-    
+    const TRANSACTION_TTL = 300_000; // 5 minutes
+    const GAS_PRICE_TTL = 60_000; // 1 minute
+
     const MAX_CACHE_ENTRIES = 1000;
-    
+
     pub fn init(allocator: Allocator, inner: *SuiRpcClient) Self {
         return .{
             .allocator = allocator,
@@ -171,7 +170,7 @@ pub const CachingSuiRpcClient = struct {
             .misses = 0,
         };
     }
-    
+
     pub fn deinit(self: *Self) void {
         // Free all cached strings
         var obj_iter = self.object_cache.map.iterator();
@@ -179,37 +178,37 @@ pub const CachingSuiRpcClient = struct {
             self.allocator.free(entry.key_ptr.*);
             self.allocator.free(entry.value_ptr.data);
         }
-        
+
         var bal_iter = self.balance_cache.map.iterator();
         while (bal_iter.next()) |entry| {
             self.allocator.free(entry.key_ptr.*);
             self.allocator.free(entry.value_ptr.data);
         }
-        
+
         var owned_iter = self.owned_objects_cache.map.iterator();
         while (owned_iter.next()) |entry| {
             self.allocator.free(entry.key_ptr.*);
             self.allocator.free(entry.value_ptr.data);
         }
-        
+
         var tx_iter = self.transaction_cache.map.iterator();
         while (tx_iter.next()) |entry| {
             self.allocator.free(entry.key_ptr.*);
             self.allocator.free(entry.value_ptr.data);
         }
-        
+
         var gas_iter = self.gas_price_cache.map.iterator();
         while (gas_iter.next()) |entry| {
             self.allocator.free(entry.key_ptr.*);
         }
-        
+
         self.object_cache.deinit();
         self.balance_cache.deinit();
         self.owned_objects_cache.deinit();
         self.transaction_cache.deinit();
         self.gas_price_cache.deinit();
     }
-    
+
     /// Get object with caching
     pub fn getObject(self: *Self, object_id: []const u8) ![]const u8 {
         // Check cache first
@@ -217,26 +216,25 @@ pub const CachingSuiRpcClient = struct {
             self.hits += 1;
             return self.allocator.dupe(u8, cached);
         }
-        
+
         self.misses += 1;
-        
+
         // Fetch from network
-        const response = try self.inner.call("sui_getObject", 
-            try std.fmt.allocPrint(self.allocator, "[\"{s}\"]", .{object_id}));
+        const response = try self.inner.call("sui_getObject", try std.fmt.allocPrint(self.allocator, "[\"{s}\"]", .{object_id}));
         defer self.allocator.free(response);
-        
+
         // Parse and cache
         const result = try self.allocator.dupe(u8, response);
-        
+
         const key = try self.allocator.dupe(u8, object_id);
         self.object_cache.put(key, result) catch {
             self.allocator.free(key);
             // Don't fail if caching fails, just return the result
         };
-        
+
         return try self.allocator.dupe(u8, response);
     }
-    
+
     /// Get balance with caching
     pub fn getBalance(self: *Self, address: []const u8, coin_type: ?[]const u8) !u64 {
         const cache_key = if (coin_type) |ct|
@@ -244,7 +242,7 @@ pub const CachingSuiRpcClient = struct {
         else
             try self.allocator.dupe(u8, address);
         defer self.allocator.free(cache_key);
-        
+
         // Check cache
         if (self.balance_cache.get(cache_key)) |cached| {
             self.hits += 1;
@@ -252,27 +250,27 @@ pub const CachingSuiRpcClient = struct {
             defer parsed.deinit();
             return parsed.value;
         }
-        
+
         self.misses += 1;
-        
+
         // Fetch from network (using query module)
         const query = @import("query.zig");
         const balance = try query.getBalance(self.inner, address, coin_type);
-        
+
         // Cache result
         const balance_json = try std.fmt.allocPrint(self.allocator, "{d}", .{balance});
         defer self.allocator.free(balance_json);
-        
+
         const key = try self.allocator.dupe(u8, cache_key);
         const value = try self.allocator.dupe(u8, balance_json);
         self.balance_cache.put(key, value) catch {
             self.allocator.free(key);
             self.allocator.free(value);
         };
-        
+
         return balance;
     }
-    
+
     /// Get owned objects with caching
     pub fn getOwnedObjects(self: *Self, address: []const u8) ![]const u8 {
         // Check cache
@@ -280,25 +278,24 @@ pub const CachingSuiRpcClient = struct {
             self.hits += 1;
             return self.allocator.dupe(u8, cached);
         }
-        
+
         self.misses += 1;
-        
+
         // Fetch from network
-        const response = try self.inner.call("suix_getOwnedObjects",
-            try std.fmt.allocPrint(self.allocator, "[\"{s}\"]", .{address}));
+        const response = try self.inner.call("suix_getOwnedObjects", try std.fmt.allocPrint(self.allocator, "[\"{s}\"]", .{address}));
         defer self.allocator.free(response);
-        
+
         // Cache result
         const result = try self.allocator.dupe(u8, response);
-        
+
         const key = try self.allocator.dupe(u8, address);
         self.owned_objects_cache.put(key, result) catch {
             self.allocator.free(key);
         };
-        
+
         return try self.allocator.dupe(u8, response);
     }
-    
+
     /// Get transaction with caching
     pub fn getTransaction(self: *Self, digest: []const u8) ![]const u8 {
         // Check cache
@@ -306,50 +303,49 @@ pub const CachingSuiRpcClient = struct {
             self.hits += 1;
             return self.allocator.dupe(u8, cached);
         }
-        
+
         self.misses += 1;
-        
+
         // Fetch from network
-        const response = try self.inner.call("sui_getTransactionBlock",
-            try std.fmt.allocPrint(self.allocator, "[\"{s}\"]", .{digest}));
+        const response = try self.inner.call("sui_getTransactionBlock", try std.fmt.allocPrint(self.allocator, "[\"{s}\"]", .{digest}));
         defer self.allocator.free(response);
-        
+
         // Cache result
         const result = try self.allocator.dupe(u8, response);
-        
+
         const key = try self.allocator.dupe(u8, digest);
         self.transaction_cache.put(key, result) catch {
             self.allocator.free(key);
         };
-        
+
         return try self.allocator.dupe(u8, response);
     }
-    
+
     /// Get reference gas price with caching
     pub fn getReferenceGasPrice(self: *Self) !u64 {
         const cache_key = "gas_price";
-        
+
         // Check cache
         if (self.gas_price_cache.get(cache_key)) |cached| {
             self.hits += 1;
             return cached;
         }
-        
+
         self.misses += 1;
-        
+
         // Fetch from network
         const query = @import("query.zig");
         const price = try query.getReferenceGasPrice(self.inner);
-        
+
         // Cache result
         const key = try self.allocator.dupe(u8, cache_key);
         self.gas_price_cache.put(key, price) catch {
             self.allocator.free(key);
         };
-        
+
         return price;
     }
-    
+
     /// Clear all caches
     pub fn clearCache(self: *Self) void {
         self.object_cache.clear();
@@ -360,7 +356,7 @@ pub const CachingSuiRpcClient = struct {
         self.hits = 0;
         self.misses = 0;
     }
-    
+
     /// Get cache statistics
     pub fn getStats(self: *const Self) struct {
         hits: u64,
@@ -373,11 +369,11 @@ pub const CachingSuiRpcClient = struct {
         gas_price_cache_size: usize,
     } {
         const total = self.hits + self.misses;
-        const hit_rate = if (total > 0) 
-            @as(f64, @floatFromInt(self.hits)) / @as(f64, @floatFromInt(total)) * 100.0 
-        else 
+        const hit_rate = if (total > 0)
+            @as(f64, @floatFromInt(self.hits)) / @as(f64, @floatFromInt(total)) * 100.0
+        else
             0.0;
-        
+
         return .{
             .hits = self.hits,
             .misses = self.misses,
@@ -389,11 +385,11 @@ pub const CachingSuiRpcClient = struct {
             .gas_price_cache_size = self.gas_price_cache.map.count(),
         };
     }
-    
+
     /// Print cache statistics
     pub fn printStats(self: *const Self) void {
         const stats = self.getStats();
-        
+
         std.log.info("═══════════════════════════════════════════════════════════════", .{});
         std.log.info("                    Cache Statistics", .{});
         std.log.info("═══════════════════════════════════════════════════════════════", .{});
@@ -413,14 +409,14 @@ pub const CachingSuiRpcClient = struct {
 // Test functions
 test "CachingSuiRpcClient init/deinit" {
     const allocator = std.testing.allocator;
-    
+
     // Create a mock inner client (would be real in production)
     var inner_client = SuiRpcClient.init(allocator, "https://testnet.sui.io");
     defer inner_client.deinit();
-    
+
     var caching_client = CachingSuiRpcClient.init(allocator, &inner_client);
     defer caching_client.deinit();
-    
+
     const stats = caching_client.getStats();
     try std.testing.expectEqual(stats.hits, 0);
     try std.testing.expectEqual(stats.misses, 0);
@@ -428,16 +424,16 @@ test "CachingSuiRpcClient init/deinit" {
 
 test "Cache statistics calculation" {
     const allocator = std.testing.allocator;
-    
+
     var inner_client = SuiRpcClient.init(allocator, "https://testnet.sui.io");
     defer inner_client.deinit();
-    
+
     var client = CachingSuiRpcClient.init(allocator, &inner_client);
     defer client.deinit();
-    
+
     client.hits = 75;
     client.misses = 25;
-    
+
     const stats = client.getStats();
     try std.testing.expectEqual(stats.hits, 75);
     try std.testing.expectEqual(stats.misses, 25);

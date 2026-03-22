@@ -101,7 +101,7 @@ pub fn printCommandHelp(writer: anytype, command: types.Command) !void {
     switch (command) {
         .help => try printUsage(writer),
         .version => try printVersion(writer),
-        
+
         .wallet_create => try writer.writeAll(
             \\wallet create - Create a new wallet
             \\
@@ -113,7 +113,7 @@ pub fn printCommandHelp(writer: anytype, command: types.Command) !void {
             \\  --json              Output as JSON
             \\
         ),
-        
+
         .wallet_import => try writer.writeAll(
             \\wallet import - Import wallet from private key
             \\
@@ -127,7 +127,7 @@ pub fn printCommandHelp(writer: anytype, command: types.Command) !void {
             \\  --json              Output as JSON
             \\
         ),
-        
+
         .wallet_use => try writer.writeAll(
             \\wallet use - Set active wallet
             \\
@@ -140,7 +140,7 @@ pub fn printCommandHelp(writer: anytype, command: types.Command) !void {
             \\  --json              Output as JSON
             \\
         ),
-        
+
         .wallet_accounts => try writer.writeAll(
             \\wallet accounts - List wallet accounts
             \\
@@ -150,7 +150,7 @@ pub fn printCommandHelp(writer: anytype, command: types.Command) !void {
             \\  --json              Output as JSON
             \\
         ),
-        
+
         .account_list => try writer.writeAll(
             \\account list - List all accounts
             \\
@@ -160,7 +160,7 @@ pub fn printCommandHelp(writer: anytype, command: types.Command) !void {
             \\  --json              Output as JSON
             \\
         ),
-        
+
         .account_info => try writer.writeAll(
             \\account info - Get account information
             \\
@@ -173,7 +173,7 @@ pub fn printCommandHelp(writer: anytype, command: types.Command) !void {
             \\  --json              Output as JSON
             \\
         ),
-        
+
         .account_balance => try writer.writeAll(
             \\account balance - Get account balance
             \\
@@ -186,7 +186,7 @@ pub fn printCommandHelp(writer: anytype, command: types.Command) !void {
             \\  --json              Output as JSON
             \\
         ),
-        
+
         .tx_simulate => try writer.writeAll(
             \\tx simulate - Simulate transaction
             \\
@@ -199,7 +199,7 @@ pub fn printCommandHelp(writer: anytype, command: types.Command) !void {
             \\  --summarize         Summarize output
             \\
         ),
-        
+
         .tx_dry_run => try writer.writeAll(
             \\tx dry-run - Dry-run transaction
             \\
@@ -212,7 +212,7 @@ pub fn printCommandHelp(writer: anytype, command: types.Command) !void {
             \\  --summarize         Summarize output
             \\
         ),
-        
+
         .tx_build => try writer.writeAll(
             \\tx build - Build transaction
             \\
@@ -228,7 +228,7 @@ pub fn printCommandHelp(writer: anytype, command: types.Command) !void {
             \\  --summarize         Summarize output
             \\
         ),
-        
+
         .tx_send => try writer.writeAll(
             \\tx send - Send transaction
             \\
@@ -244,7 +244,7 @@ pub fn printCommandHelp(writer: anytype, command: types.Command) !void {
             \\  --observe           Observe execution
             \\
         ),
-        
+
         .move_package => try writer.writeAll(
             \\move package - Get package information
             \\
@@ -257,7 +257,7 @@ pub fn printCommandHelp(writer: anytype, command: types.Command) !void {
             \\  --summarize         Summarize output
             \\
         ),
-        
+
         .move_module => try writer.writeAll(
             \\move module - Get module information
             \\
@@ -271,7 +271,7 @@ pub fn printCommandHelp(writer: anytype, command: types.Command) !void {
             \\  --summarize         Summarize output
             \\
         ),
-        
+
         .move_function => try writer.writeAll(
             \\move function - Get function information
             \\
@@ -287,7 +287,7 @@ pub fn printCommandHelp(writer: anytype, command: types.Command) !void {
             \\  --summarize         Summarize output
             \\
         ),
-        
+
         .object_get => try writer.writeAll(
             \\object get - Get object information
             \\
@@ -301,7 +301,7 @@ pub fn printCommandHelp(writer: anytype, command: types.Command) !void {
             \\  --show-content      Show object content
             \\
         ),
-        
+
         .object_dynamic_fields => try writer.writeAll(
             \\object dynamic-fields - Get object dynamic fields
             \\
@@ -314,7 +314,7 @@ pub fn printCommandHelp(writer: anytype, command: types.Command) !void {
             \\  --limit <n>         Limit results
             \\
         ),
-        
+
         .rpc => try writer.writeAll(
             \\rpc - Send raw JSON-RPC request
             \\
@@ -325,7 +325,7 @@ pub fn printCommandHelp(writer: anytype, command: types.Command) !void {
             \\  [params]            JSON parameters (default: [])
             \\
         ),
-        
+
         else => try writer.print("No detailed help available for command: {s}\n", .{@tagName(command)}),
     }
 }
@@ -344,7 +344,7 @@ pub fn printCategoryHelp(writer: anytype, category: types.CommandCategory) !void
             \\  wallet fund [options]                Fund wallet
             \\
         ),
-        
+
         .account => try writer.writeAll(
             \\Account Commands:
             \\  account list [options]               List accounts
@@ -354,7 +354,7 @@ pub fn printCategoryHelp(writer: anytype, category: types.CommandCategory) !void
             \\  account objects [address] [options]  List objects
             \\
         ),
-        
+
         .transaction => try writer.writeAll(
             \\Transaction Commands:
             \\  tx simulate [tx-bytes] [options]     Simulate transaction
@@ -364,7 +364,7 @@ pub fn printCategoryHelp(writer: anytype, category: types.CommandCategory) !void
             \\  tx payload [tx-bytes] [options]      Build payload
             \\
         ),
-        
+
         .move => try writer.writeAll(
             \\Move Commands:
             \\  move package <id> [options]          Get package info
@@ -372,20 +372,20 @@ pub fn printCategoryHelp(writer: anytype, category: types.CommandCategory) !void
             \\  move function <pkg> <mod> <fn> [opt] Get function info
             \\
         ),
-        
+
         .object => try writer.writeAll(
             \\Object Commands:
             \\  object get <id> [options]            Get object info
             \\  object dynamic-fields <id> [options] Get dynamic fields
             \\
         ),
-        
+
         .query => try writer.writeAll(
             \\Query Commands:
             \\  events [options]                     Query events
             \\
         ),
-        
+
         .request => try writer.writeAll(
             \\Request Lifecycle Commands:
             \\  request build [options]              Build request
@@ -396,7 +396,7 @@ pub fn printCategoryHelp(writer: anytype, category: types.CommandCategory) !void
             \\  request send [options]               Send request
             \\
         ),
-        
+
         .utility => try writer.writeAll(
             \\Utility Commands:
             \\  help                                 Show help

@@ -95,7 +95,7 @@ test "end-to-end type flow" {
         pretty: bool = false,
     };
     var args = MockArgs{};
-    const signatures = &.{"sig1", "sig2"};
+    const signatures = &.{ "sig1", "sig2" };
 
     const payload = try tx.buildExecutePayloadFromArgs(allocator, &args, signatures, null);
     defer allocator.free(payload);

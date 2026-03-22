@@ -229,20 +229,21 @@ pub fn buildRemoteAuthorizationResultFromJson(
 ) !RemoteAuthorizationResult {
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
     defer parsed.deinit();
-    
+
     const value = parsed.value;
     if (value != .object) return error.InvalidCli;
-    
-    const sender = if (value.object.get("sender")) |s| 
-        if (s == .string) try allocator.dupe(u8, s.string) else null 
-    else null;
-    
+
+    const sender = if (value.object.get("sender")) |s|
+        if (s == .string) try allocator.dupe(u8, s.string) else null
+    else
+        null;
+
     var signatures = std.ArrayList([]const u8).init(allocator);
     errdefer {
         for (signatures.items) |sig| allocator.free(sig);
         signatures.deinit();
     }
-    
+
     if (value.object.get("signatures")) |sigs| {
         if (sigs == .array) {
             for (sigs.array.items) |sig| {
@@ -252,11 +253,12 @@ pub fn buildRemoteAuthorizationResultFromJson(
             }
         }
     }
-    
+
     const supports_execute = if (value.object.get("supports_execute")) |se|
         se == .bool and se.bool
-    else true;
-    
+    else
+        true;
+
     return RemoteAuthorizationResult{
         .sender = sender,
         .signatures = try signatures.toOwnedSlice(),
@@ -468,7 +470,7 @@ test "buildRemoteAuthorizationResultFromJson parses valid JSON" {
     const allocator = gpa.allocator();
 
     const json = "{\"sender\":\"0x123\",\"signatures\":[\"sig1\",\"sig2\"],\"supports_execute\":true}";
-    
+
     var result = try buildRemoteAuthorizationResultFromJson(allocator, json);
     defer result.deinit(allocator);
 

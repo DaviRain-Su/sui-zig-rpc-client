@@ -47,14 +47,14 @@ pub fn sendExecuteAndMaybeWaitForConfirmation(
     // Parse tx_bytes and signatures from payload
     // For now, use the old approach with parsed args
     const tx_bytes = args.tx_bytes orelse return error.InvalidCli;
-    
+
     // Collect signatures
     var signatures = std.ArrayList([]const u8).init(allocator);
     defer {
         for (signatures.items) |sig| allocator.free(sig);
         signatures.deinit();
     }
-    
+
     if (@hasField(@TypeOf(args.*), "signatures")) {
         for (args.signatures.items) |sig| {
             try signatures.append(try allocator.dupe(u8, sig));
@@ -75,11 +75,11 @@ pub fn sendExecuteAndMaybeWaitForConfirmation(
             // Build summary from result
             var summary = std.json.ObjectMap.init(allocator);
             defer summary.deinit();
-            
+
             try summary.put("digest", .{ .string = result.digest });
             try summary.put("status", .{ .string = @tagName(result.effects.status) });
             try summary.put("gas_used", .{ .integer = @intCast(result.effects.gas_used.computation_cost) });
-            
+
             try shared.printStructuredJson(writer, summary, pretty);
         } else {
             // Print full result
@@ -101,10 +101,10 @@ pub fn sendExecuteAndMaybeWaitForConfirmation(
     if (tx_send_summarize) {
         var summary = std.json.ObjectMap.init(allocator);
         defer summary.deinit();
-        
+
         try summary.put("digest", .{ .string = result.digest });
         try summary.put("status", .{ .string = @tagName(result.effects.status) });
-        
+
         try shared.printStructuredJson(writer, summary, pretty);
     } else {
         try writer.print("Transaction: {s}\n", .{result.digest});
@@ -131,10 +131,10 @@ pub fn sendDryRunAndMaybeSummarize(
     if (args.tx_send_summarize) {
         var summary = std.json.ObjectMap.init(allocator);
         defer summary.deinit();
-        
+
         try summary.put("status", .{ .string = @tagName(result.effects.status) });
         try summary.put("gas_used", .{ .integer = @intCast(result.effects.gas_used.computation_cost) });
-        
+
         try shared.printStructuredJson(writer, summary, args.pretty);
     } else {
         try writer.print("Status: {s}\n", .{@tagName(result.effects.status)});
@@ -168,7 +168,7 @@ pub fn buildExecutePayloadFromArgs(
     options: ?[]const u8,
 ) ![]u8 {
     _ = args;
-    
+
     var arr: std.ArrayList(u8) = .{};
     errdefer arr.deinit(allocator);
 
@@ -269,7 +269,7 @@ pub fn buildSimulatePayload(
     try writer.writeAll("[\"");
     try writer.writeAll(tx_bytes);
     try writer.writeAll("\",");
-    
+
     // Build options object
     try writer.writeAll("{");
     try writer.print("\"skipChecks\":{}", .{options.skip_checks});
@@ -279,7 +279,7 @@ pub fn buildSimulatePayload(
     if (options.show_object_changes) try writer.writeAll(",\"showObjectChanges\":true");
     if (options.show_balance_changes) try writer.writeAll(",\"showBalanceChanges\":true");
     try writer.writeAll("}");
-    
+
     try writer.writeAll("]");
 
     return arr.toOwnedSlice(allocator);
@@ -304,7 +304,7 @@ pub fn runTxSimulate(
     writer: anytype,
 ) !void {
     const tx_bytes = args.tx_bytes orelse return error.InvalidCli;
-    
+
     // Use new API directly
     const result = try rpc_new.simulateTransaction(
         rpc,
@@ -344,18 +344,18 @@ pub fn runTxSend(
     writer: anytype,
 ) !void {
     const tx_bytes = args.tx_bytes orelse return error.InvalidCli;
-    
+
     // Collect signatures
     var signatures: std.ArrayList([]const u8) = .{};
     defer signatures.deinit(allocator);
-    
+
     // Add signatures from args
     if (@hasField(@TypeOf(args.*), "signatures")) {
         for (args.signatures.items) |sig| {
             try signatures.append(sig);
         }
     }
-    
+
     const payload = try buildPayloadFromTxBytesAndSignatures(
         allocator,
         tx_bytes,
@@ -363,7 +363,7 @@ pub fn runTxSend(
         args.tx_options,
     );
     defer allocator.free(payload);
-    
+
     try sendExecuteAndMaybeWaitForConfirmation(allocator, rpc, args, payload, writer);
 }
 
@@ -374,17 +374,17 @@ pub fn runTxPayload(
     writer: anytype,
 ) !void {
     const tx_bytes = args.tx_bytes orelse return error.InvalidCli;
-    
+
     // Collect signatures
     var signatures: std.ArrayList([]const u8) = .{};
     defer signatures.deinit(allocator);
-    
+
     if (@hasField(@TypeOf(args.*), "signatures")) {
         for (args.signatures.items) |sig| {
             try signatures.append(sig);
         }
     }
-    
+
     const payload = try buildPayloadFromTxBytesAndSignatures(
         allocator,
         tx_bytes,
@@ -392,16 +392,16 @@ pub fn runTxPayload(
         args.tx_options,
     );
     defer allocator.free(payload);
-    
+
     if (args.tx_send_summarize) {
         // Build summary
         var summary = std.json.ObjectMap.init(allocator);
         defer summary.deinit();
-        
+
         try summary.put("data_kind", .{ .string = "tx_bytes" });
         try summary.put("signature_count", .{ .integer = @intCast(signatures.items.len) });
         try summary.put("has_options", .{ .bool = args.tx_options != null });
-        
+
         try shared.printStructuredJson(writer, summary, args.pretty);
     } else {
         try writer.print("{s}\n", .{payload});
@@ -443,7 +443,7 @@ test "buildExecutePayloadFromArgs builds correct payload" {
     };
 
     var args = MockArgs{};
-    const signatures = &.{"sig-a", "sig-b"};
+    const signatures = &.{ "sig-a", "sig-b" };
 
     const payload = try buildExecutePayloadFromArgs(testing.allocator, &args, signatures, null);
     defer testing.allocator.free(payload);
@@ -468,7 +468,7 @@ test "buildSimulatePayload with options" {
         .skip_checks = true,
         .show_effects = true,
     };
-    
+
     const payload = try buildSimulatePayload(testing.allocator, "tx_data", options);
     defer testing.allocator.free(payload);
 
@@ -483,7 +483,7 @@ test "buildPayloadFromTxBytesAndSignatures" {
     const payload = try buildPayloadFromTxBytesAndSignatures(
         testing.allocator,
         "tx_bytes_data",
-        &.{"sig1", "sig2"},
+        &.{ "sig1", "sig2" },
         null,
     );
     defer testing.allocator.free(payload);
@@ -513,9 +513,9 @@ test "buildTransactionBlockFromArgs placeholder" {
     const testing = std.testing;
     const MockArgs = struct {};
     var args = MockArgs{};
-    
+
     const result = try buildTransactionBlockFromArgs(testing.allocator, &args);
     defer testing.allocator.free(result);
-    
+
     try testing.expectEqualStrings("{}", result);
 }

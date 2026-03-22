@@ -118,7 +118,7 @@ pub fn buildMoveCallTxBytes(
 ) ![]u8 {
     _ = type_args;
     _ = args;
-    
+
     // Use new API to build move call transaction
     const tx_bytes = try rpc_new.buildMoveCallTxBytes(
         rpc,
@@ -130,7 +130,7 @@ pub fn buildMoveCallTxBytes(
         &.{}, // args
         null, // gas_budget
     );
-    
+
     return try allocator.dupe(u8, tx_bytes);
 }
 

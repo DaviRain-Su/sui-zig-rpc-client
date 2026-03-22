@@ -34,19 +34,21 @@ pub fn setRpcUrl(
 fn isValidUrl(url: []const u8) bool {
     // Must start with http:// or https://
     return std.mem.startsWith(u8, url, "http://") or
-           std.mem.startsWith(u8, url, "https://");
+        std.mem.startsWith(u8, url, "https://");
 }
 
 /// Parse boolean value from string
 pub fn parseBool(value: []const u8) !bool {
     if (std.mem.eql(u8, value, "true") or
         std.mem.eql(u8, value, "1") or
-        std.mem.eql(u8, value, "yes")) {
+        std.mem.eql(u8, value, "yes"))
+    {
         return true;
     }
     if (std.mem.eql(u8, value, "false") or
         std.mem.eql(u8, value, "0") or
-        std.mem.eql(u8, value, "no")) {
+        std.mem.eql(u8, value, "no"))
+    {
         return false;
     }
     return error.InvalidCli;
@@ -141,7 +143,7 @@ pub fn writeFileContents(path: []const u8, contents: []const u8) !void {
 /// Get home directory
 pub fn getHomeDir() ?[]const u8 {
     return std.posix.getenv("HOME") orelse
-           std.posix.getenv("USERPROFILE");
+        std.posix.getenv("USERPROFILE");
 }
 
 /// Expand tilde in path
@@ -318,7 +320,7 @@ test "expandTilde" {
 
     // Should either expand or return as-is if no home dir
     try testing.expect(std.mem.startsWith(u8, expanded, "/") or
-                       std.mem.startsWith(u8, expanded, "~"));
+        std.mem.startsWith(u8, expanded, "~"));
 }
 
 test "wrapText" {

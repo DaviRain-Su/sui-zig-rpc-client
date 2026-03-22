@@ -180,8 +180,7 @@ pub fn exampleMockSender(allocator: std.mem.Allocator) !void {
     defer mock.deinit(allocator);
 
     // Add mock responses
-    try mock.addResponse("suix_getBalance",
-        "{\"result\":{\"coinType\":\"0x2::sui::SUI\",\"coinObjectCount\":5,\"totalBalance\":\"1000000000\",\"lockedBalance\":{}}}");
+    try mock.addResponse("suix_getBalance", "{\"result\":{\"coinType\":\"0x2::sui::SUI\",\"coinObjectCount\":5,\"totalBalance\":\"1000000000\",\"lockedBalance\":{}}}");
 
     // Set mock sender
     const sender = rpc_client.RequestSender{

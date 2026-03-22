@@ -41,14 +41,14 @@ const MockSender = struct {
         request: rpc_client.RpcRequest,
     ) std.mem.Allocator.Error![]u8 {
         const self = @as(*MockSender, @ptrCast(@alignCast(context)));
-        
+
         const logged = try std.fmt.allocPrint(allocator, "{s}:{s}", .{ request.method, request.params_json });
         try self.request_log.append(logged);
-        
+
         if (self.responses.get(request.method)) |response| {
             return try allocator.dupe(u8, response);
         }
-        
+
         return try allocator.dupe(u8, "{\"error\":{\"code\":-32601,\"message\":\"Method not found\"}}");
     }
 };
@@ -123,8 +123,7 @@ test "getBalance integration" {
     var mock = MockSender.init(allocator);
     defer mock.deinit(allocator);
 
-    try mock.addResponse("suix_getBalance", 
-        "{\"result\":{\"coinType\":\"0x2::sui::SUI\",\"coinObjectCount\":5,\"totalBalance\":\"1000000000\",\"lockedBalance\":{}}}");
+    try mock.addResponse("suix_getBalance", "{\"result\":{\"coinType\":\"0x2::sui::SUI\",\"coinObjectCount\":5,\"totalBalance\":\"1000000000\",\"lockedBalance\":{}}}");
 
     const sender = rpc_client.RequestSender{
         .context = &mock,
@@ -149,8 +148,7 @@ test "getObject integration" {
     var mock = MockSender.init(allocator);
     defer mock.deinit(allocator);
 
-    try mock.addResponse("sui_getObject",
-        "{\"result\":{\"data\":{\"objectId\":\"0x123\",\"version\":\"1\",\"digest\":\"abc\",\"type\":\"0x2::coin::Coin\"}}}");
+    try mock.addResponse("sui_getObject", "{\"result\":{\"data\":{\"objectId\":\"0x123\",\"version\":\"1\",\"digest\":\"abc\",\"type\":\"0x2::coin::Coin\"}}}");
 
     const sender = rpc_client.RequestSender{
         .context = &mock,
@@ -203,8 +201,7 @@ test "queryEvents integration" {
     var mock = MockSender.init(allocator);
     defer mock.deinit(allocator);
 
-    try mock.addResponse("suix_queryEvents",
-        "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xabc\",\"eventSeq\":0},\"packageId\":\"0x2\",\"transactionModule\":\"sui\",\"sender\":\"0x123\",\"type\":\"0x2::event::Event\",\"bcs\":\"0x00\"}],\"hasNextPage\":false}}");
+    try mock.addResponse("suix_queryEvents", "{\"result\":{\"data\":[{\"id\":{\"txDigest\":\"0xabc\",\"eventSeq\":0},\"packageId\":\"0x2\",\"transactionModule\":\"sui\",\"sender\":\"0x123\",\"type\":\"0x2::event::Event\",\"bcs\":\"0x00\"}],\"hasNextPage\":false}}");
 
     const sender = rpc_client.RequestSender{
         .context = &mock,
@@ -233,8 +230,7 @@ test "getNormalizedMoveModule integration" {
     var mock = MockSender.init(allocator);
     defer mock.deinit(allocator);
 
-    try mock.addResponse("sui_getNormalizedMoveModule",
-        "{\"result\":{\"fileFormatVersion\":6,\"address\":\"0x2\",\"name\":\"sui\",\"friends\":[],\"structs\":{},\"exposedFunctions\":{}}}");
+    try mock.addResponse("sui_getNormalizedMoveModule", "{\"result\":{\"fileFormatVersion\":6,\"address\":\"0x2\",\"name\":\"sui\",\"friends\":[],\"structs\":{},\"exposedFunctions\":{}}}");
 
     const sender = rpc_client.RequestSender{
         .context = &mock,

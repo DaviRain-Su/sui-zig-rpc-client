@@ -40,12 +40,12 @@ test "e2e: transaction build and send workflow" {
 
     // Step 1: Build transaction
     const build_args = &[_][]const u8{
-        "tx", "build",
-        "--kind", "move-call",
-        "--package", "0x" ++ "1" ** 64,
-        "--module", "module",
-        "--function", "function",
-        "--sender", "0x" ++ "2" ** 64,
+        "tx",           "build",
+        "--kind",       "move-call",
+        "--package",    "0x" ++ "1" ** 64,
+        "--module",     "module",
+        "--function",   "function",
+        "--sender",     "0x" ++ "2" ** 64,
         "--gas-budget", "1000000",
     };
 
@@ -62,10 +62,9 @@ test "e2e: transaction build and send workflow" {
 
     // Step 4: Simulate sending
     const send_args = &[_][]const u8{
-        "tx", "send", "txbytes",
-        "--signature", "sig1",
-        "--signature", "sig2",
-        "--wait",
+        "tx",          "send",   "txbytes",
+        "--signature", "sig1",   "--signature",
+        "sig2",        "--wait",
     };
 
     var send_parsed = try parser.parseCliArgs(allocator, send_args);
@@ -120,9 +119,8 @@ test "e2e: move inspection workflow" {
 
     // Inspect function
     const function_args = &[_][]const u8{
-        "move", "function", test_package, "module", "function",
-        "--output", "dry-run-request",
-        "--summarize",
+        "move",     "function",        test_package,  "module", "function",
+        "--output", "dry-run-request", "--summarize",
     };
 
     var func_parsed = try parser.parseCliArgs(allocator, function_args);
@@ -142,9 +140,8 @@ test "e2e: object query workflow" {
 
     // Get object
     const object_args = &[_][]const u8{
-        "object", "get", test_object,
-        "--show-type",
-        "--show-content",
+        "object",      "get",            test_object,
+        "--show-type", "--show-content",
     };
 
     var parsed = try parser.parseCliArgs(allocator, object_args);
@@ -272,12 +269,12 @@ test "e2e: complex multi-step workflow" {
 
     // Step 2: Build transaction
     const build_args = &[_][]const u8{
-        "tx", "build",
-        "--kind", "move-call",
-        "--package", "0x" ++ "1" ** 64,
-        "--module", "test",
+        "tx",         "build",
+        "--kind",     "move-call",
+        "--package",  "0x" ++ "1" ** 64,
+        "--module",   "test",
         "--function", "mint",
-        "--sender", "0x" ++ "2" ** 64,
+        "--sender",   "0x" ++ "2" ** 64,
     };
 
     var build_parsed = try parser.parseCliArgs(allocator, build_args);
@@ -307,12 +304,10 @@ test "e2e: parsing performance" {
     const allocator = gpa.allocator();
 
     const args = &[_][]const u8{
-        "tx", "send", "bytes",
-        "--signature", "sig1",
-        "--signature", "sig2",
-        "--signature", "sig3",
-        "--wait",
-        "--summarize",
+        "tx",          "send",        "bytes",
+        "--signature", "sig1",        "--signature",
+        "sig2",        "--signature", "sig3",
+        "--wait",      "--summarize",
     };
 
     // Parse multiple times to check for memory leaks
@@ -330,9 +325,8 @@ test "e2e: validation performance" {
     const allocator = gpa.allocator();
 
     const args = &[_][]const u8{
-        "move", "function",
-        "0x" ++ "1" ** 64,
-        "module",
+        "move",            "function",
+        "0x" ++ "1" ** 64, "module",
         "function",
     };
 

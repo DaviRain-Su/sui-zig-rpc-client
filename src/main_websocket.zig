@@ -35,7 +35,7 @@ fn printUsage() void {
 
 fn cmdWebsocketDemo(allocator: Allocator) !void {
     _ = allocator;
-    
+
     std.log.info("=== WebSocket Demo ===", .{});
     std.log.info("", .{});
     std.log.info("WebSocket support enables real-time event streaming:", .{});
@@ -62,15 +62,15 @@ fn cmdWebsocketConnect(allocator: Allocator, endpoint: []const u8) !void {
     std.log.info("", .{});
     std.log.info("Endpoint: {s}", .{endpoint});
     std.log.info("", .{});
-    
+
     // Import WebSocket module
     const WebSocketClient = @import("websocket.zig").WebSocketClient;
-    
+
     var client = WebSocketClient.init(allocator);
     defer client.deinit();
-    
+
     std.log.info("Connecting...", .{});
-    
+
     // Attempt connection (will fail without actual server)
     client.connect(endpoint) catch |err| {
         std.log.info("Connection result: {s}", .{@errorName(err)});
@@ -82,13 +82,13 @@ fn cmdWebsocketConnect(allocator: Allocator, endpoint: []const u8) !void {
         std.log.info("  - Proper TLS certificates (for wss://)", .{});
         return;
     };
-    
+
     std.log.info("Connected successfully!", .{});
-    
+
     // Send test message
     try client.sendText("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"sui_getVersion\"}");
     std.log.info("Sent: version request", .{});
-    
+
     // Receive response
     const response = try client.receive();
     std.log.info("Received: {s}", .{response});
@@ -97,7 +97,7 @@ fn cmdWebsocketConnect(allocator: Allocator, endpoint: []const u8) !void {
 fn cmdWebsocketSubscribe(allocator: Allocator, args: []const []const u8) !void {
     _ = allocator;
     _ = args;
-    
+
     std.log.info("=== Event Subscription ===", .{});
     std.log.info("", .{});
     std.log.info("Subscription types:", .{});

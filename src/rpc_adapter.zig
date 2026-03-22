@@ -2,7 +2,6 @@
 ///
 /// This module provides compatibility functions using the new RPC client API.
 /// All functions now use the new modular RPC client (rpc_client_new).
-
 const std = @import("std");
 
 // Use new API only

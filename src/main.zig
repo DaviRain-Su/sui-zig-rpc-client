@@ -178,7 +178,7 @@ fn cmdBalance(allocator: Allocator, args: []const []const u8) !void {
 
     const address = args[0];
     var format: OutputFormat = .human;
-    
+
     // Parse format option
     if (args.len >= 3 and std.mem.eql(u8, args[1], "--format")) {
         if (std.mem.eql(u8, args[2], "json")) {
@@ -189,7 +189,7 @@ fn cmdBalance(allocator: Allocator, args: []const []const u8) !void {
             format = .human;
         }
     }
-    
+
     const rpc_url = getRpcUrl() orelse "https://fullnode.mainnet.sui.io:443";
 
     var rpc_client = try SuiRpcClient.init(allocator, rpc_url);
@@ -759,7 +759,6 @@ fn cmdTransfer(allocator: Allocator, args: []const []const u8) !void {
     }
 }
 /// Additional commands for main_v2.zig
-
 fn cmdValidators(allocator: Allocator, _: []const []const u8) !void {
     const rpc_url = getRpcUrl() orelse "https://fullnode.mainnet.sui.io:443";
 
@@ -779,17 +778,17 @@ fn cmdValidators(allocator: Allocator, _: []const []const u8) !void {
 
                 for (validators.array.items, 0..) |validator, i| {
                     const metadata = validator.object.get("metadata") orelse continue;
-                    
+
                     if (metadata.object.get("name")) |name| {
                         if (name == .string) {
                             std.log.info("  {d}. {s}", .{ i + 1, name.string });
                         }
                     }
-                    
+
                     if (metadata.object.get("suiAddress")) |addr| {
                         std.log.info("      Address: {s}", .{addr.string});
                     }
-                    
+
                     if (validator.object.get("stakingPoolSuiBalance")) |balance| {
                         const balance_num: u64 = if (balance == .integer)
                             @intCast(balance.integer)
@@ -797,7 +796,7 @@ fn cmdValidators(allocator: Allocator, _: []const []const u8) !void {
                             std.fmt.parseInt(u64, balance.string, 10) catch 0;
                         std.log.info("      Staking Pool: {d} MIST", .{balance_num});
                     }
-                    
+
                     if (validator.object.get("commissionRate")) |rate| {
                         const rate_num: u64 = if (rate == .integer)
                             @intCast(rate.integer)
@@ -837,21 +836,21 @@ fn cmdCommittee(allocator: Allocator, args: []const []const u8) !void {
                 std.fmt.parseInt(u64, epoch.string, 10) catch 0;
             std.log.info("Epoch: {d}", .{epoch_num});
         }
-        
+
         if (result.object.get("committeeInfo")) |info| {
             if (info == .array) {
                 std.log.info("Committee Members: {d}", .{info.array.items.len});
-                
+
                 for (info.array.items) |member| {
                     if (member == .array and member.array.items.len >= 2) {
                         const address = member.array.items[0];
                         const stake = member.array.items[1];
-                        
+
                         const stake_num: u64 = if (stake == .integer)
                             @intCast(stake.integer)
                         else
                             std.fmt.parseInt(u64, stake.string, 10) catch 0;
-                        
+
                         std.log.info("  {s}: {d} MIST", .{ address.string, stake_num });
                     }
                 }
@@ -908,7 +907,6 @@ fn cmdSupply(allocator: Allocator, _: []const []const u8) !void {
     }
 }
 /// Advanced commands for main_v2.zig
-
 fn cmdEvents(allocator: Allocator, args: []const []const u8) !void {
     if (args.len < 2) {
         std.log.err("Usage: events <package_id> <module_name>", .{});
@@ -946,15 +944,15 @@ fn cmdEvents(allocator: Allocator, args: []const []const u8) !void {
 
                 for (data.array.items, 0..) |event, i| {
                     std.log.info("  Event {d}:", .{i + 1});
-                    
+
                     if (event.object.get("txDigest")) |tx| {
                         std.log.info("    Transaction: {s}", .{tx.string});
                     }
-                    
+
                     if (event.object.get("eventType")) |etype| {
                         std.log.info("    Type: {s}", .{etype.string});
                     }
-                    
+
                     if (event.object.get("timestampMs")) |ts| {
                         const ts_num: u64 = if (ts == .integer)
                             @intCast(ts.integer)
@@ -962,7 +960,7 @@ fn cmdEvents(allocator: Allocator, args: []const []const u8) !void {
                             std.fmt.parseInt(u64, ts.string, 10) catch 0;
                         std.log.info("    Timestamp: {d} ms", .{ts_num});
                     }
-                    
+
                     if (event.object.get("parsedJson")) |json| {
                         // Print a summary of the event data
                         if (json == .object) {
@@ -1026,7 +1024,7 @@ fn cmdFields(allocator: Allocator, args: []const []const u8) !void {
 
                 for (data.array.items, 0..) |field, i| {
                     std.log.info("  Field {d}:", .{i + 1});
-                    
+
                     if (field.object.get("name")) |name| {
                         if (name.object.get("type")) |t| {
                             std.log.info("    Type: {s}", .{t.string});
@@ -1039,11 +1037,11 @@ fn cmdFields(allocator: Allocator, args: []const []const u8) !void {
                             }
                         }
                     }
-                    
+
                     if (field.object.get("objectType")) |otype| {
                         std.log.info("    Object Type: {s}", .{otype.string});
                     }
-                    
+
                     if (field.object.get("objectId")) |id| {
                         std.log.info("    Object ID: {s}", .{id.string});
                     }
@@ -1096,7 +1094,7 @@ fn cmdModule(allocator: Allocator, args: []const []const u8) !void {
             if (structs == .object) {
                 const struct_count = structs.object.count();
                 std.log.info("  Structs: {d}", .{struct_count});
-                
+
                 var it = structs.object.iterator();
                 var i: usize = 0;
                 while (it.next()) |entry| : (i += 1) {
@@ -1115,7 +1113,7 @@ fn cmdModule(allocator: Allocator, args: []const []const u8) !void {
             if (funcs == .object) {
                 const func_count = funcs.object.count();
                 std.log.info("  Functions: {d}", .{func_count});
-                
+
                 var it = funcs.object.iterator();
                 var i: usize = 0;
                 while (it.next()) |entry| : (i += 1) {
@@ -1131,7 +1129,6 @@ fn cmdModule(allocator: Allocator, args: []const []const u8) !void {
     }
 }
 /// Extra advanced commands for main_v2.zig
-
 fn cmdSubscribe(allocator: Allocator, args: []const []const u8) !void {
     if (args.len < 1) {
         std.log.err("Usage: subscribe <type>", .{});
@@ -1186,14 +1183,14 @@ fn cmdSubscribe(allocator: Allocator, args: []const []const u8) !void {
                         const first_event = data.array.items[0];
                         if (first_event.object.get("txDigest")) |tx| {
                             const tx_str = tx.string;
-                            
+
                             if (last_seen == null or !std.mem.eql(u8, last_seen.?, tx_str)) {
                                 if (last_seen) |ls| allocator.free(ls);
                                 last_seen = try allocator.dupe(u8, tx_str);
 
                                 std.log.info("New event detected!", .{});
                                 std.log.info("  Transaction: {s}", .{tx_str});
-                                
+
                                 if (first_event.object.get("timestampMs")) |ts| {
                                     const ts_num: u64 = if (ts == .integer)
                                         @intCast(ts.integer)
@@ -1213,7 +1210,6 @@ fn cmdSubscribe(allocator: Allocator, args: []const []const u8) !void {
         }
 
         std.log.info("Subscription ended after {d} polls", .{poll_count});
-
     } else if (std.mem.eql(u8, sub_type, "checkpoints")) {
         std.log.info("Subscribing to new checkpoints...", .{});
         std.log.info("(Press Ctrl+C to stop)", .{});
@@ -1250,7 +1246,6 @@ fn cmdSubscribe(allocator: Allocator, args: []const []const u8) !void {
         }
 
         std.log.info("Subscription ended after {d} polls", .{poll_count});
-
     } else if (std.mem.eql(u8, sub_type, "transactions")) {
         if (args.len < 2) {
             std.log.err("Usage: subscribe transactions <address>", .{});
@@ -1283,7 +1278,7 @@ fn cmdSubscribe(allocator: Allocator, args: []const []const u8) !void {
                 if (result.object.get("data")) |data| {
                     if (data == .array) {
                         const current_count = data.array.items.len;
-                        
+
                         if (current_count > 0 and current_count != last_count) {
                             if (last_count > 0) {
                                 std.log.info("New transaction detected!", .{});
@@ -1301,7 +1296,6 @@ fn cmdSubscribe(allocator: Allocator, args: []const []const u8) !void {
         }
 
         std.log.info("Subscription ended after {d} polls", .{poll_count});
-
     } else {
         std.log.err("Unknown subscription type: {s}", .{sub_type});
         std.process.exit(1);
@@ -1346,7 +1340,7 @@ fn cmdBatch(allocator: Allocator, args: []const []const u8) !void {
     while (lines.next()) |line| {
         line_num += 1;
         const trimmed = std.mem.trim(u8, line, " \t\r\n");
-        
+
         // Skip empty lines and comments
         if (trimmed.len == 0 or std.mem.startsWith(u8, trimmed, "#")) {
             continue;
@@ -1373,7 +1367,7 @@ fn cmdBatch(allocator: Allocator, args: []const []const u8) !void {
 
         // Execute command
         var rpc_client = try SuiRpcClient.init(allocator, rpc_url);
-        
+
         if (std.mem.eql(u8, cmd, "balance")) {
             if (cmd_args.len >= 1) {
                 cmdBalance(allocator, cmd_args) catch |err| {
@@ -1467,7 +1461,7 @@ fn cmdSearch(allocator: Allocator, args: []const []const u8) !void {
         if (result.object.get("data")) |data| {
             if (data == .array) {
                 std.log.info("  {d} objects owned", .{data.array.items.len});
-                
+
                 if (result.object.get("hasNextPage")) |has_next| {
                     if (has_next == .bool and has_next.bool) {
                         std.log.info("  (More objects available)", .{});
@@ -1481,7 +1475,6 @@ fn cmdSearch(allocator: Allocator, args: []const []const u8) !void {
     std.log.info("Use 'objects {s}' to list all objects", .{address});
 }
 /// Configuration and output formatting for main_v2.zig
-
 const OutputFormat = enum {
     human,
     json,
@@ -1521,7 +1514,7 @@ fn getConfig(allocator: Allocator) !*Config {
 fn loadConfig(allocator: Allocator) !Config {
     // Try to load from config file
     const config_path = getConfigPath() orelse return Config.default(allocator);
-    
+
     const file = std.fs.cwd().openFile(config_path, .{}) catch |err| {
         if (err == error.FileNotFound) {
             return Config.default(allocator);
@@ -1529,15 +1522,15 @@ fn loadConfig(allocator: Allocator) !Config {
         return err;
     };
     defer file.close();
-    
+
     const content = file.readToEndAlloc(allocator, 1024 * 1024) catch |err| {
         std.log.warn("Failed to read config: {s}", .{@errorName(err)});
         return Config.default(allocator);
     };
     defer allocator.free(content);
-    
+
     var config = Config.default(allocator);
-    
+
     // Simple key=value parser
     var lines = std.mem.splitSequence(u8, content, "\n");
     while (lines.next()) |line| {
@@ -1545,11 +1538,11 @@ fn loadConfig(allocator: Allocator) !Config {
         if (trimmed.len == 0 or std.mem.startsWith(u8, trimmed, "#")) {
             continue;
         }
-        
+
         if (std.mem.indexOf(u8, trimmed, "=")) |eq_pos| {
             const key = std.mem.trim(u8, trimmed[0..eq_pos], " \t");
             const value = std.mem.trim(u8, trimmed[eq_pos + 1 ..], " \t\"'");
-            
+
             if (std.mem.eql(u8, key, "rpc_url")) {
                 allocator.free(config.rpc_url);
                 config.rpc_url = try allocator.dupe(u8, value);
@@ -1569,7 +1562,7 @@ fn loadConfig(allocator: Allocator) !Config {
             }
         }
     }
-    
+
     return config;
 }
 
@@ -1577,10 +1570,10 @@ fn getConfigPath() ?[]const u8 {
     if (std.process.getEnvVarOwned(std.heap.page_allocator, "SUI_ZIG_CONFIG")) |path| {
         return path;
     } else |_| {}
-    
+
     const home = std.process.getEnvVarOwned(std.heap.page_allocator, "HOME") catch return null;
     defer std.heap.page_allocator.free(home);
-    
+
     return std.fs.path.join(std.heap.page_allocator, &[_][]const u8{
         home, ".config", "sui-zig", "config",
     }) catch null;
@@ -1592,22 +1585,22 @@ fn saveConfig(_: Allocator, config: Config) !void {
         return;
     };
     defer std.heap.page_allocator.free(config_path);
-    
+
     // Ensure directory exists
     const config_dir = std.fs.path.dirname(config_path).?;
     std.fs.cwd().makePath(config_dir) catch |err| {
         std.log.err("Failed to create config directory: {s}", .{@errorName(err)});
         return;
     };
-    
+
     const file = try std.fs.cwd().createFile(config_path, .{});
     defer file.close();
-    
+
     // Write config content
     var buf: [4096]u8 = undefined;
     var fbs = std.io.fixedBufferStream(&buf);
     const writer = fbs.writer();
-    
+
     try writer.print("# Sui Zig RPC Client Configuration\n", .{});
     try writer.print("# Generated automatically\n\n", .{});
     try writer.print("rpc_url=\"{s}\"\n", .{config.rpc_url});
@@ -1616,10 +1609,10 @@ fn saveConfig(_: Allocator, config: Config) !void {
     }
     try writer.print("output_format=\"{s}\"\n", .{@tagName(config.output_format)});
     try writer.print("verbose={s}\n", .{if (config.verbose) "true" else "false"});
-    
+
     const written = fbs.getWritten();
     try file.writeAll(written);
-    
+
     std.log.info("Config saved to {s}", .{config_path});
 }
 
@@ -1639,36 +1632,35 @@ fn cmdConfig(allocator: Allocator, args: []const []const u8) !void {
         std.log.info("  verbose                 true|false", .{});
         std.process.exit(1);
     }
-    
+
     const action = args[0];
-    
+
     if (std.mem.eql(u8, action, "show")) {
         var config = try loadConfig(allocator);
         defer config.deinit(allocator);
-        
+
         std.log.info("Current configuration:", .{});
         std.log.info("  rpc_url: {s}", .{config.rpc_url});
         std.log.info("  default_address: {s}", .{config.default_address orelse "(none)"});
         std.log.info("  output_format: {s}", .{@tagName(config.output_format)});
         std.log.info("  verbose: {s}", .{if (config.verbose) "true" else "false"});
-        
+
         if (getConfigPath()) |path| {
             defer std.heap.page_allocator.free(path);
             std.log.info("  config_file: {s}", .{path});
         }
-        
     } else if (std.mem.eql(u8, action, "set")) {
         if (args.len < 3) {
             std.log.err("Usage: config set <key> <value>", .{});
             std.process.exit(1);
         }
-        
+
         var config = try loadConfig(allocator);
         defer config.deinit(allocator);
-        
+
         const key = args[1];
         const value = args[2];
-        
+
         if (std.mem.eql(u8, key, "rpc_url")) {
             allocator.free(config.rpc_url);
             config.rpc_url = try allocator.dupe(u8, value);
@@ -1692,21 +1684,20 @@ fn cmdConfig(allocator: Allocator, args: []const []const u8) !void {
             std.log.err("Unknown config key: {s}", .{key});
             std.process.exit(1);
         }
-        
+
         try saveConfig(allocator, config);
         std.log.info("Set {s} = {s}", .{ key, value });
-        
     } else if (std.mem.eql(u8, action, "get")) {
         if (args.len < 2) {
             std.log.err("Usage: config get <key>", .{});
             std.process.exit(1);
         }
-        
+
         var config = try loadConfig(allocator);
         defer config.deinit(allocator);
-        
+
         const key = args[1];
-        
+
         if (std.mem.eql(u8, key, "rpc_url")) {
             std.log.info("{s}", .{config.rpc_url});
         } else if (std.mem.eql(u8, key, "default_address")) {
@@ -1719,13 +1710,11 @@ fn cmdConfig(allocator: Allocator, args: []const []const u8) !void {
             std.log.err("Unknown config key: {s}", .{key});
             std.process.exit(1);
         }
-        
     } else if (std.mem.eql(u8, action, "init")) {
         var config = Config.default(allocator);
         defer config.deinit(allocator);
         try saveConfig(allocator, config);
         std.log.info("Created default config file", .{});
-        
     } else {
         std.log.err("Unknown action: {s}", .{action});
         std.process.exit(1);
@@ -1800,7 +1789,6 @@ const ObjectInfo = struct {
     digest: []const u8,
 };
 /// History and analytics commands for main_v2.zig
-
 fn cmdHistory(allocator: Allocator, args: []const []const u8) !void {
     if (args.len < 2) {
         std.log.err("Usage: history <type> <address_or_id>", .{});
@@ -2089,7 +2077,6 @@ fn cmdAnalytics(allocator: Allocator, args: []const []const u8) !void {
             const avg_balance = balance / coin_count;
             std.log.info("Average Balance per Coin: {d} MIST", .{avg_balance});
         }
-
     } else if (std.mem.eql(u8, analytics_type, "activity")) {
         std.log.info("Activity analysis for {s}:", .{address});
         std.log.info("---", .{});
@@ -2168,7 +2155,6 @@ fn cmdAnalytics(allocator: Allocator, args: []const []const u8) !void {
                 std.log.info("Avg Transactions/Day: {d:.1}", .{tx_per_day});
             }
         }
-
     } else if (std.mem.eql(u8, analytics_type, "gas")) {
         std.log.info("Gas usage analysis for {s}:", .{address});
         std.log.info("---", .{});
@@ -2331,7 +2317,6 @@ fn cmdCompare(allocator: Allocator, args: []const []const u8) !void {
     }
 }
 /// Monitoring and export commands for main_v2.zig
-
 fn cmdMonitor(allocator: Allocator, args: []const []const u8) !void {
     if (args.len < 1) {
         std.log.err("Usage: monitor <type>", .{});
@@ -2417,7 +2402,6 @@ fn cmdMonitor(allocator: Allocator, args: []const []const u8) !void {
             last_checkpoint = current_cp;
             std.Thread.sleep(5 * std.time.ns_per_s);
         }
-
     } else if (std.mem.eql(u8, monitor_type, "address")) {
         if (args.len < 2) {
             std.log.err("Usage: monitor address <address>", .{});
@@ -2493,7 +2477,6 @@ fn cmdMonitor(allocator: Allocator, args: []const []const u8) !void {
 
             std.Thread.sleep(3 * std.time.ns_per_s);
         }
-
     } else if (std.mem.eql(u8, monitor_type, "gas")) {
         std.log.info("=== Gas Price Monitor ===", .{});
         std.log.info("Monitoring gas price changes...", .{});
@@ -2553,7 +2536,6 @@ fn cmdMonitor(allocator: Allocator, args: []const []const u8) !void {
 
             std.Thread.sleep(5 * std.time.ns_per_s);
         }
-
     } else if (std.mem.eql(u8, monitor_type, "tps")) {
         std.log.info("=== TPS Monitor ===", .{});
         std.log.info("Monitoring transactions per second...", .{});
@@ -2624,7 +2606,6 @@ fn cmdMonitor(allocator: Allocator, args: []const []const u8) !void {
 
             std.Thread.sleep(5 * std.time.ns_per_s);
         }
-
     } else {
         std.log.err("Unknown monitor type: {s}", .{monitor_type});
         std.process.exit(1);
@@ -2720,7 +2701,6 @@ fn cmdExport(allocator: Allocator, args: []const []const u8) !void {
         try file.writeAll(written);
 
         std.log.info("Exported {d} transactions to {s}", .{ export_count, output_file });
-
     } else if (std.mem.eql(u8, export_type, "objects")) {
         std.log.info("Exporting objects for {s} to {s}...", .{ target, output_file });
 
@@ -2776,7 +2756,6 @@ fn cmdExport(allocator: Allocator, args: []const []const u8) !void {
         try file.writeAll(written);
 
         std.log.info("Exported {d} objects to {s}", .{ export_count, output_file });
-
     } else if (std.mem.eql(u8, export_type, "balance")) {
         std.log.info("Exporting balance snapshot for {s} to {s}...", .{ target, output_file });
 
@@ -2803,7 +2782,6 @@ fn cmdExport(allocator: Allocator, args: []const []const u8) !void {
         try file.writeAll(written);
 
         std.log.info("Exported balance snapshot to {s}", .{output_file});
-
     } else {
         std.log.err("Unknown export type: {s}", .{export_type});
         std.process.exit(1);
@@ -2843,7 +2821,6 @@ fn cmdStats(allocator: Allocator, args: []const []const u8) !void {
             0;
 
         std.log.info("Latest Checkpoint: {d}", .{latest_cp});
-
     } else if (std.mem.eql(u8, stats_type, "validators")) {
         std.log.info("=== Validator Statistics ===", .{});
         std.log.info("---", .{});
@@ -2890,7 +2867,6 @@ fn cmdStats(allocator: Allocator, args: []const []const u8) !void {
                 }
             }
         }
-
     } else if (std.mem.eql(u8, stats_type, "address")) {
         if (args.len < 2) {
             std.log.err("Usage: stats address <address>", .{});
@@ -2954,14 +2930,12 @@ fn cmdStats(allocator: Allocator, args: []const []const u8) !void {
             std.log.info("  > 10 SUI: Top ~30%", .{});
             std.log.info("  > 100 SUI: Top ~5%", .{});
         }
-
     } else {
         std.log.err("Unknown stats type: {s}", .{stats_type});
         std.process.exit(1);
     }
 }
 /// Interactive REPL and plugin system for main_v2.zig
-
 const ReplCommand = struct {
     name: []const u8,
     description: []const u8,
@@ -3174,7 +3148,6 @@ fn cmdScript(allocator: Allocator, args: []const []const u8) !void {
         std.log.info("  Lines executed: {d}", .{success_count + fail_count});
         std.log.info("  Successful: {d}", .{success_count});
         std.log.info("  Failed: {d}", .{fail_count});
-
     } else if (std.mem.eql(u8, action, "validate")) {
         if (args.len < 2) {
             std.log.err("Usage: script validate <file>", .{});
@@ -3184,7 +3157,6 @@ fn cmdScript(allocator: Allocator, args: []const []const u8) !void {
         const file_path = args[1];
         std.log.info("Validating script: {s}", .{file_path});
         std.log.info("Script syntax is valid.", .{});
-
     } else if (std.mem.eql(u8, action, "template")) {
         const template_name = if (args.len >= 2) args[1] else "default";
 
@@ -3233,7 +3205,6 @@ fn cmdScript(allocator: Allocator, args: []const []const u8) !void {
     }
 }
 /// WebSocket and GraphQL support for main_v2.zig
-
 fn cmdWs(allocator: Allocator, args: []const []const u8) !void {
     if (args.len < 1) {
         std.log.err("Usage: ws <action>", .{});
@@ -3324,7 +3295,6 @@ fn cmdWs(allocator: Allocator, args: []const []const u8) !void {
 
                 std.Thread.sleep(3 * std.time.ns_per_s);
             }
-
         } else if (std.mem.eql(u8, sub_type, "transactions")) {
             if (args.len < 3) {
                 std.log.err("Usage: ws subscribe transactions <address>", .{});
@@ -3371,7 +3341,6 @@ fn cmdWs(allocator: Allocator, args: []const []const u8) !void {
 
                 std.Thread.sleep(3 * std.time.ns_per_s);
             }
-
         } else if (std.mem.eql(u8, sub_type, "checkpoints")) {
             std.log.info("Subscribing to new checkpoints...", .{});
 
@@ -3409,7 +3378,6 @@ fn cmdWs(allocator: Allocator, args: []const []const u8) !void {
             std.log.err("Unknown subscription type: {s}", .{sub_type});
             std.process.exit(1);
         }
-
     } else if (std.mem.eql(u8, action, "status")) {
         std.log.info("=== WebSocket Status ===", .{});
         std.log.info("---", .{});
@@ -3421,10 +3389,8 @@ fn cmdWs(allocator: Allocator, args: []const []const u8) !void {
         std.log.info("  - Using a WebSocket proxy", .{});
         std.log.info("  - External WebSocket client", .{});
         std.log.info("  - Upgrading to newer Zig version", .{});
-
     } else if (std.mem.eql(u8, action, "close")) {
         std.log.info("WebSocket connection closed (simulated).", .{});
-
     } else {
         std.log.err("Unknown WebSocket action: {s}", .{action});
         std.process.exit(1);
@@ -3447,7 +3413,6 @@ fn cmdCache(allocator: Allocator, args: []const []const u8) !void {
         // Note: In a real implementation, this would clear global cache
         std.log.info("Cache cleared successfully.", .{});
         std.log.info("All cached data has been removed.", .{});
-
     } else if (std.mem.eql(u8, action, "stats")) {
         // Demo cache stats
         std.log.info("=== Cache Statistics ===", .{});
@@ -3461,14 +3426,13 @@ fn cmdCache(allocator: Allocator, args: []const []const u8) !void {
         std.log.info("Gas Price Cache     | 0       | 0%       | 1min", .{});
         std.log.info("", .{});
         std.log.info("Cache is ready. Use 'cache demo' to see it in action.", .{});
-
     } else if (std.mem.eql(u8, action, "demo")) {
         // Demonstrate cache functionality
         std.log.info("=== Cache Demo ===", .{});
         std.log.info("", .{});
         std.log.info("This demonstrates how caching reduces RPC calls:", .{});
         std.log.info("", .{});
-        
+
         // Simple cache demonstration
         const DemoCache = struct {
             const Entry = struct {
@@ -3478,7 +3442,7 @@ fn cmdCache(allocator: Allocator, args: []const []const u8) !void {
             entries: std.StringHashMap(Entry),
             ttl_ms: i64,
             allocator: Allocator,
-            
+
             fn init(alloc: Allocator, ttl: i64) @This() {
                 return .{
                     .entries = std.StringHashMap(Entry).init(alloc),
@@ -3486,7 +3450,7 @@ fn cmdCache(allocator: Allocator, args: []const []const u8) !void {
                     .allocator = alloc,
                 };
             }
-            
+
             fn deinit(self: *@This()) void {
                 var iter = self.entries.iterator();
                 while (iter.next()) |entry| {
@@ -3495,7 +3459,7 @@ fn cmdCache(allocator: Allocator, args: []const []const u8) !void {
                 }
                 self.entries.deinit();
             }
-            
+
             fn get(self: *@This(), key: []const u8) ?[]const u8 {
                 const entry = self.entries.get(key) orelse return null;
                 const now = std.time.milliTimestamp();
@@ -3505,7 +3469,7 @@ fn cmdCache(allocator: Allocator, args: []const []const u8) !void {
                 }
                 return entry.value;
             }
-            
+
             fn put(self: *@This(), key: []const u8, value: []const u8) !void {
                 const key_copy = try self.allocator.dupe(u8, key);
                 const value_copy = try self.allocator.dupe(u8, value);
@@ -3514,20 +3478,20 @@ fn cmdCache(allocator: Allocator, args: []const []const u8) !void {
                     .timestamp = std.time.milliTimestamp(),
                 });
             }
-            
+
             fn count(self: *@This()) usize {
                 return self.entries.count();
             }
         };
-        
+
         // Create a demo cache
         var cache = DemoCache.init(allocator, 5000);
         defer cache.deinit();
-        
+
         // Simulate cache operations
         const key1 = "0x1234...object";
         const value1 = "{\"objectId\":\"0x1234...\",\"type\":\"coin\"}";
-        
+
         // First access - cache miss
         std.log.info("1. First request for object {s}", .{key1});
         if (cache.get(key1) == null) {
@@ -3535,7 +3499,7 @@ fn cmdCache(allocator: Allocator, args: []const []const u8) !void {
             try cache.put(key1, value1);
             std.log.info("   → Stored in cache", .{});
         }
-        
+
         // Second access - cache hit
         std.log.info("", .{});
         std.log.info("2. Second request for same object (within 5s)", .{});
@@ -3543,7 +3507,7 @@ fn cmdCache(allocator: Allocator, args: []const []const u8) !void {
             std.log.info("   → Cache HIT! (no network call)", .{});
             std.log.info("   → Value: {s}", .{cached});
         }
-        
+
         // Show stats
         std.log.info("", .{});
         std.log.info("Cache Stats:", .{});
@@ -3553,7 +3517,6 @@ fn cmdCache(allocator: Allocator, args: []const []const u8) !void {
         std.log.info("  ✓ Reduced latency (cached data is instant)", .{});
         std.log.info("  ✓ Lower RPC costs (fewer network calls)", .{});
         std.log.info("  ✓ Better UX (faster response times)", .{});
-
     } else {
         std.log.err("Unknown cache action: {s}", .{action});
         std.process.exit(1);
@@ -3604,7 +3567,6 @@ fn cmdDebug(allocator: Allocator, args: []const []const u8) !void {
 
         // Show response (pretty print not available in Zig 0.15.2)
         std.log.info("Response preview: {s}", .{response[0..@min(response.len, 500)]});
-
     } else if (std.mem.eql(u8, action, "config")) {
         std.log.info("=== Debug Configuration ===", .{});
         std.log.info("---", .{});
@@ -3619,7 +3581,6 @@ fn cmdDebug(allocator: Allocator, args: []const []const u8) !void {
         std.log.info("  - WebSocket: simulated (polling)", .{});
         std.log.info("  - GraphQL: query builder", .{});
         std.log.info("  - Caching: disabled", .{});
-
     } else if (std.mem.eql(u8, action, "test-connection")) {
         const rpc_url = getRpcUrl() orelse "https://fullnode.mainnet.sui.io:443";
 
@@ -3644,7 +3605,6 @@ fn cmdDebug(allocator: Allocator, args: []const []const u8) !void {
         } else {
             std.log.info("✗ Connection failed", .{});
         }
-
     } else {
         std.log.err("Unknown debug action: {s}", .{action});
         std.process.exit(1);
@@ -3678,7 +3638,7 @@ fn cmdSign(allocator: Allocator, args: []const []const u8) !void {
         }
 
         const tx_bytes_b64 = args[1];
-        
+
         // Decode transaction bytes
         const decoded_len = try std.base64.standard.Decoder.calcSizeForSlice(tx_bytes_b64);
         const tx_bytes = try allocator.alloc(u8, decoded_len);
@@ -3709,14 +3669,13 @@ fn cmdSign(allocator: Allocator, args: []const []const u8) !void {
         std.log.info("Transaction signed successfully!", .{});
         std.log.info("", .{});
         std.log.info("Signature (base64):", .{});
-        
+
         var sig_b64_buf: [256]u8 = undefined;
         const sig_b64 = std.base64.standard.Encoder.encode(&sig_b64_buf, &signature);
         std.log.info("{s}", .{sig_b64});
         std.log.info("", .{});
         std.log.info("Signature scheme: ED25519", .{});
         std.log.info("Public key: {s}", .{try bytesToHex(allocator, &keypair.public_key)});
-
     } else if (std.mem.eql(u8, action, "message")) {
         if (args.len < 2) {
             std.log.err("Usage: sign message <message>", .{});
@@ -3724,7 +3683,7 @@ fn cmdSign(allocator: Allocator, args: []const []const u8) !void {
         }
 
         const message = args[1];
-        
+
         // Load keypair
         const keystore_path = getKeystorePath() orelse {
             std.log.err("No keystore configured", .{});
@@ -3743,11 +3702,10 @@ fn cmdSign(allocator: Allocator, args: []const []const u8) !void {
         std.log.info("Message signed successfully!", .{});
         std.log.info("Message: {s}", .{message});
         std.log.info("", .{});
-        
+
         var sig_b64_buf: [256]u8 = undefined;
         const sig_b64 = std.base64.standard.Encoder.encode(&sig_b64_buf, &signature);
         std.log.info("Signature: {s}", .{sig_b64});
-
     } else if (std.mem.eql(u8, action, "verify")) {
         if (args.len < 4) {
             std.log.err("Usage: sign verify <signature> <message> <address>", .{});
@@ -3761,7 +3719,7 @@ fn cmdSign(allocator: Allocator, args: []const []const u8) !void {
         std.log.info("Verifying signature...", .{});
         std.log.info("Address: {s}", .{address});
         std.log.info("Message: {s}", .{message});
-        
+
         // Decode signature
         const decoded_len = try std.base64.standard.Decoder.calcSizeForSlice(signature_b64);
         const signature = try allocator.alloc(u8, decoded_len);
@@ -3770,44 +3728,43 @@ fn cmdSign(allocator: Allocator, args: []const []const u8) !void {
 
         // Verify signature using Ed25519
         const Ed25519 = std.crypto.sign.Ed25519;
-        
+
         // Extract signature components
         // Sui signature format: [scheme(1) || signature(64) || public_key(32)]
         if (signature.len < 97) {
             std.log.err("Invalid signature length: {d}", .{signature.len});
             std.process.exit(1);
         }
-        
+
         const scheme = signature[0];
         if (scheme != 0x00) {
             std.log.err("Unsupported signature scheme: {d}", .{scheme});
             std.process.exit(1);
         }
-        
+
         const sig_bytes = signature[1..65];
         const pk_bytes = signature[65..97];
-        
+
         // Parse public key and signature
         const pk = Ed25519.PublicKey.fromBytes(pk_bytes.*) catch |err| {
             std.log.err("Invalid public key: {s}", .{@errorName(err)});
             std.process.exit(1);
         };
-        
+
         // Create signature struct from bytes
         var sig_bytes_array: [64]u8 = undefined;
         @memcpy(&sig_bytes_array, sig_bytes);
         const sig = Ed25519.Signature.fromBytes(sig_bytes_array);
-        
+
         // Verify
         sig.verify(message, pk) catch |err| {
             std.log.info("", .{});
             std.log.info("❌ Signature verification FAILED: {s}", .{@errorName(err)});
             std.process.exit(1);
         };
-        
+
         std.log.info("", .{});
         std.log.info("✅ Signature verification PASSED", .{});
-
     } else {
         std.log.err("Unknown sign action: {s}", .{action});
         std.process.exit(1);
@@ -3836,7 +3793,7 @@ fn cmdKey(allocator: Allocator, args: []const []const u8) !void {
         // Check if mnemonic is requested
         var use_mnemonic = false;
         var word_count: u8 = 12;
-        
+
         for (args[1..]) |arg| {
             if (std.mem.eql(u8, arg, "--mnemonic")) {
                 use_mnemonic = true;
@@ -3844,21 +3801,21 @@ fn cmdKey(allocator: Allocator, args: []const []const u8) !void {
                 word_count = 24;
             }
         }
-        
+
         if (use_mnemonic) {
             std.log.info("Generating new keypair from BIP-39 mnemonic...", .{});
             std.log.info("", .{});
-            
+
             const bip39 = @import("bip39.zig");
             const length = if (word_count == 24) bip39.MnemonicLength.words24 else bip39.MnemonicLength.words12;
-            
+
             const result = try bip39.generateMnemonicWithSeed(allocator, length);
             defer allocator.free(result.mnemonic);
-            
+
             // Derive key from seed
             const secret_key = try bip39.deriveEd25519Key(result.seed, "m/44'/784'/0'/0'/0'");
             const keypair = try KeyPair.fromSecretKey(secret_key);
-            
+
             std.log.info("✓ Keypair generated from mnemonic!", .{});
             std.log.info("", .{});
             std.log.info("═══════════════════════════════════════════════════════════════", .{});
@@ -3868,92 +3825,90 @@ fn cmdKey(allocator: Allocator, args: []const []const u8) !void {
             std.log.info("{s}", .{result.mnemonic});
             std.log.info("", .{});
             std.log.info("═══════════════════════════════════════════════════════════════", .{});
-            
+
             // Show public key
             const pk_hex = try bytesToHex(allocator, &keypair.public_key);
             defer allocator.free(pk_hex);
             std.log.info("Public Key: {s}", .{pk_hex});
-            
+
             // Derive address
             const signer = TransactionSigner.init(allocator, keypair);
             const address = try signer.getAddress(allocator);
             defer allocator.free(address);
             std.log.info("Address: {s}", .{address});
-            
+
             std.log.info("", .{});
             std.log.info("IMPORTANT: Your mnemonic is the ONLY way to recover this key!", .{});
             std.log.info("Store it safely offline. Never share it with anyone.", .{});
         } else {
             std.log.info("Generating new Ed25519 keypair...", .{});
-            
+
             const keypair = try KeyPair.generateRandom();
-            
+
             std.log.info("", .{});
             std.log.info("Keypair generated successfully!", .{});
             std.log.info("", .{});
-            
+
             // Show public key
             const pk_hex = try bytesToHex(allocator, &keypair.public_key);
             defer allocator.free(pk_hex);
             std.log.info("Public Key: {s}", .{pk_hex});
-            
+
             // Derive address
             const signer = TransactionSigner.init(allocator, keypair);
             const address = try signer.getAddress(allocator);
             defer allocator.free(address);
             std.log.info("Address: {s}", .{address});
-            
+
             std.log.info("", .{});
             std.log.info("IMPORTANT: Save this keypair securely!", .{});
             std.log.info("The secret key cannot be recovered if lost.", .{});
             std.log.info("", .{});
             std.log.info("Tip: Use 'key generate --mnemonic' for recoverable keys.", .{});
         }
-
     } else if (std.mem.eql(u8, action, "show")) {
         const address = if (args.len >= 2) args[1] else try getActiveAddress(allocator);
         defer if (args.len < 2) allocator.free(address);
-        
+
         std.log.info("Key information for {s}:", .{address});
         std.log.info("", .{});
-        
+
         // Load from keystore
         const keystore_path = getKeystorePath() orelse {
             std.log.err("No keystore configured", .{});
             std.process.exit(1);
         };
-        
+
         const keypair = tx_signer.loadKeypairFromKeystore(allocator, keystore_path, address) catch {
             std.log.err("Key not found for address: {s}", .{address});
             std.process.exit(1);
         };
-        
+
         const pk_hex = try bytesToHex(allocator, &keypair.public_key);
         defer allocator.free(pk_hex);
-        
+
         std.log.info("Public Key: {s}", .{pk_hex});
         std.log.info("Scheme: ED25519", .{});
         std.log.info("Keystore: {s}", .{keystore_path});
-
     } else if (std.mem.eql(u8, action, "list")) {
         const keystore_path = getKeystorePath() orelse {
             std.log.err("No keystore configured", .{});
             std.process.exit(1);
         };
-        
+
         // Read keystore
         const file = try std.fs.cwd().openFile(keystore_path, .{});
         defer file.close();
-        
+
         const content = try file.readToEndAlloc(allocator, 1024 * 1024);
         defer allocator.free(content);
-        
+
         const parsed = try std.json.parseFromSlice(std.json.Value, allocator, content, .{});
         defer parsed.deinit();
-        
+
         std.log.info("Keys in keystore:", .{});
         std.log.info("", .{});
-        
+
         if (parsed.value.object.get("addresses")) |addresses| {
             if (addresses == .array) {
                 for (addresses.array.items, 0..) |addr, i| {
@@ -3961,7 +3916,6 @@ fn cmdKey(allocator: Allocator, args: []const []const u8) !void {
                 }
             }
         }
-
     } else if (std.mem.eql(u8, action, "derive")) {
         // Derive multiple addresses from mnemonic
         if (args.len < 2) {
@@ -3969,92 +3923,89 @@ fn cmdKey(allocator: Allocator, args: []const []const u8) !void {
             std.log.info("Example: key derive \"word1 word2 ...\" 5", .{});
             std.process.exit(1);
         }
-        
+
         const mnemonic = args[1];
         const count = if (args.len >= 3) try std.fmt.parseInt(u8, args[2], 10) else 5;
-        
+
         if (count < 1 or count > 100) {
             std.log.err("Count must be between 1 and 100", .{});
             std.process.exit(1);
         }
-        
+
         std.log.info("Deriving {d} addresses from mnemonic...", .{count});
         std.log.info("", .{});
-        
+
         // Convert mnemonic to seed
         const bip39 = @import("bip39.zig");
         const seed = try bip39.mnemonicToSeed(allocator, mnemonic, null);
-        
+
         // Derive addresses
         std.log.info("HD Wallet Addresses (Path: m/44'/784'/0'/0'/{d}'):", .{0});
         std.log.info("", .{});
-        
+
         var i: u32 = 0;
         while (i < count) : (i += 1) {
             const secret_key = try bip39.deriveSuiAddress(seed, i);
             const keypair = try KeyPair.fromSecretKey(secret_key);
-            
+
             const signer = TransactionSigner.init(allocator, keypair);
             const address = try signer.getAddress(allocator);
             defer allocator.free(address);
-            
+
             std.log.info("  {d:2}. {s} (m/44'/784'/0'/0'/{d}')", .{ i + 1, address, i });
         }
-        
+
         std.log.info("", .{});
         std.log.info("These addresses are derived from the same mnemonic.", .{});
         std.log.info("You can use any of them for transactions.", .{});
-
     } else if (std.mem.eql(u8, action, "import")) {
         if (args.len < 2) {
             std.log.err("Usage: key import <key_file>", .{});
             std.process.exit(1);
         }
-        
+
         const key_file = args[1];
-        
+
         std.log.info("Importing key from {s}...", .{key_file});
-        
+
         const keypair = try tx_signer.loadKeypairFromFile(allocator, key_file);
-        
+
         const signer = TransactionSigner.init(allocator, keypair);
         const address = try signer.getAddress(allocator);
         defer allocator.free(address);
-        
+
         std.log.info("Key imported successfully!", .{});
         std.log.info("Address: {s}", .{address});
-
     } else if (std.mem.eql(u8, action, "export")) {
         if (args.len < 3) {
             std.log.err("Usage: key export <address> <output_file>", .{});
             std.process.exit(1);
         }
-        
+
         const address = args[1];
         const output_file = args[2];
-        
+
         std.log.info("Exporting key for {s} to {s}...", .{ address, output_file });
-        
+
         // Load key
         const keystore_path = getKeystorePath() orelse {
             std.log.err("No keystore configured", .{});
             std.process.exit(1);
         };
-        
+
         const keypair = try tx_signer.loadKeypairFromKeystore(allocator, keystore_path, address);
-        
+
         // Export to file
         const file = try std.fs.cwd().createFile(output_file, .{});
         defer file.close();
-        
+
         const sk_hex = try bytesToHex(allocator, &keypair.secret_key);
         defer allocator.free(sk_hex);
-        
+
         try file.writeAll(sk_hex);
-        
+
         std.log.info("Key exported successfully!", .{});
         std.log.info("WARNING: Keep this file secure - it contains your private key!", .{});
-
     } else {
         std.log.err("Unknown key action: {s}", .{action});
         std.process.exit(1);
@@ -4073,17 +4024,17 @@ fn cmdSend(allocator: Allocator, args: []const []const u8) !void {
     const from = args[0];
     const to = args[1];
     const amount_str = args[2];
-    
+
     // Parse amount
     const amount = std.fmt.parseInt(u64, amount_str, 10) catch {
         std.log.err("Invalid amount: {s}", .{amount_str});
         std.process.exit(1);
     };
-    
+
     // Parse options
     var gas_budget: u64 = 5000000;
     var dry_run = false;
-    
+
     var i: usize = 3;
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], "--gas-budget")) {
@@ -4158,12 +4109,12 @@ fn cmdSend(allocator: Allocator, args: []const []const u8) !void {
         std.log.info("=== DRY RUN - Transaction not sent ===", .{});
         std.log.info("", .{});
         std.log.info("Transaction bytes (base64):", .{});
-        
+
         var tx_b64_buf: [4096]u8 = undefined;
         const tx_b64 = std.base64.standard.Encoder.encode(&tx_b64_buf, tx_bytes);
         std.log.info("{s}", .{tx_b64});
         std.log.info("", .{});
-        
+
         std.log.info("Signature (base64):", .{});
         var sig_b64_buf: [256]u8 = undefined;
         const sig_b64 = std.base64.standard.Encoder.encode(&sig_b64_buf, &signature);
@@ -4173,7 +4124,7 @@ fn cmdSend(allocator: Allocator, args: []const []const u8) !void {
     } else {
         // Execute transaction
         std.log.info("Sending transaction...", .{});
-        
+
         const result = try executeTransaction(
             allocator,
             &rpc_client,
@@ -4181,7 +4132,7 @@ fn cmdSend(allocator: Allocator, args: []const []const u8) !void {
             &signature,
         );
         defer allocator.free(result);
-        
+
         std.log.info("Transaction sent successfully!", .{});
         std.log.info("Result: {s}", .{result});
     }
@@ -4193,10 +4144,10 @@ fn getKeystorePath() ?[]const u8 {
     if (std.process.getEnvVarOwned(std.heap.page_allocator, "SUI_KEYSTORE")) |path| {
         return path;
     } else |_| {}
-    
+
     const home = std.process.getEnvVarOwned(std.heap.page_allocator, "HOME") catch return null;
     defer std.heap.page_allocator.free(home);
-    
+
     return std.fs.path.join(std.heap.page_allocator, &[_][]const u8{
         home, ".sui", "sui_config", "sui.keystore",
     }) catch null;
@@ -4206,18 +4157,18 @@ fn getActiveAddress(allocator: Allocator) ![]const u8 {
     // Read client.yaml to get active address
     const home = try std.process.getEnvVarOwned(allocator, "HOME");
     defer allocator.free(home);
-    
+
     const client_yaml = try std.fs.path.join(allocator, &[_][]const u8{
         home, ".sui", "sui_config", "client.yaml",
     });
     defer allocator.free(client_yaml);
-    
+
     const file = try std.fs.cwd().openFile(client_yaml, .{});
     defer file.close();
-    
+
     const content = try file.readToEndAlloc(allocator, 1024 * 1024);
     defer allocator.free(content);
-    
+
     // Parse YAML to find active_address
     // Simple line-based parser looking for "active_address: <address>"
     var start: usize = 0;
@@ -4225,7 +4176,7 @@ fn getActiveAddress(allocator: Allocator) ![]const u8 {
         // Find end of line
         const end = std.mem.indexOf(u8, content[start..], "\n") orelse content.len;
         const line = content[start .. start + end];
-        
+
         const trimmed = std.mem.trim(u8, line, " \t\r\n");
         if (std.mem.startsWith(u8, trimmed, "active_address:")) {
             const value_start = std.mem.indexOf(u8, trimmed, ":") orelse continue;
@@ -4234,22 +4185,22 @@ fn getActiveAddress(allocator: Allocator) ![]const u8 {
                 return try allocator.dupe(u8, value);
             }
         }
-        
+
         start += end + 1;
     }
-    
+
     return error.ActiveAddressNotFound;
 }
 
 fn bytesToHex(allocator: Allocator, bytes: []const u8) ![]const u8 {
     const hex_chars = "0123456789abcdef";
     const result = try allocator.alloc(u8, bytes.len * 2);
-    
+
     for (bytes, 0..) |byte, i| {
         result[i * 2] = hex_chars[byte >> 4];
         result[i * 2 + 1] = hex_chars[byte & 0x0F];
     }
-    
+
     return result;
 }
 
@@ -4265,7 +4216,7 @@ fn getGasObjects(allocator: Allocator, rpc_client: *SuiRpcClient, address: []con
 
     var objects = try std.ArrayList([]const u8).initCapacity(allocator, 10);
     defer objects.deinit(allocator);
-    
+
     if (parsed.value.object.get("result")) |result| {
         if (result.object.get("data")) |data| {
             if (data == .array) {
@@ -4279,7 +4230,7 @@ fn getGasObjects(allocator: Allocator, rpc_client: *SuiRpcClient, address: []con
             }
         }
     }
-    
+
     return try objects.toOwnedSlice(allocator);
 }
 
@@ -4293,18 +4244,19 @@ fn buildTransferTransaction(
 ) ![]const u8 {
     // Build transaction data
     // This is a simplified version - real implementation needs proper BCS encoding
-    
-    const tx_json = try std.fmt.allocPrint(allocator,
-        "{{\"kind\":\"PaySui\",\"data\":{{\"inputCoins\":[\"{s}\"],\"recipients\":[\"{s}\"],\"amounts\":[{d}],\"gasBudget\":{d}}}}}" ,
+
+    const tx_json = try std.fmt.allocPrint(
+        allocator,
+        "{{\"kind\":\"PaySui\",\"data\":{{\"inputCoins\":[\"{s}\"],\"recipients\":[\"{s}\"],\"amounts\":[{d}],\"gasBudget\":{d}}}}}",
         .{ gas_object, to, amount, gas_budget },
     );
     defer allocator.free(tx_json);
-    
+
     // Encode as base64
     const encoded_len = std.base64.standard.Encoder.calcSize(tx_json.len);
     const encoded = try allocator.alloc(u8, encoded_len);
     _ = std.base64.standard.Encoder.encode(encoded, tx_json);
-    
+
     return encoded;
 }
 
@@ -4317,20 +4269,20 @@ fn executeTransaction(
     // Build execute transaction request
     var sig_b64_buf: [256]u8 = undefined;
     const sig_b64 = std.base64.standard.Encoder.encode(&sig_b64_buf, signature);
-    
-    const params = try std.fmt.allocPrint(allocator,
+
+    const params = try std.fmt.allocPrint(
+        allocator,
         "[\"{s}\",[\"{s}\"],null]",
         .{ tx_bytes, sig_b64 },
     );
     defer allocator.free(params);
-    
+
     const response = try rpc_client.call("sui_executeTransactionBlock", params);
     defer allocator.free(response);
-    
+
     return try allocator.dupe(u8, response);
 }
 /// zkLogin and Passkey commands for main_v2.zig
-
 const advanced_auth = @import("advanced_auth.zig");
 const ZkLoginProvider = advanced_auth.ZkLoginProvider;
 const ZkLoginSession = advanced_auth.ZkLoginSession;
@@ -4406,17 +4358,16 @@ fn cmdZklogin(allocator: Allocator, args: []const []const u8) !void {
         std.log.info("", .{});
         std.log.info("Provider: {s}", .{@tagName(provider.?)});
         std.log.info("Salt: {s}", .{salt_hex.?});
-        
+
         const pk_hex = try bytesToHex(allocator, &session.ephemeral_keypair.public_key);
         defer allocator.free(pk_hex);
         std.log.info("Ephemeral Public Key: {s}", .{pk_hex});
-        
+
         std.log.info("", .{});
         std.log.info("Next steps:", .{});
         std.log.info("1. Run: zklogin auth-url", .{});
         std.log.info("2. Complete OAuth flow", .{});
         std.log.info("3. Run: zklogin complete --jwt <token>", .{});
-
     } else if (std.mem.eql(u8, action, "auth-url")) {
         std.log.info("=== zkLogin OAuth URL ===", .{});
         std.log.info("", .{});
@@ -4437,7 +4388,6 @@ fn cmdZklogin(allocator: Allocator, args: []const []const u8) !void {
         std.log.info("  &nonce=RANDOM_NONCE", .{});
         std.log.info("", .{});
         std.log.info("Note: You need to register an OAuth application first.", .{});
-
     } else if (std.mem.eql(u8, action, "complete")) {
         // Parse JWT
         var jwt: ?[]const u8 = null;
@@ -4467,7 +4417,6 @@ fn cmdZklogin(allocator: Allocator, args: []const []const u8) !void {
         std.log.info("  - JWT parsing and validation", .{});
         std.log.info("  - Address derivation", .{});
         std.log.info("  - zkProof generation (Groth16)", .{});
-
     } else if (std.mem.eql(u8, action, "address")) {
         std.log.info("=== zkLogin Address ===", .{});
         std.log.info("", .{});
@@ -4480,7 +4429,6 @@ fn cmdZklogin(allocator: Allocator, args: []const []const u8) !void {
         std.log.info("  salt = 16-byte random value", .{});
         std.log.info("", .{});
         std.log.info("Note: Initialize a session first to derive your address.", .{});
-
     } else if (std.mem.eql(u8, action, "prove")) {
         std.log.info("=== zkProof Generation ===", .{});
         std.log.info("", .{});
@@ -4492,7 +4440,6 @@ fn cmdZklogin(allocator: Allocator, args: []const []const u8) !void {
         std.log.info("", .{});
         std.log.info("Note: Proving is computationally expensive.", .{});
         std.log.info("      A typical proof takes 2-5 seconds on modern hardware.", .{});
-
     } else {
         std.log.err("Unknown zklogin action: {s}", .{action});
         std.process.exit(1);
@@ -4578,7 +4525,6 @@ fn cmdPasskeyOld(allocator: Allocator, args: []const []const u8) !void {
             std.log.info("  - Linux: libfido2-dev package installed", .{});
             std.log.info("  - Hardware: FIDO2 authenticator (YubiKey, etc.)", .{});
         }
-
     } else if (std.mem.eql(u8, action, "list")) {
         std.log.info("=== Passkey Credentials ===", .{});
         std.log.info("", .{});
@@ -4587,7 +4533,6 @@ fn cmdPasskeyOld(allocator: Allocator, args: []const []const u8) !void {
         std.log.info("Note: Credentials are stored in:", .{});
         std.log.info("  - macOS: Secure Enclave / Keychain", .{});
         std.log.info("  - Linux: FIDO2 authenticator (hardware)", .{});
-
     } else if (std.mem.eql(u8, action, "sign")) {
         var credential_id: ?[]const u8 = null;
         var tx_bytes: ?[]const u8 = null;
@@ -4629,7 +4574,6 @@ fn cmdPasskeyOld(allocator: Allocator, args: []const []const u8) !void {
         std.log.info("  5. Construct Sui Passkey signature", .{});
         std.log.info("", .{});
         std.log.info("Note: Full implementation requires platform bindings.", .{});
-
     } else if (std.mem.eql(u8, action, "address")) {
         std.log.info("=== Passkey Address ===", .{});
         std.log.info("", .{});
@@ -4640,7 +4584,6 @@ fn cmdPasskeyOld(allocator: Allocator, args: []const []const u8) !void {
         std.log.info("  4. Take first 20 bytes, prefix with '0x'", .{});
         std.log.info("", .{});
         std.log.info("Result: 0x + 40 hex characters", .{});
-
     } else if (std.mem.eql(u8, action, "export")) {
         std.log.info("=== Export Passkey ===", .{});
         std.log.info("", .{});
@@ -4650,7 +4593,6 @@ fn cmdPasskeyOld(allocator: Allocator, args: []const []const u8) !void {
         std.log.info("", .{});
         std.log.info("Note: Private key never leaves the authenticator!", .{});
         std.log.info("      This is the security guarantee of Passkeys.", .{});
-
     } else if (std.mem.eql(u8, action, "platform")) {
         std.log.info("=== WebAuthn Platform Info ===", .{});
         std.log.info("", .{});
@@ -4693,7 +4635,6 @@ fn cmdPasskeyOld(allocator: Allocator, args: []const []const u8) !void {
                 std.log.info("  - Linux with libfido2", .{});
             },
         }
-
     } else {
         std.log.err("Unknown passkey action: {s}", .{action});
         std.process.exit(1);
@@ -4714,7 +4655,6 @@ fn cmdWallet(allocator: Allocator, args: []const []const u8) !void {
     try wallet_cmd.cmdWallet(allocator, args);
 }
 
-
 // Import GraphQL command module
 const graphql_cmd = @import("main_graphql.zig");
 
@@ -4722,11 +4662,9 @@ fn cmdGraphql(allocator: Allocator, args: []const []const u8) !void {
     try graphql_cmd.cmdGraphql(allocator, args);
 }
 
-
 // Import plugin command module
 const plugin_cmd = @import("main_plugin.zig");
 
 fn cmdPlugin(allocator: Allocator, args: []const []const u8) !void {
     try plugin_cmd.cmdPlugin(allocator, args);
 }
-

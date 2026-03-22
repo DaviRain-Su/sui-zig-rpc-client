@@ -399,13 +399,10 @@ pub fn executeQuery(
 ) ![]const u8 {
     _ = _timeout_ms;
     _ = endpoint;
-    
+
     // Mock response - in production, this would make actual HTTP request
-    const mock_response = try std.fmt.allocPrint(allocator, 
-        "{{\"data\":{{\"query\":\"{s}\"}},\"mock\":true}}", 
-        .{query[0..@min(query.len, 100)]}
-    );
-    
+    const mock_response = try std.fmt.allocPrint(allocator, "{{\"data\":{{\"query\":\"{s}\"}},\"mock\":true}}", .{query[0..@min(query.len, 100)]});
+
     return mock_response;
 }
 

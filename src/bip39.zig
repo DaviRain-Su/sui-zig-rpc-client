@@ -9,11 +9,11 @@ const wordlist = @import("bip39_wordlist.zig");
 
 /// Supported mnemonic lengths
 pub const MnemonicLength = enum {
-    words12,  // 128 bits entropy + 4 bits checksum
-    words15,  // 160 bits entropy + 5 bits checksum
-    words18,  // 192 bits entropy + 6 bits checksum
-    words21,  // 224 bits entropy + 7 bits checksum
-    words24,  // 256 bits entropy + 8 bits checksum
+    words12, // 128 bits entropy + 4 bits checksum
+    words15, // 160 bits entropy + 5 bits checksum
+    words18, // 192 bits entropy + 6 bits checksum
+    words21, // 224 bits entropy + 7 bits checksum
+    words24, // 256 bits entropy + 8 bits checksum
 
     pub fn wordCount(self: MnemonicLength) u8 {
         return switch (self) {
@@ -109,7 +109,7 @@ pub fn validateMnemonic(mnemonic: []const u8) bool {
 
     // BIP-39 supports 12, 15, 18, 21, 24 words
     return word_count == 12 or word_count == 15 or
-           word_count == 18 or word_count == 21 or word_count == 24;
+        word_count == 18 or word_count == 21 or word_count == 24;
 }
 
 /// Get word count from mnemonic

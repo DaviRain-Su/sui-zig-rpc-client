@@ -76,17 +76,17 @@ fn getKeystoreDir(allocator: Allocator) ![]const u8 {
 
 fn promptPassword(allocator: Allocator) ![]const u8 {
     std.log.info("Enter password to protect the key: ", .{});
-    
+
     // Simple password prompt (echo disabled in production)
     var buf: [256]u8 = undefined;
     const stdin = std.fs.File{ .handle = 0 };
     const n = try stdin.read(&buf);
-    
+
     // Remove newline
     var len = n;
     if (len > 0 and buf[len - 1] == '\n') len -= 1;
     if (len > 0 and buf[len - 1] == '\r') len -= 1;
-    
+
     return try allocator.dupe(u8, buf[0..len]);
 }
 
@@ -143,10 +143,7 @@ fn cmdCreate(allocator: Allocator, args: []const []const u8) !void {
     }
 
     const bio_type = c.LAContextGetBiometryType(context);
-    const bio_name = if (bio_type == BIOMETRY_TYPE_TOUCH_ID) "Touch ID"
-        else if (bio_type == BIOMETRY_TYPE_FACE_ID) "Face ID"
-        else if (bio_type == BIOMETRY_TYPE_OPTIC_ID) "Optic ID"
-        else "Biometric";
+    const bio_name = if (bio_type == BIOMETRY_TYPE_TOUCH_ID) "Touch ID" else if (bio_type == BIOMETRY_TYPE_FACE_ID) "Face ID" else if (bio_type == BIOMETRY_TYPE_OPTIC_ID) "Optic ID" else "Biometric";
 
     std.log.info("✓ {s} is available", .{bio_name});
     std.log.info("", .{});
@@ -204,7 +201,7 @@ fn cmdCreate(allocator: Allocator, args: []const []const u8) !void {
 
     // Generate Ed25519 key pair
     std.log.info("Generating Ed25519 keypair...", .{});
-    
+
     const Ed25519 = std.crypto.sign.Ed25519;
     var seed: [32]u8 = undefined;
     std.crypto.random.bytes(&seed);
@@ -377,10 +374,7 @@ fn cmdPlatform() !void {
             );
 
             const bio_type = c.LAContextGetBiometryType(ctx);
-            const bio_name = if (bio_type == BIOMETRY_TYPE_TOUCH_ID) "Touch ID 🖐️"
-                else if (bio_type == BIOMETRY_TYPE_FACE_ID) "Face ID 😊"
-                else if (bio_type == BIOMETRY_TYPE_OPTIC_ID) "Optic ID 👁️"
-                else "None";
+            const bio_name = if (bio_type == BIOMETRY_TYPE_TOUCH_ID) "Touch ID 🖐️" else if (bio_type == BIOMETRY_TYPE_FACE_ID) "Face ID 😊" else if (bio_type == BIOMETRY_TYPE_OPTIC_ID) "Optic ID 👁️" else "None";
 
             std.log.info("Biometry Type: {s}", .{bio_name});
             std.log.info("Available: {s}", .{if (bio_available) "✓ Yes" else "✗ No"});
@@ -405,14 +399,14 @@ fn cmdPlatform() !void {
     } else if (is_linux) {
         std.log.info("Platform: Linux", .{});
         std.log.info("", .{});
-        
+
         // Check for libfido2 support
         var webauthn = LinuxWebAuthn.init(std.heap.page_allocator);
         defer webauthn.deinit();
-        
+
         const available = webauthn.isAvailable();
         std.log.info("Hardware Key Support: {s}", .{if (available) "✓ Available" else "✗ Not Available"});
-        
+
         if (available) {
             const devices = webauthn.listDevices() catch |err| {
                 std.log.info("  Error listing devices: {s}", .{@errorName(err)});
@@ -426,10 +420,10 @@ fn cmdPlatform() !void {
                 }
                 std.heap.page_allocator.free(devices);
             }
-            
+
             std.log.info("  Connected devices: {d}", .{devices.len});
             for (devices) |dev| {
-                std.log.info("    - {s} ({s})", .{dev.product, dev.manufacturer});
+                std.log.info("    - {s} ({s})", .{ dev.product, dev.manufacturer });
             }
         }
 
@@ -449,16 +443,16 @@ fn cmdPlatform() !void {
 fn cmdDevices(allocator: Allocator) !void {
     std.log.info("=== Hardware Key Devices ===", .{});
     std.log.info("", .{});
-    
+
     if (!is_linux) {
         std.log.info("Device listing is only available on Linux with libfido2.", .{});
         std.log.info("On macOS, hardware keys are automatically detected.", .{});
         return;
     }
-    
+
     var webauthn = LinuxWebAuthn.init(allocator);
     defer webauthn.deinit();
-    
+
     const devices = webauthn.listDevices() catch |err| {
         std.log.err("Failed to list devices: {s}", .{@errorName(err)});
         std.process.exit(1);
@@ -471,7 +465,7 @@ fn cmdDevices(allocator: Allocator) !void {
         }
         allocator.free(devices);
     }
-    
+
     if (devices.len == 0) {
         std.log.info("No hardware keys detected.", .{});
         std.log.info("", .{});
@@ -494,7 +488,7 @@ fn cmdDevices(allocator: Allocator) !void {
 
 fn cmdTest(allocator: Allocator) !void {
     _ = allocator;
-    
+
     std.log.info("=== Authentication Test ===", .{});
     std.log.info("", .{});
 
@@ -508,7 +502,7 @@ fn cmdTest(allocator: Allocator) !void {
         std.log.info("Use 'passkey devices' to list connected hardware keys.", .{});
         return;
     }
-    
+
     if (!webauthn_available) {
         std.log.err("Touch ID test requires WebAuthn support (build with -Dwebauthn)", .{});
         std.process.exit(1);
@@ -534,10 +528,7 @@ fn cmdTest(allocator: Allocator) !void {
     }
 
     const bio_type = c.LAContextGetBiometryType(context);
-    const bio_name = if (bio_type == BIOMETRY_TYPE_TOUCH_ID) "Touch ID"
-        else if (bio_type == BIOMETRY_TYPE_FACE_ID) "Face ID"
-        else if (bio_type == BIOMETRY_TYPE_OPTIC_ID) "Optic ID"
-        else "Biometric";
+    const bio_name = if (bio_type == BIOMETRY_TYPE_TOUCH_ID) "Touch ID" else if (bio_type == BIOMETRY_TYPE_FACE_ID) "Face ID" else if (bio_type == BIOMETRY_TYPE_OPTIC_ID) "Optic ID" else "Biometric";
 
     std.log.info("✓ {s} is available", .{bio_name});
     std.log.info("", .{});

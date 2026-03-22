@@ -1,6 +1,5 @@
 /// WebAuthn Platform Abstraction Layer
 /// Supports macOS (LocalAuthentication) and Linux (libfido2)
-
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 

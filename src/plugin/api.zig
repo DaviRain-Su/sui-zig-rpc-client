@@ -192,7 +192,7 @@ pub export fn sui_plugin_get_api_version() u32 {
     return API_VERSION;
 }
 
-/// Plugin must export this function  
+/// Plugin must export this function
 pub export fn sui_plugin_get_interface() *const PluginInterface {
     // This is a placeholder - actual plugins will implement this
     return undefined;

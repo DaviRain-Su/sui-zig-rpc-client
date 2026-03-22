@@ -2,7 +2,6 @@
 ///
 /// This module provides the main command dispatch functionality.
 /// It routes commands to the appropriate sub-module handlers.
-
 const std = @import("std");
 const types = @import("types.zig");
 const wallet_types = @import("wallet_types.zig");
@@ -129,7 +128,7 @@ fn handleWalletCreate(
         return;
     };
     defer allocator.free(raw_key);
-    
+
     try wallet.runWalletCreateOrImport(allocator, args, writer, "created", raw_key);
 }
 
@@ -153,19 +152,19 @@ fn handleTxBuild(
 ) !void {
     // Validate arguments
     try tx.validateTxBuildArguments(args);
-    
+
     // Build transaction block
     const tx_block = try tx.buildTransactionBlockFromArgs(allocator, args);
     defer allocator.free(tx_block);
-    
+
     if (args.tx_send_summarize) {
         // Output summary
         var summary = std.json.ObjectMap.init(allocator);
         defer summary.deinit();
-        
+
         try summary.put("kind", .{ .string = "transaction_block" });
         try summary.put("data", .{ .string = tx_block });
-        
+
         try shared.printStructuredJson(writer, summary, args.pretty);
     } else {
         try writer.print("{s}\n", .{tx_block});
@@ -183,11 +182,11 @@ fn handleMovePackage(
     writer: anytype,
 ) !void {
     const package_id = args.move_package_id orelse return error.InvalidCli;
-    
+
     // Use new API to get normalized modules
     const modules = try rpc_new.getNormalizedMoveModule(rpc, package_id, "");
     defer modules.deinit(allocator);
-    
+
     if (args.move_summarize) {
         try writer.print("Package: {s}\n", .{package_id});
         try writer.print("Module: {s}\n", .{modules.name});
@@ -204,11 +203,11 @@ fn handleMoveModule(
 ) !void {
     const package_id = args.move_package_id orelse return error.InvalidCli;
     const module_name = args.move_module_name orelse return error.InvalidCli;
-    
+
     // Use new API
     const mod = try rpc_new.getNormalizedMoveModule(rpc, package_id, module_name);
     defer mod.deinit(allocator);
-    
+
     if (args.move_summarize) {
         try writer.print("Package: {s}\n", .{package_id});
         try writer.print("Module: {s}\n", .{module_name});
@@ -227,11 +226,11 @@ fn handleMoveFunction(
     const package_id = args.move_package_id orelse return error.InvalidCli;
     const module_name = args.move_module_name orelse return error.InvalidCli;
     const function_name = args.move_function_name orelse return error.InvalidCli;
-    
+
     // Use new API to get module
     const mod = try rpc_new.getNormalizedMoveModule(rpc, package_id, module_name);
     defer mod.deinit(allocator);
-    
+
     // Find function
     var found = false;
     for (mod.functions) |func| {
@@ -242,7 +241,7 @@ fn handleMoveFunction(
                     try writer.print("Function: {s}\n", .{func.name});
                     return;
                 };
-                
+
                 switch (output) {
                     .commands => try writer.print("Function: {s}\n", .{func.name}),
                     .tx_dry_run_request => try writer.writeAll("// Dry run request would be built here\n"),
@@ -255,7 +254,7 @@ fn handleMoveFunction(
             break;
         }
     }
-    
+
     if (!found) {
         try writer.print("Function '{s}' not found in module\n", .{function_name});
     }
@@ -272,11 +271,11 @@ fn handleObjectGet(
     writer: anytype,
 ) !void {
     const object_id = args.object_id orelse return error.InvalidCli;
-    
+
     // Use new API
     const obj = try rpc_new.getObject(rpc, object_id, null);
     defer obj.deinit(allocator);
-    
+
     if (args.pretty) {
         try writer.print("Object: {s}\n", .{obj.objectId});
         if (obj.type) |t| {
@@ -294,11 +293,11 @@ fn handleObjectDynamicFields(
     writer: anytype,
 ) !void {
     const object_id = args.object_id orelse return error.InvalidCli;
-    
+
     // Use new API
     const fields = try rpc_new.getDynamicFields(rpc, object_id, null, null);
     defer fields.deinit(allocator);
-    
+
     if (args.pretty) {
         try writer.print("Dynamic fields for {s}:\n", .{object_id});
         for (fields.data) |field| {
@@ -321,11 +320,11 @@ fn handleRpc(
 ) !void {
     const method = args.rpc_method orelse return error.InvalidCli;
     const params = args.rpc_params orelse "[]";
-    
+
     // Use new API's raw call capability
     const response = try rpc.call(method, params);
     defer rpc.allocator.free(response);
-    
+
     try shared.printJsonResponse(writer, response, args.pretty);
 }
 
@@ -370,75 +369,75 @@ test "handleUnimplemented outputs message" {
 
 test "handleTxBuild validates arguments" {
     const testing = std.testing;
-    
+
     const MockArgs = struct {
         tx_build_kind: ?tx.TxKind = null,
         tx_send_summarize: bool = false,
         pretty: bool = false,
     };
-    
+
     var args = MockArgs{};
     var output: std.ArrayList(u8) = .{};
     defer output.deinit(testing.allocator);
-    
+
     // Should not error with empty args (placeholder validation)
     try handleTxBuild(testing.allocator, &args, output.writer());
 }
 
 test "handleMovePackage requires package_id" {
     const testing = std.testing;
-    
+
     const MockArgs = struct {
         move_package_id: ?[]const u8 = null,
         move_summarize: bool = false,
     };
-    
+
     var args = MockArgs{};
     var output: std.ArrayList(u8) = .{};
     defer output.deinit(testing.allocator);
-    
+
     var rpc = try SuiRpcClient.init(testing.allocator, "http://example.local");
     defer rpc.deinit();
-    
+
     const result = handleMovePackage(testing.allocator, &rpc, &args, output.writer());
     try testing.expectError(error.InvalidCli, result);
 }
 
 test "handleObjectGet requires object_id" {
     const testing = std.testing;
-    
+
     const MockArgs = struct {
         object_id: ?[]const u8 = null,
         pretty: bool = false,
     };
-    
+
     var args = MockArgs{};
     var output: std.ArrayList(u8) = .{};
     defer output.deinit(testing.allocator);
-    
+
     var rpc = try SuiRpcClient.init(testing.allocator, "http://example.local");
     defer rpc.deinit();
-    
+
     const result = handleObjectGet(testing.allocator, &rpc, &args, output.writer());
     try testing.expectError(error.InvalidCli, result);
 }
 
 test "handleRpc requires method" {
     const testing = std.testing;
-    
+
     const MockArgs = struct {
         rpc_method: ?[]const u8 = null,
         rpc_params: ?[]const u8 = null,
         pretty: bool = false,
     };
-    
+
     var args = MockArgs{};
     var output: std.ArrayList(u8) = .{};
     defer output.deinit(testing.allocator);
-    
+
     var rpc = try SuiRpcClient.init(testing.allocator, "http://example.local");
     defer rpc.deinit();
-    
+
     const result = handleRpc(testing.allocator, &rpc, &args, output.writer());
     try testing.expectError(error.InvalidCli, result);
 }

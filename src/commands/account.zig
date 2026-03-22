@@ -55,20 +55,20 @@ fn resolveWalletOwner(
         // Try to get from wallet state
         const state = wallet_state.readDefaultWalletState(allocator) catch null;
         defer if (state) |s| allocator.free(s);
-        
+
         if (state) |s| {
             const owned = try allocator.dupe(u8, s);
             return .{ .owner = owned, .owned = owned };
         }
-        
+
         return error.InvalidCli;
     };
-    
+
     if (std.mem.startsWith(u8, selector, "0x")) {
         const owned = try allocator.dupe(u8, selector);
         return .{ .owner = owned, .owned = owned };
     }
-    
+
     // Resolve by alias
     const address = try client.keystore.resolveAddressBySelector(allocator, selector) orelse return error.InvalidCli;
     return .{ .owner = address, .owned = address };
@@ -82,18 +82,18 @@ pub fn listAccounts(
 ) !void {
     const keystore_path = try client.keystore.resolveDefaultSuiKeystorePath(allocator);
     defer if (keystore_path) |p| allocator.free(p);
-    
+
     if (keystore_path) |path| {
         const contents = readOptionalFileAtPathAlloc(allocator, path, 4 * 1024 * 1024) catch null;
         defer if (contents) |c| allocator.free(c);
-        
+
         if (args.account_info_json) {
             try writer.writeAll("{\"accounts\":[");
             if (contents) |c| {
                 // Parse and output accounts
                 const parsed = std.json.parseFromSlice(std.json.Value, allocator, c, .{}) catch null;
                 defer if (parsed) |p| p.deinit();
-                
+
                 if (parsed) |p| {
                     for (p.value.array.items, 0..) |item, i| {
                         if (i > 0) try writer.writeAll(",");
@@ -109,7 +109,7 @@ pub fn listAccounts(
             if (contents) |c| {
                 const parsed = std.json.parseFromSlice(std.json.Value, allocator, c, .{}) catch null;
                 defer if (parsed) |p| p.deinit();
-                
+
                 if (parsed) |p| {
                     for (p.value.array.items) |item| {
                         if (item.object.get("address")) |addr| {
@@ -137,7 +137,7 @@ pub fn getAccountInfo(
 ) !void {
     const resolved = try resolveWalletOwner(allocator, args);
     defer if (resolved.owned) |o| allocator.free(o);
-    
+
     if (args.account_info_json) {
         try writer.print("{{\"address\":\"{s}\"}}\n", .{resolved.owner});
     } else {
@@ -154,7 +154,7 @@ pub fn getAccountBalance(
     // Use new API
     const balance = try rpc_new.getBalance(rpc, address, null);
     defer balance.deinit(allocator);
-    
+
     return balance.totalBalance;
 }
 
@@ -167,7 +167,7 @@ pub fn printBalanceSummaryForOwner(
     args: anytype,
 ) !void {
     const balance = try getAccountBalance(allocator, rpc, owner);
-    
+
     if (args.account_info_json) {
         try writer.print("{{\"address\":\"{s}\",\"balance\":{d}}}\n", .{ owner, balance });
     } else {
@@ -185,11 +185,11 @@ pub fn getAccountCoins(
 ) !void {
     const resolved = try resolveWalletOwner(allocator, args);
     defer if (resolved.owned) |o| allocator.free(o);
-    
+
     // Use new API - get all coins
     const coins = try rpc_new.getAllCoins(rpc, resolved.owner, null, null);
     defer coins.deinit(allocator);
-    
+
     if (args.account_info_json) {
         // Output as JSON
         try writer.writeAll("{\"coins\":[");
@@ -219,11 +219,11 @@ pub fn getAccountObjects(
 ) !void {
     const resolved = try resolveWalletOwner(allocator, args);
     defer if (resolved.owned) |o| allocator.free(o);
-    
+
     // Use new API
     const objects = try rpc_new.getOwnedObjects(rpc, resolved.owner, null);
     defer objects.deinit(allocator);
-    
+
     if (args.account_info_json) {
         // Output as JSON
         try writer.writeAll("{\"objects\":[");

@@ -1,6 +1,5 @@
 /// macOS WebAuthn Implementation
 /// Uses LocalAuthentication framework and Secure Enclave
-
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 

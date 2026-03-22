@@ -1,6 +1,5 @@
 /// Advanced authentication methods for Sui
 /// Supports zkLogin and Passkey
-
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
@@ -126,14 +125,14 @@ pub const EphemeralKeyPair = struct {
     pub fn generate() !EphemeralKeyPair {
         // Use Zig's standard library Ed25519
         const Ed25519 = std.crypto.sign.Ed25519;
-        
+
         // Generate random seed
         var seed: [32]u8 = undefined;
         std.crypto.random.bytes(&seed);
-        
+
         // Create keypair from seed
         const kp = try Ed25519.KeyPair.generateDeterministic(seed);
-        
+
         var public_key: [32]u8 = undefined;
         var secret_key: [32]u8 = undefined;
         @memcpy(&public_key, &kp.public_key.bytes);
@@ -147,13 +146,13 @@ pub const EphemeralKeyPair = struct {
 
     pub fn sign(self: *const EphemeralKeyPair, message: []const u8) ![64]u8 {
         const Ed25519 = std.crypto.sign.Ed25519;
-        
+
         // Recreate keypair from seed
         const kp = try Ed25519.KeyPair.generateDeterministic(self.secret_key);
-        
+
         // Sign the message
         const sig = try kp.sign(message, null);
-        
+
         return sig.toBytes();
     }
 };
@@ -163,11 +162,11 @@ pub const EphemeralKeyPair = struct {
 // ============================================================================
 
 pub const PasskeyCredential = struct {
-    id: []const u8,              // Base64url encoded credential ID
-    public_key: [33]u8,          // P-256 compressed public key (0x02 || x) or (0x03 || x)
-    rp_id: []const u8,           // Relying Party ID (e.g., "sui.io")
-    user_handle: []const u8,     // User identifier
-    sign_count: u32,             // Signature counter (anti-replay)
+    id: []const u8, // Base64url encoded credential ID
+    public_key: [33]u8, // P-256 compressed public key (0x02 || x) or (0x03 || x)
+    rp_id: []const u8, // Relying Party ID (e.g., "sui.io")
+    user_handle: []const u8, // User identifier
+    sign_count: u32, // Signature counter (anti-replay)
 
     pub fn fromCreationResponse(allocator: Allocator, response: []const u8) !PasskeyCredential {
         // Parse WebAuthn credential creation response
@@ -225,7 +224,7 @@ pub const PasskeyCredential = struct {
 pub const PasskeySignature = struct {
     authenticator_data: []const u8,
     client_data_json: []const u8,
-    signature: [64]u8,  // ECDSA P-256 signature (r || s)
+    signature: [64]u8, // ECDSA P-256 signature (r || s)
 };
 
 pub const PasskeyAuthenticator = struct {

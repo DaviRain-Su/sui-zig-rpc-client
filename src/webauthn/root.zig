@@ -1,6 +1,5 @@
 /// WebAuthn Module for Sui
 /// Cross-platform Passkey support
-
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
@@ -135,13 +134,13 @@ pub const PasskeySignature = struct {
         const result = try allocator.alloc(u8, total_len);
         var pos: usize = 0;
 
-        @memcpy(result[pos..pos + self.authenticator_data.len], self.authenticator_data);
+        @memcpy(result[pos .. pos + self.authenticator_data.len], self.authenticator_data);
         pos += self.authenticator_data.len;
 
-        @memcpy(result[pos..pos + self.client_data_json.len], self.client_data_json);
+        @memcpy(result[pos .. pos + self.client_data_json.len], self.client_data_json);
         pos += self.client_data_json.len;
 
-        @memcpy(result[pos..pos + self.signature.len], self.signature);
+        @memcpy(result[pos .. pos + self.signature.len], self.signature);
 
         return result;
     }
