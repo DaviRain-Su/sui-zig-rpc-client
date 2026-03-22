@@ -22,18 +22,18 @@
 
 ## 🔴 Critical Issues (Blocking)
 
-### 1. Dual Main Entry Points
+### 1. ~~Dual Main Entry Points~~ ✅ FIXED
 
-**Problem:** Two main files exist:
-- `src/main.zig` - Uses OLD API (legacy)
-- `src/main_v2.zig` - Uses NEW API (actively developed)
+**Status:** COMPLETED
 
-**Impact:** Confusion for users, maintenance burden
+**Changes Made:**
+- [x] Renamed `main_v2.zig` → `main.zig`
+- [x] Moved old `main.zig` → `main_legacy.zig`
+- [x] Updated `build.zig` to use unified main
+- [x] Renamed all `main_v2_*.zig` → `main_*.zig`
+- [x] Updated imports in main.zig
 
-**Recommendation:** 
-- [ ] Deprecate `main.zig`
-- [ ] Rename `main_v2.zig` → `main.zig`
-- [ ] Update build.zig to use new main only
+**Result:** Single entry point `sui-zig-rpc-client` using new API
 
 ### 2. Legacy RPC Client Still Exported
 
@@ -69,16 +69,19 @@ pub const SuiRpcClient = rpc_client.SuiRpcClient;
 
 **Impact:** Minor - flags exist but not wired to logic
 
-### 2. Commands Adapter
+### 2. ~~Commands Adapter~~ ✅ FIXED
 
-**File:** `src/commands/adapter.zig:381,393`
+**File:** `src/commands/adapter.zig`
 
-```zig
-// TODO: Implement using new RPC client
-return error.NotImplemented;
-```
+**Status:** COMPLETED
 
-**Impact:** Medium - some command paths broken
+**Changes Made:**
+- [x] Implemented `executeAction()` with new RPC client
+- [x] Implemented `executeOrChallenge()` with delegation
+- [x] Added support for: query_balance, query_object, query_owned_objects
+- [x] Graceful error handling for unimplemented actions
+
+**Result:** Adapter now functional for read operations
 
 ### 3. Intent Parser HTTP
 

@@ -25,7 +25,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    // Executable module (original structure)
+    // Main executable (unified - uses new API)
     const exe_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
@@ -40,52 +40,28 @@ pub fn build(b: *std.Build) void {
         .root_module = exe_module,
     });
 
-    b.installArtifact(exe);
-
-    // New v2 executable using new API only
-    const exe_v2_module = b.createModule(.{
-        .root_source_file = b.path("src/main_v2.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "sui_client_zig", .module = client_module },
-        },
-    });
-
-    const exe_v2 = b.addExecutable(.{
-        .name = "sui-zig-rpc-client-v2",
-        .root_module = exe_v2_module,
-    });
-
     // Add WebAuthn support on macOS
     if (webauthn and target.result.os.tag == .macos) {
         std.log.info("Building with WebAuthn support for macOS", .{});
         
         // Add the Objective-C object file
-        exe_v2.addObjectFile(b.path("macos_bridge.o"));
+        exe.addObjectFile(b.path("macos_bridge.o"));
         
         // Link Apple frameworks
-        exe_v2.linkFramework("LocalAuthentication");
-        exe_v2.linkFramework("Security");
-        exe_v2.linkFramework("Foundation");
+        exe.linkFramework("LocalAuthentication");
+        exe.linkFramework("Security");
+        exe.linkFramework("Foundation");
         
         // Add include path for headers
-        exe_v2.addIncludePath(b.path("src/webauthn"));
+        exe.addIncludePath(b.path("src/webauthn"));
         
         // Define WEBAUTHN_ENABLED for conditional compilation
-        exe_v2.root_module.addCMacro("WEBAUTHN_ENABLED", "1");
+        exe.root_module.addCMacro("WEBAUTHN_ENABLED", "1");
     }
 
-    b.installArtifact(exe_v2);
+    b.installArtifact(exe);
 
-    // Run v2 command
-    const run_v2_step = b.step("run-v2", "Run the v2 app");
-    const run_v2_cmd = b.addRunArtifact(exe_v2);
-    if (b.args) |args| {
-        run_v2_cmd.addArgs(args);
-    }
-    run_v2_step.dependOn(&run_v2_cmd.step);
-
+    // Run command
     const run_step = b.step("run", "Run the app");
     const run_cmd = b.addRunArtifact(exe);
     if (b.args) |args| {
