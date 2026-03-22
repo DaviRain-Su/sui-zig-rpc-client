@@ -1,3 +1,10 @@
+// ============================================================================
+// ⚠️ DEPRECATED API
+// This file is deprecated and will be removed in a future version.
+// Please migrate to the new API: @import("tx_request_builder/root.zig")
+// See: docs/DEPRECATION_PLAN.md for migration guide
+// ============================================================================
+
 const std = @import("std");
 const tx_builder = @import("./tx_builder.zig");
 const keystore = @import("./keystore.zig");

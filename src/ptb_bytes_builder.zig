@@ -1,3 +1,10 @@
+// ============================================================================
+// ⚠️ DEPRECATED API
+// This file is deprecated and will be removed in a future version.
+// Please migrate to the new API: @import("ptb_bytes_builder/root.zig")
+// See: docs/DEPRECATION_PLAN.md for migration guide
+// ============================================================================
+
 const std = @import("std");
 
 pub const Address = [32]u8;

@@ -1,3 +1,10 @@
+// ============================================================================
+// ⚠️ DEPRECATED API
+// This file is deprecated and will be removed in a future version.
+// Please migrate to the new API: @import("commands/root.zig")
+// See: docs/DEPRECATION_PLAN.md for migration guide
+// ============================================================================
+
 const std = @import("std");
 const client = @import("sui_client_zig");
 const cli = @import("./cli.zig");
