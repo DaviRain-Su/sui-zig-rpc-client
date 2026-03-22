@@ -286,8 +286,8 @@ fn cmdCreateBrowser(allocator: Allocator, args: []const []const u8) !void {
     const stdin = std.fs.File{ .handle = 0 };
     _ = stdin.read(&buf) catch {};
 
-    // Import browser bridge
-    const browser = @import("webauthn/browser_simple.zig");
+    // Import browser bridge (use server version for localhost support)
+    const browser = @import("webauthn/browser_server.zig");
 
     const output_dir = try getKeystoreDir(allocator);
     defer allocator.free(output_dir);
@@ -295,7 +295,7 @@ fn cmdCreateBrowser(allocator: Allocator, args: []const []const u8) !void {
     std.log.info("", .{});
     std.log.info("Opening browser...", .{});
 
-    const credential = browser.createCredentialInBrowser(
+    var credential = browser.createCredentialInBrowser(
         allocator,
         "sui-cli.local",
         credential_name,
