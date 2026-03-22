@@ -1,7 +1,6 @@
 /// cli/root.zig - CLI module root
 ///
 /// This module provides command-line argument parsing and validation.
-
 const std = @import("std");
 
 // Import sub-modules

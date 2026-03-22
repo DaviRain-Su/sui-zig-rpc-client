@@ -5,56 +5,49 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-const http = @import("http");
+// Note: HTTP server implementation is a placeholder
+// In production, use a proper HTTP server library or std.http
 
-/// WebAuthn bridge server
+/// WebAuthn bridge server (placeholder implementation)
 pub const BrowserBridge = struct {
     allocator: Allocator,
     port: u16,
-    server: ?*http.Server,
     pending_requests: std.StringHashMap(PendingRequest),
-    
+
     const PendingRequest = struct {
         request_type: RequestType,
         response_channel: *std.Thread.ResetEvent,
         response_data: ?[]const u8,
     };
-    
+
     const RequestType = enum {
         create_credential,
         get_assertion,
     };
-    
+
     const Self = @This();
-    
+
     pub fn init(allocator: Allocator, port: u16) !Self {
         return Self{
             .allocator = allocator,
             .port = port,
-            .server = null,
             .pending_requests = std.StringHashMap(PendingRequest).init(allocator),
         };
     }
-    
+
     pub fn deinit(self: *Self) void {
-        if (self.server) |server| {
-            server.stop();
-        }
         self.pending_requests.deinit();
     }
-    
+
     /// Start the bridge server
     pub fn start(self: *Self) !void {
         std.log.info("Starting WebAuthn bridge server on http://localhost:{d}", .{self.port});
-        
+
         // Open browser with WebAuthn page
         try self.openBrowser();
-        
-        // Start HTTP server
-        var server = try http.Server.init(self.allocator, .{ .port = self.port });
-        self.server = &server;
-        
-        try server.listen();
+
+        // TODO: Implement HTTP server using std.http
+        return error.NotImplemented;
     }
     
     /// Open browser with WebAuthn interface

@@ -136,11 +136,11 @@ pub fn isTouchIDAvailable() bool {
 }
 
 /// Prompt for Touch ID to unlock Keychain
-pub func promptTouchID(reason: []const u8) !bool {
+pub fn promptTouchID(reason: []const u8) !bool {
     const context = c.LAContextCreate();
     if (context == null) return false;
     defer c.LAContextRelease(context);
-    
+
     var error_code: c_int = 0;
     return c.LAContextEvaluatePolicySync(
         context,

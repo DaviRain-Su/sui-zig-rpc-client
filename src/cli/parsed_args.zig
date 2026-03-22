@@ -122,7 +122,6 @@ pub const ParsedArgs = struct {
         if (self.owned_rpc_url) |v| allocator.free(v);
         self.owned_rpc_url = try allocator.dupe(u8, url);
         self.rpc_url = self.owned_rpc_url.?;
-        self.has_rpc_url = true;
     }
 
     /// Add signature
@@ -132,7 +131,10 @@ pub const ParsedArgs = struct {
         try self.owned_signatures.append(allocator, owned);
     }
 
-    const has_rpc_url: bool = false,
+    /// Check if RPC URL was explicitly set
+    pub fn hasRpcUrl(self: *const ParsedArgs) bool {
+        return self.owned_rpc_url != null;
+    }
 };
 
 /// Check if parsed args has move call arguments
@@ -209,7 +211,7 @@ test "ParsedArgs setRpcUrl" {
 
     try args.setRpcUrl(allocator, "https://custom.rpc.com");
     try testing.expectEqualStrings("https://custom.rpc.com", args.rpc_url);
-    try testing.expect(args.has_rpc_url);
+    try testing.expect(args.hasRpcUrl());
 }
 
 test "ParsedArgs addSignature" {
