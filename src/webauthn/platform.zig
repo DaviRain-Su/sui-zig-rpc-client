@@ -38,13 +38,13 @@ pub const AssertionResult = struct {
 
 /// Platform-specific WebAuthn implementation
 pub const WebAuthnPlatform = union(Platform) {
-    macos: MacOSWebAuthn,
+    macos: MacOSWebAuthnPlaceholder,
     linux: LinuxWebAuthn,
     unsupported: UnsupportedWebAuthn,
 
     pub fn init(allocator: Allocator) !WebAuthnPlatform {
         return switch (Platform.current()) {
-            .macos => .{ .macos = try MacOSWebAuthn.init(allocator) },
+            .macos => .{ .macos = try MacOSWebAuthnPlaceholder.init(allocator) },
             .linux => .{ .linux = try LinuxWebAuthn.init(allocator) },
             .unsupported => .{ .unsupported = UnsupportedWebAuthn.init() },
         };
@@ -97,26 +97,24 @@ pub const WebAuthnPlatform = union(Platform) {
 // macOS Implementation (LocalAuthentication + Secure Enclave)
 // ============================================================================
 
-const MacOSWebAuthn = struct {
+const MacOSWebAuthnPlaceholder = struct {
     allocator: Allocator,
 
-    pub fn init(allocator: Allocator) !MacOSWebAuthn {
+    pub fn init(allocator: Allocator) !MacOSWebAuthnPlaceholder {
         return .{ .allocator = allocator };
     }
 
-    pub fn deinit(self: *MacOSWebAuthn) void {
+    pub fn deinit(self: *MacOSWebAuthnPlaceholder) void {
         _ = self;
     }
 
-    pub fn isAvailable(self: *const MacOSWebAuthn) bool {
+    pub fn isAvailable(self: *const MacOSWebAuthnPlaceholder) bool {
         _ = self;
-        // Check if LocalAuthentication framework is available
-        // This would call into Objective-C runtime
         return true; // Placeholder
     }
 
     pub fn createCredential(
-        self: *MacOSWebAuthn,
+        self: *MacOSWebAuthnPlaceholder,
         rp_id: []const u8,
         user_name: []const u8,
         user_display_name: []const u8,
@@ -125,19 +123,11 @@ const MacOSWebAuthn = struct {
         _ = rp_id;
         _ = user_name;
         _ = user_display_name;
-
-        // This would:
-        // 1. Call LAContext.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics)
-        // 2. Generate P-256 keypair in Secure Enclave
-        // 3. Store credential in keychain
-        // 4. Return credential ID and public key
-
-        std.log.info("macOS: Creating credential in Secure Enclave...", .{});
         return error.NotImplemented;
     }
 
     pub fn getAssertion(
-        self: *MacOSWebAuthn,
+        self: *MacOSWebAuthnPlaceholder,
         rp_id: []const u8,
         challenge: []const u8,
         credential_id: ?[]const u8,
@@ -146,13 +136,6 @@ const MacOSWebAuthn = struct {
         _ = rp_id;
         _ = challenge;
         _ = credential_id;
-
-        // This would:
-        // 1. Prompt for biometric authentication
-        // 2. Sign challenge with private key in Secure Enclave
-        // 3. Return assertion data
-
-        std.log.info("macOS: Getting assertion with Touch ID/Face ID...", .{});
         return error.NotImplemented;
     }
 };
@@ -263,3 +246,8 @@ pub const c = struct {
     pub extern "fido2" fn fido_assert_new() ?*fido_assert_t;
     pub extern "fido2" fn fido_assert_free(assert: **fido_assert_t) void;
 };
+
+// Re-export macOS implementation
+pub const MacOSWebAuthn = @import("macos_impl.zig").MacOSWebAuthn;
+pub const BiometryType = @import("macos_impl.zig").BiometryType;
+pub const Credential = @import("macos_impl.zig").Credential;
