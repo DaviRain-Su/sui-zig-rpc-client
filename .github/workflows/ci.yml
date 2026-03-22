@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  ZIG_VERSION: 0.15.2
+
+jobs:
+  test:
+    name: Test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            target: x86_64-linux-gnu
+          - os: macos-latest
+            target: x86_64-macos
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Setup Zig
+      uses: goto-bus-stop/setup-zig@v2
+      with:
+        version: ${{ env.ZIG_VERSION }}
+
+    - name: Cache Zig dependencies
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cache/zig
+          .zig-cache
+        key: ${{ runner.os }}-zig-${{ hashFiles('build.zig') }}
+        restore-keys: |
+          ${{ runner.os }}-zig-
+
+    - name: Check formatting
+      run: zig fmt --check src/
+
+    - name: Run tests
+      run: zig build test --summary all
+
+    - name: Build release
+      run: zig build -Doptimize=ReleaseFast
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: sui-zig-${{ matrix.target }}
+        path: zig-out/bin/sui-zig-rpc-client
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Setup Zig
+      uses: goto-bus-stop/setup-zig@v2
+      with:
+        version: ${{ env.ZIG_VERSION }}
+
+    - name: Check formatting
+      run: zig fmt --check src/
+
+    - name: Build debug
+      run: zig build
+
+  build-macos-webauthn:
+    name: Build (macOS + WebAuthn)
+    runs-on: macos-latest
+    if: contains(github.event.head_commit.message, '[webauthn]') || github.event_name == 'workflow_dispatch'
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Setup Zig
+      uses: goto-bus-stop/setup-zig@v2
+      with:
+        version: ${{ env.ZIG_VERSION }}
+
+    - name: Build with WebAuthn
+      run: zig build -Dwebauthn=true
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: sui-zig-macos-webauthn
+        path: zig-out/bin/sui-zig-rpc-client

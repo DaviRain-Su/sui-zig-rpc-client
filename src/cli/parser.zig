@@ -1157,8 +1157,8 @@ test "parseCliArgs handles very long argument" {
 test "parseCliArgs handles special characters in args" {
     const testing = std.testing;
     const args = &.{
-        "tx", "send",
-        "--tx-bytes", "AA==",
+        "tx",          "send",
+        "--tx-bytes",  "AA==",
         "--signature", "sig_with-special.chars",
     };
 
@@ -1172,9 +1172,8 @@ test "parseCliArgs handles special characters in args" {
 test "parseCliArgs handles multiple flags" {
     const testing = std.testing;
     const args = &.{
-        "tx", "send",
-        "--wait",
-        "--summarize",
+        "tx",        "send",
+        "--wait",    "--summarize",
         "--observe",
     };
 
@@ -1191,7 +1190,7 @@ test "parseIntValue handles boundary values" {
 
     // Test max u64 value
     try testing.expectEqual(@as(u64, std.math.maxInt(u64)), try parseIntValue("18446744073709551615"));
-    
+
     // Test large values
     try testing.expectEqual(@as(u64, 1000000000000), try parseIntValue("1000000000000"));
 }
@@ -1208,7 +1207,7 @@ test "parseCliArgs wallet commands" {
 
     // Test wallet create
     const args1 = &.{
-        "wallet", "create",
+        "wallet",  "create",
         "--alias", "test_wallet",
     };
     var parsed1 = try parseCliArgs(testing.allocator, args1);
@@ -1218,7 +1217,7 @@ test "parseCliArgs wallet commands" {
 
     // Test wallet balance
     const args2 = &.{
-        "wallet", "balance",
+        "wallet",  "balance",
         "--limit", "50",
     };
     var parsed2 = try parseCliArgs(testing.allocator, args2);
@@ -1241,7 +1240,7 @@ test "parseCliArgs account commands" {
 
     // Test account balance with selector
     const args2 = &.{
-        "account", "balance", "main",
+        "account",     "balance",       "main",
         "--coin-type", "0x2::sui::SUI",
     };
     var parsed2 = try parseCliArgs(testing.allocator, args2);
@@ -1255,8 +1254,8 @@ test "parseCliArgs move commands" {
 
     const args = &.{
         "move", "function",
-        "0x1", "module", "func",
-        "--summarize",
+        "0x1",  "module",
+        "func", "--summarize",
     };
     var parsed = try parseCliArgs(testing.allocator, args);
     defer parsed.deinit(testing.allocator);
@@ -1272,7 +1271,7 @@ test "parseCliArgs request commands" {
     const testing = std.testing;
 
     const args = &.{
-        "request", "build",
+        "request",      "build",
         "--gas-budget", "1000000",
     };
     var parsed = try parseCliArgs(testing.allocator, args);
@@ -1287,9 +1286,12 @@ test "parseCliArgs event commands" {
 
     const args = &.{
         "events",
-        "--package", "0x1",
-        "--module", "test",
-        "--limit", "100",
+        "--package",
+        "0x1",
+        "--module",
+        "test",
+        "--limit",
+        "100",
     };
     var parsed = try parseCliArgs(testing.allocator, args);
     defer parsed.deinit(testing.allocator);

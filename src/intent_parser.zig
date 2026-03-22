@@ -253,7 +253,7 @@ fn mockParseIntent(allocator: std.mem.Allocator, query: []const u8) !IntentResul
     // Claim rewards intent detection
     if (std.mem.indexOf(u8, lower, "claim") != null and
         (std.mem.indexOf(u8, lower, "reward") != null or
-         std.mem.indexOf(u8, lower, "staking reward") != null))
+            std.mem.indexOf(u8, lower, "staking reward") != null))
     {
         const validator = try extractHexAddress(allocator, query);
 
