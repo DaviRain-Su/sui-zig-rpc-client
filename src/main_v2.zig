@@ -42,6 +42,14 @@ pub fn main() !void {
         try cmdChain(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "transfer")) {
         try cmdTransfer(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "validators")) {
+        try cmdValidators(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "committee")) {
+        try cmdCommittee(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "gas-price")) {
+        try cmdGasPrice(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "supply")) {
+        try cmdSupply(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "help") or std.mem.eql(u8, command, "--help")) {
         printUsage(args[0]);
     } else {
@@ -64,6 +72,10 @@ fn printUsage(prog_name: []const u8) void {
     std.log.info("  gas <address>               Get gas objects for address", .{});
     std.log.info("  chain                       Get chain identifier", .{});
     std.log.info("  transfer <from> <to> <amt>  Build transfer transaction (dry-run)", .{});
+    std.log.info("  validators                  List active validators", .{});
+    std.log.info("  committee [epoch]           Get committee info for epoch", .{});
+    std.log.info("  gas-price                   Get reference gas price", .{});
+    std.log.info("  supply                      Get total SUI supply", .{});
     std.log.info("  help                        Show this help", .{});
 }
 
@@ -624,5 +636,154 @@ fn cmdTransfer(allocator: Allocator, args: []const []const u8) !void {
         std.log.info("", .{});
         std.log.info("Note: This is a dry-run demonstration.", .{});
         std.log.info("Use --export to get the Sui CLI command for actual execution.", .{});
+    }
+}
+/// Additional commands for main_v2.zig
+
+fn cmdValidators(allocator: Allocator, _: []const []const u8) !void {
+    const rpc_url = getRpcUrl() orelse "https://fullnode.mainnet.sui.io:443";
+
+    var rpc_client = try SuiRpcClient.init(allocator, rpc_url);
+    defer rpc_client.deinit();
+
+    const response = try rpc_client.call("suix_getLatestSuiSystemState", "[]");
+    defer allocator.free(response);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, response, .{});
+    defer parsed.deinit();
+
+    if (parsed.value.object.get("result")) |result| {
+        if (result.object.get("activeValidators")) |validators| {
+            if (validators == .array) {
+                std.log.info("Active Validators: {d}", .{validators.array.items.len});
+
+                for (validators.array.items, 0..) |validator, i| {
+                    const metadata = validator.object.get("metadata") orelse continue;
+                    
+                    if (metadata.object.get("name")) |name| {
+                        if (name == .string) {
+                            std.log.info("  {d}. {s}", .{ i + 1, name.string });
+                        }
+                    }
+                    
+                    if (metadata.object.get("suiAddress")) |addr| {
+                        std.log.info("      Address: {s}", .{addr.string});
+                    }
+                    
+                    if (validator.object.get("stakingPoolSuiBalance")) |balance| {
+                        const balance_num: u64 = if (balance == .integer)
+                            @intCast(balance.integer)
+                        else
+                            std.fmt.parseInt(u64, balance.string, 10) catch 0;
+                        std.log.info("      Staking Pool: {d} MIST", .{balance_num});
+                    }
+                    
+                    if (validator.object.get("commissionRate")) |rate| {
+                        const rate_num: u64 = if (rate == .integer)
+                            @intCast(rate.integer)
+                        else
+                            std.fmt.parseInt(u64, rate.string, 10) catch 0;
+                        std.log.info("      Commission: {d}%", .{rate_num / 100});
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn cmdCommittee(allocator: Allocator, args: []const []const u8) !void {
+    const rpc_url = getRpcUrl() orelse "https://fullnode.mainnet.sui.io:443";
+
+    var rpc_client = try SuiRpcClient.init(allocator, rpc_url);
+    defer rpc_client.deinit();
+
+    const params = if (args.len >= 1)
+        try std.fmt.allocPrint(allocator, "[{s}]", .{args[0]})
+    else
+        "[]";
+    defer if (args.len >= 1) allocator.free(params);
+
+    const response = try rpc_client.call("suix_getCommitteeInfo", params);
+    defer allocator.free(response);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, response, .{});
+    defer parsed.deinit();
+
+    if (parsed.value.object.get("result")) |result| {
+        if (result.object.get("epoch")) |epoch| {
+            const epoch_num: u64 = if (epoch == .integer)
+                @intCast(epoch.integer)
+            else
+                std.fmt.parseInt(u64, epoch.string, 10) catch 0;
+            std.log.info("Epoch: {d}", .{epoch_num});
+        }
+        
+        if (result.object.get("committeeInfo")) |info| {
+            if (info == .array) {
+                std.log.info("Committee Members: {d}", .{info.array.items.len});
+                
+                for (info.array.items) |member| {
+                    if (member == .array and member.array.items.len >= 2) {
+                        const address = member.array.items[0];
+                        const stake = member.array.items[1];
+                        
+                        const stake_num: u64 = if (stake == .integer)
+                            @intCast(stake.integer)
+                        else
+                            std.fmt.parseInt(u64, stake.string, 10) catch 0;
+                        
+                        std.log.info("  {s}: {d} MIST", .{ address.string, stake_num });
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn cmdGasPrice(allocator: Allocator, _: []const []const u8) !void {
+    const rpc_url = getRpcUrl() orelse "https://fullnode.mainnet.sui.io:443";
+
+    var rpc_client = try SuiRpcClient.init(allocator, rpc_url);
+    defer rpc_client.deinit();
+
+    const response = try rpc_client.call("suix_getReferenceGasPrice", "[]");
+    defer allocator.free(response);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, response, .{});
+    defer parsed.deinit();
+
+    if (parsed.value.object.get("result")) |result| {
+        const price: u64 = if (result == .integer)
+            @intCast(result.integer)
+        else
+            std.fmt.parseInt(u64, result.string, 10) catch 0;
+        std.log.info("Reference Gas Price: {d} MIST", .{price});
+    }
+}
+
+fn cmdSupply(allocator: Allocator, _: []const []const u8) !void {
+    const rpc_url = getRpcUrl() orelse "https://fullnode.mainnet.sui.io:443";
+
+    var rpc_client = try SuiRpcClient.init(allocator, rpc_url);
+    defer rpc_client.deinit();
+
+    const response = try rpc_client.call("suix_getTotalSupply", "[\"0x2::sui::SUI\"]");
+    defer allocator.free(response);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, response, .{});
+    defer parsed.deinit();
+
+    if (parsed.value.object.get("result")) |result| {
+        if (result.object.get("value")) |value| {
+            const supply: u64 = if (value == .integer)
+                @intCast(value.integer)
+            else
+                std.fmt.parseInt(u64, value.string, 10) catch 0;
+            std.log.info("Total SUI Supply: {d} MIST ({d}.{d} SUI)", .{
+                supply,
+                supply / 1_000_000_000,
+                supply % 1_000_000_000,
+            });
+        }
     }
 }
