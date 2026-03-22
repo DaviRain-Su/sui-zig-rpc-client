@@ -1,10 +1,10 @@
 /// commands/adapter.zig - Adapter to bridge old and new RPC client APIs
 const std = @import("std");
+const client = @import("sui_client_zig");
 
-// Import new RPC client
-const new_rpc = @import("../client/rpc_client/root.zig");
-const SuiRpcClient = new_rpc.SuiRpcClient;
-const ClientError = new_rpc.ClientError;
+// Use new RPC client from sui_client_zig module
+const SuiRpcClient = client.rpc_client_new.SuiRpcClient;
+const ClientError = client.rpc_client_new.ClientError;
 
 /// Adapter for RpcRequest - maps old to new
 pub const RpcRequest = struct {
@@ -26,11 +26,11 @@ pub const ReadQueryActionResult = union(enum) {
     objects: []ObjectResult,
     transaction: TransactionResult,
     events: []EventResult,
-    error: []const u8,
+    errors: []const u8,
 
     pub fn deinit(self: *ReadQueryActionResult, allocator: std.mem.Allocator) void {
         switch (self.*) {
-            .error => |e| allocator.free(e),
+            .errors => |e| allocator.free(e),
             .objects => |objs| {
                 for (objs) |*obj| obj.deinit(allocator);
                 allocator.free(objs);
@@ -192,7 +192,7 @@ pub const ProgrammaticClientActionResult = union(enum) {
     simulate_transaction: SimulateTransactionResult,
     execute_transaction: ExecuteTransactionResult,
     query: ReadQueryActionResult,
-    error: []const u8,
+    errors: []const u8,
 
     pub fn deinit(self: *ProgrammaticClientActionResult, allocator: std.mem.Allocator) void {
         switch (self.*) {
@@ -200,7 +200,7 @@ pub const ProgrammaticClientActionResult = union(enum) {
             .simulate_transaction => |*r| r.deinit(allocator),
             .execute_transaction => |*r| r.deinit(allocator),
             .query => |*r| r.deinit(allocator),
-            .error => |e| allocator.free(e),
+            .errors => |e| allocator.free(e),
         }
     }
 };
@@ -334,14 +334,15 @@ pub const ObjectReadOptions = struct {
     show_display: bool = false,
 
     pub fn toJson(self: ObjectReadOptions) []const u8 {
-        return ObjectDataOptions{
+        const opts = ObjectDataOptions{
             .show_type = self.show_type,
             .show_content = self.show_content,
             .show_owner = self.show_owner,
             .show_previous_transaction = self.show_previous_transaction,
             .show_storage_rebate = self.show_storage_rebate,
             .show_display = self.show_display,
-        }.toJson();
+        };
+        return opts.toJson();
     }
 };
 
@@ -371,24 +372,26 @@ pub const EventFilter = struct {
 
 /// Execute a programmatic action using the new API
 pub fn executeAction(
-    client: *SuiRpcClient,
+    rpc_client: *SuiRpcClient,
     action: ProgrammaticClientAction,
     allocator: std.mem.Allocator,
 ) !ProgrammaticClientActionResult {
-    _ = client;
+    _ = rpc_client;
+    _ = action;
     // TODO: Implement using new RPC client
-    return .{ .error = try allocator.dupe(u8, "Not implemented") };
+    return .{ .errors = try allocator.dupe(u8, "Not implemented") };
 }
 
 /// Execute or get challenge prompt
 pub fn executeOrChallenge(
-    client: *SuiRpcClient,
+    rpc_client: *SuiRpcClient,
     action: ProgrammaticClientAction,
     allocator: std.mem.Allocator,
 ) !ProgrammaticClientActionOrChallengePromptResult {
-    _ = client;
+    _ = rpc_client;
+    _ = action;
     // TODO: Implement using new RPC client
-    return .{ .result = .{ .error = try allocator.dupe(u8, "Not implemented") } };
+    return .{ .result = .{ .errors = try allocator.dupe(u8, "Not implemented") } };
 }
 
 // ============================================================
