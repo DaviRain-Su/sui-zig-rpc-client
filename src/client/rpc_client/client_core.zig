@@ -150,23 +150,30 @@ pub const SuiRpcClient = struct {
         return response;
     }
 
-    /// Make HTTP request
+    /// Make HTTP request (Zig 0.15.2 compatible)
     fn makeHttpRequest(self: *SuiRpcClient, request: RpcRequest) ![]u8 {
         const uri = try std.Uri.parse(self.endpoint);
 
-        var headers = std.http.Headers{ .allocator = self.allocator };
-        defer headers.deinit();
+        // Zig 0.15.2 API: use request() with options
+        const extra_headers = &[_]std.http.Header{
+            .{ .name = "Content-Type", .value = "application/json" },
+        };
 
-        try headers.append("Content-Type", "application/json");
-
-        var req = try self.http_client.request(.POST, uri, headers, .{});
+        var req = try self.http_client.request(.POST, uri, .{
+            .extra_headers = extra_headers,
+        });
         defer req.deinit();
 
-        try req.writeAll(request.request_body);
-        try req.finish();
+        // Send body
+        try req.sendBodyComplete(request.request_body);
+
+        // Wait for response
         try req.wait();
 
-        const body = try req.reader().readAllAlloc(self.allocator, 10 * 1024 * 1024);
+        // Read response body
+        var body_buffer: [10 * 1024 * 1024]u8 = undefined;
+        const body_len = try req.reader().readAll(&body_buffer);
+        const body = try self.allocator.dupe(u8, body_buffer[0..body_len]);
         errdefer self.allocator.free(body);
 
         if (req.response.status != .ok) {
