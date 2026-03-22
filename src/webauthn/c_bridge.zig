@@ -82,6 +82,12 @@ pub extern fn NSStringRelease(str: NSStringRef) void;
 pub extern fn NSDataGetLength(data: NSDataRef) usize;
 pub extern fn NSDataGetBytes(data: NSDataRef) [*c]const u8;
 pub extern fn NSDataRelease(data: NSDataRef) void;
+pub extern fn NSDataCreateWithBytes(bytes: [*c]const u8, length: usize) NSDataRef;
+
+// Software key storage (Keychain without Secure Enclave)
+pub extern fn StoreKeyInKeychain(tag: NSStringRef, keyData: NSDataRef, requireTouchID: bool, errorCode: *c_int) bool;
+pub extern fn LoadKeyFromKeychain(tag: NSStringRef, errorCode: *c_int) NSDataRef;
+pub extern fn DeleteKeyFromKeychain(tag: NSStringRef, errorCode: *c_int) bool;
 
 // Utility
 pub extern fn GetErrorMessage(errorCode: c_int) [*c]const u8;

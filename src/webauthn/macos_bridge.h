@@ -88,6 +88,14 @@ bool StoreCredentialInKeychain(const char* tag, BridgeSecKeyRef privateKey, int3
 BridgeSecKeyRef LoadCredentialFromKeychain(const char* tag, int32_t* errorCode);
 bool DeleteCredentialFromKeychain(const char* tag, int32_t* errorCode);
 
+// Software key storage (Keychain without Secure Enclave)
+bool StoreKeyInKeychain(NSStringRef tag, NSDataRef keyData, bool requireTouchID, int32_t* errorCode);
+NSDataRef LoadKeyFromKeychain(NSStringRef tag, int32_t* errorCode);
+bool DeleteKeyFromKeychain(NSStringRef tag, int32_t* errorCode);
+
+// NSData creation
+NSDataRef NSDataCreateWithBytes(const uint8_t* bytes, size_t length);
+
 // Utility
 const char* GetErrorMessage(int32_t errorCode);
 void FreeString(const char* str);

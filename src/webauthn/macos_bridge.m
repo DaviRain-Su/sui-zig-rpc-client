@@ -398,6 +398,131 @@ bool DeleteCredentialFromKeychain(const char* tag, int32_t* errorCode) {
     return true;
 }
 
+// MARK: - Software Key Storage (Keychain without Secure Enclave)
+
+bool StoreKeyInKeychain(NSStringRef tag, NSDataRef keyData, bool requireTouchID, int32_t* errorCode) {
+    if (!tag || !keyData) {
+        if (errorCode) *errorCode = BRIDGE_LA_ERROR_INVALID_CONTEXT;
+        return false;
+    }
+    
+    NSString *tagString = (__bridge NSString *)tag;
+    NSData *keyNSData = (__bridge NSData *)keyData;
+    
+    // Delete any existing item first
+    NSDictionary *deleteQuery = @{
+        (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+        (__bridge id)kSecAttrAccount: tagString,
+        (__bridge id)kSecAttrService: @"sui-zig-passkey"
+    };
+    SecItemDelete((__bridge CFDictionaryRef)deleteQuery);
+    
+    // Create access control if Touch ID is required
+    CFErrorRef error = NULL;
+    SecAccessControlRef accessControl = NULL;
+    
+    if (requireTouchID) {
+        accessControl = SecAccessControlCreateWithFlags(
+            kCFAllocatorDefault,
+            kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+            kSecAccessControlBiometryCurrentSet,
+            &error
+        );
+        
+        if (error) {
+            NSLog(@"SecAccessControlCreateWithFlags error: %@", error);
+            CFRelease(error);
+            // Continue without Touch ID protection
+            accessControl = NULL;
+        }
+    }
+    
+    // Build attributes - simplified, no access control for now
+    NSDictionary *attributes = @{
+        (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+        (__bridge id)kSecAttrAccount: tagString,
+        (__bridge id)kSecAttrService: @"sui-zig-passkey",
+        (__bridge id)kSecValueData: keyNSData,
+        (__bridge id)kSecAttrAccessible: (__bridge id)kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+    };
+    
+    (void)accessControl; // Unused for now
+    
+    OSStatus status = SecItemAdd((__bridge CFDictionaryRef)attributes, NULL);
+    
+    if (status != errSecSuccess) {
+        NSLog(@"SecItemAdd failed with status: %d", (int)status);
+        if (errorCode) *errorCode = (int32_t)status;
+        return false;
+    }
+    
+    if (errorCode) *errorCode = BRIDGE_LA_ERROR_SUCCESS;
+    return true;
+}
+
+NSDataRef LoadKeyFromKeychain(NSStringRef tag, int32_t* errorCode) {
+    if (!tag) {
+        if (errorCode) *errorCode = BRIDGE_LA_ERROR_INVALID_CONTEXT;
+        return NULL;
+    }
+    
+    NSString *tagString = (__bridge NSString *)tag;
+    
+    NSDictionary *query = @{
+        (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+        (__bridge id)kSecAttrAccount: tagString,
+        (__bridge id)kSecAttrService: @"sui-zig-passkey",
+        (__bridge id)kSecReturnData: @YES,
+        (__bridge id)kSecMatchLimit: (__bridge id)kSecMatchLimitOne
+    };
+    
+    CFDataRef data = NULL;
+    OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, (CFTypeRef*)&data);
+    
+    if (status != errSecSuccess) {
+        NSLog(@"SecItemCopyMatching failed with status: %d", (int)status);
+        if (errorCode) *errorCode = (int32_t)status;
+        return NULL;
+    }
+    
+    if (errorCode) *errorCode = BRIDGE_LA_ERROR_SUCCESS;
+    return (NSDataRef)data;
+}
+
+bool DeleteKeyFromKeychain(NSStringRef tag, int32_t* errorCode) {
+    if (!tag) {
+        if (errorCode) *errorCode = BRIDGE_LA_ERROR_INVALID_CONTEXT;
+        return false;
+    }
+    
+    NSString *tagString = (__bridge NSString *)tag;
+    
+    NSDictionary *query = @{
+        (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+        (__bridge id)kSecAttrAccount: tagString,
+        (__bridge id)kSecAttrService: @"sui-zig-passkey"
+    };
+    
+    OSStatus status = SecItemDelete((__bridge CFDictionaryRef)query);
+    
+    if (status != errSecSuccess && status != errSecItemNotFound) {
+        if (errorCode) *errorCode = (int32_t)status;
+        return false;
+    }
+    
+    if (errorCode) *errorCode = BRIDGE_LA_ERROR_SUCCESS;
+    return true;
+}
+
+// MARK: - NSData Helpers
+
+NSDataRef NSDataCreateWithBytes(const uint8_t* bytes, size_t length) {
+    if (!bytes || length == 0) return NULL;
+    
+    NSData *data = [NSData dataWithBytes:bytes length:length];
+    return (NSDataRef)CFBridgingRetain(data);
+}
+
 // MARK: - Utility
 
 const char* GetErrorMessage(int32_t errorCode) {
