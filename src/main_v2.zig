@@ -102,6 +102,8 @@ pub fn main() !void {
         try cmdZklogin(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "passkey")) {
         try cmdPasskey(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "websocket") or std.mem.eql(u8, command, "ws")) {
+        try cmdWebsocket(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "help") or std.mem.eql(u8, command, "--help")) {
         printUsage(args[0]);
     } else {
@@ -5020,4 +5022,11 @@ fn cmdPasskeyOld(allocator: Allocator, args: []const []const u8) !void {
         std.log.err("Unknown passkey action: {s}", .{action});
         std.process.exit(1);
     }
+}
+
+// Import WebSocket command module
+const websocket_cmd = @import("main_v2_websocket.zig");
+
+fn cmdWebsocket(allocator: Allocator, args: []const []const u8) !void {
+    try websocket_cmd.cmdWebsocket(allocator, args);
 }
