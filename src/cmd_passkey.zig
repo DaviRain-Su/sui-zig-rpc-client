@@ -10,9 +10,11 @@ const Allocator = std.mem.Allocator;
 const builtin = @import("builtin");
 const is_macos = builtin.os.tag == .macos;
 const is_linux = builtin.os.tag == .linux;
+const webauthn_enabled = @hasDecl(builtin, "WEBAUTHN_ENABLED");
+const webauthn_available = is_macos and webauthn_enabled;
 
-// Import C bridge on macOS for Touch ID
-const c = if (is_macos) @import("webauthn/c_bridge.zig") else struct {};
+// Import C bridge only when WebAuthn is enabled on macOS
+const c = if (webauthn_available) @import("webauthn/c_bridge.zig") else struct {};
 
 // Import Linux WebAuthn support
 const LinuxWebAuthn = if (is_linux) @import("webauthn/linux.zig").LinuxWebAuthn else struct {};
@@ -20,7 +22,7 @@ const LinuxWebAuthn = if (is_linux) @import("webauthn/linux.zig").LinuxWebAuthn 
 // Import file keystore
 const FileKeystore = @import("webauthn/file_keystore.zig").FileKeystore;
 
-// Constants
+// Constants (only used when WebAuthn is available)
 const POLICY_DEVICE_OWNER_AUTHENTICATION_WITH_BIOMETRICS: c_int = 2;
 const BIOMETRY_TYPE_TOUCH_ID: c_int = 1;
 const BIOMETRY_TYPE_FACE_ID: c_int = 2;
@@ -109,8 +111,8 @@ fn cmdCreate(allocator: Allocator, args: []const []const u8) !void {
     std.log.info("Name: {s}", .{credential_name});
     std.log.info("", .{});
 
-    if (!is_macos) {
-        std.log.err("Passkey creation is only supported on macOS currently", .{});
+    if (!webauthn_available) {
+        std.log.err("Passkey creation requires WebAuthn support (macOS with -Dwebauthn flag)", .{});
         std.process.exit(1);
     }
 
@@ -359,8 +361,8 @@ fn cmdPlatform() !void {
     std.log.info("=== WebAuthn Platform Info ===", .{});
     std.log.info("", .{});
 
-    if (is_macos) {
-        std.log.info("Platform: macOS", .{});
+    if (webauthn_available) {
+        std.log.info("Platform: macOS (WebAuthn enabled)", .{});
         std.log.info("", .{});
 
         const context = c.LAContextCreate();
@@ -392,6 +394,14 @@ fn cmdPlatform() !void {
         std.log.info("  - AES-256-GCM encryption", .{});
         std.log.info("  - PBKDF2 key derivation", .{});
         std.log.info("  - File-based storage (no Apple Developer needed!)", .{});
+    } else if (is_macos) {
+        std.log.info("Platform: macOS", .{});
+        std.log.info("", .{});
+        std.log.info("WebAuthn: Not enabled (build with -Dwebauthn)", .{});
+        std.log.info("", .{});
+        std.log.info("Features:", .{});
+        std.log.info("  - File-based keystore (available)", .{});
+        std.log.info("  - Touch ID authentication (requires -Dwebauthn)", .{});
     } else if (is_linux) {
         std.log.info("Platform: Linux", .{});
         std.log.info("", .{});
@@ -499,8 +509,8 @@ fn cmdTest(allocator: Allocator) !void {
         return;
     }
     
-    if (!is_macos) {
-        std.log.err("This test is only available on macOS and Linux", .{});
+    if (!webauthn_available) {
+        std.log.err("Touch ID test requires WebAuthn support (build with -Dwebauthn)", .{});
         std.process.exit(1);
     }
 

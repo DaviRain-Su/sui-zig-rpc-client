@@ -4,11 +4,13 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-// Only compile on macOS
+// Only compile on macOS with WebAuthn enabled
 const is_macos = builtin.os.tag == .macos;
+const webauthn_enabled = @hasDecl(@import("builtin"), "WEBAUTHN_ENABLED");
+const webauthn_available = is_macos and webauthn_enabled;
 
-// Import C bridge on macOS
-const c = if (is_macos) @import("c_bridge.zig") else struct {};
+// Import C bridge only when WebAuthn is available
+const c = if (webauthn_available) @import("c_bridge.zig") else struct {};
 
 // WebAuthn types
 const Credential = @import("platform.zig").Credential;
@@ -36,7 +38,7 @@ pub const MacOSWebAuthnImpl = struct {
     pub fn isAvailable(self: *Self) bool {
         _ = self;
         
-        if (!is_macos) return false;
+        if (!webauthn_available) return false;
         
         // Create LAContext to check availability
         const context = c.LAContextCreate();
@@ -55,7 +57,7 @@ pub const MacOSWebAuthnImpl = struct {
     pub fn getBiometryType(self: *Self) ![]const u8 {
         _ = self;
         
-        if (!is_macos) {
+        if (!webauthn_available) {
             return "none";
         }
         
@@ -74,7 +76,7 @@ pub const MacOSWebAuthnImpl = struct {
     
     /// Create a new credential using Secure Enclave
     pub fn createCredential(self: *Self, options: CredentialOptions) !Credential {
-        if (!is_macos) {
+        if (!webauthn_available) {
             return PlatformError.NotSupported;
         }
         
@@ -141,7 +143,7 @@ pub const MacOSWebAuthnImpl = struct {
     
     /// Sign data using a credential
     pub fn sign(self: *Self, options: SignOptions) ![]const u8 {
-        if (!is_macos) {
+        if (!webauthn_available) {
             return PlatformError.NotSupported;
         }
         
@@ -182,7 +184,7 @@ pub const MacOSWebAuthnImpl = struct {
     
     /// Delete a credential from the keychain
     pub fn deleteCredential(self: *Self, credential_id: []const u8) !void {
-        if (!is_macos) {
+        if (!webauthn_available) {
             return PlatformError.NotSupported;
         }
         
@@ -196,17 +198,45 @@ pub const MacOSWebAuthnImpl = struct {
     }
     
     /// List all credentials (returns IDs)
+    /// Uses a registry file to track credentials since macOS Keychain
+    /// doesn't provide a direct enumeration API for generic passwords
     pub fn listCredentials(self: *Self) ![][]const u8 {
-        _ = self;
-        // TODO: Implement keychain query to list all credentials
-        return &[_][]const u8{};
+        if (!webauthn_available) {
+            return PlatformError.NotSupported;
+        }
+        
+        // Use the file-based keystore for listing
+        // This provides a consistent interface across platforms
+        const FileKeystore = @import("file_keystore.zig").FileKeystore;
+        
+        // Get default keystore directory
+        const home = std.process.getEnvVarOwned(self.allocator, "HOME") catch |err| {
+            std.log.err("Failed to get HOME directory: {any}", .{err});
+            return PlatformError.KeychainError;
+        };
+        defer self.allocator.free(home);
+        
+        const keystore_dir = try std.fs.path.join(self.allocator, &.{ home, ".sui", "webauthn_credentials" });
+        defer self.allocator.free(keystore_dir);
+        
+        var keystore = FileKeystore.init(self.allocator, keystore_dir) catch |err| {
+            std.log.err("Failed to initialize keystore: {any}", .{err});
+            // Return empty list if keystore doesn't exist yet
+            return try self.allocator.alloc([]const u8, 0);
+        };
+        defer keystore.deinit();
+        
+        return keystore.listCredentials(self.allocator) catch |err| {
+            std.log.err("Failed to list credentials: {any}", .{err});
+            return try self.allocator.alloc([]const u8, 0);
+        };
     }
     
     /// Prompt user for biometric authentication
     pub fn authenticate(self: *Self, reason: []const u8) !bool {
         _ = self;
         
-        if (!is_macos) {
+        if (!webauthn_available) {
             return PlatformError.NotSupported;
         }
         
@@ -269,7 +299,7 @@ pub const MacOSWebAuthnImpl = struct {
 };
 
 // Export for non-macOS platforms
-pub const MacOSWebAuthn = if (is_macos) MacOSWebAuthnImpl else struct {
+pub const MacOSWebAuthn = if (webauthn_available) MacOSWebAuthnImpl else struct {
     pub fn init(allocator: std.mem.Allocator) @This() {
         _ = allocator;
         return .{};

@@ -3,30 +3,36 @@
 
 const std = @import("std");
 
-// Only compile on macOS
+// Only compile on macOS with WebAuthn enabled
 const builtin = @import("builtin");
 const is_macos = builtin.os.tag == .macos;
 
-// C types
-pub const c = if (is_macos) @cImport({
-    @cInclude("macos_bridge.h");
-}) else struct {};
+// Check if WebAuthn is enabled via build flag
+const webauthn_enabled = @hasDecl(@import("builtin"), "WEBAUTHN_ENABLED");
+
+// C types - only import when WebAuthn is enabled on macOS
+pub const c = if (is_macos and webauthn_enabled)
+    @cImport({
+        @cInclude("macos_bridge.h");
+    })
+else
+    struct {};
 
 // Re-export types for easier access
-pub const LAContextRef = if (is_macos) c.LAContextRef else *anyopaque;
-pub const BridgeSecKeyRef = if (is_macos) c.BridgeSecKeyRef else *anyopaque;
-pub const NSDataRef = if (is_macos) c.NSDataRef else *anyopaque;
-pub const NSStringRef = if (is_macos) c.NSStringRef else *anyopaque;
+pub const LAContextRef = if (is_macos and webauthn_enabled) c.LAContextRef else *anyopaque;
+pub const BridgeSecKeyRef = if (is_macos and webauthn_enabled) c.BridgeSecKeyRef else *anyopaque;
+pub const NSDataRef = if (is_macos and webauthn_enabled) c.NSDataRef else *anyopaque;
+pub const NSStringRef = if (is_macos and webauthn_enabled) c.NSStringRef else *anyopaque;
 
 // Policy enum
-pub const BridgeLAPolicy = if (is_macos) c.BridgeLAPolicy else enum(c_int) {
+pub const BridgeLAPolicy = if (is_macos and webauthn_enabled) c.BridgeLAPolicy else enum(c_int) {
     device_owner_authentication = 1,
     device_owner_authentication_with_biometrics = 2,
     device_owner_authentication_with_watch = 3,
 };
 
 // Error enum
-pub const BridgeLAError = if (is_macos) c.BridgeLAError else enum(c_int) {
+pub const BridgeLAError = if (is_macos and webauthn_enabled) c.BridgeLAError else enum(c_int) {
     success = 0,
     authentication_failed = -1,
     user_cancel = -2,
@@ -46,7 +52,7 @@ pub const BridgeLAError = if (is_macos) c.BridgeLAError else enum(c_int) {
 };
 
 // Biometry type enum
-pub const BridgeBiometryType = if (is_macos) c.BridgeBiometryType else enum(c_int) {
+pub const BridgeBiometryType = if (is_macos and webauthn_enabled) c.BridgeBiometryType else enum(c_int) {
     none = 0,
     touch_id = 1,
     face_id = 2,

@@ -61,6 +61,8 @@ pub const IntentParseError = error{
     InvalidJson,
     MissingRequiredField,
     AmbiguousIntent,
+    ApiError,
+    ParseError,
     OutOfMemory,
 };
 
@@ -194,7 +196,6 @@ fn callClaudeApi(
     query: []const u8,
     api_key: []const u8,
 ) IntentParseError!IntentResult {
-    _ = api_key;
     // 构建 prompt
     const prompt = try buildPrompt(allocator, query);
     defer allocator.free(prompt);
@@ -203,12 +204,247 @@ fn callClaudeApi(
     const request_body = try buildClaudeRequest(allocator, prompt);
     defer allocator.free(request_body);
 
-    // TODO: Implement HTTP call using the project's transport infrastructure
-    // For now, return a mock response for common swap queries
-    const lower = try std.ascii.allocLowerString(allocator, query);
+    // Try to call Claude API using project's HTTP infrastructure
+    const api_result = callClaudeApi(allocator, request_body, api_key) catch |err| {
+        std.log.warn("Claude API call failed ({}), falling back to mock parser", .{err});
+        // Fall back to mock response for common queries
+        return try mockParseIntent(allocator, query);
+    };
+    defer {
+        allocator.free(api_result.body);
+        if (api_result.response) |r| r.deinit();
+    };
+
+    // Parse Claude API response
+    return parseClaudeResponse(allocator, api_result.body) catch |err| {
+        std.log.warn("Failed to parse Claude response ({}), falling back to mock parser", .{err});
+        return try mockParseIntent(allocator, query);
+    };
+}
+
+/// HTTP API call result
+const ApiResult = struct {
+    body: []const u8,
+    response: ?std.http.Client.Response,
+};
+
+/// Call Claude API using std.http.Client
+fn callClaudeApi(
+    allocator: std.mem.Allocator,
+    request_body: []const u8,
+    api_key: []const u8,
+) !ApiResult {
+    // Create HTTP client
+    var client = std.http.Client{ .allocator = allocator };
+    defer client.deinit();
+
+    // Parse API endpoint URL
+    const uri = try std.Uri.parse("https://api.anthropic.com/v1/messages");
+
+    // Prepare headers
+    const api_key_header = try std.fmt.allocPrint(allocator, "Bearer {s}", .{api_key});
+    defer allocator.free(api_key_header);
+
+    const headers = &[_]std.http.Header{
+        .{ .name = "Content-Type", .value = "application/json" },
+        .{ .name = "Authorization", .value = api_key_header },
+        .{ .name = "anthropic-version", .value = "2023-06-01" },
+    };
+
+    // Make the request
+    var response_body = std.ArrayList(u8).init(allocator);
+    defer response_body.deinit();
+
+    const response = try client.fetch(.{
+        .method = .POST,
+        .uri = uri,
+        .headers = .{ .content_type = .{ .override = "application/json" } },
+        .extra_headers = headers,
+        .payload = request_body,
+        .response_storage = .{ .dynamic = &response_body },
+    });
+
+    // Check response status
+    if (response.status != .ok) {
+        std.log.err("Claude API returned status: {d}", .{@intFromEnum(response.status)});
+        return IntentParseError.ApiError;
+    }
+
+    return ApiResult{
+        .body = try response_body.toOwnedSlice(),
+        .response = null,
+    };
+}
+
+/// Parse Claude API response into IntentResult
+fn parseClaudeResponse(allocator: std.mem.Allocator, response_body: []const u8) !IntentResult {
+    // Parse JSON response
+    const parsed = try std.json.parseFromSlice(struct {
+        content: []const struct {
+            text: []const u8,
+        },
+    }, allocator, response_body, .{});
+    defer parsed.deinit();
+
+    if (parsed.value.content.len == 0) {
+        return IntentParseError.ParseError;
+    }
+
+    const text = parsed.value.content[0].text;
+
+    // Try to parse as JSON intent
+    const intent = std.json.parseFromSlice(IntentResult, allocator, text, .{}) catch {
+        // If not valid JSON, treat as raw text and try to extract intent
+        return try extractIntentFromText(allocator, text);
+    };
+    defer intent.deinit();
+
+    // Clone the result to return owned memory
+    return try cloneIntentResult(allocator, intent.value);
+}
+
+/// Extract intent from raw text when JSON parsing fails
+fn extractIntentFromText(allocator: std.mem.Allocator, text: []const u8) !IntentResult {
+    // Simple keyword-based extraction
+    const lower = try std.ascii.allocLowerString(allocator, text);
     defer allocator.free(lower);
 
-    return try mockParseIntent(allocator, query);
+    // Check for swap keywords
+    if (std.mem.indexOf(u8, lower, "swap") != null or
+        std.mem.indexOf(u8, lower, "exchange") != null or
+        std.mem.indexOf(u8, lower, "convert") != null)
+    {
+        return try parseSwapFromText(allocator, lower);
+    }
+
+    // Check for transfer keywords
+    if (std.mem.indexOf(u8, lower, "send") != null or
+        std.mem.indexOf(u8, lower, "transfer") != null)
+    {
+        return try parseTransferFromText(allocator, lower);
+    }
+
+    // Check for balance keywords
+    if (std.mem.indexOf(u8, lower, "balance") != null or
+        std.mem.indexOf(u8, lower, "check") != null)
+    {
+        return IntentResult{
+            .intent_type = .balance,
+            .balance = .{
+                .token = try allocator.dupe(u8, "SUI"),
+            },
+        };
+    }
+
+    return IntentParseError.ParseError;
+}
+
+/// Parse swap intent from text
+fn parseSwapFromText(allocator: std.mem.Allocator, text: []const u8) !IntentResult {
+    var amount: ?[]const u8 = null;
+    var from_token: []const u8 = try allocator.dupe(u8, "SUI");
+    var to_token: []const u8 = try allocator.dupe(u8, "USDC");
+
+    // Try to extract amount (number followed by token)
+    var tokenizer = std.mem.tokenizeAny(u8, text, " \t\n,.!?");
+    while (tokenizer.next()) |token| {
+        // Check if token is a number
+        if (std.fmt.parseInt(u64, token, 10) catch null) |_| {
+            amount = try allocator.dupe(u8, token);
+        }
+        // Check for common tokens
+        if (std.mem.eql(u8, token, "sui")) {
+            allocator.free(from_token);
+            from_token = try allocator.dupe(u8, "SUI");
+        } else if (std.mem.eql(u8, token, "usdc")) {
+            allocator.free(to_token);
+            to_token = try allocator.dupe(u8, "USDC");
+        } else if (std.mem.eql(u8, token, "usdt")) {
+            allocator.free(to_token);
+            to_token = try allocator.dupe(u8, "USDT");
+        }
+    }
+
+    return IntentResult{
+        .intent_type = .swap,
+        .swap = .{
+            .amount = amount,
+            .from_token = from_token,
+            .to_token = to_token,
+            .slippage_bps = 50,
+        },
+    };
+}
+
+/// Parse transfer intent from text
+fn parseTransferFromText(allocator: std.mem.Allocator, text: []const u8) !IntentResult {
+    var amount: []const u8 = try allocator.dupe(u8, "0");
+    var token: []const u8 = try allocator.dupe(u8, "SUI");
+    var recipient: []const u8 = try allocator.dupe(u8, "");
+
+    // Try to extract amount and address
+    var tokenizer = std.mem.tokenizeAny(u8, text, " \t\n,.!?");
+    while (tokenizer.next()) |token| {
+        // Check if token is a number
+        if (std.fmt.parseInt(u64, token, 10) catch null) |_| {
+            allocator.free(amount);
+            amount = try allocator.dupe(u8, token);
+        }
+        // Check for Sui address (0x...)
+        if (std.mem.startsWith(u8, token, "0x") and token.len >= 42) {
+            allocator.free(recipient);
+            recipient = try allocator.dupe(u8, token);
+        }
+    }
+
+    return IntentResult{
+        .intent_type = .transfer,
+        .transfer = .{
+            .amount = amount,
+            .token = token,
+            .recipient = recipient,
+        },
+    };
+}
+
+/// Clone an IntentResult to ensure owned memory
+fn cloneIntentResult(allocator: std.mem.Allocator, source: IntentResult) !IntentResult {
+    var result = source;
+
+    switch (source.intent_type) {
+        .swap => {
+            if (source.swap.amount) |a| {
+                result.swap.amount = try allocator.dupe(u8, a);
+            }
+            result.swap.from_token = try allocator.dupe(u8, source.swap.from_token);
+            result.swap.to_token = try allocator.dupe(u8, source.swap.to_token);
+        },
+        .transfer => {
+            result.transfer.amount = try allocator.dupe(u8, source.transfer.amount);
+            result.transfer.token = try allocator.dupe(u8, source.transfer.token);
+            result.transfer.recipient = try allocator.dupe(u8, source.transfer.recipient);
+        },
+        .balance => {
+            result.balance.token = try allocator.dupe(u8, source.balance.token);
+        },
+        .stake => {
+            if (source.stake.amount) |a| {
+                result.stake.amount = try allocator.dupe(u8, a);
+            }
+            if (source.stake.validator) |v| {
+                result.stake.validator = try allocator.dupe(u8, v);
+            }
+        },
+        .unstake => {
+            if (source.unstake.amount) |a| {
+                result.unstake.amount = try allocator.dupe(u8, a);
+            }
+        },
+        .claim_rewards => {},
+        .unknown => {},
+    }
+
+    return result;
 }
 
 /// 构建 prompt
