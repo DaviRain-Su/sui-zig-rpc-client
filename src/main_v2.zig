@@ -32,6 +32,14 @@ pub fn main() !void {
         try cmdTransaction(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "coins")) {
         try cmdCoins(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "checkpoint")) {
+        try cmdCheckpoint(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "epoch")) {
+        try cmdEpoch(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "gas")) {
+        try cmdGas(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "chain")) {
+        try cmdChain(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "help") or std.mem.eql(u8, command, "--help")) {
         printUsage(args[0]);
     } else {
@@ -48,7 +56,11 @@ fn printUsage(prog_name: []const u8) void {
     std.log.info("  objects <address>           List owned objects for address", .{});
     std.log.info("  object <object_id>          Get object details", .{});
     std.log.info("  tx <tx_digest>              Get transaction details", .{});
-    std.log.info("  coins <address>             List coin objects for address", .{});
+    std.log.info("  coins <address> [type]      List coin objects for address", .{});
+    std.log.info("  checkpoint [id]             Get checkpoint info (latest if no id)", .{});
+    std.log.info("  epoch                       Get current epoch info", .{});
+    std.log.info("  gas <address>               Get gas objects for address", .{});
+    std.log.info("  chain                       Get chain identifier", .{});
     std.log.info("  help                        Show this help", .{});
 }
 
