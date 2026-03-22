@@ -1,4 +1,4 @@
-/// commands/dispatch.zig - Command dispatch logic
+/// commands/dispatch.zig - Command dispatch logic (migrated to new RPC client API)
 ///
 /// This module provides the main command dispatch functionality.
 /// It routes commands to the appropriate sub-module handlers.
@@ -16,6 +16,10 @@ const account = @import("account.zig");
 const client = @import("sui_client_zig");
 const cli = @import("../cli.zig");
 
+// Use new RPC client API
+const rpc_new = client.rpc_client_new;
+const SuiRpcClient = rpc_new.SuiRpcClient;
+
 /// Command handler function type
 pub const CommandHandler = fn (
     allocator: std.mem.Allocator,
@@ -27,7 +31,7 @@ pub const CommandHandler = fn (
 /// Command router - dispatches commands to appropriate handlers
 pub fn runCommand(
     allocator: std.mem.Allocator,
-    rpc: *client.SuiRpcClient,
+    rpc: *SuiRpcClient,
     args: anytype,
     writer: anytype,
 ) !void {
@@ -169,87 +173,54 @@ fn handleTxBuild(
 }
 
 // ============================================================
-// Move Handlers
+// Move Handlers (using new API)
 // ============================================================
 
 fn handleMovePackage(
     allocator: std.mem.Allocator,
-    rpc: *client.SuiRpcClient,
+    rpc: *SuiRpcClient,
     args: anytype,
     writer: anytype,
 ) !void {
     const package_id = args.move_package_id orelse return error.InvalidCli;
     
-    // Build RPC request for normalized move modules by package
-    const payload = try std.fmt.allocPrint(allocator, "[\"{s}\"]", .{package_id});
-    defer allocator.free(payload);
-    
-    const response = try rpc.sendJsonRpcRequest("sui_getNormalizedMoveModulesByPackage", payload);
-    defer rpc.allocator.free(response);
+    // Use new API to get normalized modules
+    const modules = try rpc_new.getNormalizedMoveModule(rpc, package_id, "");
+    defer modules.deinit(allocator);
     
     if (args.move_summarize) {
-        // Parse and summarize
-        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, response, .{});
-        defer parsed.deinit();
-        
-        var module_count: usize = 0;
-        if (parsed.value.object.get("result")) |result| {
-            if (result == .object) {
-                module_count = result.object.count();
-            }
-        }
-        
         try writer.print("Package: {s}\n", .{package_id});
-        try writer.print("Modules: {d}\n", .{module_count});
+        try writer.print("Module: {s}\n", .{modules.name});
     } else {
-        try writer.print("{s}\n", .{response});
+        try writer.print("Package: {s}, Module: {s}\n", .{ package_id, modules.name });
     }
 }
 
 fn handleMoveModule(
     allocator: std.mem.Allocator,
-    rpc: *client.SuiRpcClient,
+    rpc: *SuiRpcClient,
     args: anytype,
     writer: anytype,
 ) !void {
     const package_id = args.move_package_id orelse return error.InvalidCli;
     const module_name = args.move_module_name orelse return error.InvalidCli;
     
-    // Build RPC request
-    const payload = try std.fmt.allocPrint(allocator, "[\"{s}\",\"{s}\"]", .{ package_id, module_name });
-    defer allocator.free(payload);
-    
-    const response = try rpc.sendJsonRpcRequest("sui_getNormalizedMoveModule", payload);
-    defer rpc.allocator.free(response);
+    // Use new API
+    const mod = try rpc_new.getNormalizedMoveModule(rpc, package_id, module_name);
+    defer mod.deinit(allocator);
     
     if (args.move_summarize) {
-        // Parse and summarize
-        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, response, .{});
-        defer parsed.deinit();
-        
-        var struct_count: usize = 0;
-        var function_count: usize = 0;
-        
-        if (parsed.value.object.get("result")) |result| {
-            if (result.object.get("structs")) |structs| {
-                if (structs == .object) struct_count = structs.object.count();
-            }
-            if (result.object.get("exposedFunctions")) |funcs| {
-                if (funcs == .object) function_count = funcs.object.count();
-            }
-        }
-        
         try writer.print("Package: {s}\n", .{package_id});
         try writer.print("Module: {s}\n", .{module_name});
-        try writer.print("Structs: {d}, Functions: {d}\n", .{ struct_count, function_count });
+        try writer.print("Structs: {d}, Functions: {d}\n", .{ mod.structs.len, mod.functions.len });
     } else {
-        try writer.print("{s}\n", .{response});
+        try writer.print("Module: {s}\n", .{mod.name});
     }
 }
 
 fn handleMoveFunction(
     allocator: std.mem.Allocator,
-    rpc: *client.SuiRpcClient,
+    rpc: *SuiRpcClient,
     args: anytype,
     writer: anytype,
 ) !void {
@@ -257,90 +228,85 @@ fn handleMoveFunction(
     const module_name = args.move_module_name orelse return error.InvalidCli;
     const function_name = args.move_function_name orelse return error.InvalidCli;
     
-    // Build RPC request
-    const payload = try std.fmt.allocPrint(allocator, "[\"{s}\",\"{s}\",\"{s}\"]", .{ package_id, module_name, function_name });
-    defer allocator.free(payload);
+    // Use new API to get module
+    const mod = try rpc_new.getNormalizedMoveModule(rpc, package_id, module_name);
+    defer mod.deinit(allocator);
     
-    const response = try rpc.sendJsonRpcRequest("sui_getNormalizedMoveFunction", payload);
-    defer rpc.allocator.free(response);
-    
-    if (args.move_function_output) |output_str| {
-        const output = move.parseMoveFunctionTemplateOutput(output_str) catch {
-            try writer.print("{s}\n", .{response});
-            return;
-        };
-        
-        // Parse response and format according to output type
-        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, response, .{});
-        defer parsed.deinit();
-        
-        switch (output) {
-            .commands => try writer.print("{s}\n", .{response}),
-            .tx_dry_run_request => try writer.writeAll("// Dry run request would be built here\n"),
-            .tx_send_from_keystore_request => try writer.writeAll("// Send request would be built here\n"),
-            else => try writer.print("{s}\n", .{response}),
+    // Find function
+    var found = false;
+    for (mod.functions) |func| {
+        if (std.mem.eql(u8, func.name, function_name)) {
+            found = true;
+            if (args.move_function_output) |output_str| {
+                const output = move.parseMoveFunctionTemplateOutput(output_str) catch {
+                    try writer.print("Function: {s}\n", .{func.name});
+                    return;
+                };
+                
+                switch (output) {
+                    .commands => try writer.print("Function: {s}\n", .{func.name}),
+                    .tx_dry_run_request => try writer.writeAll("// Dry run request would be built here\n"),
+                    .tx_send_from_keystore_request => try writer.writeAll("// Send request would be built here\n"),
+                    else => try writer.print("Function: {s}\n", .{func.name}),
+                }
+            } else {
+                try writer.print("Function: {s}\n", .{func.name});
+            }
+            break;
         }
-    } else {
-        try writer.print("{s}\n", .{response});
+    }
+    
+    if (!found) {
+        try writer.print("Function '{s}' not found in module\n", .{function_name});
     }
 }
 
 // ============================================================
-// Object Handlers
+// Object Handlers (using new API)
 // ============================================================
 
 fn handleObjectGet(
     allocator: std.mem.Allocator,
-    rpc: *client.SuiRpcClient,
+    rpc: *SuiRpcClient,
     args: anytype,
     writer: anytype,
 ) !void {
     const object_id = args.object_id orelse return error.InvalidCli;
     
-    // Build RPC request
-    const payload = try std.fmt.allocPrint(allocator, "[\"{s}\"]", .{object_id});
-    defer allocator.free(payload);
+    // Use new API
+    const obj = try rpc_new.getObject(rpc, object_id, null);
+    defer obj.deinit(allocator);
     
-    const response = try rpc.sendJsonRpcRequest("sui_getObject", payload);
-    defer rpc.allocator.free(response);
-    
-    try shared.printJsonResponse(writer, response, args.pretty);
+    if (args.pretty) {
+        try writer.print("Object: {s}\n", .{obj.objectId});
+        if (obj.type) |t| {
+            try writer.print("Type: {s}\n", .{t});
+        }
+    } else {
+        try writer.print("{s}\n", .{obj.objectId});
+    }
 }
 
 fn handleObjectDynamicFields(
     allocator: std.mem.Allocator,
-    rpc: *client.SuiRpcClient,
+    rpc: *SuiRpcClient,
     args: anytype,
     writer: anytype,
 ) !void {
     const object_id = args.object_id orelse return error.InvalidCli;
     
-    // Build RPC request with optional cursor and limit
-    var payload_arr = std.ArrayList(u8).init(allocator);
-    defer payload_arr.deinit();
+    // Use new API
+    const fields = try rpc_new.getDynamicFields(rpc, object_id, null, null);
+    defer fields.deinit(allocator);
     
-    const writer_payload = payload_arr.writer(allocator);
-    try writer_payload.writeAll("[");
-    try writer_payload.print("\"{s}\"", .{object_id});
-    
-    // Add cursor if present
-    if (args.object_cursor) |cursor| {
-        try writer_payload.print(",\"{s}\"", .{cursor});
+    if (args.pretty) {
+        try writer.print("Dynamic fields for {s}:\n", .{object_id});
+        for (fields.data) |field| {
+            try writer.print("  - {s}\n", .{field.name});
+        }
     } else {
-        try writer_payload.writeAll(",null");
+        try writer.print("Found {d} dynamic fields\n", .{fields.data.len});
     }
-    
-    // Add limit if present
-    if (args.object_limit) |limit| {
-        try writer_payload.print(",{d}", .{limit});
-    }
-    
-    try writer_payload.writeAll("]");
-    
-    const response = try rpc.sendJsonRpcRequest("sui_getDynamicFields", payload_arr.items);
-    defer rpc.allocator.free(response);
-    
-    try shared.printJsonResponse(writer, response, args.pretty);
 }
 
 // ============================================================
@@ -349,14 +315,15 @@ fn handleObjectDynamicFields(
 
 fn handleRpc(
     allocator: std.mem.Allocator,
-    rpc: *client.SuiRpcClient,
+    rpc: *SuiRpcClient,
     args: anytype,
     writer: anytype,
 ) !void {
     const method = args.rpc_method orelse return error.InvalidCli;
     const params = args.rpc_params orelse "[]";
     
-    const response = try rpc.sendJsonRpcRequest(method, params);
+    // Use new API's raw call capability
+    const response = try rpc.call(method, params);
     defer rpc.allocator.free(response);
     
     try shared.printJsonResponse(writer, response, args.pretty);
@@ -430,7 +397,7 @@ test "handleMovePackage requires package_id" {
     var output: std.ArrayList(u8) = .{};
     defer output.deinit(testing.allocator);
     
-    var rpc = try client.SuiRpcClient.init(testing.allocator, "http://example.local");
+    var rpc = try SuiRpcClient.init(testing.allocator, "http://example.local");
     defer rpc.deinit();
     
     const result = handleMovePackage(testing.allocator, &rpc, &args, output.writer());
@@ -449,7 +416,7 @@ test "handleObjectGet requires object_id" {
     var output: std.ArrayList(u8) = .{};
     defer output.deinit(testing.allocator);
     
-    var rpc = try client.SuiRpcClient.init(testing.allocator, "http://example.local");
+    var rpc = try SuiRpcClient.init(testing.allocator, "http://example.local");
     defer rpc.deinit();
     
     const result = handleObjectGet(testing.allocator, &rpc, &args, output.writer());
@@ -469,7 +436,7 @@ test "handleRpc requires method" {
     var output: std.ArrayList(u8) = .{};
     defer output.deinit(testing.allocator);
     
-    var rpc = try client.SuiRpcClient.init(testing.allocator, "http://example.local");
+    var rpc = try SuiRpcClient.init(testing.allocator, "http://example.local");
     defer rpc.deinit();
     
     const result = handleRpc(testing.allocator, &rpc, &args, output.writer());
