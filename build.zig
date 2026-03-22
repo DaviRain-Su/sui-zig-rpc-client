@@ -38,6 +38,31 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(exe);
 
+    // New v2 executable using new API only
+    const exe_v2_module = b.createModule(.{
+        .root_source_file = b.path("src/main_v2.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "sui_client_zig", .module = client_module },
+        },
+    });
+
+    const exe_v2 = b.addExecutable(.{
+        .name = "sui-zig-rpc-client-v2",
+        .root_module = exe_v2_module,
+    });
+
+    b.installArtifact(exe_v2);
+
+    // Run v2 command
+    const run_v2_step = b.step("run-v2", "Run the v2 app");
+    const run_v2_cmd = b.addRunArtifact(exe_v2);
+    if (b.args) |args| {
+        run_v2_cmd.addArgs(args);
+    }
+    run_v2_step.dependOn(&run_v2_cmd.step);
+
     const run_step = b.step("run", "Run the app");
     const run_cmd = b.addRunArtifact(exe);
     if (b.args) |args| {
