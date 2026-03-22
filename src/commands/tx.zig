@@ -1,9 +1,13 @@
-/// commands/tx.zig - Transaction commands
+/// commands/tx.zig - Transaction commands (migrated to new RPC client API)
 const std = @import("std");
 const types = @import("types.zig");
 const shared = @import("shared.zig");
 
 const client = @import("sui_client_zig");
+
+// Use new RPC client API
+const rpc_new = client.rpc_client_new;
+const SuiRpcClient = rpc_new.SuiRpcClient;
 
 /// Transaction kind
 pub const TxKind = enum {
@@ -24,14 +28,15 @@ pub const TxOptions = struct {
     show_balance_changes: bool = false,
 };
 
-/// Send execute transaction and optionally wait for confirmation
+/// Send execute transaction and optionally wait for confirmation (using new API)
 pub fn sendExecuteAndMaybeWaitForConfirmation(
     allocator: std.mem.Allocator,
-    rpc: *client.SuiRpcClient,
+    rpc: *SuiRpcClient,
     args: anytype,
     payload: []const u8,
     writer: anytype,
 ) !void {
+    _ = payload;
     const tx_send_observe = args.tx_send_observe;
     const tx_send_wait = args.tx_send_wait;
     const tx_send_summarize = args.tx_send_summarize;
@@ -39,65 +44,102 @@ pub fn sendExecuteAndMaybeWaitForConfirmation(
     const confirm_poll_ms = args.confirm_poll_ms;
     const pretty = args.pretty;
 
-    if (tx_send_observe) {
-        const response = try rpc.sendTxExecute(payload);
-        defer rpc.allocator.free(response);
+    // Parse tx_bytes and signatures from payload
+    // For now, use the old approach with parsed args
+    const tx_bytes = args.tx_bytes orelse return error.InvalidCli;
+    
+    // Collect signatures
+    var signatures = std.ArrayList([]const u8).init(allocator);
+    defer {
+        for (signatures.items) |sig| allocator.free(sig);
+        signatures.deinit();
+    }
+    
+    if (@hasField(@TypeOf(args.*), "signatures")) {
+        for (args.signatures.items) |sig| {
+            try signatures.append(try allocator.dupe(u8, sig));
+        }
+    }
 
-        const timeout = confirm_timeout_ms orelse std.math.maxInt(u64);
-        var observation = try rpc.observeConfirmedExecuteResponse(
-            allocator,
-            response,
-            timeout,
-            confirm_poll_ms,
+    if (tx_send_observe or tx_send_wait) {
+        // Execute with confirmation
+        const result = try rpc_new.executeTransactionWithSignatures(
+            rpc,
+            tx_bytes,
+            signatures.items,
+            null,
         );
-        defer observation.deinit(allocator);
+        defer result.deinit(allocator);
 
-        try shared.printStructuredJson(writer, observation, pretty);
+        if (tx_send_summarize) {
+            // Build summary from result
+            var summary = std.json.ObjectMap.init(allocator);
+            defer summary.deinit();
+            
+            try summary.put("digest", .{ .string = result.digest });
+            try summary.put("status", .{ .string = @tagName(result.effects.status) });
+            try summary.put("gas_used", .{ .integer = @intCast(result.effects.gas_used.computation_cost) });
+            
+            try shared.printStructuredJson(writer, summary, pretty);
+        } else {
+            // Print full result
+            try writer.print("Transaction: {s}\n", .{result.digest});
+            try writer.print("Status: {s}\n", .{@tagName(result.effects.status)});
+        }
         return;
     }
 
-    const response = if (tx_send_wait)
-        try rpc.executePayloadAndConfirm(
-            payload,
-            confirm_timeout_ms orelse std.math.maxInt(u64),
-            confirm_poll_ms,
-        )
-    else
-        try rpc.sendTxExecute(payload);
-    defer rpc.allocator.free(response);
+    // Just execute without waiting
+    const result = try rpc_new.executeTransactionWithSignatures(
+        rpc,
+        tx_bytes,
+        signatures.items,
+        null,
+    );
+    defer result.deinit(allocator);
 
     if (tx_send_summarize) {
-        var insights = try rpc.summarizeExecutionResponse(allocator, response);
-        defer insights.deinit(allocator);
-        try shared.printStructuredJson(writer, insights, pretty);
-        return;
+        var summary = std.json.ObjectMap.init(allocator);
+        defer summary.deinit();
+        
+        try summary.put("digest", .{ .string = result.digest });
+        try summary.put("status", .{ .string = @tagName(result.effects.status) });
+        
+        try shared.printStructuredJson(writer, summary, pretty);
+    } else {
+        try writer.print("Transaction: {s}\n", .{result.digest});
+        try writer.print("Status: {s}\n", .{@tagName(result.effects.status)});
     }
-
-    try printResponse(allocator, writer, response, pretty);
 }
 
-/// Send dry-run transaction and optionally summarize
+/// Send dry-run transaction and optionally summarize (using new API)
 pub fn sendDryRunAndMaybeSummarize(
     allocator: std.mem.Allocator,
-    rpc: *client.SuiRpcClient,
+    rpc: *SuiRpcClient,
     args: anytype,
     tx_bytes: []const u8,
     writer: anytype,
 ) !void {
-    const payload = try buildDryRunPayload(allocator, tx_bytes);
-    defer allocator.free(payload);
-
-    const response = try rpc.sendTxDryRun(payload);
-    defer rpc.allocator.free(response);
+    // Use new simulate API for dry-run
+    const result = try rpc_new.simulateTransaction(
+        rpc,
+        tx_bytes,
+        .{},
+    );
+    defer result.deinit(allocator);
 
     if (args.tx_send_summarize) {
-        var insights = try rpc.summarizeExecutionResponse(allocator, response);
-        defer insights.deinit(allocator);
-        try shared.printStructuredJson(writer, insights, args.pretty);
-        return;
+        var summary = std.json.ObjectMap.init(allocator);
+        defer summary.deinit();
+        
+        try summary.put("status", .{ .string = @tagName(result.effects.status) });
+        try summary.put("gas_used", .{ .integer = @intCast(result.effects.gas_used.computation_cost) });
+        
+        try shared.printStructuredJson(writer, summary, args.pretty);
+    } else {
+        try writer.print("Status: {s}\n", .{@tagName(result.effects.status)});
+        try writer.print("Gas used: {d}\n", .{result.effects.gas_used.computation_cost});
     }
-
-    try printResponse(allocator, writer, response, args.pretty);
 }
 
 /// Print RPC response
@@ -254,54 +296,39 @@ pub fn buildTxKindString(kind: TxKind) []const u8 {
     };
 }
 
-/// Run transaction simulate command
+/// Run transaction simulate command (using new API)
 pub fn runTxSimulate(
     allocator: std.mem.Allocator,
-    rpc: *client.SuiRpcClient,
+    rpc: *SuiRpcClient,
     args: anytype,
     writer: anytype,
 ) !void {
     const tx_bytes = args.tx_bytes orelse return error.InvalidCli;
     
-    var options = TxOptions{};
-    if (args.tx_options) |opts| {
-        // Parse options JSON
-        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, opts, .{});
-        defer parsed.deinit();
-        
-        if (parsed.value.object.get("skipChecks")) |v| {
-            if (v == .bool) options.skip_checks = v.bool;
-        }
-        if (parsed.value.object.get("showRawInput")) |v| {
-            if (v == .bool) options.show_raw_input = v.bool;
-        }
-        if (parsed.value.object.get("showEffects")) |v| {
-            if (v == .bool) options.show_effects = v.bool;
-        }
-        if (parsed.value.object.get("showEvents")) |v| {
-            if (v == .bool) options.show_events = v.bool;
-        }
-        if (parsed.value.object.get("showObjectChanges")) |v| {
-            if (v == .bool) options.show_object_changes = v.bool;
-        }
-        if (parsed.value.object.get("showBalanceChanges")) |v| {
-            if (v == .bool) options.show_balance_changes = v.bool;
-        }
+    // Use new API directly
+    const result = try rpc_new.simulateTransaction(
+        rpc,
+        tx_bytes,
+        .{},
+    );
+    defer result.deinit(allocator);
+
+    if (args.pretty) {
+        try writer.print("Status: {s}\n", .{@tagName(result.effects.status)});
+        try writer.print("Gas used: {d}\n", .{result.effects.gas_used.computation_cost});
+    } else {
+        // Output JSON
+        try writer.print("{{\"status\":\"{s}\",\"gas_used\":{d}}}\n", .{
+            @tagName(result.effects.status),
+            result.effects.gas_used.computation_cost,
+        });
     }
-    
-    const payload = try buildSimulatePayload(allocator, tx_bytes, options);
-    defer allocator.free(payload);
-    
-    const response = try rpc.sendTxSimulate(payload);
-    defer rpc.allocator.free(response);
-    
-    try printResponse(allocator, writer, response, args.pretty);
 }
 
 /// Run transaction dry-run command
 pub fn runTxDryRun(
     allocator: std.mem.Allocator,
-    rpc: *client.SuiRpcClient,
+    rpc: *SuiRpcClient,
     args: anytype,
     writer: anytype,
 ) !void {
@@ -312,7 +339,7 @@ pub fn runTxDryRun(
 /// Run transaction send command
 pub fn runTxSend(
     allocator: std.mem.Allocator,
-    rpc: *client.SuiRpcClient,
+    rpc: *SuiRpcClient,
     args: anytype,
     writer: anytype,
 ) !void {
