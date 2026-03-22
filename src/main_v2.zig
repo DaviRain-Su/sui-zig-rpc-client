@@ -50,6 +50,12 @@ pub fn main() !void {
         try cmdGasPrice(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "supply")) {
         try cmdSupply(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "events")) {
+        try cmdEvents(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "fields")) {
+        try cmdFields(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "module")) {
+        try cmdModule(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "help") or std.mem.eql(u8, command, "--help")) {
         printUsage(args[0]);
     } else {
@@ -76,6 +82,9 @@ fn printUsage(prog_name: []const u8) void {
     std.log.info("  committee [epoch]           Get committee info for epoch", .{});
     std.log.info("  gas-price                   Get reference gas price", .{});
     std.log.info("  supply                      Get total SUI supply", .{});
+    std.log.info("  events <package> <module>   Query events by module", .{});
+    std.log.info("  fields <object_id>          Get dynamic fields of object", .{});
+    std.log.info("  module <package> <module>   Get Move module bytecode", .{});
     std.log.info("  help                        Show this help", .{});
 }
 
@@ -784,6 +793,229 @@ fn cmdSupply(allocator: Allocator, _: []const []const u8) !void {
                 supply / 1_000_000_000,
                 supply % 1_000_000_000,
             });
+        }
+    }
+}
+/// Advanced commands for main_v2.zig
+
+fn cmdEvents(allocator: Allocator, args: []const []const u8) !void {
+    if (args.len < 2) {
+        std.log.err("Usage: events <package_id> <module_name>", .{});
+        std.log.info("Example: events 0x2 coin", .{});
+        std.process.exit(1);
+    }
+
+    const package_id = args[0];
+    const module_name = args[1];
+    const rpc_url = getRpcUrl() orelse "https://fullnode.mainnet.sui.io:443";
+
+    var rpc_client = try SuiRpcClient.init(allocator, rpc_url);
+    defer rpc_client.deinit();
+
+    // Query events by module
+    const params = try std.fmt.allocPrint(
+        allocator,
+        "[{{\"MoveModule\":{{\"package\":\"{s}\",\"module\":\"{s}\"}}}},null,10,null]",
+        .{ package_id, module_name },
+    );
+    defer allocator.free(params);
+
+    const response = try rpc_client.call("suix_queryEvents", params);
+    defer allocator.free(response);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, response, .{});
+    defer parsed.deinit();
+
+    std.log.info("Events for {s}::{s}:", .{ package_id, module_name });
+
+    if (parsed.value.object.get("result")) |result| {
+        if (result.object.get("data")) |data| {
+            if (data == .array) {
+                std.log.info("Found {d} events", .{data.array.items.len});
+
+                for (data.array.items, 0..) |event, i| {
+                    std.log.info("  Event {d}:", .{i + 1});
+                    
+                    if (event.object.get("txDigest")) |tx| {
+                        std.log.info("    Transaction: {s}", .{tx.string});
+                    }
+                    
+                    if (event.object.get("eventType")) |etype| {
+                        std.log.info("    Type: {s}", .{etype.string});
+                    }
+                    
+                    if (event.object.get("timestampMs")) |ts| {
+                        const ts_num: u64 = if (ts == .integer)
+                            @intCast(ts.integer)
+                        else
+                            std.fmt.parseInt(u64, ts.string, 10) catch 0;
+                        std.log.info("    Timestamp: {d} ms", .{ts_num});
+                    }
+                    
+                    if (event.object.get("parsedJson")) |json| {
+                        // Print a summary of the event data
+                        if (json == .object) {
+                            var key_count: usize = 0;
+                            for (json.object.keys()) |key| {
+                                if (key_count < 3) {
+                                    std.log.info("    Data[{s}]: ...", .{key});
+                                }
+                                key_count += 1;
+                            }
+                            if (key_count > 3) {
+                                std.log.info("    ... and {d} more fields", .{key_count - 3});
+                            }
+                        }
+                    }
+                }
+
+                if (result.object.get("hasNextPage")) |has_next| {
+                    if (has_next == .bool and has_next.bool) {
+                        std.log.info("(More events available)", .{});
+                    }
+                }
+            } else {
+                std.log.info("No events found", .{});
+            }
+        }
+    }
+}
+
+fn cmdFields(allocator: Allocator, args: []const []const u8) !void {
+    if (args.len < 1) {
+        std.log.err("Usage: fields <object_id>", .{});
+        std.process.exit(1);
+    }
+
+    const object_id = args[0];
+    const rpc_url = getRpcUrl() orelse "https://fullnode.mainnet.sui.io:443";
+
+    var rpc_client = try SuiRpcClient.init(allocator, rpc_url);
+    defer rpc_client.deinit();
+
+    const params = try std.fmt.allocPrint(
+        allocator,
+        "[\"{s}\",null,50]",
+        .{object_id},
+    );
+    defer allocator.free(params);
+
+    const response = try rpc_client.call("suix_getDynamicFields", params);
+    defer allocator.free(response);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, response, .{});
+    defer parsed.deinit();
+
+    std.log.info("Dynamic Fields for {s}:", .{object_id});
+
+    if (parsed.value.object.get("result")) |result| {
+        if (result.object.get("data")) |data| {
+            if (data == .array) {
+                std.log.info("Found {d} dynamic fields", .{data.array.items.len});
+
+                for (data.array.items, 0..) |field, i| {
+                    std.log.info("  Field {d}:", .{i + 1});
+                    
+                    if (field.object.get("name")) |name| {
+                        if (name.object.get("type")) |t| {
+                            std.log.info("    Type: {s}", .{t.string});
+                        }
+                        if (name.object.get("value")) |v| {
+                            switch (v) {
+                                .string => |s| std.log.info("    Name: {s}", .{s}),
+                                .integer => |n| std.log.info("    Name: {d}", .{n}),
+                                else => std.log.info("    Name: (complex)", .{}),
+                            }
+                        }
+                    }
+                    
+                    if (field.object.get("objectType")) |otype| {
+                        std.log.info("    Object Type: {s}", .{otype.string});
+                    }
+                    
+                    if (field.object.get("objectId")) |id| {
+                        std.log.info("    Object ID: {s}", .{id.string});
+                    }
+                }
+
+                if (result.object.get("hasNextPage")) |has_next| {
+                    if (has_next == .bool and has_next.bool) {
+                        std.log.info("(More fields available)", .{});
+                    }
+                }
+            } else {
+                std.log.info("No dynamic fields found", .{});
+            }
+        }
+    }
+}
+
+fn cmdModule(allocator: Allocator, args: []const []const u8) !void {
+    if (args.len < 2) {
+        std.log.err("Usage: module <package_id> <module_name>", .{});
+        std.log.info("Example: module 0x2 coin", .{});
+        std.process.exit(1);
+    }
+
+    const package_id = args[0];
+    const module_name = args[1];
+    const rpc_url = getRpcUrl() orelse "https://fullnode.mainnet.sui.io:443";
+
+    var rpc_client = try SuiRpcClient.init(allocator, rpc_url);
+    defer rpc_client.deinit();
+
+    const params = try std.fmt.allocPrint(
+        allocator,
+        "[\"{s}\",\"{s}\"]",
+        .{ package_id, module_name },
+    );
+    defer allocator.free(params);
+
+    const response = try rpc_client.call("sui_getNormalizedMoveModule", params);
+    defer allocator.free(response);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, response, .{});
+    defer parsed.deinit();
+
+    std.log.info("Module {s}::{s}:", .{ package_id, module_name });
+
+    if (parsed.value.object.get("result")) |result| {
+        // Show structs
+        if (result.object.get("structs")) |structs| {
+            if (structs == .object) {
+                const struct_count = structs.object.count();
+                std.log.info("  Structs: {d}", .{struct_count});
+                
+                var it = structs.object.iterator();
+                var i: usize = 0;
+                while (it.next()) |entry| : (i += 1) {
+                    if (i < 5) {
+                        std.log.info("    - {s}", .{entry.key_ptr.*});
+                    }
+                }
+                if (struct_count > 5) {
+                    std.log.info("    ... and {d} more", .{struct_count - 5});
+                }
+            }
+        }
+
+        // Show functions
+        if (result.object.get("exposedFunctions")) |funcs| {
+            if (funcs == .object) {
+                const func_count = funcs.object.count();
+                std.log.info("  Functions: {d}", .{func_count});
+                
+                var it = funcs.object.iterator();
+                var i: usize = 0;
+                while (it.next()) |entry| : (i += 1) {
+                    if (i < 5) {
+                        std.log.info("    - {s}", .{entry.key_ptr.*});
+                    }
+                }
+                if (func_count > 5) {
+                    std.log.info("    ... and {d} more", .{func_count - 5});
+                }
+            }
         }
     }
 }
