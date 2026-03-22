@@ -35,11 +35,45 @@ pub const BalanceIntent = struct {
     }
 };
 
+/// Stake intent - new!
+pub const StakeIntent = struct {
+    amount: ?[]const u8, // null means stake all available
+    validator: ?[]const u8, // validator address, null means auto-select
+
+    pub fn deinit(self: *StakeIntent, allocator: std.mem.Allocator) void {
+        if (self.amount) |a| allocator.free(a);
+        if (self.validator) |v| allocator.free(v);
+    }
+};
+
+/// Unstake intent - new!
+pub const UnstakeIntent = struct {
+    amount: ?[]const u8, // null means unstake all
+    validator: ?[]const u8, // specific validator to unstake from
+
+    pub fn deinit(self: *UnstakeIntent, allocator: std.mem.Allocator) void {
+        if (self.amount) |a| allocator.free(a);
+        if (self.validator) |v| allocator.free(v);
+    }
+};
+
+/// Claim rewards intent - new!
+pub const ClaimRewardsIntent = struct {
+    validator: ?[]const u8, // specific validator, null means all
+
+    pub fn deinit(self: *ClaimRewardsIntent, allocator: std.mem.Allocator) void {
+        if (self.validator) |v| allocator.free(v);
+    }
+};
+
 /// 意图解析结果
 pub const IntentResult = union(enum) {
     swap: SwapIntent,
     transfer: TransferIntent,
     balance: BalanceIntent,
+    stake: StakeIntent,
+    unstake: UnstakeIntent,
+    claim_rewards: ClaimRewardsIntent,
     unsupported: []const u8, // 不支持的操作类型
 
     pub fn deinit(self: *IntentResult, allocator: std.mem.Allocator) void {
@@ -47,8 +81,24 @@ pub const IntentResult = union(enum) {
             .swap => |*s| s.deinit(allocator),
             .transfer => |*t| t.deinit(allocator),
             .balance => |*b| b.deinit(allocator),
+            .stake => |*s| s.deinit(allocator),
+            .unstake => |*u| u.deinit(allocator),
+            .claim_rewards => |*c| c.deinit(allocator),
             .unsupported => |u| allocator.free(u),
         }
+    }
+
+    /// Get intent type name
+    pub fn typeName(self: IntentResult) []const u8 {
+        return switch (self) {
+            .swap => "swap",
+            .transfer => "transfer",
+            .balance => "balance",
+            .stake => "stake",
+            .unstake => "unstake",
+            .claim_rewards => "claim_rewards",
+            .unsupported => "unsupported",
+        };
     }
 };
 
@@ -159,6 +209,61 @@ fn mockParseIntent(allocator: std.mem.Allocator, query: []const u8) !IntentResul
         };
     }
 
+    // Stake intent detection
+    if (std.mem.indexOf(u8, lower, "stake") != null) {
+        var amount: ?[]const u8 = null;
+        if (std.mem.indexOf(u8, lower, "all") != null) {
+            amount = null; // Stake all
+        } else {
+            amount = try detectFirstNumericToken(allocator, query);
+        }
+
+        // Try to extract validator address
+        const validator = try extractHexAddress(allocator, query);
+
+        return IntentResult{
+            .stake = .{
+                .amount = amount,
+                .validator = validator,
+            },
+        };
+    }
+
+    // Unstake intent detection
+    if (std.mem.indexOf(u8, lower, "unstake") != null or
+        std.mem.indexOf(u8, lower, "withdraw stake") != null)
+    {
+        var amount: ?[]const u8 = null;
+        if (std.mem.indexOf(u8, lower, "all") != null) {
+            amount = null; // Unstake all
+        } else {
+            amount = try detectFirstNumericToken(allocator, query);
+        }
+
+        const validator = try extractHexAddress(allocator, query);
+
+        return IntentResult{
+            .unstake = .{
+                .amount = amount,
+                .validator = validator,
+            },
+        };
+    }
+
+    // Claim rewards intent detection
+    if (std.mem.indexOf(u8, lower, "claim") != null and
+        (std.mem.indexOf(u8, lower, "reward") != null or
+         std.mem.indexOf(u8, lower, "staking reward") != null))
+    {
+        const validator = try extractHexAddress(allocator, query);
+
+        return IntentResult{
+            .claim_rewards = .{
+                .validator = validator,
+            },
+        };
+    }
+
     if (std.mem.indexOf(u8, lower, "swap") != null and
         std.mem.indexOf(u8, lower, "sui") != null and
         std.mem.indexOf(u8, lower, "usdc") != null)
@@ -186,7 +291,7 @@ fn mockParseIntent(allocator: std.mem.Allocator, query: []const u8) !IntentResul
     }
 
     return IntentResult{
-        .unsupported = try allocator.dupe(u8, "only swap, transfer, and balance intents are supported in preview mode"),
+        .unsupported = try allocator.dupe(u8, "supported intents: swap, transfer, balance, stake, unstake, claim_rewards"),
     };
 }
 
@@ -443,6 +548,73 @@ pub fn parseIntentJson(
         return IntentResult{
             .balance = .{
                 .token = token_str,
+            },
+        };
+    }
+
+    if (std.mem.eql(u8, intent_str, "stake")) {
+        const amount = root.object.get("amount");
+        var amount_str: ?[]const u8 = null;
+        if (amount) |a| {
+            if (a == .string) {
+                amount_str = try allocator.dupe(u8, a.string);
+            } else if (a == .integer) {
+                amount_str = try std.fmt.allocPrint(allocator, "{d}", .{a.integer});
+            }
+        }
+
+        const validator = root.object.get("validator");
+        var validator_str: ?[]const u8 = null;
+        if (validator) |v| {
+            if (v != .string) return IntentParseError.InvalidResponse;
+            validator_str = try allocator.dupe(u8, v.string);
+        }
+
+        return IntentResult{
+            .stake = .{
+                .amount = amount_str,
+                .validator = validator_str,
+            },
+        };
+    }
+
+    if (std.mem.eql(u8, intent_str, "unstake")) {
+        const amount = root.object.get("amount");
+        var amount_str: ?[]const u8 = null;
+        if (amount) |a| {
+            if (a == .string) {
+                amount_str = try allocator.dupe(u8, a.string);
+            } else if (a == .integer) {
+                amount_str = try std.fmt.allocPrint(allocator, "{d}", .{a.integer});
+            }
+        }
+
+        const validator = root.object.get("validator");
+        var validator_str: ?[]const u8 = null;
+        if (validator) |v| {
+            if (v != .string) return IntentParseError.InvalidResponse;
+            validator_str = try allocator.dupe(u8, v.string);
+        }
+
+        return IntentResult{
+            .unstake = .{
+                .amount = amount_str,
+                .validator = validator_str,
+            },
+        };
+    }
+
+    if (std.mem.eql(u8, intent_str, "claim_rewards")) {
+        const validator = root.object.get("validator");
+        var validator_str: ?[]const u8 = null;
+        if (validator) |v| {
+            if (v != .string) return IntentParseError.InvalidResponse;
+            validator_str = try allocator.dupe(u8, v.string);
+        }
+
+        return IntentResult{
+            .claim_rewards = .{
+                .validator = validator_str,
             },
         };
     }
@@ -1177,4 +1349,216 @@ test "parseClaudeResponse covers wrapped intents and rejects malformed payloads"
     try testing.expectError(IntentParseError.InvalidResponse, parseClaudeResponse(testing.allocator, "{\"content\":[]}"));
     try testing.expectError(IntentParseError.InvalidResponse, parseClaudeResponse(testing.allocator, "{\"content\":[{}]}"));
     try testing.expectError(IntentParseError.InvalidJson, parseClaudeResponse(testing.allocator, "{\"content\":[{\"text\":\"{not-json}\"}]}"));
+}
+
+// New tests for stake/unstake/claim_rewards intents
+
+test "mock parse stake intent" {
+    const testing = std.testing;
+
+    var result = try parseNaturalLanguageIntent(
+        testing.allocator,
+        "stake 1000 SUI",
+        null,
+    );
+    defer result.deinit(testing.allocator);
+
+    switch (result) {
+        .stake => |intent| {
+            try testing.expect(intent.amount != null);
+            try testing.expectEqualStrings("1000", intent.amount.?);
+            try testing.expect(intent.validator == null);
+        },
+        else => return error.UnexpectedResult,
+    }
+}
+
+test "mock parse stake all intent" {
+    const testing = std.testing;
+
+    var result = try parseNaturalLanguageIntent(
+        testing.allocator,
+        "stake all my SUI",
+        null,
+    );
+    defer result.deinit(testing.allocator);
+
+    switch (result) {
+        .stake => |intent| {
+            try testing.expect(intent.amount == null); // null means stake all
+        },
+        else => return error.UnexpectedResult,
+    }
+}
+
+test "mock parse stake with validator intent" {
+    const testing = std.testing;
+
+    var result = try parseNaturalLanguageIntent(
+        testing.allocator,
+        "stake 1000 SUI to 0x1234",
+        null,
+    );
+    defer result.deinit(testing.allocator);
+
+    switch (result) {
+        .stake => |intent| {
+            try testing.expect(intent.amount != null);
+            try testing.expect(intent.validator != null);
+            try testing.expectEqualStrings("0x1234", intent.validator.?);
+        },
+        else => return error.UnexpectedResult,
+    }
+}
+
+test "mock parse unstake intent" {
+    const testing = std.testing;
+
+    var result = try parseNaturalLanguageIntent(
+        testing.allocator,
+        "unstake 500 SUI",
+        null,
+    );
+    defer result.deinit(testing.allocator);
+
+    switch (result) {
+        .unstake => |intent| {
+            try testing.expect(intent.amount != null);
+            try testing.expectEqualStrings("500", intent.amount.?);
+        },
+        else => return error.UnexpectedResult,
+    }
+}
+
+test "mock parse unstake all intent" {
+    const testing = std.testing;
+
+    var result = try parseNaturalLanguageIntent(
+        testing.allocator,
+        "unstake all",
+        null,
+    );
+    defer result.deinit(testing.allocator);
+
+    switch (result) {
+        .unstake => |intent| {
+            try testing.expect(intent.amount == null); // null means unstake all
+        },
+        else => return error.UnexpectedResult,
+    }
+}
+
+test "mock parse claim rewards intent" {
+    const testing = std.testing;
+
+    var result = try parseNaturalLanguageIntent(
+        testing.allocator,
+        "claim my staking rewards",
+        null,
+    );
+    defer result.deinit(testing.allocator);
+
+    switch (result) {
+        .claim_rewards => |intent| {
+            try testing.expect(intent.validator == null);
+        },
+        else => return error.UnexpectedResult,
+    }
+}
+
+test "mock parse claim rewards from validator intent" {
+    const testing = std.testing;
+
+    var result = try parseNaturalLanguageIntent(
+        testing.allocator,
+        "claim rewards from 0xvalidator",
+        null,
+    );
+    defer result.deinit(testing.allocator);
+
+    switch (result) {
+        .claim_rewards => |intent| {
+            try testing.expect(intent.validator != null);
+            try testing.expectEqualStrings("0xvalidator", intent.validator.?);
+        },
+        else => return error.UnexpectedResult,
+    }
+}
+
+test "parse intent json stake" {
+    const testing = std.testing;
+
+    var result = try parseIntentJson(
+        testing.allocator,
+        "{\"intent\":\"stake\",\"amount\":\"1000\",\"validator\":\"0x1234\"}",
+    );
+    defer result.deinit(testing.allocator);
+
+    switch (result) {
+        .stake => |intent| {
+            try testing.expectEqualStrings("1000", intent.amount.?);
+            try testing.expectEqualStrings("0x1234", intent.validator.?);
+        },
+        else => return error.UnexpectedResult,
+    }
+}
+
+test "parse intent json unstake" {
+    const testing = std.testing;
+
+    var result = try parseIntentJson(
+        testing.allocator,
+        "{\"intent\":\"unstake\",\"amount\":\"500\"}",
+    );
+    defer result.deinit(testing.allocator);
+
+    switch (result) {
+        .unstake => |intent| {
+            try testing.expectEqualStrings("500", intent.amount.?);
+            try testing.expect(intent.validator == null);
+        },
+        else => return error.UnexpectedResult,
+    }
+}
+
+test "parse intent json claim_rewards" {
+    const testing = std.testing;
+
+    var result = try parseIntentJson(
+        testing.allocator,
+        "{\"intent\":\"claim_rewards\",\"validator\":\"0xvalidator\"}",
+    );
+    defer result.deinit(testing.allocator);
+
+    switch (result) {
+        .claim_rewards => |intent| {
+            try testing.expectEqualStrings("0xvalidator", intent.validator.?);
+        },
+        else => return error.UnexpectedResult,
+    }
+}
+
+test "IntentResult typeName returns correct names" {
+    const testing = std.testing;
+
+    const swap_result = IntentResult{ .swap = .{ .amount = null, .from_token = "SUI", .to_token = "USDC", .slippage_bps = 50 } };
+    try testing.expectEqualStrings("swap", swap_result.typeName());
+
+    const transfer_result = IntentResult{ .transfer = .{ .amount = "100", .token = "SUI", .recipient = "0x1" } };
+    try testing.expectEqualStrings("transfer", transfer_result.typeName());
+
+    const balance_result = IntentResult{ .balance = .{ .token = null } };
+    try testing.expectEqualStrings("balance", balance_result.typeName());
+
+    const stake_result = IntentResult{ .stake = .{ .amount = null, .validator = null } };
+    try testing.expectEqualStrings("stake", stake_result.typeName());
+
+    const unstake_result = IntentResult{ .unstake = .{ .amount = null, .validator = null } };
+    try testing.expectEqualStrings("unstake", unstake_result.typeName());
+
+    const claim_result = IntentResult{ .claim_rewards = .{ .validator = null } };
+    try testing.expectEqualStrings("claim_rewards", claim_result.typeName());
+
+    const unsupported_result = IntentResult{ .unsupported = "test" };
+    try testing.expectEqualStrings("unsupported", unsupported_result.typeName());
 }
