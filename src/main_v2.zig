@@ -64,6 +64,12 @@ pub fn main() !void {
         try cmdSearch(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "config")) {
         try cmdConfig(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "history")) {
+        try cmdHistory(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "analytics")) {
+        try cmdAnalytics(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "compare")) {
+        try cmdCompare(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "help") or std.mem.eql(u8, command, "--help")) {
         printUsage(args[0]);
     } else {
@@ -97,6 +103,9 @@ fn printUsage(prog_name: []const u8) void {
     std.log.info("  batch <file>                Execute batch commands from file", .{});
     std.log.info("  search <address>            Search address summary", .{});
     std.log.info("  config <action>             Manage configuration", .{});
+    std.log.info("  history <type> <target>     Query historical data", .{});
+    std.log.info("  analytics <type> <address>  Analyze address data", .{});
+    std.log.info("  compare <addr1> <addr2>     Compare two addresses", .{});
     std.log.info("  help                        Show this help", .{});
 }
 
@@ -1733,3 +1742,534 @@ const ObjectInfo = struct {
     version: u64,
     digest: []const u8,
 };
+/// History and analytics commands for main_v2.zig
+
+fn cmdHistory(allocator: Allocator, args: []const []const u8) !void {
+    if (args.len < 2) {
+        std.log.err("Usage: history <type> <address_or_id>", .{});
+        std.log.info("Types:", .{});
+        std.log.info("  transactions <address> [limit]  Query transaction history", .{});
+        std.log.info("  checkpoints [limit]             Query recent checkpoints", .{});
+        std.log.info("  epochs [limit]                  Query epoch history", .{});
+        std.process.exit(1);
+    }
+
+    const history_type = args[0];
+    const target = args[1];
+    const limit = if (args.len >= 3) std.fmt.parseInt(u32, args[2], 10) catch 10 else 10;
+
+    const rpc_url = getRpcUrl() orelse "https://fullnode.mainnet.sui.io:443";
+    var rpc_client = try SuiRpcClient.init(allocator, rpc_url);
+    defer rpc_client.deinit();
+
+    if (std.mem.eql(u8, history_type, "transactions")) {
+        std.log.info("Transaction history for {s} (limit: {d}):", .{ target, limit });
+        std.log.info("", .{});
+
+        // Query transactions for address
+        const params = try std.fmt.allocPrint(
+            allocator,
+            "[{{\"FromAddress\":\"{s}\"}},null,{d},descending]",
+            .{ target, limit },
+        );
+        defer allocator.free(params);
+
+        const response = try rpc_client.call("suix_queryTransactionBlocks", params);
+        defer allocator.free(response);
+
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, response, .{});
+        defer parsed.deinit();
+
+        if (parsed.value.object.get("result")) |result| {
+            if (result.object.get("data")) |data| {
+                if (data == .array) {
+                    std.log.info("Found {d} transactions:", .{data.array.items.len});
+                    std.log.info("", .{});
+
+                    for (data.array.items, 0..) |tx, i| {
+                        std.log.info("Transaction {d}:", .{i + 1});
+
+                        if (tx.object.get("digest")) |digest| {
+                            std.log.info("  Digest: {s}", .{digest.string});
+                        }
+
+                        if (tx.object.get("checkpoint")) |cp| {
+                            const cp_num: u64 = if (cp == .integer)
+                                @intCast(cp.integer)
+                            else
+                                std.fmt.parseInt(u64, cp.string, 10) catch 0;
+                            std.log.info("  Checkpoint: {d}", .{cp_num});
+                        }
+
+                        if (tx.object.get("timestampMs")) |ts| {
+                            const ts_num: u64 = if (ts == .integer)
+                                @intCast(ts.integer)
+                            else
+                                std.fmt.parseInt(u64, ts.string, 10) catch 0;
+                            std.log.info("  Timestamp: {d} ms", .{ts_num});
+                        }
+
+                        if (tx.object.get("effects")) |effects| {
+                            if (effects.object.get("status")) |status| {
+                                if (status.object.get("status")) |s| {
+                                    std.log.info("  Status: {s}", .{s.string});
+                                }
+                            }
+                        }
+
+                        std.log.info("", .{});
+                    }
+
+                    if (result.object.get("hasNextPage")) |has_next| {
+                        if (has_next == .bool and has_next.bool) {
+                            std.log.info("(More transactions available)", .{});
+                        }
+                    }
+                } else {
+                    std.log.info("No transactions found", .{});
+                }
+            }
+        }
+    } else if (std.mem.eql(u8, history_type, "checkpoints")) {
+        std.log.info("Recent checkpoints (limit: {d}):", .{limit});
+        std.log.info("", .{});
+
+        // Get latest checkpoint number
+        const latest_response = try rpc_client.call("sui_getLatestCheckpointSequenceNumber", "[]");
+        defer allocator.free(latest_response);
+
+        const latest_parsed = try std.json.parseFromSlice(std.json.Value, allocator, latest_response, .{});
+        defer latest_parsed.deinit();
+
+        const latest: u64 = if (latest_parsed.value.object.get("result")) |result|
+            if (result == .integer) @intCast(result.integer) else std.fmt.parseInt(u64, result.string, 10) catch 0
+        else
+            0;
+
+        // Query recent checkpoints
+        var count: u32 = 0;
+        var seq: u64 = latest;
+        while (count < limit and seq > 0) : (count += 1) {
+            const params = try std.fmt.allocPrint(allocator, "[{d}]", .{seq});
+            defer allocator.free(params);
+
+            const response = try rpc_client.call("sui_getCheckpoint", params);
+            defer allocator.free(response);
+
+            const parsed = try std.json.parseFromSlice(std.json.Value, allocator, response, .{});
+            defer parsed.deinit();
+
+            if (parsed.value.object.get("result")) |result| {
+                std.log.info("Checkpoint {d}:", .{seq});
+
+                if (result.object.get("digest")) |digest| {
+                    std.log.info("  Digest: {s}", .{digest.string});
+                }
+
+                if (result.object.get("epoch")) |epoch| {
+                    const epoch_num: u64 = if (epoch == .integer)
+                        @intCast(epoch.integer)
+                    else
+                        std.fmt.parseInt(u64, epoch.string, 10) catch 0;
+                    std.log.info("  Epoch: {d}", .{epoch_num});
+                }
+
+                if (result.object.get("timestampMs")) |ts| {
+                    const ts_num: u64 = if (ts == .integer)
+                        @intCast(ts.integer)
+                    else
+                        std.fmt.parseInt(u64, ts.string, 10) catch 0;
+                    std.log.info("  Timestamp: {d} ms", .{ts_num});
+                }
+
+                if (result.object.get("transactions")) |txs| {
+                    if (txs == .array) {
+                        std.log.info("  Transactions: {d}", .{txs.array.items.len});
+                    }
+                }
+
+                std.log.info("", .{});
+            }
+
+            seq -= 1;
+        }
+    } else if (std.mem.eql(u8, history_type, "epochs")) {
+        std.log.info("Epoch history (limit: {d}):", .{limit});
+        std.log.info("", .{});
+
+        // Get current epoch
+        const epoch_response = try rpc_client.call("sui_getEpoch", "[]");
+        defer allocator.free(epoch_response);
+
+        const epoch_parsed = try std.json.parseFromSlice(std.json.Value, allocator, epoch_response, .{});
+        defer epoch_parsed.deinit();
+
+        const current_epoch: u64 = if (epoch_parsed.value.object.get("result")) |result|
+            if (result.object.get("epoch")) |e|
+                if (e == .integer) @intCast(e.integer) else std.fmt.parseInt(u64, e.string, 10) catch 0
+            else
+                0
+        else
+            0;
+
+        std.log.info("Current epoch: {d}", .{current_epoch});
+        std.log.info("", .{});
+
+        // Query recent epochs
+        var count: u32 = 0;
+        var epoch: u64 = current_epoch;
+        while (count < limit and epoch > 0) : (count += 1) {
+            const params = try std.fmt.allocPrint(allocator, "[{d}]", .{epoch});
+            defer allocator.free(params);
+
+            const response = try rpc_client.call("sui_getCommittee", params);
+            defer allocator.free(response);
+
+            const parsed = try std.json.parseFromSlice(std.json.Value, allocator, response, .{});
+            defer parsed.deinit();
+
+            if (parsed.value.object.get("result")) |result| {
+                std.log.info("Epoch {d}:", .{epoch});
+
+                if (result.object.get("validators")) |validators| {
+                    if (validators == .object) {
+                        std.log.info("  Validators: {d}", .{validators.object.count()});
+                    }
+                }
+
+                std.log.info("", .{});
+            }
+
+            epoch -= 1;
+        }
+    } else {
+        std.log.err("Unknown history type: {s}", .{history_type});
+        std.process.exit(1);
+    }
+}
+
+fn cmdAnalytics(allocator: Allocator, args: []const []const u8) !void {
+    if (args.len < 2) {
+        std.log.err("Usage: analytics <type> <address>", .{});
+        std.log.info("Types:", .{});
+        std.log.info("  portfolio <address>      Analyze token portfolio", .{});
+        std.log.info("  activity <address>       Analyze transaction activity", .{});
+        std.log.info("  gas <address>            Analyze gas usage", .{});
+        std.process.exit(1);
+    }
+
+    const analytics_type = args[0];
+    const address = args[1];
+
+    const rpc_url = getRpcUrl() orelse "https://fullnode.mainnet.sui.io:443";
+    var rpc_client = try SuiRpcClient.init(allocator, rpc_url);
+    defer rpc_client.deinit();
+
+    if (std.mem.eql(u8, analytics_type, "portfolio")) {
+        std.log.info("Portfolio analysis for {s}:", .{address});
+        std.log.info("", .{});
+
+        // Get all coins
+        const params = try std.fmt.allocPrint(
+            allocator,
+            "[\"{s}\",null,null,50]",
+            .{address},
+        );
+        defer allocator.free(params);
+
+        const response = try rpc_client.call("suix_getAllCoins", params);
+        defer allocator.free(response);
+
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, response, .{});
+        defer parsed.deinit();
+
+        var total_sui: u64 = 0;
+        var coin_count: u32 = 0;
+        var coin_types: u32 = 0;
+
+        if (parsed.value.object.get("result")) |result| {
+            if (result.object.get("data")) |data| {
+                if (data == .array) {
+                    for (data.array.items) |coin| {
+                        coin_count += 1;
+
+                        if (coin.object.get("balance")) |bal| {
+                            const balance: u64 = if (bal == .integer)
+                                @intCast(bal.integer)
+                            else
+                                std.fmt.parseInt(u64, bal.string, 10) catch 0;
+
+                            if (coin.object.get("coinType")) |coin_type| {
+                                if (std.mem.eql(u8, coin_type.string, "0x2::sui::SUI")) {
+                                    total_sui += balance;
+                                } else {
+                                    coin_types += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Get balance for comparison
+        const balance = sui_client.rpc_client_new.getBalance(
+            &rpc_client,
+            address,
+            null,
+        ) catch 0;
+
+        std.log.info("=== Portfolio Summary ===", .{});
+        std.log.info("Total SUI Balance: {d} MIST ({d}.{d:0>9} SUI)", .{
+            balance,
+            balance / 1_000_000_000,
+            balance % 1_000_000_000,
+        });
+        std.log.info("Coin Objects: {d}", .{coin_count});
+        std.log.info("Non-SUI Token Types: {d}", .{coin_types});
+
+        if (balance > 0) {
+            const avg_balance = balance / coin_count;
+            std.log.info("Average Balance per Coin: {d} MIST", .{avg_balance});
+        }
+
+    } else if (std.mem.eql(u8, analytics_type, "activity")) {
+        std.log.info("Activity analysis for {s}:", .{address});
+        std.log.info("", .{});
+
+        // Query recent transactions
+        const params = try std.fmt.allocPrint(
+            allocator,
+            "[{{\"FromAddress\":\"{s}\"}},null,20,descending]",
+            .{address},
+        );
+        defer allocator.free(params);
+
+        const response = try rpc_client.call("suix_queryTransactionBlocks", params);
+        defer allocator.free(response);
+
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, response, .{});
+        defer parsed.deinit();
+
+        var tx_count: u32 = 0;
+        var success_count: u32 = 0;
+        var fail_count: u32 = 0;
+        var oldest_ts: u64 = 0;
+        var newest_ts: u64 = 0;
+
+        if (parsed.value.object.get("result")) |result| {
+            if (result.object.get("data")) |data| {
+                if (data == .array) {
+                    tx_count = @intCast(data.array.items.len);
+
+                    for (data.array.items) |tx| {
+                        // Check status
+                        if (tx.object.get("effects")) |effects| {
+                            if (effects.object.get("status")) |status| {
+                                if (status.object.get("status")) |s| {
+                                    if (std.mem.eql(u8, s.string, "success")) {
+                                        success_count += 1;
+                                    } else {
+                                        fail_count += 1;
+                                    }
+                                }
+                            }
+                        }
+
+                        // Track timestamps
+                        if (tx.object.get("timestampMs")) |ts| {
+                            const ts_num: u64 = if (ts == .integer)
+                                @intCast(ts.integer)
+                            else
+                                std.fmt.parseInt(u64, ts.string, 10) catch 0;
+
+                            if (newest_ts == 0) newest_ts = ts_num;
+                            oldest_ts = ts_num;
+                        }
+                    }
+                }
+            }
+        }
+
+        std.log.info("=== Activity Summary ===", .{});
+        std.log.info("Total Transactions: {d}", .{tx_count});
+        std.log.info("Successful: {d}", .{success_count});
+        std.log.info("Failed: {d}", .{fail_count});
+
+        if (tx_count > 0) {
+            const success_rate = @as(f64, @floatFromInt(success_count)) / @as(f64, @floatFromInt(tx_count)) * 100.0;
+            std.log.info("Success Rate: {d:.1}%", .{@as(u32, @intFromFloat(success_rate))});
+        }
+
+        if (newest_ts > oldest_ts) {
+            const time_span = newest_ts - oldest_ts;
+            const days = time_span / (24 * 60 * 60 * 1000);
+            std.log.info("Activity Span: {d} days", .{days});
+
+            if (days > 0) {
+                const tx_per_day = @as(f64, @floatFromInt(tx_count)) / @as(f64, @floatFromInt(days));
+                std.log.info("Avg Transactions/Day: {d:.1}", .{tx_per_day});
+            }
+        }
+
+    } else if (std.mem.eql(u8, analytics_type, "gas")) {
+        std.log.info("Gas usage analysis for {s}:", .{address});
+        std.log.info("", .{});
+
+        // Get gas objects to analyze
+        const params = try std.fmt.allocPrint(
+            allocator,
+            "[\"{s}\",null,null,10]",
+            .{address},
+        );
+        defer allocator.free(params);
+
+        const response = try rpc_client.call("suix_getOwnedObjects", params);
+        defer allocator.free(response);
+
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, response, .{});
+        defer parsed.deinit();
+
+        var gas_objects: u32 = 0;
+        var total_gas_balance: u64 = 0;
+
+        if (parsed.value.object.get("result")) |result| {
+            if (result.object.get("data")) |data| {
+                if (data == .array) {
+                    for (data.array.items) |item| {
+                        if (item.object.get("data")) |obj_data| {
+                            // Check if it's a gas object (SUI coin)
+                            if (obj_data.object.get("type")) |t| {
+                                if (t == .string and std.mem.eql(u8, t.string, "0x2::coin::Coin<0x2::sui::SUI>")) {
+                                    gas_objects += 1;
+                                    if (obj_data.object.get("content")) |content| {
+                                        if (content.object.get("fields")) |fields| {
+                                            if (fields.object.get("balance")) |bal| {
+                                                const balance: u64 = if (bal == .integer)
+                                                    @intCast(bal.integer)
+                                                else
+                                                    std.fmt.parseInt(u64, bal.string, 10) catch 0;
+                                                total_gas_balance += balance;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        const gas_price: u64 = 1000; // Default reference gas price
+
+        std.log.info("=== Gas Analysis ===", .{});
+        std.log.info("Gas Objects: {d}", .{gas_objects});
+        std.log.info("Total Gas Balance: {d} MIST", .{total_gas_balance});
+        std.log.info("Reference Gas Price: {d} MIST (estimated)", .{gas_price});
+        std.log.info("", .{});
+        std.log.info("Estimated Simple Transfer Cost: ~{d} MIST", .{gas_price * 2000});
+        std.log.info("Estimated Complex Tx Cost: ~{d} MIST", .{gas_price * 10000});
+    } else {
+        std.log.err("Unknown analytics type: {s}", .{analytics_type});
+        std.process.exit(1);
+    }
+}
+
+fn cmdCompare(allocator: Allocator, args: []const []const u8) !void {
+    if (args.len < 2) {
+        std.log.err("Usage: compare <address1> <address2>", .{});
+        std.log.info("Compare two addresses across various metrics", .{});
+        std.process.exit(1);
+    }
+
+    const addr1 = args[0];
+    const addr2 = args[1];
+
+    const rpc_url = getRpcUrl() orelse "https://fullnode.mainnet.sui.io:443";
+    var rpc_client = try SuiRpcClient.init(allocator, rpc_url);
+    defer rpc_client.deinit();
+
+    std.log.info("Comparing addresses:", .{});
+    std.log.info("  A: {s}", .{addr1});
+    std.log.info("  B: {s}", .{addr2});
+    std.log.info("", .{});
+
+    // Compare balances
+    const balance1 = sui_client.rpc_client_new.getBalance(
+        &rpc_client,
+        addr1,
+        null,
+    ) catch 0;
+
+    const balance2 = sui_client.rpc_client_new.getBalance(
+        &rpc_client,
+        addr2,
+        null,
+    ) catch 0;
+
+    std.log.info("=== Balance Comparison ===", .{});
+    std.log.info("A: {d}.{d:0>9} SUI", .{ balance1 / 1_000_000_000, balance1 % 1_000_000_000 });
+    std.log.info("B: {d}.{d:0>9} SUI", .{ balance2 / 1_000_000_000, balance2 % 1_000_000_000 });
+
+    if (balance1 > balance2) {
+        const diff = balance1 - balance2;
+        std.log.info("A has {d}.{d:0>9} SUI more than B", .{ diff / 1_000_000_000, diff % 1_000_000_000 });
+    } else if (balance2 > balance1) {
+        const diff = balance2 - balance1;
+        std.log.info("B has {d}.{d:0>9} SUI more than A", .{ diff / 1_000_000_000, diff % 1_000_000_000 });
+    } else {
+        std.log.info("Both have equal balance", .{});
+    }
+
+    // Compare object counts
+    const params1 = try std.fmt.allocPrint(allocator, "[\"{s}\",null,null,1]", .{addr1});
+    defer allocator.free(params1);
+
+    const response1 = try rpc_client.call("suix_getOwnedObjects", params1);
+    defer allocator.free(response1);
+
+    const parsed1 = try std.json.parseFromSlice(std.json.Value, allocator, response1, .{});
+    defer parsed1.deinit();
+
+    const params2 = try std.fmt.allocPrint(allocator, "[\"{s}\",null,null,1]", .{addr2});
+    defer allocator.free(params2);
+
+    const response2 = try rpc_client.call("suix_getOwnedObjects", params2);
+    defer allocator.free(response2);
+
+    const parsed2 = try std.json.parseFromSlice(std.json.Value, allocator, response2, .{});
+    defer parsed2.deinit();
+
+    var count1: u32 = 0;
+    var count2: u32 = 0;
+
+    if (parsed1.value.object.get("result")) |result| {
+        if (result.object.get("data")) |data| {
+            if (data == .array) {
+                count1 = @intCast(data.array.items.len);
+            }
+        }
+    }
+
+    if (parsed2.value.object.get("result")) |result| {
+        if (result.object.get("data")) |data| {
+            if (data == .array) {
+                count2 = @intCast(data.array.items.len);
+            }
+        }
+    }
+
+    std.log.info("", .{});
+    std.log.info("=== Object Count Comparison ===", .{});
+    std.log.info("A: {d} objects", .{count1});
+    std.log.info("B: {d} objects", .{count2});
+
+    if (count1 > count2) {
+        std.log.info("A has {d} more objects than B", .{count1 - count2});
+    } else if (count2 > count1) {
+        std.log.info("B has {d} more objects than A", .{count2 - count1});
+    } else {
+        std.log.info("Both have equal object count", .{});
+    }
+}
