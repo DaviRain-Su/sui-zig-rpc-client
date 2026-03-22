@@ -31,3 +31,6 @@ pub const object_preset = @import("./object_preset.zig");
 
 // RPC adapter for gradual migration
 pub const rpc_adapter = @import("./rpc_adapter.zig");
+
+// GraphQL client for advanced queries
+pub const graphql = @import("./graphql/root.zig");

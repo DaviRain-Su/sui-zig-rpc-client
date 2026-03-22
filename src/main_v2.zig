@@ -159,6 +159,7 @@ fn printUsage(prog_name: []const u8) void {
     std.log.info("  zklogin <action>            zkLogin (OAuth) authentication", .{});
     std.log.info("  passkey <action>            Passkey (WebAuthn) authentication", .{});
     std.log.info("  wallet <action>             Advanced wallet (sessions, policy)", .{});
+    std.log.info("  graphql <action>            GraphQL queries", .{});
     std.log.info("  help                        Show this help", .{});
 }
 
@@ -3611,197 +3612,6 @@ fn cmdWs(allocator: Allocator, args: []const []const u8) !void {
     }
 }
 
-fn cmdGraphql(allocator: Allocator, args: []const []const u8) !void {
-    if (args.len < 1) {
-        std.log.err("Usage: graphql <action>", .{});
-        std.log.info("Actions:", .{});
-        std.log.info("  query <query_file>          Execute GraphQL query from file", .{});
-        std.log.info("  query-string <query>        Execute GraphQL query string", .{});
-        std.log.info("  introspect                  Get GraphQL schema introspection", .{});
-        std.log.info("  template <name>             Generate query template", .{});
-        std.process.exit(1);
-    }
-
-    const action = args[0];
-
-    if (std.mem.eql(u8, action, "query")) {
-        if (args.len < 2) {
-            std.log.err("Usage: graphql query <query_file>", .{});
-            std.process.exit(1);
-        }
-
-        const query_file = args[1];
-        std.log.info("Executing GraphQL query from {s}...", .{query_file});
-
-        // Read query file
-        const file = std.fs.cwd().openFile(query_file, .{}) catch |err| {
-            std.log.err("Failed to open query file: {s}", .{@errorName(err)});
-            return;
-        };
-        defer file.close();
-
-        const query = file.readToEndAlloc(allocator, 1024 * 1024) catch |err| {
-            std.log.err("Failed to read query file: {s}", .{@errorName(err)});
-            return;
-        };
-        defer allocator.free(query);
-
-        // Execute query (mock)
-        std.log.info("Query:", .{});
-        std.log.info("{s}", .{query});
-        std.log.info("---", .{});
-        std.log.info("Note: GraphQL execution requires external GraphQL endpoint", .{});
-        std.log.info("Query saved for manual execution.", .{});
-
-    } else if (std.mem.eql(u8, action, "query-string")) {
-        if (args.len < 2) {
-            std.log.err("Usage: graphql query-string <query>", .{});
-            std.process.exit(1);
-        }
-
-        const query = args[1];
-        std.log.info("Executing GraphQL query:", .{});
-        std.log.info("{s}", .{query});
-        std.log.info("---", .{});
-        std.log.info("Note: GraphQL execution requires external GraphQL endpoint", .{});
-
-    } else if (std.mem.eql(u8, action, "introspect")) {
-        std.log.info("=== GraphQL Schema Introspection ===", .{});
-        std.log.info("---", .{});
-        std.log.info("Available Types:", .{});
-        std.log.info("  Query", .{});
-        std.log.info("    - address(address: String!): Address", .{});
-        std.log.info("    - object(id: String!): Object", .{});
-        std.log.info("    - transaction(digest: String!): Transaction", .{});
-        std.log.info("    - checkpoint(id: String!): Checkpoint", .{});
-        std.log.info("    - epoch(id: String!): Epoch", .{});
-        std.log.info("    - coins(owner: String!, coinType: String): [Coin]", .{});
-        std.log.info("---", .{});
-        std.log.info("  Address", .{});
-        std.log.info("    - address: String!", .{});
-        std.log.info("    - balance: Balance", .{});
-        std.log.info("    - objects: [Object]", .{});
-        std.log.info("    - coins: [Coin]", .{});
-        std.log.info("---", .{});
-        std.log.info("  Object", .{});
-        std.log.info("    - id: String!", .{});
-        std.log.info("    - version: Int!", .{});
-        std.log.info("    - digest: String!", .{});
-        std.log.info("    - type: String!", .{});
-        std.log.info("    - owner: Owner", .{});
-        std.log.info("    - content: ObjectContent", .{});
-        std.log.info("---", .{});
-        std.log.info("  Transaction", .{});
-        std.log.info("    - digest: String!", .{});
-        std.log.info("    - timestamp: String", .{});
-        std.log.info("    - checkpoint: Checkpoint", .{});
-        std.log.info("    - effects: TransactionEffects", .{});
-        std.log.info("    - sender: Address", .{});
-        std.log.info("---", .{});
-        std.log.info("Note: Full introspection requires GraphQL endpoint", .{});
-
-    } else if (std.mem.eql(u8, action, "template")) {
-        const template_name = if (args.len >= 2) args[1] else "address";
-
-        std.log.info("=== GraphQL Query Template: {s} ===", .{template_name});
-        std.log.info("---", .{});
-
-        if (std.mem.eql(u8, template_name, "address")) {
-            std.log.info("query GetAddress($address: String!)", .{});
-            std.log.info("  address(address: $address)", .{});
-            std.log.info("    address", .{});
-            std.log.info("    balance", .{});
-            std.log.info("      totalBalance", .{});
-            std.log.info("    objects", .{});
-            std.log.info("      edges", .{});
-            std.log.info("        node", .{});
-            std.log.info("          id", .{});
-            std.log.info("          type", .{});
-            std.log.info("            repr", .{});
-        } else if (std.mem.eql(u8, template_name, "transaction")) {
-            std.log.info("query GetTransaction($digest: String!) ", .{});
-            std.log.info("  transaction(digest: $digest) ", .{});
-            std.log.info("    digest", .{});
-            std.log.info("    timestamp", .{});
-            std.log.info("    sender ", .{});
-            std.log.info("      address", .{});
-            std.log.info("    (end)", .{});
-            std.log.info("    effects ", .{});
-            std.log.info("      status ", .{});
-            std.log.info("        status", .{});
-            std.log.info("-", .{});
-            std.log.info("      gasUsed ", .{});
-            std.log.info("        computationCost", .{});
-            std.log.info("        storageCost", .{});
-            std.log.info("        storageRebate", .{});
-            std.log.info("-", .{});
-            std.log.info("    (end)", .{});
-            std.log.info("-", .{});
-            std.log.info("---", .{});
-        } else if (std.mem.eql(u8, template_name, "checkpoint")) {
-            std.log.info("query GetCheckpoint($id: String!) ", .{});
-            std.log.info("  checkpoint(id: $id) ", .{});
-            std.log.info("    id", .{});
-            std.log.info("    sequenceNumber", .{});
-            std.log.info("    timestamp", .{});
-            std.log.info("    epoch ", .{});
-            std.log.info("      epochId", .{});
-            std.log.info("    (end)", .{});
-            std.log.info("    transactionBlocks ", .{});
-            std.log.info("      edges ", .{});
-            std.log.info("        node ", .{});
-            std.log.info("          digest", .{});
-            std.log.info("-", .{});
-            std.log.info("-", .{});
-            std.log.info("    (end)", .{});
-            std.log.info("-", .{});
-            std.log.info("---", .{});
-        } else if (std.mem.eql(u8, template_name, "coins")) {
-            std.log.info("query GetCoins($owner: String!, $coinType: String) ", .{});
-            std.log.info("  coins(owner: $owner, coinType: $coinType) ", .{});
-            std.log.info("    edges ", .{});
-            std.log.info("      node ", .{});
-            std.log.info("        id", .{});
-            std.log.info("        balance", .{});
-            std.log.info("        coinType ", .{});
-            std.log.info("          repr", .{});
-            std.log.info("-", .{});
-            std.log.info("-", .{});
-            std.log.info("    (end)", .{});
-            std.log.info("-", .{});
-            std.log.info("---", .{});
-        } else if (std.mem.eql(u8, template_name, "events")) {
-            std.log.info("query GetEvents($filter: EventFilter!) ", .{});
-            std.log.info("  events(filter: $filter) ", .{});
-            std.log.info("    edges ", .{});
-            std.log.info("      node ", .{});
-            std.log.info("        id", .{});
-            std.log.info("        timestamp", .{});
-            std.log.info("        type ", .{});
-            std.log.info("          repr", .{});
-            std.log.info("-", .{});
-            std.log.info("        sender ", .{});
-            std.log.info("          address", .{});
-            std.log.info("-", .{});
-            std.log.info("        contents", .{});
-            std.log.info("-", .{});
-            std.log.info("    (end)", .{});
-            std.log.info("-", .{});
-            std.log.info("---", .{});
-        } else {
-            std.log.err("Unknown template: {s}", .{template_name});
-            std.log.info("Available templates: address, transaction, checkpoint, coins, events", .{});
-        }
-
-        std.log.info("---", .{});
-        std.log.info("Save to file and use: graphql query <file>", .{});
-
-    } else {
-        std.log.err("Unknown GraphQL action: {s}", .{action});
-        std.process.exit(1);
-    }
-}
-
 fn cmdCache(allocator: Allocator, args: []const []const u8) !void {
     if (args.len < 1) {
         std.log.err("Usage: cache <action>", .{});
@@ -5083,5 +4893,13 @@ const wallet_cmd = @import("main_v2_wallet.zig");
 
 fn cmdWallet(allocator: Allocator, args: []const []const u8) !void {
     try wallet_cmd.cmdWallet(allocator, args);
+}
+
+
+// Import GraphQL command module
+const graphql_cmd = @import("main_v2_graphql.zig");
+
+fn cmdGraphql(allocator: Allocator, args: []const []const u8) !void {
+    try graphql_cmd.cmdGraphql(allocator, args);
 }
 
