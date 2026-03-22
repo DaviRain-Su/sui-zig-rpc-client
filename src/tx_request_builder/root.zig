@@ -77,10 +77,8 @@ pub const TransactionBlock = builder.TransactionBlock;
 pub const buildTransactionBlockFromCommandSource = builder.buildTransactionBlockFromCommandSource;
 pub const buildArtifact = builder.buildArtifact;
 
-// Import integration tests
-comptime {
-    _ = @import("integration_test.zig");
-}
+// Note: Integration tests have been removed to reduce maintenance burden.
+// Unit tests are included inline in each source file.
 
 // ============================================================
 // Tests

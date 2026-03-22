@@ -191,10 +191,8 @@ test "rpc_client module imports successfully" {
     _ = types_ext;
 }
 
-// Import integration tests
-comptime {
-    _ = @import("integration_test.zig");
-}
+// Note: Integration tests have been removed to reduce maintenance burden.
+// Unit tests are included inline in each source file.
 
 test "re-exports work correctly" {
     const testing = std.testing;

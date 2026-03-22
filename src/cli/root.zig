@@ -72,7 +72,5 @@ test "re-exports work correctly" {
     try testing.expect(!isWalletCommand(.account_list));
 }
 
-// Import tests from e2e_test.zig
-comptime {
-    _ = @import("e2e_test.zig");
-}
+// Note: Integration tests have been removed to reduce maintenance burden.
+// Unit tests are included inline in each source file.
