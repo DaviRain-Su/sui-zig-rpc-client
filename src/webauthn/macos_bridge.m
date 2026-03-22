@@ -118,6 +118,36 @@ BridgeBiometryType LAContextGetBiometryType(LAContextRef context) {
     return MapBiometryType(ctx.biometryType);
 }
 
+// Synchronous authentication with run loop for UI
+bool LAContextEvaluatePolicySync(LAContextRef context, BridgeLAPolicy policy, const char* localizedReason, int32_t* errorCode) {
+    if (!context || !localizedReason) {
+        if (errorCode) *errorCode = BRIDGE_LA_ERROR_INVALID_CONTEXT;
+        return false;
+    }
+    
+    LAContext *ctx = (__bridge LAContext *)context;
+    NSString *reason = [NSString stringWithUTF8String:localizedReason];
+    
+    __block BOOL success = NO;
+    __block int32_t errCode = BRIDGE_LA_ERROR_SUCCESS;
+    __block BOOL completed = NO;
+    
+    // Evaluate policy
+    [ctx evaluatePolicy:MapPolicy(policy) localizedReason:reason reply:^(BOOL ok, NSError *error) {
+        success = ok;
+        errCode = MapErrorCode(error);
+        completed = YES;
+    }];
+    
+    // Run the run loop until completion
+    while (!completed) {
+        [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
+    }
+    
+    if (errorCode) *errorCode = errCode;
+    return success ? true : false;
+}
+
 // MARK: - Secure Enclave Key Generation
 
 BridgeSecKeyRef BridgeSecKeyGenerateSecureEnclaveKey(const char* tag, bool biometricRequired, int32_t* errorCode) {

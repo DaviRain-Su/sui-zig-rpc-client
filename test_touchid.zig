@@ -31,9 +31,10 @@ const BIOMETRY_TYPE_OPTIC_ID: CInt = 3;
 extern fn LAContextCreate() LAContextRef;
 extern fn LAContextRelease(context: LAContextRef) void;
 extern fn LAContextCanEvaluatePolicy(context: LAContextRef, policy: CInt, errorCode: *CInt) bool;
-extern fn LAContextEvaluatePolicy(context: LAContextRef, policy: CInt, localizedReason: [*c]const u8, 
+extern fn LAContextEvaluatePolicy(context: LAContextRef, policy: CInt, localizedReason: [*c]const u8,
                                    completion: ?*const fn (?*anyopaque, bool, CInt) callconv(.c) void,
                                    userData: ?*anyopaque) void;
+extern fn LAContextEvaluatePolicySync(context: LAContextRef, policy: CInt, localizedReason: [*c]const u8, errorCode: *CInt) bool;
 extern fn LAContextGetBiometryType(context: LAContextRef) CInt;
 extern fn BridgeSecKeyGenerateSecureEnclaveKey(tag: [*c]const u8, biometricRequired: bool, errorCode: *CInt) BridgeSecKeyRef;
 extern fn BridgeSecKeyRelease(key: BridgeSecKeyRef) void;
@@ -151,55 +152,29 @@ pub fn main() !void {
     }
     defer LAContextRelease(auth_context);
 
-    // Completion handler
-    const Completion = struct {
-        completed: bool = false,
-        success: bool = false,
-        
-        fn handler(userData: ?*anyopaque, ok: bool, err: CInt) callconv(.c) void {
-            _ = err;
-            const self = @as(*@This(), @ptrCast(@alignCast(userData.?)));
-            self.success = ok;
-            self.completed = true;
-        }
-    };
-    
-    var completion = Completion{};
-
+    // Use synchronous evaluation
     const reason = "Test Touch ID authentication for Sui CLI";
-    LAContextEvaluatePolicy(
+    var auth_error: CInt = 0;
+    const success = LAContextEvaluatePolicySync(
         auth_context,
         POLICY_DEVICE_OWNER_AUTHENTICATION_WITH_BIOMETRICS,
         reason.ptr,
-        &Completion.handler,
-        &completion,
+        &auth_error,
     );
 
-    // Wait for completion with timeout
-    var timeout: u32 = 0;
-    const max_timeout: u32 = 30000; // 30 seconds
-    while (!completion.completed and timeout < max_timeout) {
-        // Simple busy wait
-        var i: u32 = 0;
-        while (i < 1000000) : (i += 1) {
-            std.mem.doNotOptimizeAway(i);
-        }
-        timeout += 100;
-    }
-
-    if (!completion.completed) {
-        std.debug.print("⏱️  Authentication timed out\n", .{});
-    } else if (completion.success) {
+    if (success) {
         std.debug.print("✓ Authentication successful! 🎉\n", .{});
     } else {
-        std.debug.print("❌ Authentication failed\n", .{});
+        const err_msg = GetErrorMessage(auth_error);
+        defer FreeString(err_msg);
+        std.debug.print("❌ Authentication failed: {s}\n", .{err_msg});
     }
 
     // Test 5: Secure Enclave Key Generation
     std.debug.print("\nTest 5: Secure Enclave Key Generation\n", .{});
     std.debug.print("─────────────────────────────────────\n", .{});
     
-    if (completion.success) {
+    if (success) {
         std.debug.print("Generating P-256 key in Secure Enclave...\n", .{});
         
         const test_tag = "test-sui-passkey-touchid";
@@ -302,12 +277,12 @@ pub fn main() !void {
         if (device_auth) "Available" else "Not available",
     });
     std.debug.print("{s} Touch ID prompt: {s}\n", .{
-        if (completion.completed) (if (completion.success) "✓" else "❌") else "⏱️",
-        if (completion.completed) (if (completion.success) "Successful" else "Failed") else "Timeout",
+        if (success) "✓" else "❌",
+        if (success) "Successful" else "Failed",
     });
     std.debug.print("\n", .{});
     
-    if (completion.success) {
+    if (success) {
         std.debug.print("🎉 All Touch ID tests passed!\n", .{});
         std.debug.print("\nYour MacBook is ready for WebAuthn/Passkey operations.\n", .{});
     } else {

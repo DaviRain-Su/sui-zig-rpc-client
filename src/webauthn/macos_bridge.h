@@ -59,8 +59,9 @@ typedef enum {
 LAContextRef LAContextCreate(void);
 void LAContextRelease(LAContextRef context);
 bool LAContextCanEvaluatePolicy(LAContextRef context, BridgeLAPolicy policy, int32_t* errorCode);
-void LAContextEvaluatePolicy(LAContextRef context, BridgeLAPolicy policy, const char* localizedReason, 
+void LAContextEvaluatePolicy(LAContextRef context, BridgeLAPolicy policy, const char* localizedReason,
                               void (*completion)(bool success, int32_t errorCode));
+bool LAContextEvaluatePolicySync(LAContextRef context, BridgeLAPolicy policy, const char* localizedReason, int32_t* errorCode);
 BridgeBiometryType LAContextGetBiometryType(LAContextRef context);
 
 // Secure Enclave key generation
