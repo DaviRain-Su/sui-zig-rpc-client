@@ -124,12 +124,20 @@ pub const EphemeralKeyPair = struct {
     secret_key: [32]u8,
 
     pub fn generate() !EphemeralKeyPair {
-        var secret_key: [32]u8 = undefined;
-        std.crypto.random.bytes(&secret_key);
-
-        // Derive public key (placeholder - needs actual Ed25519)
+        // Use Zig's standard library Ed25519
+        const Ed25519 = std.crypto.sign.Ed25519;
+        
+        // Generate random seed
+        var seed: [32]u8 = undefined;
+        std.crypto.random.bytes(&seed);
+        
+        // Create keypair from seed
+        const kp = try Ed25519.KeyPair.generateDeterministic(seed);
+        
         var public_key: [32]u8 = undefined;
-        @memcpy(&public_key, &secret_key);
+        var secret_key: [32]u8 = undefined;
+        @memcpy(&public_key, &kp.public_key.bytes);
+        @memcpy(&secret_key, &seed);
 
         return .{
             .public_key = public_key,
@@ -137,11 +145,16 @@ pub const EphemeralKeyPair = struct {
         };
     }
 
-    pub fn sign(_: *const EphemeralKeyPair, _: []const u8) [64]u8 {
-        // Placeholder - needs actual Ed25519 signing
-        var signature: [64]u8 = undefined;
-        @memset(&signature, 0xAA);
-        return signature;
+    pub fn sign(self: *const EphemeralKeyPair, message: []const u8) ![64]u8 {
+        const Ed25519 = std.crypto.sign.Ed25519;
+        
+        // Recreate keypair from seed
+        const kp = try Ed25519.KeyPair.generateDeterministic(self.secret_key);
+        
+        // Sign the message
+        const sig = try kp.sign(message, null);
+        
+        return sig.toBytes();
     }
 };
 

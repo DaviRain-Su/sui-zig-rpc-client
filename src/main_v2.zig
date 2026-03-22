@@ -4058,10 +4058,45 @@ fn cmdSign(allocator: Allocator, args: []const []const u8) !void {
         defer allocator.free(signature);
         try std.base64.standard.Decoder.decode(signature, signature_b64);
 
-        // TODO: Implement signature verification
+        // Verify signature using Ed25519
+        const Ed25519 = std.crypto.sign.Ed25519;
+        
+        // Extract signature components
+        // Sui signature format: [scheme(1) || signature(64) || public_key(32)]
+        if (signature.len < 97) {
+            std.log.err("Invalid signature length: {d}", .{signature.len});
+            std.process.exit(1);
+        }
+        
+        const scheme = signature[0];
+        if (scheme != 0x00) {
+            std.log.err("Unsupported signature scheme: {d}", .{scheme});
+            std.process.exit(1);
+        }
+        
+        const sig_bytes = signature[1..65];
+        const pk_bytes = signature[65..97];
+        
+        // Parse public key and signature
+        const pk = Ed25519.PublicKey.fromBytes(pk_bytes.*) catch |err| {
+            std.log.err("Invalid public key: {s}", .{@errorName(err)});
+            std.process.exit(1);
+        };
+        
+        // Create signature struct from bytes
+        var sig_bytes_array: [64]u8 = undefined;
+        @memcpy(&sig_bytes_array, sig_bytes);
+        const sig = Ed25519.Signature.fromBytes(sig_bytes_array);
+        
+        // Verify
+        sig.verify(message, pk) catch |err| {
+            std.log.info("", .{});
+            std.log.info("❌ Signature verification FAILED: {s}", .{@errorName(err)});
+            std.process.exit(1);
+        };
+        
         std.log.info("", .{});
-        std.log.info("Signature verification: NOT IMPLEMENTED", .{});
-        std.log.info("(Requires Ed25519 verification library)", .{});
+        std.log.info("✅ Signature verification PASSED", .{});
 
     } else {
         std.log.err("Unknown sign action: {s}", .{action});
@@ -4373,8 +4408,26 @@ fn getActiveAddress(allocator: Allocator) ![]const u8 {
     defer allocator.free(content);
     
     // Parse YAML to find active_address
-    // For now, return placeholder
-    return try allocator.dupe(u8, "0x");
+    // Simple line-based parser looking for "active_address: <address>"
+    var start: usize = 0;
+    while (start < content.len) {
+        // Find end of line
+        const end = std.mem.indexOf(u8, content[start..], "\n") orelse content.len;
+        const line = content[start .. start + end];
+        
+        const trimmed = std.mem.trim(u8, line, " \t\r\n");
+        if (std.mem.startsWith(u8, trimmed, "active_address:")) {
+            const value_start = std.mem.indexOf(u8, trimmed, ":") orelse continue;
+            const value = std.mem.trim(u8, trimmed[value_start + 1 ..], " \t\"'\r\n");
+            if (value.len > 0) {
+                return try allocator.dupe(u8, value);
+            }
+        }
+        
+        start += end + 1;
+    }
+    
+    return error.ActiveAddressNotFound;
 }
 
 fn bytesToHex(allocator: Allocator, bytes: []const u8) ![]const u8 {
