@@ -31,6 +31,8 @@ pub fn execute(allocator: Allocator, args: []const []const u8) !void {
 
     if (std.mem.eql(u8, action, "create")) {
         try cmdCreate(allocator, args[1..]);
+    } else if (std.mem.eql(u8, action, "create-browser")) {
+        try cmdCreateBrowser(allocator, args[1..]);
     } else if (std.mem.eql(u8, action, "platform")) {
         try cmdPlatform();
     } else if (std.mem.eql(u8, action, "test")) {
@@ -47,10 +49,11 @@ pub fn execute(allocator: Allocator, args: []const []const u8) !void {
 fn printUsage() void {
     std.log.info("Usage: passkey <action>", .{});
     std.log.info("Actions:", .{});
-    std.log.info("  create --name <name>    Create new Passkey with Touch ID", .{});
-    std.log.info("  list                    List stored credentials", .{});
-    std.log.info("  platform                Show platform info", .{});
-    std.log.info("  test                    Test Touch ID authentication", .{});
+    std.log.info("  create --name <name>         Create Passkey (file encryption)", .{});
+    std.log.info("  create-browser --name <name> Create Passkey via browser (WebAuthn)", .{});
+    std.log.info("  list                         List stored credentials", .{});
+    std.log.info("  platform                     Show platform info", .{});
+    std.log.info("  test                         Test Touch ID authentication", .{});
 }
 
 fn getKeystoreDir(allocator: Allocator) ![]const u8 {
@@ -249,6 +252,67 @@ fn printCredentialSuccess(tag: []const u8, public_key: *const [32]u8, is_secure_
     std.log.info("", .{});
     std.log.info("To use this credential:", .{});
     std.log.info("  passkey sign --id \"{s}\" --tx <transaction_bytes>", .{tag});
+}
+
+fn cmdCreateBrowser(allocator: Allocator, args: []const []const u8) !void {
+    var name: ?[]const u8 = null;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "--name")) {
+            if (i + 1 >= args.len) {
+                std.log.err("Missing value for --name", .{});
+                std.process.exit(1);
+            }
+            name = args[i + 1];
+            i += 1;
+        }
+    }
+
+    const credential_name = name orelse "Sui Passkey";
+
+    std.log.info("=== Create Passkey via Browser ===", .{});
+    std.log.info("", .{});
+    std.log.info("Name: {s}", .{credential_name});
+    std.log.info("", .{});
+    std.log.info("This will:", .{});
+    std.log.info("  1. Open your default browser", .{});
+    std.log.info("  2. Use WebAuthn API for credential creation", .{});
+    std.log.info("  3. Support Touch ID, Face ID, or YubiKey", .{});
+    std.log.info("  4. Save credential to file", .{});
+    std.log.info("", .{});
+    std.log.info("Press Enter to continue...", .{});
+
+    var buf: [10]u8 = undefined;
+    const stdin = std.fs.File{ .handle = 0 };
+    _ = stdin.read(&buf) catch {};
+
+    // Import browser bridge
+    const browser = @import("webauthn/browser_simple.zig");
+
+    const output_dir = try getKeystoreDir(allocator);
+    defer allocator.free(output_dir);
+
+    std.log.info("", .{});
+    std.log.info("Opening browser...", .{});
+
+    const credential = browser.createCredentialInBrowser(
+        allocator,
+        "sui-cli.local",
+        credential_name,
+        output_dir,
+    ) catch |err| {
+        std.log.err("Failed to create credential: {s}", .{@errorName(err)});
+        std.log.info("", .{});
+        std.log.info("Make sure to:", .{});
+        std.log.info("  - Use a WebAuthn-compatible browser (Safari, Chrome, Firefox)", .{});
+        std.log.info("  - Download the .json file when prompted", .{});
+        std.log.info("  - Move it to: {s}/", .{output_dir});
+        std.process.exit(1);
+    };
+    defer credential.deinit(allocator);
+
+    std.log.info("✓ Credential created via browser!", .{});
+    std.log.info("  ID: {s}", .{credential.id});
 }
 
 fn cmdList(allocator: Allocator) !void {
