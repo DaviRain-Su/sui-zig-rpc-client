@@ -4109,9 +4109,12 @@ fn cmdKey(allocator: Allocator, args: []const []const u8) !void {
         std.log.err("Usage: key <action>", .{});
         std.log.info("Actions:", .{});
         std.log.info("  generate                   Generate new keypair", .{});
+        std.log.info("  generate --mnemonic        Generate keypair with BIP-39 mnemonic", .{});
+        std.log.info("  generate --mnemonic --words24  Generate with 24-word mnemonic", .{});
         std.log.info("  show [address]             Show key info for address", .{});
         std.log.info("  list                       List all keys in keystore", .{});
         std.log.info("  import <path>              Import key from file", .{});
+        std.log.info("  import --mnemonic          Import from BIP-39 mnemonic", .{});
         std.log.info("  export <address> <path>    Export key to file", .{});
         std.process.exit(1);
     }
@@ -4119,28 +4122,82 @@ fn cmdKey(allocator: Allocator, args: []const []const u8) !void {
     const action = args[0];
 
     if (std.mem.eql(u8, action, "generate")) {
-        std.log.info("Generating new Ed25519 keypair...", .{});
+        // Check if mnemonic is requested
+        var use_mnemonic = false;
+        var word_count: u8 = 12;
         
-        const keypair = try KeyPair.generateRandom();
+        for (args[1..]) |arg| {
+            if (std.mem.eql(u8, arg, "--mnemonic")) {
+                use_mnemonic = true;
+            } else if (std.mem.eql(u8, arg, "--words24")) {
+                word_count = 24;
+            }
+        }
         
-        std.log.info("", .{});
-        std.log.info("Keypair generated successfully!", .{});
-        std.log.info("", .{});
-        
-        // Show public key
-        const pk_hex = try bytesToHex(allocator, &keypair.public_key);
-        defer allocator.free(pk_hex);
-        std.log.info("Public Key: {s}", .{pk_hex});
-        
-        // Derive address
-        const signer = TransactionSigner.init(allocator, keypair);
-        const address = try signer.getAddress(allocator);
-        defer allocator.free(address);
-        std.log.info("Address: {s}", .{address});
-        
-        std.log.info("", .{});
-        std.log.info("IMPORTANT: Save this keypair securely!", .{});
-        std.log.info("The secret key cannot be recovered if lost.", .{});
+        if (use_mnemonic) {
+            std.log.info("Generating new keypair from BIP-39 mnemonic...", .{});
+            std.log.info("", .{});
+            
+            const bip39 = @import("bip39.zig");
+            const length = if (word_count == 24) bip39.MnemonicLength.words24 else bip39.MnemonicLength.words12;
+            
+            const result = try bip39.generateMnemonicWithSeed(allocator, length);
+            defer allocator.free(result.mnemonic);
+            
+            // Derive key from seed
+            const secret_key = try bip39.deriveEd25519Key(result.seed, "m/44'/784'/0'/0'/0'");
+            const keypair = try KeyPair.fromSecretKey(secret_key);
+            
+            std.log.info("✓ Keypair generated from mnemonic!", .{});
+            std.log.info("", .{});
+            std.log.info("═══════════════════════════════════════════════════════════════", .{});
+            std.log.info("  WRITE DOWN THESE WORDS IN ORDER AND KEEP THEM SECURE!", .{});
+            std.log.info("═══════════════════════════════════════════════════════════════", .{});
+            std.log.info("", .{});
+            std.log.info("{s}", .{result.mnemonic});
+            std.log.info("", .{});
+            std.log.info("═══════════════════════════════════════════════════════════════", .{});
+            
+            // Show public key
+            const pk_hex = try bytesToHex(allocator, &keypair.public_key);
+            defer allocator.free(pk_hex);
+            std.log.info("Public Key: {s}", .{pk_hex});
+            
+            // Derive address
+            const signer = TransactionSigner.init(allocator, keypair);
+            const address = try signer.getAddress(allocator);
+            defer allocator.free(address);
+            std.log.info("Address: {s}", .{address});
+            
+            std.log.info("", .{});
+            std.log.info("IMPORTANT: Your mnemonic is the ONLY way to recover this key!", .{});
+            std.log.info("Store it safely offline. Never share it with anyone.", .{});
+        } else {
+            std.log.info("Generating new Ed25519 keypair...", .{});
+            
+            const keypair = try KeyPair.generateRandom();
+            
+            std.log.info("", .{});
+            std.log.info("Keypair generated successfully!", .{});
+            std.log.info("", .{});
+            
+            // Show public key
+            const pk_hex = try bytesToHex(allocator, &keypair.public_key);
+            defer allocator.free(pk_hex);
+            std.log.info("Public Key: {s}", .{pk_hex});
+            
+            // Derive address
+            const signer = TransactionSigner.init(allocator, keypair);
+            const address = try signer.getAddress(allocator);
+            defer allocator.free(address);
+            std.log.info("Address: {s}", .{address});
+            
+            std.log.info("", .{});
+            std.log.info("IMPORTANT: Save this keypair securely!", .{});
+            std.log.info("The secret key cannot be recovered if lost.", .{});
+            std.log.info("", .{});
+            std.log.info("Tip: Use 'key generate --mnemonic' for recoverable keys.", .{});
+        }
 
     } else if (std.mem.eql(u8, action, "show")) {
         const address = if (args.len >= 2) args[1] else try getActiveAddress(allocator);
