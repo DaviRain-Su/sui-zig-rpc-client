@@ -4635,7 +4635,7 @@ fn cmdZklogin(allocator: Allocator, args: []const []const u8) !void {
     }
 }
 
-fn cmdPasskey(_: Allocator, args: []const []const u8) !void {
+fn cmdPasskey(allocator: Allocator, args: []const []const u8) !void {
     if (args.len < 1) {
         std.log.err("Usage: passkey <action>", .{});
         std.log.info("Actions:", .{});
@@ -4644,6 +4644,7 @@ fn cmdPasskey(_: Allocator, args: []const []const u8) !void {
         std.log.info("  sign --id <id> --tx <bytes>     Sign transaction", .{});
         std.log.info("  address --id <id>               Show derived address", .{});
         std.log.info("  export --id <id>                Export public key", .{});
+        std.log.info("  platform                        Show platform info", .{});
         std.process.exit(1);
     }
 
@@ -4668,24 +4669,44 @@ fn cmdPasskey(_: Allocator, args: []const []const u8) !void {
         std.log.info("", .{});
         std.log.info("Name: {s}", .{name orelse "Sui Passkey"});
         std.log.info("", .{});
-        std.log.info("Platform Support:", .{});
-        std.log.info("  macOS: Touch ID / Secure Enclave", .{});
-        std.log.info("  iOS: Face ID / Touch ID", .{});
-        std.log.info("  Android: BiometricPrompt", .{});
-        std.log.info("  Linux: libfido2 / hardware keys", .{});
-        std.log.info("", .{});
-        std.log.info("Note: This requires platform WebAuthn support.", .{});
-        std.log.info("      Zig implementation would need:", .{});
-        std.log.info("      - macOS: LocalAuthentication framework", .{});
-        std.log.info("      - Linux: libfido2 bindings", .{});
-        std.log.info("      - Or external tool like passkey-cli", .{});
+
+        // Check platform availability
+        const webauthn = @import("webauthn/root.zig");
+        var manager = webauthn.WebAuthnManager.init(allocator) catch |err| {
+            std.log.err("Failed to initialize WebAuthn: {s}", .{@errorName(err)});
+            std.process.exit(1);
+        };
+        defer manager.deinit();
+
+        if (manager.isAvailable()) {
+            std.log.info("Platform WebAuthn: Available", .{});
+            std.log.info("", .{});
+            std.log.info("To create a credential, this would:", .{});
+            std.log.info("  1. Generate P-256 keypair in secure hardware", .{});
+            std.log.info("  2. Prompt for biometric/PIN verification", .{});
+            std.log.info("  3. Store credential in platform keychain", .{});
+            std.log.info("  4. Return credential ID and public key", .{});
+        } else {
+            std.log.info("Platform WebAuthn: Not Available", .{});
+            std.log.info("", .{});
+            std.log.info("Platform Support:", .{});
+            std.log.info("  macOS: Touch ID / Secure Enclave", .{});
+            std.log.info("  Linux: libfido2 / hardware keys (YubiKey)", .{});
+            std.log.info("", .{});
+            std.log.info("Requirements:", .{});
+            std.log.info("  - macOS: LocalAuthentication framework", .{});
+            std.log.info("  - Linux: libfido2-dev package installed", .{});
+            std.log.info("  - Hardware: FIDO2 authenticator (YubiKey, etc.)", .{});
+        }
 
     } else if (std.mem.eql(u8, action, "list")) {
         std.log.info("=== Passkey Credentials ===", .{});
         std.log.info("", .{});
-        std.log.info("No credentials stored.", .{});
+        std.log.info("Stored credentials would appear here.", .{});
         std.log.info("", .{});
-        std.log.info("Use 'passkey create' to add a credential.", .{});
+        std.log.info("Note: Credentials are stored in:", .{});
+        std.log.info("  - macOS: Secure Enclave / Keychain", .{});
+        std.log.info("  - Linux: FIDO2 authenticator (hardware)", .{});
 
     } else if (std.mem.eql(u8, action, "sign")) {
         var credential_id: ?[]const u8 = null;
@@ -4724,8 +4745,10 @@ fn cmdPasskey(_: Allocator, args: []const []const u8) !void {
         std.log.info("  1. Prepare WebAuthn assertion request", .{});
         std.log.info("  2. Call platform authenticator", .{});
         std.log.info("  3. User verifies (biometric/PIN)", .{});
-        std.log.info("  4. Get signature (r || s)", .{});
-        std.log.info("  5. Construct Sui transaction", .{});
+        std.log.info("  4. Get ECDSA P-256 signature (r || s)", .{});
+        std.log.info("  5. Construct Sui Passkey signature", .{});
+        std.log.info("", .{});
+        std.log.info("Note: Full implementation requires platform bindings.", .{});
 
     } else if (std.mem.eql(u8, action, "address")) {
         std.log.info("=== Passkey Address ===", .{});
@@ -4747,6 +4770,49 @@ fn cmdPasskey(_: Allocator, args: []const []const u8) !void {
         std.log.info("", .{});
         std.log.info("Note: Private key never leaves the authenticator!", .{});
         std.log.info("      This is the security guarantee of Passkeys.", .{});
+
+    } else if (std.mem.eql(u8, action, "platform")) {
+        std.log.info("=== WebAuthn Platform Info ===", .{});
+        std.log.info("", .{});
+
+        const webauthn = @import("webauthn/root.zig");
+        const Platform = webauthn.Platform;
+
+        const platform = Platform.current();
+        std.log.info("Current Platform: {s}", .{@tagName(platform)});
+        std.log.info("", .{});
+
+        switch (platform) {
+            .macos => {
+                std.log.info("macOS WebAuthn Support:", .{});
+                std.log.info("  - Touch ID: MacBook Pro/Air with Touch ID", .{});
+                std.log.info("  - Secure Enclave: Hardware key storage", .{});
+                std.log.info("  - LocalAuthentication: Biometric API", .{});
+                std.log.info("", .{});
+                std.log.info("Implementation:", .{});
+                std.log.info("  - Objective-C runtime bindings", .{});
+                std.log.info("  - LAContext for biometric auth", .{});
+                std.log.info("  - SecKey for key management", .{});
+            },
+            .linux => {
+                std.log.info("Linux WebAuthn Support:", .{});
+                std.log.info("  - libfido2: FIDO2/CTAP2 library", .{});
+                std.log.info("  - Hardware keys: YubiKey, SoloKey, etc.", .{});
+                std.log.info("  - /dev/hidraw*: USB HID interface", .{});
+                std.log.info("", .{});
+                std.log.info("Requirements:", .{});
+                std.log.info("  - libfido2-dev package", .{});
+                std.log.info("  - udev rules for HID devices", .{});
+                std.log.info("  - FIDO2 authenticator", .{});
+            },
+            .unsupported => {
+                std.log.info("Platform not supported for WebAuthn", .{});
+                std.log.info("", .{});
+                std.log.info("Supported platforms:", .{});
+                std.log.info("  - macOS 10.15+", .{});
+                std.log.info("  - Linux with libfido2", .{});
+            },
+        }
 
     } else {
         std.log.err("Unknown passkey action: {s}", .{action});
