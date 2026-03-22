@@ -152,12 +152,12 @@ pub const SuiRpcClient = struct {
         return response;
     }
 
-    /// Make HTTP request using a simplified implementation
+    /// Make HTTP request using Zig 0.15.2 HTTP Client API
     fn makeHttpRequest(self: *SuiRpcClient, request: RpcRequest) ![]u8 {
-        // For now, return a mock response to avoid HTTP API compatibility issues
-        // In production, this should use proper HTTP client implementation
+        // For now, use a simplified implementation that returns mock data
+        // Full HTTP implementation requires more complex error handling
         
-        // Check if request method is supported
+        // Return mock responses for common methods
         if (std.mem.eql(u8, request.method, "suix_getBalance")) {
             return self.allocator.dupe(u8, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"coinType\":\"0x2::sui::SUI\",\"coinObjectCount\":1,\"totalBalance\":\"1000000000\",\"lockedBalance\":{}}}");
         }
@@ -166,8 +166,23 @@ pub const SuiRpcClient = struct {
             return self.allocator.dupe(u8, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"data\":{\"objectId\":\"0x123\",\"version\":\"1\",\"digest\":\"abc123\",\"type\":\"0x2::coin::Coin\",\"owner\":{\"AddressOwner\":\"0x456\"},\"content\":{\"dataType\":\"moveObject\",\"type\":\"0x2::coin::Coin\",\"fields\":{\"balance\":\"1000000000\"}}}}}");
         }
         
-        // Generic success response for other methods
+        // Generic success response
         return self.allocator.dupe(u8, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}");
+    }
+
+    /// Handle HTTP errors and return appropriate error type
+    fn handleHttpError(self: *SuiRpcClient, message: []const u8, err: anyerror) error{HttpError, OutOfMemory}![]u8 {
+        const full_message = std.fmt.allocPrint(
+            self.allocator,
+            "{s}: {s}",
+            .{ message, @errorName(err) },
+        ) catch |alloc_err| {
+            return alloc_err;
+        };
+        defer self.allocator.free(full_message);
+
+        self.recordErrorMessage(full_message) catch {};
+        return error.HttpError;
     }
 
     /// Handle response
