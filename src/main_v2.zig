@@ -16,8 +16,7 @@ pub fn main() !void {
     defer std.process.argsFree(allocator, args);
 
     if (args.len < 2) {
-        std.log.info("Usage: {s} <command> [options]", .{args[0]});
-        std.log.info("Commands: balance", .{});
+        printUsage(args[0]);
         return;
     }
 
@@ -25,10 +24,24 @@ pub fn main() !void {
 
     if (std.mem.eql(u8, command, "balance")) {
         try cmdBalance(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "help") or std.mem.eql(u8, command, "--help")) {
+        printUsage(args[0]);
     } else {
         std.log.err("Unknown command: {s}", .{command});
+        printUsage(args[0]);
         std.process.exit(1);
     }
+}
+
+fn printUsage(prog_name: []const u8) void {
+    std.log.info("Usage: {s} <command> [options]", .{prog_name});
+    std.log.info("Commands:", .{});
+    std.log.info("  balance <address>           Get SUI balance for address", .{});
+    std.log.info("  help                        Show this help", .{});
+}
+
+fn getRpcUrl() ?[]const u8 {
+    return std.process.getEnvVarOwned(std.heap.page_allocator, "SUI_RPC_URL") catch null;
 }
 
 fn cmdBalance(allocator: Allocator, args: []const []const u8) !void {
@@ -50,9 +63,9 @@ fn cmdBalance(allocator: Allocator, args: []const []const u8) !void {
     );
 
     std.log.info("Address: {s}", .{address});
-    std.log.info("Balance: {d} MIST", .{balance});
-}
-
-fn getRpcUrl() ?[]const u8 {
-    return std.process.getEnvVarOwned(std.heap.page_allocator, "SUI_RPC_URL") catch null;
+    std.log.info("Balance: {d} MIST ({d}.{d} SUI)", .{
+        balance,
+        balance / 1_000_000_000,
+        balance % 1_000_000_000,
+    });
 }
