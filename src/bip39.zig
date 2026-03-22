@@ -151,16 +151,21 @@ pub fn mnemonicToSeed(allocator: Allocator, mnemonic: []const u8, passphrase: ?[
 /// Derive Ed25519 key from seed using SLIP-0010
 /// Path format: "m/44'/784'/0'/0'/0'" (Sui coin type is 784)
 pub fn deriveEd25519Key(seed: [64]u8, path: []const u8) ![32]u8 {
-    // For now, return first 32 bytes of seed as master key
-    // Full SLIP-0010 implementation would do proper hierarchical derivation
-    // This is sufficient for basic BIP-39 to Ed25519 conversion
+    const slip0010 = @import("slip0010.zig");
+    return try slip0010.derivePath(&seed, path, std.heap.page_allocator);
+}
 
-    var key: [32]u8 = undefined;
-    @memcpy(&key, seed[0..32]);
+/// Derive Sui address at specific index
+/// Uses standard path: m/44'/784'/0'/0'/{index}'
+pub fn deriveSuiAddress(seed: [64]u8, index: u32) ![32]u8 {
+    const slip0010 = @import("slip0010.zig");
+    return try slip0010.deriveSuiAddressKey(&seed, 0, 0, index);
+}
 
-    _ = path; // TODO: Implement full SLIP-0010 path derivation
-
-    return key;
+/// Derive multiple Sui addresses from seed
+pub fn deriveSuiAddresses(seed: [64]u8, count: u8) ![][32]u8 {
+    const slip0010 = @import("slip0010.zig");
+    return try slip0010.deriveSuiAddresses(&seed, count);
 }
 
 /// Generate mnemonic and return with seed

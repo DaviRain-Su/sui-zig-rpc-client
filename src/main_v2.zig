@@ -4189,6 +4189,7 @@ fn cmdKey(allocator: Allocator, args: []const []const u8) !void {
         std.log.info("  generate                   Generate new keypair", .{});
         std.log.info("  generate --mnemonic        Generate keypair with BIP-39 mnemonic", .{});
         std.log.info("  generate --mnemonic --words24  Generate with 24-word mnemonic", .{});
+        std.log.info("  derive <mnemonic> [count]  Derive HD wallet addresses", .{});
         std.log.info("  show [address]             Show key info for address", .{});
         std.log.info("  list                       List all keys in keystore", .{});
         std.log.info("  import <path>              Import key from file", .{});
@@ -4328,6 +4329,49 @@ fn cmdKey(allocator: Allocator, args: []const []const u8) !void {
                 }
             }
         }
+
+    } else if (std.mem.eql(u8, action, "derive")) {
+        // Derive multiple addresses from mnemonic
+        if (args.len < 2) {
+            std.log.err("Usage: key derive <mnemonic> [count]", .{});
+            std.log.info("Example: key derive \"word1 word2 ...\" 5", .{});
+            std.process.exit(1);
+        }
+        
+        const mnemonic = args[1];
+        const count = if (args.len >= 3) try std.fmt.parseInt(u8, args[2], 10) else 5;
+        
+        if (count < 1 or count > 100) {
+            std.log.err("Count must be between 1 and 100", .{});
+            std.process.exit(1);
+        }
+        
+        std.log.info("Deriving {d} addresses from mnemonic...", .{count});
+        std.log.info("", .{});
+        
+        // Convert mnemonic to seed
+        const bip39 = @import("bip39.zig");
+        const seed = try bip39.mnemonicToSeed(allocator, mnemonic, null);
+        
+        // Derive addresses
+        std.log.info("HD Wallet Addresses (Path: m/44'/784'/0'/0'/{d}'):", .{0});
+        std.log.info("", .{});
+        
+        var i: u32 = 0;
+        while (i < count) : (i += 1) {
+            const secret_key = try bip39.deriveSuiAddress(seed, i);
+            const keypair = try KeyPair.fromSecretKey(secret_key);
+            
+            const signer = TransactionSigner.init(allocator, keypair);
+            const address = try signer.getAddress(allocator);
+            defer allocator.free(address);
+            
+            std.log.info("  {d:2}. {s} (m/44'/784'/0'/0'/{d}')", .{ i + 1, address, i });
+        }
+        
+        std.log.info("", .{});
+        std.log.info("These addresses are derived from the same mnemonic.", .{});
+        std.log.info("You can use any of them for transactions.", .{});
 
     } else if (std.mem.eql(u8, action, "import")) {
         if (args.len < 2) {
