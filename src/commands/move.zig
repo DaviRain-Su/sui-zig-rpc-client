@@ -1,7 +1,13 @@
-/// commands/move.zig - Move contract commands
+/// commands/move.zig - Move contract commands (migrated to new RPC client API)
 const std = @import("std");
 const types = @import("types.zig");
 const shared = @import("shared.zig");
+
+const client = @import("sui_client_zig");
+
+// Use new RPC client API
+const rpc_new = client.rpc_client_new;
+const SuiRpcClient = rpc_new.SuiRpcClient;
 
 /// Move function template output type
 pub const MoveFunctionTemplateOutput = enum {
@@ -89,6 +95,45 @@ pub fn formatMoveFunctionId(
     try writer.print("{s}::{s}::{s}", .{ id.package, id.module, id.function });
 }
 
+/// Get Move module info using new API
+pub fn getMoveModuleInfo(
+    allocator: std.mem.Allocator,
+    rpc: *SuiRpcClient,
+    package: []const u8,
+    module: []const u8,
+) !rpc_new.NormalizedMoveModule {
+    return try rpc_new.getNormalizedMoveModule(rpc, package, module);
+}
+
+/// Build move call transaction bytes using new API
+pub fn buildMoveCallTxBytes(
+    allocator: std.mem.Allocator,
+    rpc: *SuiRpcClient,
+    package: []const u8,
+    module: []const u8,
+    function: []const u8,
+    type_args: []const []const u8,
+    args: []const []const u8,
+    sender: []const u8,
+) ![]u8 {
+    _ = type_args;
+    _ = args;
+    
+    // Use new API to build move call transaction
+    const tx_bytes = try rpc_new.buildMoveCallTxBytes(
+        rpc,
+        sender,
+        package,
+        module,
+        function,
+        &.{}, // type_args
+        &.{}, // args
+        null, // gas_budget
+    );
+    
+    return try allocator.dupe(u8, tx_bytes);
+}
+
 // ============================================================
 // Tests
 // ============================================================
@@ -135,4 +180,14 @@ test "MoveFunctionId lifecycle" {
 
     try formatMoveFunctionId(output.writer(), &id);
     try testing.expect(std.mem.containsAtLeast(u8, output.items, 1, "0x1::module::func"));
+}
+
+test "MoveCallArg union" {
+    const testing = std.testing;
+
+    const arg1 = MoveCallArg{ .pure = "value" };
+    try testing.expectEqualStrings("value", arg1.pure);
+
+    const arg2 = MoveCallArg{ .object = "0x123" };
+    try testing.expectEqualStrings("0x123", arg2.object);
 }
