@@ -142,6 +142,8 @@ pub const SuiRpcClient = struct {
 
         // Use HTTP client
         const response = try self.makeHttpRequest(request);
+        errdefer self.allocator.free(response);
+
         try self.handleResponse(response);
 
         const elapsed = @as(u64, @intCast(std.time.milliTimestamp() - start_time));
