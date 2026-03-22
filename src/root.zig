@@ -28,3 +28,6 @@ pub const package_preset = @import("./package_preset.zig");
 pub const built_in_object_preset = @import("./builtin_object_preset.zig");
 pub const protocol_object_registry = @import("./protocol_object_registry.zig");
 pub const object_preset = @import("./object_preset.zig");
+
+// RPC adapter for gradual migration
+pub const rpc_adapter = @import("./rpc_adapter.zig");
