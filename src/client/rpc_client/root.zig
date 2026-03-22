@@ -18,6 +18,7 @@ pub const builder = @import("builder.zig");
 pub const selector = @import("selector.zig");
 pub const object_input = @import("object_input.zig");
 pub const executor = @import("executor.zig");
+pub const types_ext = @import("types_ext.zig");
 
 // Re-export commonly used types
 pub const ClientError = errors.ClientError;
@@ -92,7 +93,7 @@ pub const NormalizedMoveStruct = move_module.NormalizedMoveStruct;
 pub const NormalizedMoveFunction = move_module.NormalizedMoveFunction;
 pub const MoveField = move_module.MoveField;
 pub const MoveTypeSignature = move_module.MoveTypeSignature;
-pub const MoveTypeTag = move_module.MoveTypeTag;
+// Note: MoveTypeTag is exported from types_ext instead
 pub const MoveVisibility = move_module.MoveVisibility;
 pub const getNormalizedMoveModule = move_module.getNormalizedMoveModule;
 
@@ -145,6 +146,21 @@ pub const buildAndExecuteCommandSource = executor.buildAndExecuteCommandSource;
 pub const executeOrChallenge = executor.executeOrChallenge;
 pub const waitForTransactionConfirmation = executor.waitForTransactionConfirmation;
 
+// Re-export types_ext types
+pub const BcsSerializer = types_ext.BcsSerializer;
+pub const MoveTypeTag = types_ext.MoveTypeTag;
+pub const MoveStructTag = types_ext.MoveStructTag;
+pub const SuiAddress = types_ext.SuiAddress;
+pub const ObjectID = types_ext.ObjectID;
+pub const ObjectRef = types_ext.ObjectRef;
+pub const TransactionArgument = types_ext.TransactionArgument;
+pub const SharedObjectRef = types_ext.SharedObjectRef;
+pub const CallArgument = types_ext.CallArgument;
+pub const ObjectArg = types_ext.ObjectArg;
+pub const ProgrammableMoveCall = types_ext.ProgrammableMoveCall;
+pub const Command = types_ext.Command;
+pub const ProgrammableTransaction = types_ext.ProgrammableTransaction;
+
 // Re-export utilities
 pub const dupeOptionalString = utils.dupeOptionalString;
 pub const dupeStringList = utils.dupeStringList;
@@ -173,6 +189,7 @@ test "rpc_client module imports successfully" {
     _ = selector;
     _ = object_input;
     _ = executor;
+    _ = types_ext;
 }
 
 // Import integration tests
@@ -231,4 +248,9 @@ test "re-exports work correctly" {
     // Test executor types exist
     _ = ExecuteOrChallengePromptResult;
     _ = SessionChallengePrompt;
+
+    // Test types_ext types exist
+    _ = BcsSerializer;
+    _ = MoveTypeTag;
+    _ = ProgrammableTransaction;
 }
