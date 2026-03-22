@@ -3,3 +3,14 @@ zig-cache
 zig-out
 .DS_Store
 .gstack/
+
+# Move build artifacts
+fixtures/**/build/
+
+# macOS build artifacts
+*.o
+*.a
+*.tmp
+macos_bridge*
+test_bridge
+test_touchid

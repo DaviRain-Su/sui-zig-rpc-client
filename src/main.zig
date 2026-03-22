@@ -102,8 +102,6 @@ pub fn main() !void {
         try cmdZklogin(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "passkey")) {
         try cmdPasskey(allocator, args[2..]);
-    } else if (std.mem.eql(u8, command, "plugin")) {
-        try cmdPlugin(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "websocket") or std.mem.eql(u8, command, "ws")) {
         try cmdWebsocket(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "wallet")) {
