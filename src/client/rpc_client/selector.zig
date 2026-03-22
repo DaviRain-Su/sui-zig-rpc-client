@@ -44,9 +44,9 @@ pub const OwnedSelectedArgumentRequest = struct {
     /// The request value
     value: SelectedArgumentRequest,
     /// Owned target string
-    owned_target: ?[]u8 = null,
+    owned_target: ?[]const u8 = null,
     /// Owned type filter
-    owned_type_filter: ?[]u8 = null,
+    owned_type_filter: ?[]const u8 = null,
 
     pub fn deinit(self: *OwnedSelectedArgumentRequest, allocator: std.mem.Allocator) void {
         if (self.owned_target) |t| allocator.free(t);
@@ -137,7 +137,7 @@ pub fn parseSelectedArgumentRequestTokenWithDefaultOwner(
     _ = default_owner;
     
     // Split token by ':'
-    var parts = std.mem.split(u8, token, ":");
+    var parts = std.mem.splitScalar(u8, token, ':');
     
     const type_str = parts.next() orelse return error.InvalidTokenFormat;
     const target_str = parts.next() orelse return error.InvalidTokenFormat;
