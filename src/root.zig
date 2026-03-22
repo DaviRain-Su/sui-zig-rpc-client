@@ -34,3 +34,6 @@ pub const rpc_adapter = @import("./rpc_adapter.zig");
 
 // GraphQL client for advanced queries
 pub const graphql = @import("./graphql/root.zig");
+
+// Plugin system for extensibility
+pub const plugin = @import("./plugin/root.zig");

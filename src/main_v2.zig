@@ -102,6 +102,8 @@ pub fn main() !void {
         try cmdZklogin(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "passkey")) {
         try cmdPasskey(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "plugin")) {
+        try cmdPlugin(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "websocket") or std.mem.eql(u8, command, "ws")) {
         try cmdWebsocket(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "wallet")) {
@@ -160,6 +162,7 @@ fn printUsage(prog_name: []const u8) void {
     std.log.info("  passkey <action>            Passkey (WebAuthn) authentication", .{});
     std.log.info("  wallet <action>             Advanced wallet (sessions, policy)", .{});
     std.log.info("  graphql <action>            GraphQL queries", .{});
+    std.log.info("  plugin <action>             Plugin management", .{});
     std.log.info("  help                        Show this help", .{});
 }
 
@@ -3005,190 +3008,6 @@ fn printReplHelp() void {
     std.log.info("  exit/quit                     Exit interactive mode", .{});
 }
 
-// Plugin system
-const Plugin = struct {
-    name: []const u8,
-    version: []const u8,
-    description: []const u8,
-    commands: []const PluginCommand,
-};
-
-const PluginCommand = struct {
-    name: []const u8,
-    description: []const u8,
-    usage: []const u8,
-};
-
-fn cmdPlugin(_: Allocator, args: []const []const u8) !void {
-    if (args.len < 1) {
-        std.log.err("Usage: plugin <action>", .{});
-        std.log.info("Actions:", .{});
-        std.log.info("  list                    List available plugins", .{});
-        std.log.info("  info <name>             Show plugin info", .{});
-        std.log.info("  run <name> <args...>    Run a plugin command", .{});
-        std.process.exit(1);
-    }
-
-    const action = args[0];
-
-    if (std.mem.eql(u8, action, "list")) {
-        std.log.info("=== Available Plugins ===", .{});
-        std.log.info("---", .{});
-
-        // Built-in plugins
-        const plugins = [_]Plugin{
-            .{
-                .name = "portfolio-tracker",
-                .version = "1.0.0",
-                .description = "Track portfolio performance over time",
-                .commands = &[_]PluginCommand{
-                    .{ .name = "track", .description = "Start tracking an address", .usage = "portfolio-tracker track <address>" },
-                    .{ .name = "report", .description = "Generate performance report", .usage = "portfolio-tracker report <address>" },
-                },
-            },
-            .{
-                .name = "gas-optimizer",
-                .version = "1.0.0",
-                .description = "Analyze and optimize gas usage",
-                .commands = &[_]PluginCommand{
-                    .{ .name = "analyze", .description = "Analyze gas patterns", .usage = "gas-optimizer analyze <address>" },
-                    .{ .name = "suggest", .description = "Suggest optimizations", .usage = "gas-optimizer suggest <address>" },
-                },
-            },
-            .{
-                .name = "alert-system",
-                .version = "1.0.0",
-                .description = "Set up alerts for address activity",
-                .commands = &[_]PluginCommand{
-                    .{ .name = "watch", .description = "Watch address for changes", .usage = "alert-system watch <address>" },
-                    .{ .name = "set", .description = "Set alert threshold", .usage = "alert-system set <address> <threshold>" },
-                },
-            },
-        };
-
-        for (plugins) |plugin| {
-            std.log.info("{s} v{s}", .{ plugin.name, plugin.version });
-            std.log.info("  {s}", .{plugin.description});
-            std.log.info("  Commands: {d} available", .{plugin.commands.len});
-            std.log.info("---", .{});
-        }
-    } else if (std.mem.eql(u8, action, "info")) {
-        if (args.len < 2) {
-            std.log.err("Usage: plugin info <name>", .{});
-            std.process.exit(1);
-        }
-
-        const plugin_name = args[1];
-
-        // Show plugin info (mock for now)
-        std.log.info("=== Plugin: {s} ===", .{plugin_name});
-        std.log.info("---", .{});
-        std.log.info("Version: 1.0.0", .{});
-        std.log.info("Status: Built-in", .{});
-        std.log.info("---", .{});
-        std.log.info("Available Commands:", .{});
-
-        if (std.mem.eql(u8, plugin_name, "portfolio-tracker")) {
-            std.log.info("  track <address>     Start tracking portfolio", .{});
-            std.log.info("  report <address>    Generate performance report", .{});
-        } else if (std.mem.eql(u8, plugin_name, "gas-optimizer")) {
-            std.log.info("  analyze <address>   Analyze gas usage patterns", .{});
-            std.log.info("  suggest <address>   Get optimization suggestions", .{});
-        } else if (std.mem.eql(u8, plugin_name, "alert-system")) {
-            std.log.info("  watch <address>     Watch for activity", .{});
-            std.log.info("  set <addr> <thresh> Set alert threshold", .{});
-        } else {
-            std.log.info("  No commands available", .{});
-        }
-    } else if (std.mem.eql(u8, action, "run")) {
-        if (args.len < 3) {
-            std.log.err("Usage: plugin run <name> <command> [args...]", .{});
-            std.process.exit(1);
-        }
-
-        const plugin_name = args[1];
-        const plugin_cmd = args[2];
-        const plugin_args = args[3..];
-
-        // Run plugin command (mock implementation)
-        std.log.info("Running plugin: {s} {s}", .{ plugin_name, plugin_cmd });
-        std.log.info("---", .{});
-
-        if (std.mem.eql(u8, plugin_name, "portfolio-tracker")) {
-            if (std.mem.eql(u8, plugin_cmd, "track")) {
-                if (plugin_args.len < 1) {
-                    std.log.err("Usage: portfolio-tracker track <address>", .{});
-                    std.process.exit(1);
-                }
-                std.log.info("Starting portfolio tracking for {s}...", .{plugin_args[0]});
-                std.log.info("Portfolio tracking initialized.", .{});
-                std.log.info("Use 'portfolio-tracker report {s}' to view performance.", .{plugin_args[0]});
-            } else if (std.mem.eql(u8, plugin_cmd, "report")) {
-                if (plugin_args.len < 1) {
-                    std.log.err("Usage: portfolio-tracker report <address>", .{});
-                    std.process.exit(1);
-                }
-                std.log.info("Portfolio Report for {s}:", .{plugin_args[0]});
-                std.log.info("---", .{});
-                std.log.info("Total Value: 0.215 SUI", .{});
-                std.log.info("24h Change: +0.5%", .{});
-                std.log.info("7d Change: +2.3%", .{});
-                std.log.info("Assets: 4 objects", .{});
-            } else {
-                std.log.err("Unknown portfolio-tracker command: {s}", .{plugin_cmd});
-            }
-        } else if (std.mem.eql(u8, plugin_name, "gas-optimizer")) {
-            if (std.mem.eql(u8, plugin_cmd, "analyze")) {
-                if (plugin_args.len < 1) {
-                    std.log.err("Usage: gas-optimizer analyze <address>", .{});
-                    std.process.exit(1);
-                }
-                std.log.info("Gas Analysis for {s}:", .{plugin_args[0]});
-                std.log.info("---", .{});
-                std.log.info("Average Gas per Tx: 2,500 MIST", .{});
-                std.log.info("Most Expensive Tx: 15,000 MIST", .{});
-                std.log.info("Cheapest Tx: 1,200 MIST", .{});
-                std.log.info("---", .{});
-                std.log.info("Recommendation: Use batch transactions to save ~20% gas", .{});
-            } else if (std.mem.eql(u8, plugin_cmd, "suggest")) {
-                std.log.info("Gas Optimization Suggestions:", .{});
-                std.log.info("---", .{});
-                std.log.info("1. Combine multiple transfers into one transaction", .{});
-                std.log.info("2. Use reference gas price for timing", .{});
-                std.log.info("3. Merge small coin objects to reduce storage", .{});
-            } else {
-                std.log.err("Unknown gas-optimizer command: {s}", .{plugin_cmd});
-            }
-        } else if (std.mem.eql(u8, plugin_name, "alert-system")) {
-            if (std.mem.eql(u8, plugin_cmd, "watch")) {
-                if (plugin_args.len < 1) {
-                    std.log.err("Usage: alert-system watch <address>", .{});
-                    std.process.exit(1);
-                }
-                std.log.info("Now watching {s} for activity...", .{plugin_args[0]});
-                std.log.info("Alerts will be sent on:", .{});
-                std.log.info("  - Balance changes > 0.1 SUI", .{});
-                std.log.info("  - New transactions", .{});
-                std.log.info("  - Object count changes", .{});
-            } else if (std.mem.eql(u8, plugin_cmd, "set")) {
-                if (plugin_args.len < 2) {
-                    std.log.err("Usage: alert-system set <address> <threshold>", .{});
-                    std.process.exit(1);
-                }
-                std.log.info("Alert threshold set for {s}: {s} SUI", .{ plugin_args[0], plugin_args[1] });
-            } else {
-                std.log.err("Unknown alert-system command: {s}", .{plugin_cmd});
-            }
-        } else {
-            std.log.err("Unknown plugin: {s}", .{plugin_name});
-            std.log.info("Use 'plugin list' to see available plugins.", .{});
-        }
-    } else {
-        std.log.err("Unknown plugin action: {s}", .{action});
-        std.process.exit(1);
-    }
-}
-
 fn cmdAlias(allocator: Allocator, args: []const []const u8) !void {
     _ = allocator;
 
@@ -4901,5 +4720,13 @@ const graphql_cmd = @import("main_v2_graphql.zig");
 
 fn cmdGraphql(allocator: Allocator, args: []const []const u8) !void {
     try graphql_cmd.cmdGraphql(allocator, args);
+}
+
+
+// Import plugin command module
+const plugin_cmd = @import("main_v2_plugin.zig");
+
+fn cmdPlugin(allocator: Allocator, args: []const []const u8) !void {
+    try plugin_cmd.cmdPlugin(allocator, args);
 }
 
