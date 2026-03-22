@@ -17,6 +17,7 @@ pub const move_module = @import("move.zig");
 pub const builder = @import("builder.zig");
 pub const selector = @import("selector.zig");
 pub const object_input = @import("object_input.zig");
+pub const executor = @import("executor.zig");
 
 // Re-export commonly used types
 pub const ClientError = errors.ClientError;
@@ -134,6 +135,16 @@ pub const buildSharedObjectInputJson = object_input.buildSharedObjectInputJson;
 pub const buildGasDataJson = object_input.buildGasDataJson;
 pub const buildGasDataJsonWithAutoPayment = object_input.buildGasDataJsonWithAutoPayment;
 
+// Re-export executor types and functions
+pub const ExecuteOrChallengePromptResult = executor.ExecuteOrChallengePromptResult;
+pub const SessionChallengePrompt = executor.SessionChallengePrompt;
+pub const executeTransactionWithSignatures = executor.executeTransactionWithSignatures;
+pub const executeTransactionFromKeystore = executor.executeTransactionFromKeystore;
+pub const executeTransactionWithAutoGas = executor.executeTransactionWithAutoGas;
+pub const buildAndExecuteCommandSource = executor.buildAndExecuteCommandSource;
+pub const executeOrChallenge = executor.executeOrChallenge;
+pub const waitForTransactionConfirmation = executor.waitForTransactionConfirmation;
+
 // Re-export utilities
 pub const dupeOptionalString = utils.dupeOptionalString;
 pub const dupeStringList = utils.dupeStringList;
@@ -161,6 +172,7 @@ test "rpc_client module imports successfully" {
     _ = builder;
     _ = selector;
     _ = object_input;
+    _ = executor;
 }
 
 // Import integration tests
@@ -215,4 +227,8 @@ test "re-exports work correctly" {
     // Test object_input types exist
     _ = ObjectInputKind;
     _ = ObjectInput;
+
+    // Test executor types exist
+    _ = ExecuteOrChallengePromptResult;
+    _ = SessionChallengePrompt;
 }
