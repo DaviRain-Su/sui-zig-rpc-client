@@ -98,6 +98,10 @@ pub fn main() !void {
         try cmdKey(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "send")) {
         try cmdSend(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "zklogin")) {
+        try cmdZklogin(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "passkey")) {
+        try cmdPasskey(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "help") or std.mem.eql(u8, command, "--help")) {
         printUsage(args[0]);
     } else {
@@ -148,6 +152,8 @@ fn printUsage(prog_name: []const u8) void {
     std.log.info("  sign <action>               Sign transactions/messages", .{});
     std.log.info("  key <action>                Key management", .{});
     std.log.info("  send <from> <to> <amt>      Send SUI (build, sign, execute)", .{});
+    std.log.info("  zklogin <action>            zkLogin (OAuth) authentication", .{});
+    std.log.info("  passkey <action>            Passkey (WebAuthn) authentication", .{});
     std.log.info("  help                        Show this help", .{});
 }
 
@@ -4458,4 +4464,292 @@ fn executeTransaction(
     defer allocator.free(response);
     
     return try allocator.dupe(u8, response);
+}
+/// zkLogin and Passkey commands for main_v2.zig
+
+const advanced_auth = @import("advanced_auth.zig");
+const ZkLoginProvider = advanced_auth.ZkLoginProvider;
+const ZkLoginSession = advanced_auth.ZkLoginSession;
+const PasskeyAuthenticator = advanced_auth.PasskeyAuthenticator;
+
+fn cmdZklogin(allocator: Allocator, args: []const []const u8) !void {
+    if (args.len < 1) {
+        std.log.err("Usage: zklogin <action>", .{});
+        std.log.info("Actions:", .{});
+        std.log.info("  init --provider <p> --salt <s>  Initialize zkLogin session", .{});
+        std.log.info("  auth-url                        Generate OAuth URL", .{});
+        std.log.info("  complete --jwt <token>          Complete login with JWT", .{});
+        std.log.info("  address                         Show derived address", .{});
+        std.log.info("  prove --tx <bytes>              Generate zkProof (needs prover)", .{});
+        std.log.info("", .{});
+        std.log.info("Providers: google, twitch", .{});
+        std.process.exit(1);
+    }
+
+    const action = args[0];
+
+    if (std.mem.eql(u8, action, "init")) {
+        // Parse arguments
+        var provider: ?ZkLoginProvider = null;
+        var salt_hex: ?[]const u8 = null;
+
+        var i: usize = 1;
+        while (i < args.len) : (i += 1) {
+            if (std.mem.eql(u8, args[i], "--provider")) {
+                if (i + 1 >= args.len) {
+                    std.log.err("Missing value for --provider", .{});
+                    std.process.exit(1);
+                }
+                const p = args[i + 1];
+                if (std.mem.eql(u8, p, "google")) {
+                    provider = .google;
+                } else if (std.mem.eql(u8, p, "twitch")) {
+                    provider = .twitch;
+                } else {
+                    std.log.err("Unknown provider: {s}", .{p});
+                    std.process.exit(1);
+                }
+                i += 1;
+            } else if (std.mem.eql(u8, args[i], "--salt")) {
+                if (i + 1 >= args.len) {
+                    std.log.err("Missing value for --salt", .{});
+                    std.process.exit(1);
+                }
+                salt_hex = args[i + 1];
+                i += 1;
+            }
+        }
+
+        if (provider == null or salt_hex == null) {
+            std.log.err("Usage: zklogin init --provider <google|twitch> --salt <hex>", .{});
+            std.process.exit(1);
+        }
+
+        // Parse salt
+        var salt: [16]u8 = undefined;
+        if (salt_hex.?.len != 32) {
+            std.log.err("Salt must be 32 hex characters (16 bytes)", .{});
+            std.process.exit(1);
+        }
+        for (0..16) |j| {
+            salt[j] = try std.fmt.parseInt(u8, salt_hex.?[j * 2 .. j * 2 + 2], 16);
+        }
+
+        // Create session
+        const session = try ZkLoginSession.init(provider.?, salt);
+
+        std.log.info("=== zkLogin Session Initialized ===", .{});
+        std.log.info("", .{});
+        std.log.info("Provider: {s}", .{@tagName(provider.?)});
+        std.log.info("Salt: {s}", .{salt_hex.?});
+        
+        const pk_hex = try bytesToHex(allocator, &session.ephemeral_keypair.public_key);
+        defer allocator.free(pk_hex);
+        std.log.info("Ephemeral Public Key: {s}", .{pk_hex});
+        
+        std.log.info("", .{});
+        std.log.info("Next steps:", .{});
+        std.log.info("1. Run: zklogin auth-url", .{});
+        std.log.info("2. Complete OAuth flow", .{});
+        std.log.info("3. Run: zklogin complete --jwt <token>", .{});
+
+    } else if (std.mem.eql(u8, action, "auth-url")) {
+        std.log.info("=== zkLogin OAuth URL ===", .{});
+        std.log.info("", .{});
+        std.log.info("Google:", .{});
+        std.log.info("https://accounts.google.com/o/oauth2/v2/auth", .{});
+        std.log.info("  ?client_id=YOUR_CLIENT_ID", .{});
+        std.log.info("  &redirect_uri=http://localhost:3000/callback", .{});
+        std.log.info("  &response_type=id_token", .{});
+        std.log.info("  &scope=openid email", .{});
+        std.log.info("  &nonce=RANDOM_NONCE", .{});
+        std.log.info("", .{});
+        std.log.info("Twitch:", .{});
+        std.log.info("https://id.twitch.tv/oauth2/authorize", .{});
+        std.log.info("  ?client_id=YOUR_CLIENT_ID", .{});
+        std.log.info("  &redirect_uri=http://localhost:3000/callback", .{});
+        std.log.info("  &response_type=id_token", .{});
+        std.log.info("  &scope=openid", .{});
+        std.log.info("  &nonce=RANDOM_NONCE", .{});
+        std.log.info("", .{});
+        std.log.info("Note: You need to register an OAuth application first.", .{});
+
+    } else if (std.mem.eql(u8, action, "complete")) {
+        // Parse JWT
+        var jwt: ?[]const u8 = null;
+
+        var i: usize = 1;
+        while (i < args.len) : (i += 1) {
+            if (std.mem.eql(u8, args[i], "--jwt")) {
+                if (i + 1 >= args.len) {
+                    std.log.err("Missing value for --jwt", .{});
+                    std.process.exit(1);
+                }
+                jwt = args[i + 1];
+                i += 1;
+            }
+        }
+
+        if (jwt == null) {
+            std.log.err("Usage: zklogin complete --jwt <token>", .{});
+            std.process.exit(1);
+        }
+
+        std.log.info("=== zkLogin Complete ===", .{});
+        std.log.info("", .{});
+        std.log.info("JWT received: {s}...", .{jwt.?[0..@min(jwt.?.len, 50)]});
+        std.log.info("", .{});
+        std.log.info("Note: Full implementation requires:", .{});
+        std.log.info("  - JWT parsing and validation", .{});
+        std.log.info("  - Address derivation", .{});
+        std.log.info("  - zkProof generation (Groth16)", .{});
+
+    } else if (std.mem.eql(u8, action, "address")) {
+        std.log.info("=== zkLogin Address ===", .{});
+        std.log.info("", .{});
+        std.log.info("Address derivation formula:", .{});
+        std.log.info("  address = Blake2b-256(issuer || sub || salt)", .{});
+        std.log.info("", .{});
+        std.log.info("Where:", .{});
+        std.log.info("  issuer = OAuth provider URL", .{});
+        std.log.info("  sub = User unique identifier from JWT", .{});
+        std.log.info("  salt = 16-byte random value", .{});
+        std.log.info("", .{});
+        std.log.info("Note: Initialize a session first to derive your address.", .{});
+
+    } else if (std.mem.eql(u8, action, "prove")) {
+        std.log.info("=== zkProof Generation ===", .{});
+        std.log.info("", .{});
+        std.log.info("This requires a Groth16 prover service.", .{});
+        std.log.info("", .{});
+        std.log.info("Options:", .{});
+        std.log.info("  1. Local WASM prover (slow but private)", .{});
+        std.log.info("  2. Remote prover service (fast but trusted)", .{});
+        std.log.info("", .{});
+        std.log.info("Note: Proving is computationally expensive.", .{});
+        std.log.info("      A typical proof takes 2-5 seconds on modern hardware.", .{});
+
+    } else {
+        std.log.err("Unknown zklogin action: {s}", .{action});
+        std.process.exit(1);
+    }
+}
+
+fn cmdPasskey(_: Allocator, args: []const []const u8) !void {
+    if (args.len < 1) {
+        std.log.err("Usage: passkey <action>", .{});
+        std.log.info("Actions:", .{});
+        std.log.info("  create --name <name>            Create new Passkey", .{});
+        std.log.info("  list                            List Passkeys", .{});
+        std.log.info("  sign --id <id> --tx <bytes>     Sign transaction", .{});
+        std.log.info("  address --id <id>               Show derived address", .{});
+        std.log.info("  export --id <id>                Export public key", .{});
+        std.process.exit(1);
+    }
+
+    const action = args[0];
+
+    if (std.mem.eql(u8, action, "create")) {
+        var name: ?[]const u8 = null;
+
+        var i: usize = 1;
+        while (i < args.len) : (i += 1) {
+            if (std.mem.eql(u8, args[i], "--name")) {
+                if (i + 1 >= args.len) {
+                    std.log.err("Missing value for --name", .{});
+                    std.process.exit(1);
+                }
+                name = args[i + 1];
+                i += 1;
+            }
+        }
+
+        std.log.info("=== Create Passkey ===", .{});
+        std.log.info("", .{});
+        std.log.info("Name: {s}", .{name orelse "Sui Passkey"});
+        std.log.info("", .{});
+        std.log.info("Platform Support:", .{});
+        std.log.info("  macOS: Touch ID / Secure Enclave", .{});
+        std.log.info("  iOS: Face ID / Touch ID", .{});
+        std.log.info("  Android: BiometricPrompt", .{});
+        std.log.info("  Linux: libfido2 / hardware keys", .{});
+        std.log.info("", .{});
+        std.log.info("Note: This requires platform WebAuthn support.", .{});
+        std.log.info("      Zig implementation would need:", .{});
+        std.log.info("      - macOS: LocalAuthentication framework", .{});
+        std.log.info("      - Linux: libfido2 bindings", .{});
+        std.log.info("      - Or external tool like passkey-cli", .{});
+
+    } else if (std.mem.eql(u8, action, "list")) {
+        std.log.info("=== Passkey Credentials ===", .{});
+        std.log.info("", .{});
+        std.log.info("No credentials stored.", .{});
+        std.log.info("", .{});
+        std.log.info("Use 'passkey create' to add a credential.", .{});
+
+    } else if (std.mem.eql(u8, action, "sign")) {
+        var credential_id: ?[]const u8 = null;
+        var tx_bytes: ?[]const u8 = null;
+
+        var i: usize = 1;
+        while (i < args.len) : (i += 1) {
+            if (std.mem.eql(u8, args[i], "--id")) {
+                if (i + 1 >= args.len) {
+                    std.log.err("Missing value for --id", .{});
+                    std.process.exit(1);
+                }
+                credential_id = args[i + 1];
+                i += 1;
+            } else if (std.mem.eql(u8, args[i], "--tx")) {
+                if (i + 1 >= args.len) {
+                    std.log.err("Missing value for --tx", .{});
+                    std.process.exit(1);
+                }
+                tx_bytes = args[i + 1];
+                i += 1;
+            }
+        }
+
+        if (credential_id == null or tx_bytes == null) {
+            std.log.err("Usage: passkey sign --id <credential_id> --tx <tx_bytes>", .{});
+            std.process.exit(1);
+        }
+
+        std.log.info("=== Sign with Passkey ===", .{});
+        std.log.info("", .{});
+        std.log.info("Credential ID: {s}", .{credential_id.?});
+        std.log.info("Transaction: {s}...", .{tx_bytes.?[0..@min(tx_bytes.?.len, 50)]});
+        std.log.info("", .{});
+        std.log.info("Signing process:", .{});
+        std.log.info("  1. Prepare WebAuthn assertion request", .{});
+        std.log.info("  2. Call platform authenticator", .{});
+        std.log.info("  3. User verifies (biometric/PIN)", .{});
+        std.log.info("  4. Get signature (r || s)", .{});
+        std.log.info("  5. Construct Sui transaction", .{});
+
+    } else if (std.mem.eql(u8, action, "address")) {
+        std.log.info("=== Passkey Address ===", .{});
+        std.log.info("", .{});
+        std.log.info("Address derivation:", .{});
+        std.log.info("  1. Extract P-256 public key from credential", .{});
+        std.log.info("  2. Compress to 33 bytes (0x02 || x)", .{});
+        std.log.info("  3. Hash with Blake2b-256", .{});
+        std.log.info("  4. Take first 20 bytes, prefix with '0x'", .{});
+        std.log.info("", .{});
+        std.log.info("Result: 0x + 40 hex characters", .{});
+
+    } else if (std.mem.eql(u8, action, "export")) {
+        std.log.info("=== Export Passkey ===", .{});
+        std.log.info("", .{});
+        std.log.info("Public key format:", .{});
+        std.log.info("  Uncompressed: 0x04 || x (32 bytes) || y (32 bytes)", .{});
+        std.log.info("  Compressed: 0x02/0x03 || x (32 bytes)", .{});
+        std.log.info("", .{});
+        std.log.info("Note: Private key never leaves the authenticator!", .{});
+        std.log.info("      This is the security guarantee of Passkeys.", .{});
+
+    } else {
+        std.log.err("Unknown passkey action: {s}", .{action});
+        std.process.exit(1);
+    }
 }
