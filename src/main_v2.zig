@@ -520,21 +520,27 @@ fn cmdChain(allocator: Allocator, _: []const []const u8) !void {
 
 fn cmdTransfer(allocator: Allocator, args: []const []const u8) !void {
     if (args.len < 3) {
-        std.log.err("Usage: transfer <from_address> <to_address> <amount_mist>", .{});
-        std.log.info("Note: This is a dry-run command that builds but does not send the transaction.", .{});
+        std.log.err("Usage: transfer <from_address> <to_address> <amount_mist> [--export]", .{});
+        std.log.info("Options:", .{});
+        std.log.info("  --export    Export transaction for Sui CLI instead of dry-run", .{});
+        std.log.info("", .{});
+        std.log.info("Example:", .{});
+        std.log.info("  sui-zig-rpc-client-v2 transfer 0xFROM 0xTO 1000000 --export", .{});
+        std.log.info("  sui client execute-signed-tx --tx-data $(cat tx.json)", .{});
         std.process.exit(1);
     }
 
     const from = args[0];
     const to = args[1];
     const amount = try std.fmt.parseInt(u64, args[2], 10);
+    const export_mode = args.len > 3 and std.mem.eql(u8, args[3], "--export");
 
     const rpc_url = getRpcUrl() orelse "https://fullnode.mainnet.sui.io:443";
 
     var rpc_client = try SuiRpcClient.init(allocator, rpc_url);
     defer rpc_client.deinit();
 
-    std.log.info("Building transfer transaction (DRY RUN - not sending):", .{});
+    std.log.info("Building transfer transaction:", .{});
     std.log.info("  From: {s}", .{from});
     std.log.info("  To: {s}", .{to});
     std.log.info("  Amount: {d} MIST ({d}.{d} SUI)", .{
@@ -584,23 +590,39 @@ fn cmdTransfer(allocator: Allocator, args: []const []const u8) !void {
         return;
     }
 
-    // Step 2: Build the transaction block (simplified representation)
-    std.log.info("  PTB Structure:", .{});
-    std.log.info("    Version: 1", .{});
-    std.log.info("    Sender: {s}", .{from});
-    std.log.info("    Gas Data:", .{});
-    std.log.info("      Payment: {s}", .{gas_coin_id.?});
-    std.log.info("      Budget: 5000000 MIST", .{});
-    std.log.info("    Inputs:", .{});
-    std.log.info("      0: Amount = {d} MIST", .{amount});
-    std.log.info("      1: Recipient = {s}", .{to});
-    std.log.info("    Commands:", .{});
-    std.log.info("      0: TransferObjects([Input(0)], Input(1))", .{});
+    if (export_mode) {
+        // Export mode: Generate Sui CLI compatible command
+        std.log.info("", .{});
+        std.log.info("=== Sui CLI Command ===", .{});
+        std.log.info("sui client pay \\", .{});
+        std.log.info("  --input-coins {s} \\", .{gas_coin_id.?});
+        std.log.info("  --recipients {s} \\", .{to});
+        std.log.info("  --amounts {d} \\", .{amount});
+        std.log.info("  --gas-budget 5000000 \\", .{});
+        std.log.info("  --sender {s}", .{from});
+        std.log.info("", .{});
+        std.log.info("Or use the simpler transfer command:", .{});
+        std.log.info("sui client transfer-sui \\", .{});
+        std.log.info("  --to {s} \\", .{to});
+        std.log.info("  --sui-coin-object-id {s} \\", .{gas_coin_id.?});
+        std.log.info("  --gas-budget 5000000 \\", .{});
+        std.log.info("  --amount {d}", .{amount});
+    } else {
+        // Dry-run mode
+        std.log.info("  PTB Structure:", .{});
+        std.log.info("    Version: 1", .{});
+        std.log.info("    Sender: {s}", .{from});
+        std.log.info("    Gas Data:", .{});
+        std.log.info("      Payment: {s}", .{gas_coin_id.?});
+        std.log.info("      Budget: 5000000 MIST", .{});
+        std.log.info("    Inputs:", .{});
+        std.log.info("      0: Amount = {d} MIST", .{amount});
+        std.log.info("      1: Recipient = {s}", .{to});
+        std.log.info("    Commands:", .{});
+        std.log.info("      0: TransferObjects([Input(0)], Input(1))", .{});
 
-    std.log.info("", .{});
-    std.log.info("Note: This is a demonstration. Full implementation requires:", .{});
-    std.log.info("  - BCS serialization of the transaction", .{});
-    std.log.info("  - Signing with sender's private key", .{});
-    std.log.info("  - Calling sui_executeTransactionBlock", .{});
-    std.log.info("  - Transaction simulation before execution", .{});
+        std.log.info("", .{});
+        std.log.info("Note: This is a dry-run demonstration.", .{});
+        std.log.info("Use --export to get the Sui CLI command for actual execution.", .{});
+    }
 }
