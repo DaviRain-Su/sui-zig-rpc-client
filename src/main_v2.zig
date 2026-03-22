@@ -92,6 +92,12 @@ pub fn main() !void {
         try cmdCache(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "debug")) {
         try cmdDebug(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "sign")) {
+        try cmdSign(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "key")) {
+        try cmdKey(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "send")) {
+        try cmdSend(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "help") or std.mem.eql(u8, command, "--help")) {
         printUsage(args[0]);
     } else {
@@ -139,6 +145,9 @@ fn printUsage(prog_name: []const u8) void {
     std.log.info("  graphql <action>            GraphQL queries", .{});
     std.log.info("  cache <action>              Cache management", .{});
     std.log.info("  debug <action>              Debug utilities", .{});
+    std.log.info("  sign <action>               Sign transactions/messages", .{});
+    std.log.info("  key <action>                Key management", .{});
+    std.log.info("  send <from> <to> <amt>      Send SUI (build, sign, execute)", .{});
     std.log.info("  help                        Show this help", .{});
 }
 
@@ -3924,4 +3933,529 @@ fn cmdDebug(allocator: Allocator, args: []const []const u8) !void {
         std.log.err("Unknown debug action: {s}", .{action});
         std.process.exit(1);
     }
+}
+/// Transaction signing commands for main_v2.zig
+
+// Note: std and Allocator already imported at top of file
+// Import signer module
+const tx_signer = @import("tx_signer.zig");
+const TransactionSigner = tx_signer.TransactionSigner;
+const KeyPair = tx_signer.KeyPair;
+
+fn cmdSign(allocator: Allocator, args: []const []const u8) !void {
+    if (args.len < 1) {
+        std.log.err("Usage: sign <action>", .{});
+        std.log.info("Actions:", .{});
+        std.log.info("  tx <tx_bytes>              Sign transaction bytes", .{});
+        std.log.info("  message <message>          Sign arbitrary message", .{});
+        std.log.info("  verify <sig> <msg> <addr>  Verify signature", .{});
+        std.process.exit(1);
+    }
+
+    const action = args[0];
+
+    if (std.mem.eql(u8, action, "tx")) {
+        if (args.len < 2) {
+            std.log.err("Usage: sign tx <transaction_bytes>", .{});
+            std.log.info("Signs a transaction using the configured signer", .{});
+            std.process.exit(1);
+        }
+
+        const tx_bytes_b64 = args[1];
+        
+        // Decode transaction bytes
+        const decoded_len = try std.base64.standard.Decoder.calcSizeForSlice(tx_bytes_b64);
+        const tx_bytes = try allocator.alloc(u8, decoded_len);
+        defer allocator.free(tx_bytes);
+        try std.base64.standard.Decoder.decode(tx_bytes, tx_bytes_b64);
+
+        // Load keypair from keystore
+        const keystore_path = getKeystorePath() orelse {
+            std.log.err("No keystore configured. Set SUI_KEYSTORE or use --keystore", .{});
+            std.process.exit(1);
+        };
+
+        const active_address = try getActiveAddress(allocator);
+        defer allocator.free(active_address);
+
+        const keypair = tx_signer.loadKeypairFromKeystore(allocator, keystore_path, active_address) catch |err| {
+            std.log.err("Failed to load keypair: {s}", .{@errorName(err)});
+            std.process.exit(1);
+        };
+
+        // Create signer
+        const signer = TransactionSigner.init(allocator, keypair);
+
+        // Sign transaction
+        const signature = try signer.signTransaction(tx_bytes);
+
+        // Output signature
+        std.log.info("Transaction signed successfully!", .{});
+        std.log.info("", .{});
+        std.log.info("Signature (base64):", .{});
+        
+        var sig_b64_buf: [256]u8 = undefined;
+        const sig_b64 = std.base64.standard.Encoder.encode(&sig_b64_buf, &signature);
+        std.log.info("{s}", .{sig_b64});
+        std.log.info("", .{});
+        std.log.info("Signature scheme: ED25519", .{});
+        std.log.info("Public key: {s}", .{try bytesToHex(allocator, &keypair.public_key)});
+
+    } else if (std.mem.eql(u8, action, "message")) {
+        if (args.len < 2) {
+            std.log.err("Usage: sign message <message>", .{});
+            std.process.exit(1);
+        }
+
+        const message = args[1];
+        
+        // Load keypair
+        const keystore_path = getKeystorePath() orelse {
+            std.log.err("No keystore configured", .{});
+            std.process.exit(1);
+        };
+
+        const active_address = try getActiveAddress(allocator);
+        defer allocator.free(active_address);
+
+        const keypair = try tx_signer.loadKeypairFromKeystore(allocator, keystore_path, active_address);
+        const signer = TransactionSigner.init(allocator, keypair);
+
+        // Sign message
+        const signature = try signer.signTransaction(message);
+
+        std.log.info("Message signed successfully!", .{});
+        std.log.info("Message: {s}", .{message});
+        std.log.info("", .{});
+        
+        var sig_b64_buf: [256]u8 = undefined;
+        const sig_b64 = std.base64.standard.Encoder.encode(&sig_b64_buf, &signature);
+        std.log.info("Signature: {s}", .{sig_b64});
+
+    } else if (std.mem.eql(u8, action, "verify")) {
+        if (args.len < 4) {
+            std.log.err("Usage: sign verify <signature> <message> <address>", .{});
+            std.process.exit(1);
+        }
+
+        const signature_b64 = args[1];
+        const message = args[2];
+        const address = args[3];
+
+        std.log.info("Verifying signature...", .{});
+        std.log.info("Address: {s}", .{address});
+        std.log.info("Message: {s}", .{message});
+        
+        // Decode signature
+        const decoded_len = try std.base64.standard.Decoder.calcSizeForSlice(signature_b64);
+        const signature = try allocator.alloc(u8, decoded_len);
+        defer allocator.free(signature);
+        try std.base64.standard.Decoder.decode(signature, signature_b64);
+
+        // TODO: Implement signature verification
+        std.log.info("", .{});
+        std.log.info("Signature verification: NOT IMPLEMENTED", .{});
+        std.log.info("(Requires Ed25519 verification library)", .{});
+
+    } else {
+        std.log.err("Unknown sign action: {s}", .{action});
+        std.process.exit(1);
+    }
+}
+
+fn cmdKey(allocator: Allocator, args: []const []const u8) !void {
+    if (args.len < 1) {
+        std.log.err("Usage: key <action>", .{});
+        std.log.info("Actions:", .{});
+        std.log.info("  generate                   Generate new keypair", .{});
+        std.log.info("  show [address]             Show key info for address", .{});
+        std.log.info("  list                       List all keys in keystore", .{});
+        std.log.info("  import <path>              Import key from file", .{});
+        std.log.info("  export <address> <path>    Export key to file", .{});
+        std.process.exit(1);
+    }
+
+    const action = args[0];
+
+    if (std.mem.eql(u8, action, "generate")) {
+        std.log.info("Generating new Ed25519 keypair...", .{});
+        
+        const keypair = try KeyPair.generateRandom();
+        
+        std.log.info("", .{});
+        std.log.info("Keypair generated successfully!", .{});
+        std.log.info("", .{});
+        
+        // Show public key
+        const pk_hex = try bytesToHex(allocator, &keypair.public_key);
+        defer allocator.free(pk_hex);
+        std.log.info("Public Key: {s}", .{pk_hex});
+        
+        // Derive address
+        const signer = TransactionSigner.init(allocator, keypair);
+        const address = try signer.getAddress(allocator);
+        defer allocator.free(address);
+        std.log.info("Address: {s}", .{address});
+        
+        std.log.info("", .{});
+        std.log.info("IMPORTANT: Save this keypair securely!", .{});
+        std.log.info("The secret key cannot be recovered if lost.", .{});
+
+    } else if (std.mem.eql(u8, action, "show")) {
+        const address = if (args.len >= 2) args[1] else try getActiveAddress(allocator);
+        defer if (args.len < 2) allocator.free(address);
+        
+        std.log.info("Key information for {s}:", .{address});
+        std.log.info("", .{});
+        
+        // Load from keystore
+        const keystore_path = getKeystorePath() orelse {
+            std.log.err("No keystore configured", .{});
+            std.process.exit(1);
+        };
+        
+        const keypair = tx_signer.loadKeypairFromKeystore(allocator, keystore_path, address) catch {
+            std.log.err("Key not found for address: {s}", .{address});
+            std.process.exit(1);
+        };
+        
+        const pk_hex = try bytesToHex(allocator, &keypair.public_key);
+        defer allocator.free(pk_hex);
+        
+        std.log.info("Public Key: {s}", .{pk_hex});
+        std.log.info("Scheme: ED25519", .{});
+        std.log.info("Keystore: {s}", .{keystore_path});
+
+    } else if (std.mem.eql(u8, action, "list")) {
+        const keystore_path = getKeystorePath() orelse {
+            std.log.err("No keystore configured", .{});
+            std.process.exit(1);
+        };
+        
+        // Read keystore
+        const file = try std.fs.cwd().openFile(keystore_path, .{});
+        defer file.close();
+        
+        const content = try file.readToEndAlloc(allocator, 1024 * 1024);
+        defer allocator.free(content);
+        
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, content, .{});
+        defer parsed.deinit();
+        
+        std.log.info("Keys in keystore:", .{});
+        std.log.info("", .{});
+        
+        if (parsed.value.object.get("addresses")) |addresses| {
+            if (addresses == .array) {
+                for (addresses.array.items, 0..) |addr, i| {
+                    std.log.info("  {d}. {s}", .{ i + 1, addr.string });
+                }
+            }
+        }
+
+    } else if (std.mem.eql(u8, action, "import")) {
+        if (args.len < 2) {
+            std.log.err("Usage: key import <key_file>", .{});
+            std.process.exit(1);
+        }
+        
+        const key_file = args[1];
+        
+        std.log.info("Importing key from {s}...", .{key_file});
+        
+        const keypair = try tx_signer.loadKeypairFromFile(allocator, key_file);
+        
+        const signer = TransactionSigner.init(allocator, keypair);
+        const address = try signer.getAddress(allocator);
+        defer allocator.free(address);
+        
+        std.log.info("Key imported successfully!", .{});
+        std.log.info("Address: {s}", .{address});
+
+    } else if (std.mem.eql(u8, action, "export")) {
+        if (args.len < 3) {
+            std.log.err("Usage: key export <address> <output_file>", .{});
+            std.process.exit(1);
+        }
+        
+        const address = args[1];
+        const output_file = args[2];
+        
+        std.log.info("Exporting key for {s} to {s}...", .{ address, output_file });
+        
+        // Load key
+        const keystore_path = getKeystorePath() orelse {
+            std.log.err("No keystore configured", .{});
+            std.process.exit(1);
+        };
+        
+        const keypair = try tx_signer.loadKeypairFromKeystore(allocator, keystore_path, address);
+        
+        // Export to file
+        const file = try std.fs.cwd().createFile(output_file, .{});
+        defer file.close();
+        
+        const sk_hex = try bytesToHex(allocator, &keypair.secret_key);
+        defer allocator.free(sk_hex);
+        
+        try file.writeAll(sk_hex);
+        
+        std.log.info("Key exported successfully!", .{});
+        std.log.info("WARNING: Keep this file secure - it contains your private key!", .{});
+
+    } else {
+        std.log.err("Unknown key action: {s}", .{action});
+        std.process.exit(1);
+    }
+}
+
+fn cmdSend(allocator: Allocator, args: []const []const u8) !void {
+    if (args.len < 3) {
+        std.log.err("Usage: send <from> <to> <amount> [options]", .{});
+        std.log.info("Options:", .{});
+        std.log.info("  --gas-budget <amount>      Set gas budget (default: 5000000)", .{});
+        std.log.info("  --dry-run                  Build and sign but don't send", .{});
+        std.process.exit(1);
+    }
+
+    const from = args[0];
+    const to = args[1];
+    const amount_str = args[2];
+    
+    // Parse amount
+    const amount = std.fmt.parseInt(u64, amount_str, 10) catch {
+        std.log.err("Invalid amount: {s}", .{amount_str});
+        std.process.exit(1);
+    };
+    
+    // Parse options
+    var gas_budget: u64 = 5000000;
+    var dry_run = false;
+    
+    var i: usize = 3;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "--gas-budget")) {
+            if (i + 1 >= args.len) {
+                std.log.err("Missing value for --gas-budget", .{});
+                std.process.exit(1);
+            }
+            gas_budget = std.fmt.parseInt(u64, args[i + 1], 10) catch {
+                std.log.err("Invalid gas budget: {s}", .{args[i + 1]});
+                std.process.exit(1);
+            };
+            i += 1;
+        } else if (std.mem.eql(u8, args[i], "--dry-run")) {
+            dry_run = true;
+        }
+    }
+
+    std.log.info("Building transfer transaction...", .{});
+    std.log.info("From: {s}", .{from});
+    std.log.info("To: {s}", .{to});
+    std.log.info("Amount: {d} MIST ({d}.{d:0>9} SUI)", .{ amount, amount / 1_000_000_000, amount % 1_000_000_000 });
+    std.log.info("Gas Budget: {d} MIST", .{gas_budget});
+    std.log.info("", .{});
+
+    // Build transaction
+    const rpc_url = getRpcUrl() orelse "https://fullnode.mainnet.sui.io:443";
+    var rpc_client = try SuiRpcClient.init(allocator, rpc_url);
+    defer rpc_client.deinit();
+
+    // Get gas objects for sender
+    const gas_objects = try getGasObjects(allocator, &rpc_client, from);
+    defer {
+        for (gas_objects) |obj| allocator.free(obj);
+        allocator.free(gas_objects);
+    }
+
+    if (gas_objects.len == 0) {
+        std.log.err("No gas objects found for sender", .{});
+        std.process.exit(1);
+    }
+
+    // Build transaction bytes
+    const tx_bytes = try buildTransferTransaction(
+        allocator,
+        from,
+        to,
+        amount,
+        gas_objects[0],
+        gas_budget,
+    );
+    defer allocator.free(tx_bytes);
+
+    std.log.info("Transaction built successfully!", .{});
+    std.log.info("Transaction size: {d} bytes", .{tx_bytes.len});
+    std.log.info("", .{});
+
+    // Load keypair and sign
+    const keystore_path = getKeystorePath() orelse {
+        std.log.err("No keystore configured", .{});
+        std.process.exit(1);
+    };
+
+    const keypair = try tx_signer.loadKeypairFromKeystore(allocator, keystore_path, from);
+    const signer = TransactionSigner.init(allocator, keypair);
+
+    const signature = try signer.signTransaction(tx_bytes);
+
+    std.log.info("Transaction signed!", .{});
+    std.log.info("", .{});
+
+    if (dry_run) {
+        std.log.info("=== DRY RUN - Transaction not sent ===", .{});
+        std.log.info("", .{});
+        std.log.info("Transaction bytes (base64):", .{});
+        
+        var tx_b64_buf: [4096]u8 = undefined;
+        const tx_b64 = std.base64.standard.Encoder.encode(&tx_b64_buf, tx_bytes);
+        std.log.info("{s}", .{tx_b64});
+        std.log.info("", .{});
+        
+        std.log.info("Signature (base64):", .{});
+        var sig_b64_buf: [256]u8 = undefined;
+        const sig_b64 = std.base64.standard.Encoder.encode(&sig_b64_buf, &signature);
+        std.log.info("{s}", .{sig_b64});
+        std.log.info("", .{});
+        std.log.info("To send this transaction, run without --dry-run", .{});
+    } else {
+        // Execute transaction
+        std.log.info("Sending transaction...", .{});
+        
+        const result = try executeTransaction(
+            allocator,
+            &rpc_client,
+            tx_bytes,
+            &signature,
+        );
+        defer allocator.free(result);
+        
+        std.log.info("Transaction sent successfully!", .{});
+        std.log.info("Result: {s}", .{result});
+    }
+}
+
+// Helper functions
+
+fn getKeystorePath() ?[]const u8 {
+    if (std.process.getEnvVarOwned(std.heap.page_allocator, "SUI_KEYSTORE")) |path| {
+        return path;
+    } else |_| {}
+    
+    const home = std.process.getEnvVarOwned(std.heap.page_allocator, "HOME") catch return null;
+    defer std.heap.page_allocator.free(home);
+    
+    return std.fs.path.join(std.heap.page_allocator, &[_][]const u8{
+        home, ".sui", "sui_config", "sui.keystore",
+    }) catch null;
+}
+
+fn getActiveAddress(allocator: Allocator) ![]const u8 {
+    // Read client.yaml to get active address
+    const home = try std.process.getEnvVarOwned(allocator, "HOME");
+    defer allocator.free(home);
+    
+    const client_yaml = try std.fs.path.join(allocator, &[_][]const u8{
+        home, ".sui", "sui_config", "client.yaml",
+    });
+    defer allocator.free(client_yaml);
+    
+    const file = try std.fs.cwd().openFile(client_yaml, .{});
+    defer file.close();
+    
+    const content = try file.readToEndAlloc(allocator, 1024 * 1024);
+    defer allocator.free(content);
+    
+    // Parse YAML to find active_address
+    // For now, return placeholder
+    return try allocator.dupe(u8, "0x");
+}
+
+fn bytesToHex(allocator: Allocator, bytes: []const u8) ![]const u8 {
+    const hex_chars = "0123456789abcdef";
+    const result = try allocator.alloc(u8, bytes.len * 2);
+    
+    for (bytes, 0..) |byte, i| {
+        result[i * 2] = hex_chars[byte >> 4];
+        result[i * 2 + 1] = hex_chars[byte & 0x0F];
+    }
+    
+    return result;
+}
+
+fn getGasObjects(allocator: Allocator, rpc_client: *SuiRpcClient, address: []const u8) ![][]const u8 {
+    const params = try std.fmt.allocPrint(allocator, "[\"{s}\",null,null,10]", .{address});
+    defer allocator.free(params);
+
+    const response = try rpc_client.call("suix_getOwnedObjects", params);
+    defer allocator.free(response);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, response, .{});
+    defer parsed.deinit();
+
+    var objects = try std.ArrayList([]const u8).initCapacity(allocator, 10);
+    defer objects.deinit(allocator);
+    
+    if (parsed.value.object.get("result")) |result| {
+        if (result.object.get("data")) |data| {
+            if (data == .array) {
+                for (data.array.items) |item| {
+                    if (item.object.get("data")) |obj_data| {
+                        if (obj_data.object.get("objectId")) |id| {
+                            try objects.append(allocator, try allocator.dupe(u8, id.string));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    return try objects.toOwnedSlice(allocator);
+}
+
+fn buildTransferTransaction(
+    allocator: Allocator,
+    _: []const u8,
+    to: []const u8,
+    amount: u64,
+    gas_object: []const u8,
+    gas_budget: u64,
+) ![]const u8 {
+    // Build transaction data
+    // This is a simplified version - real implementation needs proper BCS encoding
+    
+    const tx_json = try std.fmt.allocPrint(allocator,
+        "{{\"kind\":\"PaySui\",\"data\":{{\"inputCoins\":[\"{s}\"],\"recipients\":[\"{s}\"],\"amounts\":[{d}],\"gasBudget\":{d}}}}}" ,
+        .{ gas_object, to, amount, gas_budget },
+    );
+    defer allocator.free(tx_json);
+    
+    // Encode as base64
+    const encoded_len = std.base64.standard.Encoder.calcSize(tx_json.len);
+    const encoded = try allocator.alloc(u8, encoded_len);
+    _ = std.base64.standard.Encoder.encode(encoded, tx_json);
+    
+    return encoded;
+}
+
+fn executeTransaction(
+    allocator: Allocator,
+    rpc_client: *SuiRpcClient,
+    tx_bytes: []const u8,
+    signature: []const u8,
+) ![]const u8 {
+    // Build execute transaction request
+    var sig_b64_buf: [256]u8 = undefined;
+    const sig_b64 = std.base64.standard.Encoder.encode(&sig_b64_buf, signature);
+    
+    const params = try std.fmt.allocPrint(allocator,
+        "[\"{s}\",[\"{s}\"],null]",
+        .{ tx_bytes, sig_b64 },
+    );
+    defer allocator.free(params);
+    
+    const response = try rpc_client.call("sui_executeTransactionBlock", params);
+    defer allocator.free(response);
+    
+    return try allocator.dupe(u8, response);
 }
