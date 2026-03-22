@@ -70,6 +70,12 @@ pub fn main() !void {
         try cmdAnalytics(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "compare")) {
         try cmdCompare(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "monitor")) {
+        try cmdMonitor(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "export")) {
+        try cmdExport(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "stats")) {
+        try cmdStats(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "help") or std.mem.eql(u8, command, "--help")) {
         printUsage(args[0]);
     } else {
@@ -106,6 +112,9 @@ fn printUsage(prog_name: []const u8) void {
     std.log.info("  history <type> <target>     Query historical data", .{});
     std.log.info("  analytics <type> <address>  Analyze address data", .{});
     std.log.info("  compare <addr1> <addr2>     Compare two addresses", .{});
+    std.log.info("  monitor <type>              Real-time monitoring", .{});
+    std.log.info("  export <type> <target> <file> Export data to CSV", .{});
+    std.log.info("  stats <type>                Show statistics", .{});
     std.log.info("  help                        Show this help", .{});
 }
 
@@ -2271,5 +2280,635 @@ fn cmdCompare(allocator: Allocator, args: []const []const u8) !void {
         std.log.info("B has {d} more objects than A", .{count2 - count1});
     } else {
         std.log.info("Both have equal object count", .{});
+    }
+}
+/// Monitoring and export commands for main_v2.zig
+
+fn cmdMonitor(allocator: Allocator, args: []const []const u8) !void {
+    if (args.len < 1) {
+        std.log.err("Usage: monitor <type>", .{});
+        std.log.info("Types:", .{});
+        std.log.info("  network                     Monitor network health", .{});
+        std.log.info("  address <address>           Monitor address activity", .{});
+        std.log.info("  gas                         Monitor gas price changes", .{});
+        std.log.info("  tps                         Monitor transactions per second", .{});
+        std.process.exit(1);
+    }
+
+    const monitor_type = args[0];
+    const rpc_url = getRpcUrl() orelse "https://fullnode.mainnet.sui.io:443";
+
+    var rpc_client = try SuiRpcClient.init(allocator, rpc_url);
+    defer rpc_client.deinit();
+
+    if (std.mem.eql(u8, monitor_type, "network")) {
+        std.log.info("=== Network Health Monitor ===", .{});
+        std.log.info("Monitoring network status...", .{});
+        std.log.info("(Press Ctrl+C to stop)", .{});
+        std.log.info("", .{});
+
+        var last_checkpoint: u64 = 0;
+        var poll_count: u32 = 0;
+
+        while (poll_count < 30) : (poll_count += 1) {
+            // Get latest checkpoint
+            const cp_response = try rpc_client.call("sui_getLatestCheckpointSequenceNumber", "[]");
+            defer allocator.free(cp_response);
+
+            const cp_parsed = try std.json.parseFromSlice(std.json.Value, allocator, cp_response, .{});
+            defer cp_parsed.deinit();
+
+            const current_cp: u64 = if (cp_parsed.value.object.get("result")) |result|
+                if (result == .integer) @intCast(result.integer) else std.fmt.parseInt(u64, result.string, 10) catch 0
+            else
+                0;
+
+            // Get current epoch
+            const epoch_response = try rpc_client.call("sui_getEpoch", "[]");
+            defer allocator.free(epoch_response);
+
+            const epoch_parsed = try std.json.parseFromSlice(std.json.Value, allocator, epoch_response, .{});
+            defer epoch_parsed.deinit();
+
+            const current_epoch: u64 = if (epoch_parsed.value.object.get("result")) |result|
+                if (result.object.get("epoch")) |e|
+                    if (e == .integer) @intCast(e.integer) else std.fmt.parseInt(u64, e.string, 10) catch 0
+                else
+                    0
+            else
+                0;
+
+            // Get total supply
+            const supply_response = try rpc_client.call("sui_getTotalSupply", "[\"0x2::sui::SUI\"]");
+            defer allocator.free(supply_response);
+
+            const supply_parsed = try std.json.parseFromSlice(std.json.Value, allocator, supply_response, .{});
+            defer supply_parsed.deinit();
+
+            const total_supply: u64 = if (supply_parsed.value.object.get("result")) |result|
+                if (result.object.get("value")) |v|
+                    if (v == .integer) @intCast(v.integer) else std.fmt.parseInt(u64, v.string, 10) catch 0
+                else
+                    0
+            else
+                0;
+
+            // Display status
+            const timestamp = std.time.milliTimestamp();
+            const cp_diff = if (last_checkpoint > 0) current_cp - last_checkpoint else 0;
+
+            std.log.info("[{d}] Epoch: {d} | Checkpoint: {d} (+{d}) | Supply: {d}.{d:0>9}B SUI", .{
+                timestamp,
+                current_epoch,
+                current_cp,
+                cp_diff,
+                total_supply / 1_000_000_000_000_000_000,
+                (total_supply / 1_000_000_000) % 1_000_000_000,
+            });
+
+            last_checkpoint = current_cp;
+            std.Thread.sleep(5 * std.time.ns_per_s);
+        }
+
+    } else if (std.mem.eql(u8, monitor_type, "address")) {
+        if (args.len < 2) {
+            std.log.err("Usage: monitor address <address>", .{});
+            std.process.exit(1);
+        }
+
+        const address = args[1];
+        std.log.info("=== Address Monitor: {s} ===", .{address});
+        std.log.info("Monitoring address activity...", .{});
+        std.log.info("(Press Ctrl+C to stop)", .{});
+        std.log.info("", .{});
+
+        var last_balance: u64 = 0;
+        var last_objects: u32 = 0;
+        var poll_count: u32 = 0;
+
+        while (poll_count < 20) : (poll_count += 1) {
+            // Get balance
+            const balance = sui_client.rpc_client_new.getBalance(
+                &rpc_client,
+                address,
+                null,
+            ) catch 0;
+
+            // Get object count
+            const params = try std.fmt.allocPrint(allocator, "[\"{s}\",null,null,1]", .{address});
+            defer allocator.free(params);
+
+            const response = try rpc_client.call("suix_getOwnedObjects", params);
+            defer allocator.free(response);
+
+            const parsed = try std.json.parseFromSlice(std.json.Value, allocator, response, .{});
+            defer parsed.deinit();
+
+            var object_count: u32 = 0;
+            if (parsed.value.object.get("result")) |result| {
+                if (result.object.get("data")) |data| {
+                    if (data == .array) {
+                        object_count = @intCast(data.array.items.len);
+                    }
+                }
+            }
+
+            // Display changes
+            const timestamp = std.time.milliTimestamp();
+            if (balance != last_balance or object_count != last_objects) {
+                std.log.info("[{d}] Balance: {d}.{d:0>9} SUI | Objects: {d}", .{
+                    timestamp,
+                    balance / 1_000_000_000,
+                    balance % 1_000_000_000,
+                    object_count,
+                });
+
+                if (last_balance > 0 and balance != last_balance) {
+                    const diff = if (balance > last_balance) balance - last_balance else last_balance - balance;
+                    const sign = if (balance > last_balance) "+" else "-";
+                    std.log.info("  Balance change: {s}{d}.{d:0>9} SUI", .{
+                        sign,
+                        diff / 1_000_000_000,
+                        diff % 1_000_000_000,
+                    });
+                }
+
+                if (last_objects > 0 and object_count != last_objects) {
+                    const diff = if (object_count > last_objects) object_count - last_objects else last_objects - object_count;
+                    const sign = if (object_count > last_objects) "+" else "-";
+                    std.log.info("  Object change: {s}{d}", .{ sign, diff });
+                }
+
+                last_balance = balance;
+                last_objects = object_count;
+            }
+
+            std.Thread.sleep(3 * std.time.ns_per_s);
+        }
+
+    } else if (std.mem.eql(u8, monitor_type, "gas")) {
+        std.log.info("=== Gas Price Monitor ===", .{});
+        std.log.info("Monitoring gas price changes...", .{});
+        std.log.info("(Press Ctrl+C to stop)", .{});
+        std.log.info("", .{});
+
+        var last_gas_price: u64 = 0;
+        var poll_count: u32 = 0;
+
+        while (poll_count < 30) : (poll_count += 1) {
+            const response = try rpc_client.call("sui_getReferenceGasPrice", "[]");
+            defer allocator.free(response);
+
+            const parsed = try std.json.parseFromSlice(std.json.Value, allocator, response, .{});
+            defer parsed.deinit();
+
+            const gas_price: u64 = if (parsed.value.object.get("result")) |result|
+                if (result == .integer) @intCast(result.integer) else std.fmt.parseInt(u64, result.string, 10) catch 0
+            else
+                0;
+
+            const timestamp = std.time.milliTimestamp();
+
+            if (gas_price != last_gas_price) {
+                const diff: i64 = if (gas_price > last_gas_price)
+                    @intCast(gas_price - last_gas_price)
+                else
+                    -@as(i64, @intCast(last_gas_price - gas_price));
+
+                const diff_str = if (diff > 0)
+                    try std.fmt.allocPrint(allocator, "+{d}", .{diff})
+                else if (diff < 0)
+                    try std.fmt.allocPrint(allocator, "{d}", .{diff})
+                else
+                    try allocator.dupe(u8, "0");
+                defer allocator.free(diff_str);
+
+                std.log.info("[{d}] Gas Price: {d} MIST ({s})", .{
+                    timestamp,
+                    gas_price,
+                    diff_str,
+                });
+
+                // Estimate costs
+                std.log.info("  Simple tx: ~{d} MIST | Complex tx: ~{d} MIST", .{
+                    gas_price * 2000,
+                    gas_price * 10000,
+                });
+
+                last_gas_price = gas_price;
+            } else {
+                std.log.info("[{d}] Gas Price: {d} MIST (unchanged)", .{
+                    timestamp,
+                    gas_price,
+                });
+            }
+
+            std.Thread.sleep(5 * std.time.ns_per_s);
+        }
+
+    } else if (std.mem.eql(u8, monitor_type, "tps")) {
+        std.log.info("=== TPS Monitor ===", .{});
+        std.log.info("Monitoring transactions per second...", .{});
+        std.log.info("(Press Ctrl+C to stop)", .{});
+        std.log.info("", .{});
+
+        var last_tx_count: u64 = 0;
+        var last_timestamp: i64 = 0;
+        var poll_count: u32 = 0;
+
+        while (poll_count < 30) : (poll_count += 1) {
+            // Get latest checkpoint
+            const cp_response = try rpc_client.call("sui_getLatestCheckpointSequenceNumber", "[]");
+            defer allocator.free(cp_response);
+
+            const cp_parsed = try std.json.parseFromSlice(std.json.Value, allocator, cp_response, .{});
+            defer cp_parsed.deinit();
+
+            const current_cp: u64 = if (cp_parsed.value.object.get("result")) |result|
+                if (result == .integer) @intCast(result.integer) else std.fmt.parseInt(u64, result.string, 10) catch 0
+            else
+                0;
+
+            // Get checkpoint details
+            const params = try std.fmt.allocPrint(allocator, "[{d}]", .{current_cp});
+            defer allocator.free(params);
+
+            const response = try rpc_client.call("sui_getCheckpoint", params);
+            defer allocator.free(response);
+
+            const parsed = try std.json.parseFromSlice(std.json.Value, allocator, response, .{});
+            defer parsed.deinit();
+
+            if (parsed.value.object.get("result")) |result| {
+                const tx_count: u64 = if (result.object.get("networkTotalTransactions")) |tx|
+                    if (tx == .integer) @intCast(tx.integer) else std.fmt.parseInt(u64, tx.string, 10) catch 0
+                else
+                    0;
+
+                const timestamp: i64 = if (result.object.get("timestampMs")) |ts|
+                    if (ts == .integer) @intCast(ts.integer) else std.fmt.parseInt(i64, ts.string, 10) catch 0
+                else
+                    0;
+
+                if (last_tx_count > 0 and timestamp > last_timestamp) {
+                    const tx_diff = tx_count - last_tx_count;
+                    const time_diff_ms = timestamp - last_timestamp;
+                    const time_diff_s = @as(f64, @floatFromInt(time_diff_ms)) / 1000.0;
+                    const tps = @as(f64, @floatFromInt(tx_diff)) / time_diff_s;
+
+                    std.log.info("[{d}] Checkpoint: {d} | TPS: {d:.2} | Total TX: {d}", .{
+                        timestamp,
+                        current_cp,
+                        tps,
+                        tx_count,
+                    });
+                } else {
+                    std.log.info("[{d}] Checkpoint: {d} | Total TX: {d}", .{
+                        timestamp,
+                        current_cp,
+                        tx_count,
+                    });
+                }
+
+                last_tx_count = tx_count;
+                last_timestamp = timestamp;
+            }
+
+            std.Thread.sleep(5 * std.time.ns_per_s);
+        }
+
+    } else {
+        std.log.err("Unknown monitor type: {s}", .{monitor_type});
+        std.process.exit(1);
+    }
+}
+
+fn cmdExport(allocator: Allocator, args: []const []const u8) !void {
+    if (args.len < 3) {
+        std.log.err("Usage: export <type> <address_or_id> <output_file>", .{});
+        std.log.info("Types:", .{});
+        std.log.info("  transactions <address> <file>  Export transaction history to CSV", .{});
+        std.log.info("  objects <address> <file>       Export object list to CSV", .{});
+        std.log.info("  balance <address> <file>       Export balance history to CSV", .{});
+        std.process.exit(1);
+    }
+
+    const export_type = args[0];
+    const target = args[1];
+    const output_file = args[2];
+
+    const rpc_url = getRpcUrl() orelse "https://fullnode.mainnet.sui.io:443";
+    var rpc_client = try SuiRpcClient.init(allocator, rpc_url);
+    defer rpc_client.deinit();
+
+    // Create output file
+    const file = try std.fs.cwd().createFile(output_file, .{});
+    defer file.close();
+
+    var buf: [65536]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buf);
+    const writer = fbs.writer();
+
+    if (std.mem.eql(u8, export_type, "transactions")) {
+        std.log.info("Exporting transactions for {s} to {s}...", .{ target, output_file });
+
+        // Write CSV header
+        try writer.print("timestamp,digest,checkpoint,status\n", .{});
+
+        // Query transactions
+        const params = try std.fmt.allocPrint(
+            allocator,
+            "[{{\"FromAddress\":\"{s}\"}},null,50,descending]",
+            .{target},
+        );
+        defer allocator.free(params);
+
+        const response = try rpc_client.call("suix_queryTransactionBlocks", params);
+        defer allocator.free(response);
+
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, response, .{});
+        defer parsed.deinit();
+
+        var export_count: u32 = 0;
+
+        if (parsed.value.object.get("result")) |result| {
+            if (result.object.get("data")) |data| {
+                if (data == .array) {
+                    for (data.array.items) |tx| {
+                        const timestamp = if (tx.object.get("timestampMs")) |ts|
+                            if (ts == .integer) ts.integer else std.fmt.parseInt(i64, ts.string, 10) catch 0
+                        else
+                            0;
+
+                        const digest = if (tx.object.get("digest")) |d| d.string else "unknown";
+
+                        const checkpoint = if (tx.object.get("checkpoint")) |cp|
+                            if (cp == .integer) cp.integer else std.fmt.parseInt(i64, cp.string, 10) catch 0
+                        else
+                            0;
+
+                        const status = if (tx.object.get("effects")) |effects|
+                            if (effects.object.get("status")) |status|
+                                if (status.object.get("status")) |s| s.string else "unknown"
+                            else
+                                "unknown"
+                        else
+                            "unknown";
+
+                        try writer.print("{d},{s},{d},{s}\n", .{
+                            timestamp,
+                            digest,
+                            checkpoint,
+                            status,
+                        });
+
+                        export_count += 1;
+                    }
+                }
+            }
+        }
+
+        const written = fbs.getWritten();
+        try file.writeAll(written);
+
+        std.log.info("Exported {d} transactions to {s}", .{ export_count, output_file });
+
+    } else if (std.mem.eql(u8, export_type, "objects")) {
+        std.log.info("Exporting objects for {s} to {s}...", .{ target, output_file });
+
+        // Write CSV header
+        try writer.print("object_id,type,version,digest\n", .{});
+
+        // Query objects
+        const params = try std.fmt.allocPrint(
+            allocator,
+            "[\"{s}\",{{\"options\":{{\"showType\":true}}}},null,50]",
+            .{target},
+        );
+        defer allocator.free(params);
+
+        const response = try rpc_client.call("suix_getOwnedObjects", params);
+        defer allocator.free(response);
+
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, response, .{});
+        defer parsed.deinit();
+
+        var export_count: u32 = 0;
+
+        if (parsed.value.object.get("result")) |result| {
+            if (result.object.get("data")) |data| {
+                if (data == .array) {
+                    for (data.array.items) |item| {
+                        if (item.object.get("data")) |obj_data| {
+                            const object_id = if (obj_data.object.get("objectId")) |id| id.string else "unknown";
+                            const obj_type = if (obj_data.object.get("type")) |t| t.string else "unknown";
+
+                            const version = if (obj_data.object.get("version")) |v|
+                                if (v == .integer) v.integer else std.fmt.parseInt(i64, v.string, 10) catch 0
+                            else
+                                0;
+
+                            const digest = if (obj_data.object.get("digest")) |d| d.string else "unknown";
+
+                            try writer.print("{s},{s},{d},{s}\n", .{
+                                object_id,
+                                obj_type,
+                                version,
+                                digest,
+                            });
+
+                            export_count += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        const written = fbs.getWritten();
+        try file.writeAll(written);
+
+        std.log.info("Exported {d} objects to {s}", .{ export_count, output_file });
+
+    } else if (std.mem.eql(u8, export_type, "balance")) {
+        std.log.info("Exporting balance snapshot for {s} to {s}...", .{ target, output_file });
+
+        // Get balance
+        const balance = sui_client.rpc_client_new.getBalance(
+            &rpc_client,
+            target,
+            null,
+        ) catch 0;
+
+        const timestamp = std.time.milliTimestamp();
+
+        // Write CSV header and data
+        try writer.print("timestamp,address,balance_mist,balance_sui\n", .{});
+        try writer.print("{d},{s},{d},{d}.{d:0>9}\n", .{
+            timestamp,
+            target,
+            balance,
+            balance / 1_000_000_000,
+            balance % 1_000_000_000,
+        });
+
+        const written = fbs.getWritten();
+        try file.writeAll(written);
+
+        std.log.info("Exported balance snapshot to {s}", .{output_file});
+
+    } else {
+        std.log.err("Unknown export type: {s}", .{export_type});
+        std.process.exit(1);
+    }
+}
+
+fn cmdStats(allocator: Allocator, args: []const []const u8) !void {
+    if (args.len < 1) {
+        std.log.err("Usage: stats <type>", .{});
+        std.log.info("Types:", .{});
+        std.log.info("  network                     Show network statistics", .{});
+        std.log.info("  validators                  Show validator statistics", .{});
+        std.log.info("  address <address>           Show address statistics", .{});
+        std.process.exit(1);
+    }
+
+    const stats_type = args[0];
+    const rpc_url = getRpcUrl() orelse "https://fullnode.mainnet.sui.io:443";
+
+    var rpc_client = try SuiRpcClient.init(allocator, rpc_url);
+    defer rpc_client.deinit();
+
+    if (std.mem.eql(u8, stats_type, "network")) {
+        std.log.info("=== Network Statistics ===", .{});
+        std.log.info("", .{});
+
+        // Get latest checkpoint
+        const cp_response = try rpc_client.call("sui_getLatestCheckpointSequenceNumber", "[]");
+        defer allocator.free(cp_response);
+
+        const cp_parsed = try std.json.parseFromSlice(std.json.Value, allocator, cp_response, .{});
+        defer cp_parsed.deinit();
+
+        const latest_cp: u64 = if (cp_parsed.value.object.get("result")) |result|
+            if (result == .integer) @intCast(result.integer) else std.fmt.parseInt(u64, result.string, 10) catch 0
+        else
+            0;
+
+        std.log.info("Latest Checkpoint: {d}", .{latest_cp});
+
+    } else if (std.mem.eql(u8, stats_type, "validators")) {
+        std.log.info("=== Validator Statistics ===", .{});
+        std.log.info("", .{});
+
+        const response = try rpc_client.call("suix_getValidators", "[]");
+        defer allocator.free(response);
+
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, response, .{});
+        defer parsed.deinit();
+
+        if (parsed.value.object.get("result")) |result| {
+            if (result.object.get("validators")) |validators| {
+                if (validators == .array) {
+                    std.log.info("Total Validators: {d}", .{validators.array.items.len});
+                    std.log.info("", .{});
+
+                    // Show top validators by stake
+                    std.log.info("Top Validators by Stake:", .{});
+
+                    var count: u32 = 0;
+                    for (validators.array.items) |validator| {
+                        if (count >= 10) break;
+
+                        const name = if (validator.object.get("name")) |n| n.string else "Unknown";
+                        const stake: u64 = if (validator.object.get("stakingPoolSuiBalance")) |s|
+                            if (s == .integer) @intCast(s.integer) else std.fmt.parseInt(u64, s.string, 10) catch 0
+                        else
+                            0;
+
+                        const commission: u64 = if (validator.object.get("commissionRate")) |c|
+                            if (c == .integer) @intCast(c.integer) else std.fmt.parseInt(u64, c.string, 10) catch 0
+                        else
+                            0;
+
+                        std.log.info("  {d}. {s}", .{ count + 1, name });
+                        std.log.info("      Stake: {d}.{d:0>9} SUI", .{
+                            stake / 1_000_000_000,
+                            stake % 1_000_000_000,
+                        });
+                        std.log.info("      Commission: {d}%", .{commission});
+
+                        count += 1;
+                    }
+                }
+            }
+        }
+
+    } else if (std.mem.eql(u8, stats_type, "address")) {
+        if (args.len < 2) {
+            std.log.err("Usage: stats address <address>", .{});
+            std.process.exit(1);
+        }
+
+        const address = args[1];
+        std.log.info("=== Address Statistics: {s} ===", .{address});
+        std.log.info("", .{});
+
+        // Get balance
+        const balance = sui_client.rpc_client_new.getBalance(
+            &rpc_client,
+            address,
+            null,
+        ) catch 0;
+
+        std.log.info("Balance: {d}.{d:0>9} SUI", .{
+            balance / 1_000_000_000,
+            balance % 1_000_000_000,
+        });
+
+        // Get object count
+        const params = try std.fmt.allocPrint(allocator, "[\"{s}\",null,null,1]", .{address});
+        defer allocator.free(params);
+
+        const response = try rpc_client.call("suix_getOwnedObjects", params);
+        defer allocator.free(response);
+
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, response, .{});
+        defer parsed.deinit();
+
+        var object_count: u32 = 0;
+        var has_more = false;
+
+        if (parsed.value.object.get("result")) |result| {
+            if (result.object.get("data")) |data| {
+                if (data == .array) {
+                    object_count = @intCast(data.array.items.len);
+                }
+            }
+
+            if (result.object.get("hasNextPage")) |has_next| {
+                if (has_next == .bool) {
+                    has_more = has_next.bool;
+                }
+            }
+        }
+
+        std.log.info("Objects: {d}{s}", .{
+            object_count,
+            if (has_more) "+" else "",
+        });
+
+        // Calculate percentiles
+        if (balance > 0) {
+            std.log.info("", .{});
+            std.log.info("Balance Percentile Estimates:", .{});
+            std.log.info("  > 0.1 SUI: Top ~90%", .{});
+            std.log.info("  > 1 SUI: Top ~70%", .{});
+            std.log.info("  > 10 SUI: Top ~30%", .{});
+            std.log.info("  > 100 SUI: Top ~5%", .{});
+        }
+
+    } else {
+        std.log.err("Unknown stats type: {s}", .{stats_type});
+        std.process.exit(1);
     }
 }
