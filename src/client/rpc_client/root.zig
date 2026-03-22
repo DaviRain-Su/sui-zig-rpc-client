@@ -16,6 +16,7 @@ pub const event = @import("event.zig");
 pub const move_module = @import("move.zig");
 pub const builder = @import("builder.zig");
 pub const selector = @import("selector.zig");
+pub const object_input = @import("object_input.zig");
 
 // Re-export commonly used types
 pub const ClientError = errors.ClientError;
@@ -117,6 +118,22 @@ pub const selectArgumentValue = selector.selectArgumentValue;
 pub const selectArgumentValueFromToken = selector.selectArgumentValueFromToken;
 pub const selectArgumentValuesFromTokens = selector.selectArgumentValuesFromTokens;
 
+// Re-export object_input types and functions
+pub const ObjectInputKind = object_input.ObjectInputKind;
+pub const ImmOrOwnedObjectInput = object_input.ImmOrOwnedObjectInput;
+pub const SharedObjectInput = object_input.SharedObjectInput;
+pub const ReceivingObjectInput = object_input.ReceivingObjectInput;
+pub const ObjectInput = object_input.ObjectInput;
+pub const GasData = object_input.GasData;
+pub const resolveImmOrOwnedObjectInputJson = object_input.resolveImmOrOwnedObjectInputJson;
+pub const buildImmOrOwnedObjectInputJson = object_input.buildImmOrOwnedObjectInputJson;
+pub const resolveReceivingObjectInputJson = object_input.resolveReceivingObjectInputJson;
+pub const buildReceivingObjectInputJson = object_input.buildReceivingObjectInputJson;
+pub const resolveSharedObjectInputJson = object_input.resolveSharedObjectInputJson;
+pub const buildSharedObjectInputJson = object_input.buildSharedObjectInputJson;
+pub const buildGasDataJson = object_input.buildGasDataJson;
+pub const buildGasDataJsonWithAutoPayment = object_input.buildGasDataJsonWithAutoPayment;
+
 // Re-export utilities
 pub const dupeOptionalString = utils.dupeOptionalString;
 pub const dupeStringList = utils.dupeStringList;
@@ -143,6 +160,7 @@ test "rpc_client module imports successfully" {
     _ = move_module;
     _ = builder;
     _ = selector;
+    _ = object_input;
 }
 
 // Import integration tests
@@ -193,4 +211,8 @@ test "re-exports work correctly" {
     // Test selector types exist
     _ = SelectedArgumentRequest;
     _ = SelectionType;
+
+    // Test object_input types exist
+    _ = ObjectInputKind;
+    _ = ObjectInput;
 }
