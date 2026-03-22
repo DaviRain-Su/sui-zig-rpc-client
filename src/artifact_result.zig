@@ -1,5 +1,7 @@
 const std = @import("std");
-const tx_request_builder = @import("./tx_request_builder.zig");
+
+// Use new tx_request_builder module
+const tx_request_builder = @import("./tx_request_builder/root.zig");
 
 pub const ArtifactDataKind = enum {
     tx_bytes,
@@ -310,6 +312,10 @@ pub fn summarizeProgrammaticArtifact(
     };
 }
 
+// ============================================================
+// Tests
+// ============================================================
+
 test "extractExecutePayloadSummary parses execute payload transaction blocks" {
     const testing = std.testing;
 
@@ -318,7 +324,7 @@ test "extractExecutePayloadSummary parses execute payload transaction blocks" {
     const allocator = gpa.allocator();
 
     var summary = try extractExecutePayloadSummary(allocator,
-        \\["{\"kind\":\"ProgrammableTransaction\",\"sender\":\"0xabc\",\"gasBudget\":1200,\"gasPrice\":8,\"commands\":[{\"kind\":\"MoveCall\"},{\"kind\":\"TransferObjects\"}]}",["sig-a","sig-b"],{"showEffects":true,"showEvents":true}]
+        \\["{\\\"kind\\\":\\\"ProgrammableTransaction\\\",\\\"sender\\\":\\\"0xabc\\\",\\\"gasBudget\\\":1200,\\\"gasPrice\\\":8,\\\"commands\\\":[{\\\"kind\\\":\\\"MoveCall\\\"},{\\\"kind\\\":\\\"TransferObjects\\\"}]}",[\\\"sig-a\\\",\\\"sig-b\\\"],{\\\"showEffects\\\":true,\\\"showEvents\\\":true}]\\
     );
     defer summary.deinit(allocator);
 
@@ -343,7 +349,7 @@ test "extractExecutePayloadSummary parses raw tx bytes payloads" {
     const allocator = gpa.allocator();
 
     var summary = try extractExecutePayloadSummary(allocator,
-        \\["AAABBB",["sig-a"],{"showEffects":true}]
+        \\["AAABBB",["sig-a"],{"showEffects":true}]\\
     );
     defer summary.deinit(allocator);
 
@@ -368,7 +374,7 @@ test "extractBuildArtifactSummary parses move-call instruction artifacts" {
     const allocator = gpa.allocator();
 
     var summary = try extractBuildArtifactSummary(allocator,
-        \\{"kind":"MoveCall","package":"0x2","module":"counter","function":"increment","typeArguments":["T"],"arguments":["0xabc",1]}
+        \\["{\\\"kind\\\":\\\"MoveCall\\\",\\\"package\\\":\\\"0x2\\\",\\\"module\\\":\\\"counter\\\",\\\"function\\\":\\\"increment\\\",\\\"typeArguments\\\":[\\\"T\\\"],\\\"arguments\\\":[\\\"0xabc\\\",1]}]\\
     );
     defer summary.deinit(allocator);
 
@@ -390,7 +396,7 @@ test "extractBuildArtifactSummary parses programmable transaction block artifact
     const allocator = gpa.allocator();
 
     var summary = try extractBuildArtifactSummary(allocator,
-        \\{"kind":"ProgrammableTransaction","sender":"0xabc","gasBudget":1000,"gasPrice":7,"commands":[{"kind":"MoveCall"}]}
+        \\["{\\\"kind\\\":\\\"ProgrammableTransaction\\\",\\\"sender\\\":\\\"0xabc\\\",\\\"gasBudget\\\":1000,\\\"gasPrice\\\":7,\\\"commands\\\":[{\\\"kind\\\":\\\"MoveCall\\\"}]}]\\
     );
     defer summary.deinit(allocator);
 
@@ -413,7 +419,7 @@ test "extractInspectPayloadSummary parses inspect payload artifacts" {
     const allocator = gpa.allocator();
 
     var summary = try extractInspectPayloadSummary(allocator,
-        \\["{\"kind\":\"ProgrammableTransaction\",\"sender\":\"0xabc\",\"gasBudget\":1000,\"gasPrice\":7,\"commands\":[{\"kind\":\"MoveCall\"}]}",{"sender":"0xabc","gasBudget":1000,"gasPrice":7,"options":{"skipChecks":true}}]
+        \\["{\\\"kind\\\":\\\"ProgrammableTransaction\\\",\\\"sender\\\":\\\"0xabc\\\",\\\"gasBudget\\\":1000,\\\"gasPrice\\\":7,\\\"commands\\\":[{\\\"kind\\\":\\\"MoveCall\\\"}]}",{"sender":"0xabc","gasBudget":1000,"gasPrice":7,"options":{"skipChecks":true}}]\\
     );
     defer summary.deinit(allocator);
 
@@ -451,4 +457,16 @@ test "summarizeProgrammaticArtifact dispatches by artifact kind" {
         },
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "new tx_request_builder module integration" {
+    const testing = std.testing;
+
+    // Test that we can access types from the new module
+    _ = tx_request_builder.ProgrammaticArtifactKind;
+    _ = tx_request_builder.types.ProgrammaticArtifactKind;
+
+    // Test that the types are compatible
+    const kind: tx_request_builder.ProgrammaticArtifactKind = .transaction_block;
+    try testing.expectEqual(tx_request_builder.ProgrammaticArtifactKind.transaction_block, kind);
 }

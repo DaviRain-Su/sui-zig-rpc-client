@@ -26,8 +26,9 @@ pub const AuthorizationPlan = struct {
     /// Build challenge text for display
     pub fn challengeText(
         self: AuthorizationPlan,
-        allocator: std.mem.Allocator,
+        _allocator: std.mem.Allocator,
     ) !?[]u8 {
+        _ = _allocator;
         const req = self.challengeRequest() orelse return null;
         return try session.buildSessionChallengeText(req.challenge);
     }
@@ -78,9 +79,10 @@ pub const OwnedAuthorizationPlan = struct {
     /// Apply challenge response
     pub fn withChallengeResponse(
         self: *OwnedAuthorizationPlan,
-        allocator: std.mem.Allocator,
+        _allocator: std.mem.Allocator,
         response: SessionChallengeResponse,
     ) !void {
+        _ = _allocator;
         self.provider = try applySessionChallengeResponse(self.provider, response);
     }
 };
@@ -141,10 +143,10 @@ pub fn ownedAuthorizationPlan(
 
 /// Get session challenge request for provider
 fn sessionChallengeRequest(
-    options: ProgrammaticRequestOptions,
+    _options: ProgrammaticRequestOptions,
     provider: AccountProvider,
 ) ?SessionChallengeRequest {
-    _ = options;
+    _ = _options;
     return switch (provider) {
         .future_wallet => |fw| if (fw.session_challenge != null)
             SessionChallengeRequest{

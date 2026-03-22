@@ -10,12 +10,9 @@ const SessionChallengeResponse = tx_request_builder.SessionChallengeResponse;
 const buildTransactionBlockFromCommandSource = tx_request_builder.buildTransactionBlockFromCommandSource;
 const CommandRequestConfig = tx_request_builder.CommandRequestConfig;
 
-/// Test end-to-end authorization flow
+// Test end-to-end authorization flow
 test "end-to-end authorization flow with direct signer" {
     const testing = std.testing;
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
 
     // Create options
     const options = ProgrammaticRequestOptions{
@@ -42,7 +39,7 @@ test "end-to-end authorization flow with direct signer" {
     try testing.expect(plan.challengeRequest() == null);
 }
 
-/// Test authorization flow with future wallet
+// Test authorization flow with future wallet
 test "end-to-end authorization flow with future wallet" {
     const testing = std.testing;
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -83,7 +80,7 @@ test "end-to-end authorization flow with future wallet" {
     try testing.expect(owned_plan.plan().canExecute());
 }
 
-/// Test transaction building from command source
+// Test transaction building from command source
 test "build transaction from move_call command" {
     const testing = std.testing;
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -112,7 +109,7 @@ test "build transaction from move_call command" {
     try testing.expectEqual(@as(usize, 1), block.instructions.len);
 }
 
-/// Test multiple account provider types
+// Test multiple account provider types
 test "authorization with different provider types" {
     const testing = std.testing;
 
@@ -170,7 +167,7 @@ test "authorization with different provider types" {
     try testing.expect(!remote_plan.canExecute());
 }
 
-/// Test owned authorization plan memory management
+// Test owned authorization plan memory management
 test "owned authorization plan memory management" {
     const testing = std.testing;
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -202,7 +199,7 @@ test "owned authorization plan memory management" {
     try testing.expectEqual(@as(?u64, 1000000), plan.options.gas_budget);
 }
 
-/// Test error handling in transaction building
+// Test error handling in transaction building
 test "transaction building error handling" {
     const testing = std.testing;
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -255,7 +252,7 @@ test "transaction building error handling" {
     try testing.expectError(error.MissingFunction, result3);
 }
 
-/// Test complex move call with arguments
+// Test complex move call with arguments
 test "complex move call with arguments" {
     const testing = std.testing;
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -298,7 +295,7 @@ test "complex move call with arguments" {
     try testing.expectEqual(@as(usize, 1), instruction.type_arguments.len);
 }
 
-/// Test authorization plan with options
+// Test authorization plan with options
 test "authorization plan with various options" {
     const testing = std.testing;
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -342,10 +339,8 @@ test "authorization plan with various options" {
     owned_opts.deinit(allocator);
 }
 
-/// Test module re-exports
+// Test module re-exports
 test "module re-exports are accessible" {
-    const testing = std.testing;
-
     // All types should be accessible through root module
     _ = tx_request_builder.AuthorizationPlan;
     _ = tx_request_builder.OwnedAuthorizationPlan;

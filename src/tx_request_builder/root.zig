@@ -96,7 +96,7 @@ test "tx_request_builder module imports successfully" {
 }
 
 test "re-exports work correctly" {
-    const testing = std.testing;
+    _ = std.testing;
 
     // Test types
     _ = CommandResultAliases{};
