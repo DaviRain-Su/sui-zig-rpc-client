@@ -147,8 +147,66 @@ fn cmdCreate(allocator: Allocator, args: []const []const u8) !void {
 
     std.log.info("✓ Authentication successful!", .{});
     std.log.info("", .{});
-    std.log.info("Note: Full credential creation with Secure Enclave key generation", .{});
-    std.log.info("requires a properly signed binary. Touch ID integration is working!", .{});
+
+    // Generate credential tag
+    const timestamp = std.time.milliTimestamp();
+    var tag_buf: [256]u8 = undefined;
+    const tag = try std.fmt.bufPrint(&tag_buf, "sui-passkey-{s}-{d}", .{ credential_name, timestamp });
+
+    // Generate key in Secure Enclave
+    std.log.info("Generating P-256 key in Secure Enclave...", .{});
+
+    error_code = 0;
+    const private_key = c.BridgeSecKeyGenerateSecureEnclaveKey(
+        tag.ptr,
+        true, // Require biometric authentication
+        &error_code,
+    );
+
+    if (private_key == null) {
+        const err_msg = c.GetErrorMessage(error_code);
+        defer c.FreeString(err_msg);
+        std.log.err("Failed to generate key: {s}", .{err_msg});
+        std.log.info("", .{});
+        std.log.info("Note: Secure Enclave key generation requires:", .{});
+        std.log.info("  - Signed binary with proper entitlements", .{});
+        std.log.info("  - Or running as a proper app bundle", .{});
+        std.log.info("", .{});
+        std.log.info("Touch ID authentication is working correctly!", .{});
+        std.log.info("Key generation requires additional setup.", .{});
+        return;
+    }
+    defer c.BridgeSecKeyRelease(private_key);
+
+    std.log.info("✓ Private key generated in Secure Enclave", .{});
+
+    // Get public key
+    const public_key = c.BridgeSecKeyCopyPublicKey(private_key);
+    if (public_key) |pk| {
+        defer c.BridgeSecKeyRelease(pk);
+
+        const pub_key_data = c.BridgeSecKeyCopyExternalRepresentation(pk, &error_code);
+        if (pub_key_data) |data| {
+            defer c.NSDataRelease(data);
+            const len = c.NSDataGetLength(data);
+            std.log.info("✓ Public key exported ({d} bytes)", .{len});
+
+            // Store credential
+            if (c.StoreCredentialInKeychain(tag.ptr, private_key, &error_code)) {
+                std.log.info("✓ Credential stored in Keychain", .{});
+                std.log.info("", .{});
+                std.log.info("Credential ID: {s}", .{tag});
+            } else {
+                const err_msg = c.GetErrorMessage(error_code);
+                defer c.FreeString(err_msg);
+                std.log.err("Failed to store credential: {s}", .{err_msg});
+            }
+        } else {
+            std.log.err("Failed to export public key", .{});
+        }
+    } else {
+        std.log.err("Failed to get public key", .{});
+    }
 }
 
 fn cmdPlatform() !void {

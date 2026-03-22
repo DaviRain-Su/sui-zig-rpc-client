@@ -157,7 +157,16 @@ BridgeSecKeyRef BridgeSecKeyGenerateSecureEnclaveKey(const char* tag, bool biome
     }
     
     NSString *tagString = [NSString stringWithUTF8String:tag];
+    if (!tagString) {
+        if (errorCode) *errorCode = BRIDGE_LA_ERROR_INVALID_CONTEXT;
+        return NULL;
+    }
+    
     NSData *tagData = [tagString dataUsingEncoding:NSUTF8StringEncoding];
+    if (!tagData) {
+        if (errorCode) *errorCode = BRIDGE_LA_ERROR_INVALID_CONTEXT;
+        return NULL;
+    }
     
     // Create access control
     SecAccessControlCreateFlags flags = kSecAccessControlPrivateKeyUsage;
@@ -173,22 +182,24 @@ BridgeSecKeyRef BridgeSecKeyGenerateSecureEnclaveKey(const char* tag, bool biome
         &error
     );
     
-    if (error) {
-        if (errorCode) *errorCode = (int32_t)CFErrorGetCode(error);
-        CFRelease(error);
+    if (error || !accessControl) {
+        if (errorCode) *errorCode = error ? (int32_t)CFErrorGetCode(error) : BRIDGE_LA_ERROR_OTHER;
+        if (error) CFRelease(error);
         return NULL;
     }
     
     // Key attributes
+    NSDictionary *privateKeyAttrs = @{
+        (__bridge id)kSecAttrIsPermanent: @YES,
+        (__bridge id)kSecAttrApplicationTag: tagData,
+        (__bridge id)kSecAttrAccessControl: (__bridge_transfer id)accessControl
+    };
+    
     NSDictionary *attributes = @{
         (__bridge id)kSecAttrKeyType: (__bridge id)kSecAttrKeyTypeECSECPrimeRandom,
         (__bridge id)kSecAttrKeySizeInBits: @256,
         (__bridge id)kSecAttrTokenID: (__bridge id)kSecAttrTokenIDSecureEnclave,
-        (__bridge id)kSecPrivateKeyAttrs: @{
-            (__bridge id)kSecAttrIsPermanent: @YES,
-            (__bridge id)kSecAttrApplicationTag: tagData,
-            (__bridge id)kSecAttrAccessControl: (__bridge_transfer id)accessControl
-        }
+        (__bridge id)kSecPrivateKeyAttrs: privateKeyAttrs
     };
     
     CFErrorRef keyError = NULL;

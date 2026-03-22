@@ -29,7 +29,7 @@ pub const KeyPair = struct {
         const seed = secret_key;
         
         // Use Ed25519 key pair generation from seed
-        const kp = try Ed25519.KeyPair.fromSeed(seed);
+        const kp = try Ed25519.KeyPair.generateDeterministic(seed);
         
         var public_key: [ED25519_PUBLIC_KEY_LEN]u8 = undefined;
         @memcpy(&public_key, &kp.public_key.bytes);
@@ -70,7 +70,7 @@ pub const TransactionSigner = struct {
         
         // Create Ed25519 key pair from our secret key
         const seed = self.keypair.secret_key;
-        const kp = try Ed25519.KeyPair.fromSeed(seed);
+        const kp = try Ed25519.KeyPair.generateDeterministic(seed);
         
         // Sign the transaction data
         const sig = try kp.sign(tx_data, null);
