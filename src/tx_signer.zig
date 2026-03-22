@@ -173,13 +173,22 @@ pub fn loadKeypairFromKeystore(allocator: Allocator, keystore_path: []const u8, 
     return error.KeyNotFound;
 }
 
-/// Load keypair from mnemonic phrase
-pub fn loadKeypairFromMnemonic(mnemonic: []const u8) !KeyPair {
-    // TODO: Implement BIP-39 mnemonic to seed conversion
-    // Then derive Ed25519 keypair from seed using SLIP-0010
+/// Load keypair from mnemonic phrase (BIP-39)
+pub fn loadKeypairFromMnemonic(allocator: Allocator, mnemonic: []const u8) !KeyPair {
+    const bip39 = @import("bip39.zig");
     
-    _ = mnemonic;
-    return error.NotImplemented;
+    // Validate mnemonic
+    if (!bip39.validateMnemonic(mnemonic)) {
+        return error.InvalidMnemonic;
+    }
+    
+    // Convert mnemonic to seed
+    const seed = try bip39.mnemonicToSeed(allocator, mnemonic, null);
+    
+    // Derive Ed25519 key from seed (SLIP-0010)
+    const secret_key = try bip39.deriveEd25519Key(seed, "m/44'/784'/0'/0'/0'");
+    
+    return try KeyPair.fromSecretKey(secret_key);
 }
 
 /// Load keypair from private key file
