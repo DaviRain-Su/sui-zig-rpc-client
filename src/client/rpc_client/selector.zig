@@ -296,7 +296,18 @@ fn parseObjectPresetKind(preset_str: []const u8) !ObjectPresetKind {
     return error.InvalidCli;
 }
 
-/// Select argument value (placeholder)
+/// Select argument value from RPC
+///
+/// NOTE: This function is a placeholder for future implementation.
+/// Currently, argument selection is handled inline in the transaction
+/// building code. Full implementation would:
+///
+/// 1. Query RPC for objects matching the request criteria
+/// 2. Filter and sort results based on selection strategy
+/// 3. Return the best matching object ID
+///
+/// For now, use explicit object IDs or the selection helpers in
+/// object_input.zig for common patterns.
 pub fn selectArgumentValue(
     allocator: std.mem.Allocator,
     client: *SuiRpcClient,
@@ -305,6 +316,15 @@ pub fn selectArgumentValue(
     _ = allocator;
     _ = client;
     _ = request;
+
+    // TODO: Implement full argument selection
+    // This would query RPC and select best matching object:
+    // - For gas_coin: find coin with sufficient balance
+    // - For owned_object: find object by type/ID
+    // - For object_preset: return well-known object ID
+    //
+    // For now, use explicit selection in transaction building
+
     return error.NotImplemented;
 }
 

@@ -277,13 +277,25 @@ fn buildMoveCallInstruction(
 }
 
 /// Build transfer instruction
+///
+/// NOTE: This function is not yet fully implemented. The current implementation
+/// only supports basic Move call instructions. Full transfer instruction support
+/// would require:
+///
+/// 1. Parsing recipient address from config.parameters
+/// 2. Parsing objects to transfer (object IDs or GasCoin)
+/// 3. Creating TransferObjectsInstruction with proper arguments
+/// 4. Handling different transfer scenarios (SUI, objects, batch)
+///
+/// For now, use move_call instructions with 0x2::sui::transfer for transfers.
 fn buildTransferInstruction(
     allocator: std.mem.Allocator,
     config: CommandRequestConfig,
 ) !TransactionInstruction {
     _ = allocator;
     _ = config;
-    // Simplified implementation
+    // TODO: Implement full transfer instruction building
+    // This requires parsing recipient and objects from parameters
     return error.NotImplemented;
 }
 

@@ -47,6 +47,19 @@ pub fn executeTransactionWithSignatures(
 }
 
 /// Execute transaction from keystore
+///
+/// NOTE: This function is not yet implemented. Keystore-based transaction
+/// execution requires integration with the keystore module for:
+///
+/// 1. Loading the appropriate key from ~/.sui/sui_config/sui.keystore
+/// 2. Decrypting the key (if password protected)
+/// 3. Signing the transaction bytes
+/// 4. Executing with the signature
+///
+/// For now, use:
+/// - tx_signer.zig for signing with known keys
+/// - commands/wallet.zig for wallet-based execution
+/// - executeTransactionWithSignatures() if you already have signatures
 pub fn executeTransactionFromKeystore(
     client: *SuiRpcClient,
     tx_bytes: []const u8,
@@ -57,8 +70,16 @@ pub fn executeTransactionFromKeystore(
     _ = tx_bytes;
     _ = keystore_path;
     _ = options;
-    // Simplified - would actually load key from keystore and sign
-    // For now, just return an error
+
+    // TODO: Implement keystore-based execution
+    // This requires:
+    // 1. Keystore format parsing (JSON array of base64 keys)
+    // 2. Key decryption (if encrypted)
+    // 3. Ed25519 signing via tx_signer.zig
+    // 4. Signature formatting for Sui
+    //
+    // Workaround: Use executeTransactionWithSignatures() with pre-signed tx
+
     return error.NotImplemented;
 }
 

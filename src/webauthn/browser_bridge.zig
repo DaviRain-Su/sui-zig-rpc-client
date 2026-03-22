@@ -77,17 +77,26 @@ pub const BrowserBridge = struct {
     }
 
     /// Get assertion (sign challenge) using credential
+    ///
+    /// NOTE: This method is not yet implemented. The browser bridge currently
+    /// only supports credential creation. Assertion (signing) requires:
+    /// - Browser extension or native messaging
+    /// - User interaction for authentication
+    /// - Challenge-response protocol handling
+    ///
+    /// For now, use file-based keystore or platform authenticators directly.
     pub fn getAssertion(
         self: *Self,
         rp_id: []const u8,
         credential_id: []const u8,
         challenge: []const u8,
     ) !Assertion {
-        // For now, use the simple file-based approach
         _ = self;
         _ = rp_id;
         _ = credential_id;
         _ = challenge;
+        // TODO: Implement browser-based assertion
+        // This requires browser extension support for secure signing
         return error.NotImplemented;
     }
 };

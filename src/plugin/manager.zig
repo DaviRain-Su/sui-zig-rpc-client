@@ -189,16 +189,33 @@ pub const PluginManager = struct {
         }
     }
 
-    /// Load single plugin
+    /// Load single plugin from path
+    ///
+    /// NOTE: Dynamic plugin loading is not yet implemented. The plugin system
+    /// currently only supports built-in plugins. Full dynamic loading would require:
+    ///
+    /// 1. Dynamic library loading (dlopen/LoadLibrary)
+    /// 2. Plugin manifest parsing (JSON/TOML)
+    /// 3. Symbol resolution for plugin interface
+    /// 4. Version compatibility checking
+    /// 5. Sandboxing/isolation for security
+    ///
+    /// Current workaround: Built-in plugins in src/plugin/builtin.zig
+    /// Future: Dynamic loading from ~/.sui/plugins/
     pub fn loadPlugin(self: *PluginManager, _path: []const u8) !void {
         _ = self;
         _ = _path;
-        // In a real implementation, this would:
-        // 1. Load manifest.json
-        // 2. Load the plugin binary (shared library)
-        // 3. Get plugin interface
-        // 4. Create plugin instance
-        // 5. Register commands and hooks
+
+        // TODO: Implement dynamic plugin loading
+        // This requires:
+        // - Cross-platform dynamic library loading
+        // - Plugin API stability guarantees
+        // - Security sandboxing
+        // - Hot-reload support
+        //
+        // For now, use built-in plugins:
+        // src/plugin/builtin.zig
+
         return error.NotImplemented;
     }
 

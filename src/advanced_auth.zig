@@ -245,20 +245,41 @@ pub const PasskeyAuthenticator = struct {
         self.credentials.deinit();
     }
 
+    /// Create a new Passkey credential
+    ///
+    /// NOTE: This function requires platform-specific WebAuthn implementation
+    /// which is provided by the webauthn/ module. This skeleton shows the
+    /// required interface but actual implementation needs:
+    ///
+    /// 1. Platform WebAuthn API integration (macOS: LocalAuthentication, Linux: libfido2)
+    /// 2. Browser-based credential creation for hardware keys
+    /// 3. Secure Enclave or hardware key for key generation
+    ///
+    /// For actual credential creation, use:
+    /// - webauthn/platform.zig for platform authenticators
+    /// - webauthn/browser_bridge.zig for browser-based creation
+    /// - cmd_passkey.zig for CLI integration
     pub fn createCredential(_: *PasskeyAuthenticator, _: []const u8) !void {
-        // In a real implementation, this would:
-        // 1. Call platform WebAuthn API
-        // 2. Get credential creation response
-        // 3. Parse and store the credential
-
         std.log.info("Creating Passkey credential...", .{});
-        std.log.info("Note: This requires platform WebAuthn support", .{});
-        std.log.info("On macOS/iOS: Use LocalAuthentication framework", .{});
-        std.log.info("On Linux: Use libfido2", .{});
+        std.log.info("Note: Use webauthn/ module for actual implementation", .{});
+        std.log.info("  - Platform: webauthn/platform.zig", .{});
+        std.log.info("  - Browser: webauthn/browser_bridge.zig", .{});
+        std.log.info("  - CLI: cmd_passkey.zig", .{});
 
         return error.NotImplemented;
     }
 
+    /// Sign a transaction with Passkey
+    ///
+    /// NOTE: This function requires platform-specific WebAuthn implementation
+    /// for getting assertions (signatures). The webauthn/ module provides:
+    ///
+    /// 1. Platform authenticators via webauthn/platform.zig
+    /// 2. Browser-based signing via webauthn/browser_bridge.zig
+    /// 3. Hardware key support via webauthn/macos.zig and webauthn/linux.zig
+    ///
+    /// For actual transaction signing, use the webauthn module directly
+    /// or the cmd_passkey.zig CLI commands.
     pub fn signTransaction(
         self: *const PasskeyAuthenticator,
         credential_id: []const u8,
@@ -269,10 +290,15 @@ pub const PasskeyAuthenticator = struct {
             if (std.mem.eql(u8, cred.id, credential_id)) break cred;
         } else return error.CredentialNotFound;
 
-        // In a real implementation, this would:
-        // 1. Call platform WebAuthn API with tx_hash as challenge
-        // 2. Get assertion response
-        // 3. Parse authenticator data, client data, and signature
+        // Actual signing requires platform WebAuthn API:
+        // 1. Call platform API with tx_hash as challenge
+        // 2. Get assertion response (authenticator data + signature)
+        // 3. Parse and return PasskeySignature
+        //
+        // Use webauthn module for implementation:
+        // - webauthn/platform.zig for cross-platform API
+        // - webauthn/macos.zig for macOS Secure Enclave
+        // - webauthn/linux.zig for Linux libfido2
 
         _ = credential;
         _ = tx_hash;

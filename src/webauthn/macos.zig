@@ -67,6 +67,21 @@ pub const MacOSWebAuthn = struct {
     }
 
     /// Create a credential in Secure Enclave
+    ///
+    /// NOTE: This function requires full Objective-C runtime integration
+    /// which is only available when building with -Dwebauthn flag and
+    /// proper macOS SDK. The current implementation is a skeleton showing
+    /// the required steps:
+    ///
+    /// 1. Generate P-256 keypair in Secure Enclave using SecKeyCreateRandomKey
+    /// 2. Configure biometric protection with SecAccessControlCreateWithFlags
+    /// 3. Store in keychain with kSecAttrTokenIDSecureEnclave
+    /// 4. Return credential ID and public key
+    ///
+    /// To enable full functionality:
+    /// - Build with: zig build -Dwebauthn
+    /// - Requires macOS 10.15+ with Secure Enclave
+    /// - Requires proper entitlements for keychain access
     pub fn createCredential(
         self: *MacOSWebAuthn,
         rp_id: []const u8,
@@ -78,18 +93,14 @@ pub const MacOSWebAuthn = struct {
         std.log.info("  RP ID: {s}", .{rp_id});
         std.log.info("  User: {s}", .{user_name});
 
-        // Steps:
-        // 1. Generate P-256 keypair in Secure Enclave
-        // 2. Store in keychain with biometric protection
-        // 3. Return credential ID
-
+        // This would require full Objective-C integration:
         // SecAccessControlRef accessControl = SecAccessControlCreateWithFlags(
         //     kCFAllocatorDefault,
         //     kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
         //     kSecAccessControlBiometryCurrentSet,
         //     &error
         // );
-
+        //
         // NSDictionary *attributes = @{
         //     kSecAttrKeyType: kSecAttrKeyTypeECSECPrimeRandom,
         //     kSecAttrKeySizeInBits: @256,
@@ -100,7 +111,7 @@ pub const MacOSWebAuthn = struct {
         //         kSecAttrAccessControl: accessControl
         //     }
         // };
-
+        //
         // SecKeyRef privateKey = SecKeyCreateRandomKey(attributes, &error);
         // SecKeyRef publicKey = SecKeyCopyPublicKey(privateKey);
 
@@ -108,6 +119,20 @@ pub const MacOSWebAuthn = struct {
     }
 
     /// Sign data with biometric authentication
+    ///
+    /// NOTE: This function requires full Objective-C runtime integration
+    /// which is only available when building with -Dwebauthn flag.
+    /// The implementation would:
+    ///
+    /// 1. Create LAContext for biometric evaluation
+    /// 2. Call evaluatePolicy with LAPolicyDeviceOwnerAuthenticationWithBiometrics
+    /// 3. On success, retrieve private key from keychain using credential_id
+    /// 4. Use SecKeyCreateSignature to sign the data
+    ///
+    /// To enable full functionality:
+    /// - Build with: zig build -Dwebauthn
+    /// - Requires enrolled biometrics (Touch ID)
+    /// - Requires user interaction (biometric prompt)
     pub fn signWithBiometric(
         self: *MacOSWebAuthn,
         credential_id: []const u8,
@@ -118,18 +143,14 @@ pub const MacOSWebAuthn = struct {
 
         std.log.info("Requesting biometric authentication...", .{});
 
-        // Steps:
-        // 1. Create LAContext
-        // 2. Call evaluatePolicy for biometric
-        // 3. Retrieve private key from keychain
-        // 4. Sign data
-
+        // This would require full Objective-C integration:
         // LAContext *context = [[LAContext alloc] init];
         // [context evaluatePolicy:LAPolicyDeviceOwnerAuthenticationWithBiometrics
         //         localizedReason:@"Sign Sui transaction"
         //                 reply:^(BOOL success, NSError *error) {
         //     if (success) {
-        //         // Retrieve key and sign
+        //         SecKeyRef privateKey = // retrieve from keychain
+        //         CFDataRef signature = SecKeyCreateSignature(privateKey, ...);
         //     }
         // }];
 

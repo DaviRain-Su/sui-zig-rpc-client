@@ -96,6 +96,16 @@ pub const WebAuthnPlatform = union(Platform) {
 // macOS Implementation (LocalAuthentication + Secure Enclave)
 // ============================================================================
 
+/// macOS WebAuthn Placeholder Implementation
+///
+/// NOTE: This is a placeholder implementation. The actual implementation
+/// is in macos_impl.zig and requires:
+/// - macOS 10.15+ with LocalAuthentication framework
+/// - Secure Enclave support for key generation
+/// - Proper entitlements for Touch ID access
+///
+/// When building with WebAuthn support (-Dwebauthn), the real implementation
+/// from macos_impl.zig is used instead of this placeholder.
 const MacOSWebAuthnPlaceholder = struct {
     allocator: Allocator,
 
@@ -109,9 +119,12 @@ const MacOSWebAuthnPlaceholder = struct {
 
     pub fn isAvailable(self: *const MacOSWebAuthnPlaceholder) bool {
         _ = self;
-        return true; // Placeholder
+        // Placeholder: Actual implementation checks Touch ID availability
+        return true;
     }
 
+    /// Create credential - NOT IMPLEMENTED in placeholder
+    /// Use macos_impl.zig for actual implementation
     pub fn createCredential(
         self: *MacOSWebAuthnPlaceholder,
         rp_id: []const u8,
@@ -122,9 +135,15 @@ const MacOSWebAuthnPlaceholder = struct {
         _ = rp_id;
         _ = user_name;
         _ = user_display_name;
+        // Placeholder: Real implementation in macos_impl.zig requires:
+        // - LAContext for biometric authentication
+        // - Secure Enclave key generation
+        // - Keychain storage for credentials
         return error.NotImplemented;
     }
 
+    /// Get assertion - NOT IMPLEMENTED in placeholder
+    /// Use macos_impl.zig for actual implementation
     pub fn getAssertion(
         self: *MacOSWebAuthnPlaceholder,
         rp_id: []const u8,
@@ -135,10 +154,23 @@ const MacOSWebAuthnPlaceholder = struct {
         _ = rp_id;
         _ = challenge;
         _ = credential_id;
+        // Placeholder: Real implementation in macos_impl.zig requires:
+        // - LAContext for biometric authentication
+        // - Secure Enclave key signing
         return error.NotImplemented;
     }
 };
 
+/// Linux WebAuthn Placeholder Implementation
+///
+/// NOTE: This is a placeholder implementation. The actual implementation
+/// is in linux.zig and requires:
+/// - libfido2 library installed
+/// - USB HID device access (/dev/hidraw*)
+/// - udev rules for FIDO2 devices
+///
+/// When building with WebAuthn support on Linux, the real implementation
+/// from linux.zig is used instead of this placeholder.
 const LinuxWebAuthnPlaceholder = struct {
     allocator: Allocator,
 
@@ -152,9 +184,12 @@ const LinuxWebAuthnPlaceholder = struct {
 
     pub fn isAvailable(self: *const LinuxWebAuthnPlaceholder) bool {
         _ = self;
-        return false; // Placeholder
+        // Placeholder: Actual implementation checks for libfido2 and devices
+        return false;
     }
 
+    /// Create credential - NOT IMPLEMENTED in placeholder
+    /// Use linux.zig for actual implementation
     pub fn createCredential(
         self: *LinuxWebAuthnPlaceholder,
         rp_id: []const u8,
@@ -165,9 +200,15 @@ const LinuxWebAuthnPlaceholder = struct {
         _ = rp_id;
         _ = user_name;
         _ = user_display_name;
+        // Placeholder: Real implementation in linux.zig requires:
+        // - libfido2-dev package
+        // - FIDO2/CTAP2 compatible hardware key
+        // - USB HID communication
         return error.NotImplemented;
     }
 
+    /// Get assertion - NOT IMPLEMENTED in placeholder
+    /// Use linux.zig for actual implementation
     pub fn getAssertion(
         self: *LinuxWebAuthnPlaceholder,
         rp_id: []const u8,
@@ -178,6 +219,9 @@ const LinuxWebAuthnPlaceholder = struct {
         _ = rp_id;
         _ = challenge;
         _ = credential_id;
+        // Placeholder: Real implementation in linux.zig requires:
+        // - libfido2 for device communication
+        // - User presence verification on hardware key
         return error.NotImplemented;
     }
 };
