@@ -15,6 +15,7 @@ pub const object = @import("object.zig");
 pub const event = @import("event.zig");
 pub const move_module = @import("move.zig");
 pub const builder = @import("builder.zig");
+pub const selector = @import("selector.zig");
 
 // Re-export commonly used types
 pub const ClientError = errors.ClientError;
@@ -102,6 +103,20 @@ pub const MergeCoinsParams = builder.MergeCoinsParams;
 pub const buildMoveCallTxBytes = builder.buildMoveCallTxBytes;
 pub const buildBatchTransactionTxBytes = builder.buildBatchTransactionTxBytes;
 
+// Re-export selector types and functions
+pub const SelectedArgumentRequest = selector.SelectedArgumentRequest;
+pub const SelectionType = selector.SelectionType;
+pub const OwnedSelectedArgumentRequest = selector.OwnedSelectedArgumentRequest;
+pub const SelectedArgumentValue = selector.SelectedArgumentValue;
+pub const SelectionSource = selector.SelectionSource;
+pub const OwnedSelectedArgumentValue = selector.OwnedSelectedArgumentValue;
+pub const OwnedSelectedArgumentValues = selector.OwnedSelectedArgumentValues;
+pub const parseSelectedArgumentRequestToken = selector.parseSelectedArgumentRequestToken;
+pub const parseSelectedArgumentRequestTokenWithDefaultOwner = selector.parseSelectedArgumentRequestTokenWithDefaultOwner;
+pub const selectArgumentValue = selector.selectArgumentValue;
+pub const selectArgumentValueFromToken = selector.selectArgumentValueFromToken;
+pub const selectArgumentValuesFromTokens = selector.selectArgumentValuesFromTokens;
+
 // Re-export utilities
 pub const dupeOptionalString = utils.dupeOptionalString;
 pub const dupeStringList = utils.dupeStringList;
@@ -127,6 +142,7 @@ test "rpc_client module imports successfully" {
     _ = event;
     _ = move_module;
     _ = builder;
+    _ = selector;
 }
 
 // Import integration tests
@@ -173,4 +189,8 @@ test "re-exports work correctly" {
     // Test builder types exist
     _ = MoveCallParams;
     _ = BatchItem;
+
+    // Test selector types exist
+    _ = SelectedArgumentRequest;
+    _ = SelectionType;
 }

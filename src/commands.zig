@@ -7749,7 +7749,7 @@ pub fn runCommandWithProgrammaticProvider(
                             .amount = swap_intent.amount orelse "100",
                             .slippage_bps = swap_intent.slippage_bps,
                         },
-                        .commands = std.json.RawValue{ .bytes = commands_json },
+                        .commands = commands_json,
                         .sender = args.tx_build_sender orelse "0x<sender>",
                         .preview_only = true,
                         .route_status = "stub",
