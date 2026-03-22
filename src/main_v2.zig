@@ -56,6 +56,12 @@ pub fn main() !void {
         try cmdFields(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "module")) {
         try cmdModule(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "subscribe")) {
+        try cmdSubscribe(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "batch")) {
+        try cmdBatch(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "search")) {
+        try cmdSearch(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "help") or std.mem.eql(u8, command, "--help")) {
         printUsage(args[0]);
     } else {
@@ -85,6 +91,9 @@ fn printUsage(prog_name: []const u8) void {
     std.log.info("  events <package> <module>   Query events by module", .{});
     std.log.info("  fields <object_id>          Get dynamic fields of object", .{});
     std.log.info("  module <package> <module>   Get Move module bytecode", .{});
+    std.log.info("  subscribe <type>            Subscribe to events (simulated)", .{});
+    std.log.info("  batch <file>                Execute batch commands from file", .{});
+    std.log.info("  search <address>            Search address summary", .{});
     std.log.info("  help                        Show this help", .{});
 }
 
@@ -1018,4 +1027,354 @@ fn cmdModule(allocator: Allocator, args: []const []const u8) !void {
             }
         }
     }
+}
+/// Extra advanced commands for main_v2.zig
+
+fn cmdSubscribe(allocator: Allocator, args: []const []const u8) !void {
+    if (args.len < 1) {
+        std.log.err("Usage: subscribe <type>", .{});
+        std.log.info("Types:", .{});
+        std.log.info("  events <package> <module>  Poll for new events", .{});
+        std.log.info("  checkpoints                Poll for new checkpoints", .{});
+        std.log.info("  transactions <address>     Poll for new transactions", .{});
+        std.process.exit(1);
+    }
+
+    const sub_type = args[0];
+    const rpc_url = getRpcUrl() orelse "https://fullnode.mainnet.sui.io:443";
+
+    var rpc_client = try SuiRpcClient.init(allocator, rpc_url);
+    defer rpc_client.deinit();
+
+    if (std.mem.eql(u8, sub_type, "events")) {
+        if (args.len < 3) {
+            std.log.err("Usage: subscribe events <package> <module>", .{});
+            std.process.exit(1);
+        }
+
+        const package_id = args[1];
+        const module_name = args[2];
+
+        std.log.info("Subscribing to events for {s}::{s}...", .{ package_id, module_name });
+        std.log.info("(Press Ctrl+C to stop)", .{});
+        std.log.info("", .{});
+
+        var last_seen: ?[]const u8 = null;
+        defer if (last_seen) |ls| allocator.free(ls);
+
+        var poll_count: u32 = 0;
+        while (poll_count < 10) : (poll_count += 1) {
+            const params = try std.fmt.allocPrint(
+                allocator,
+                "[{{\"MoveModule\":{{\"package\":\"{s}\",\"module\":\"{s}\"}}}},null,10,null]",
+                .{ package_id, module_name },
+            );
+            defer allocator.free(params);
+
+            const response = try rpc_client.call("suix_queryEvents", params);
+            defer allocator.free(response);
+
+            const parsed = try std.json.parseFromSlice(std.json.Value, allocator, response, .{});
+            defer parsed.deinit();
+
+            if (parsed.value.object.get("result")) |result| {
+                if (result.object.get("data")) |data| {
+                    if (data == .array and data.array.items.len > 0) {
+                        // Check for new events
+                        const first_event = data.array.items[0];
+                        if (first_event.object.get("txDigest")) |tx| {
+                            const tx_str = tx.string;
+                            
+                            if (last_seen == null or !std.mem.eql(u8, last_seen.?, tx_str)) {
+                                if (last_seen) |ls| allocator.free(ls);
+                                last_seen = try allocator.dupe(u8, tx_str);
+
+                                std.log.info("New event detected!", .{});
+                                std.log.info("  Transaction: {s}", .{tx_str});
+                                
+                                if (first_event.object.get("timestampMs")) |ts| {
+                                    const ts_num: u64 = if (ts == .integer)
+                                        @intCast(ts.integer)
+                                    else
+                                        std.fmt.parseInt(u64, ts.string, 10) catch 0;
+                                    std.log.info("  Timestamp: {d} ms", .{ts_num});
+                                }
+                                std.log.info("", .{});
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Wait before polling again
+            std.Thread.sleep(2 * std.time.ns_per_s);
+        }
+
+        std.log.info("Subscription ended after {d} polls", .{poll_count});
+
+    } else if (std.mem.eql(u8, sub_type, "checkpoints")) {
+        std.log.info("Subscribing to new checkpoints...", .{});
+        std.log.info("(Press Ctrl+C to stop)", .{});
+        std.log.info("", .{});
+
+        var last_checkpoint: u64 = 0;
+        var poll_count: u32 = 0;
+
+        while (poll_count < 20) : (poll_count += 1) {
+            const response = try rpc_client.call("sui_getLatestCheckpointSequenceNumber", "[]");
+            defer allocator.free(response);
+
+            const parsed = try std.json.parseFromSlice(std.json.Value, allocator, response, .{});
+            defer parsed.deinit();
+
+            if (parsed.value.object.get("result")) |result| {
+                const current: u64 = if (result == .integer)
+                    @intCast(result.integer)
+                else
+                    std.fmt.parseInt(u64, result.string, 10) catch 0;
+
+                if (current > last_checkpoint) {
+                    if (last_checkpoint > 0) {
+                        const new_count = current - last_checkpoint;
+                        std.log.info("New checkpoint: {d} (+{d})", .{ current, new_count });
+                    } else {
+                        std.log.info("Current checkpoint: {d}", .{current});
+                    }
+                    last_checkpoint = current;
+                }
+            }
+
+            std.Thread.sleep(1 * std.time.ns_per_s);
+        }
+
+        std.log.info("Subscription ended after {d} polls", .{poll_count});
+
+    } else if (std.mem.eql(u8, sub_type, "transactions")) {
+        if (args.len < 2) {
+            std.log.err("Usage: subscribe transactions <address>", .{});
+            std.process.exit(1);
+        }
+
+        const address = args[1];
+        std.log.info("Subscribing to transactions for {s}...", .{address});
+        std.log.info("(Press Ctrl+C to stop)", .{});
+        std.log.info("", .{});
+
+        var last_count: usize = 0;
+        var poll_count: u32 = 0;
+
+        while (poll_count < 10) : (poll_count += 1) {
+            const params = try std.fmt.allocPrint(
+                allocator,
+                "[\"{s}\",null,1,descending]",
+                .{address},
+            );
+            defer allocator.free(params);
+
+            const response = try rpc_client.call("suix_queryTransactionBlocks", params);
+            defer allocator.free(response);
+
+            const parsed = try std.json.parseFromSlice(std.json.Value, allocator, response, .{});
+            defer parsed.deinit();
+
+            if (parsed.value.object.get("result")) |result| {
+                if (result.object.get("data")) |data| {
+                    if (data == .array) {
+                        const current_count = data.array.items.len;
+                        
+                        if (current_count > 0 and current_count != last_count) {
+                            if (last_count > 0) {
+                                std.log.info("New transaction detected!", .{});
+                                if (data.array.items[0].object.get("digest")) |digest| {
+                                    std.log.info("  Digest: {s}", .{digest.string});
+                                }
+                            }
+                            last_count = current_count;
+                        }
+                    }
+                }
+            }
+
+            std.Thread.sleep(3 * std.time.ns_per_s);
+        }
+
+        std.log.info("Subscription ended after {d} polls", .{poll_count});
+
+    } else {
+        std.log.err("Unknown subscription type: {s}", .{sub_type});
+        std.process.exit(1);
+    }
+}
+
+fn cmdBatch(allocator: Allocator, args: []const []const u8) !void {
+    if (args.len < 1) {
+        std.log.err("Usage: batch <command_file>", .{});
+        std.log.info("File format: one command per line", .{});
+        std.log.info("Example file:", .{});
+        std.log.info("  balance 0xADDRESS1", .{});
+        std.log.info("  balance 0xADDRESS2", .{});
+        std.log.info("  objects 0xADDRESS1", .{});
+        std.process.exit(1);
+    }
+
+    const file_path = args[0];
+    const rpc_url = getRpcUrl() orelse "https://fullnode.mainnet.sui.io:443";
+
+    // Read command file
+    const file = std.fs.cwd().openFile(file_path, .{}) catch |err| {
+        std.log.err("Failed to open file: {s}", .{@errorName(err)});
+        std.process.exit(1);
+    };
+    defer file.close();
+
+    const content = file.readToEndAlloc(allocator, 1024 * 1024) catch |err| {
+        std.log.err("Failed to read file: {s}", .{@errorName(err)});
+        std.process.exit(1);
+    };
+    defer allocator.free(content);
+
+    std.log.info("Executing batch commands from {s}...", .{file_path});
+    std.log.info("", .{});
+
+    var lines = std.mem.splitSequence(u8, content, "\n");
+    var line_num: u32 = 0;
+    var success_count: u32 = 0;
+    var fail_count: u32 = 0;
+
+    while (lines.next()) |line| {
+        line_num += 1;
+        const trimmed = std.mem.trim(u8, line, " \t\r\n");
+        
+        // Skip empty lines and comments
+        if (trimmed.len == 0 or std.mem.startsWith(u8, trimmed, "#")) {
+            continue;
+        }
+
+        std.log.info("[{d}] Executing: {s}", .{ line_num, trimmed });
+
+        // Parse command line
+        var parts = std.mem.splitSequence(u8, trimmed, " ");
+        var cmd_parts: [10][]const u8 = undefined;
+        var part_count: usize = 0;
+
+        while (parts.next()) |part| {
+            if (part_count < 10) {
+                cmd_parts[part_count] = part;
+                part_count += 1;
+            }
+        }
+
+        if (part_count == 0) continue;
+
+        const cmd = cmd_parts[0];
+        const cmd_args = cmd_parts[1..part_count];
+
+        // Execute command
+        var rpc_client = try SuiRpcClient.init(allocator, rpc_url);
+        
+        if (std.mem.eql(u8, cmd, "balance")) {
+            if (cmd_args.len >= 1) {
+                cmdBalance(allocator, cmd_args) catch |err| {
+                    std.log.err("  Error: {s}", .{@errorName(err)});
+                    fail_count += 1;
+                    continue;
+                };
+                success_count += 1;
+            }
+        } else if (std.mem.eql(u8, cmd, "objects")) {
+            if (cmd_args.len >= 1) {
+                cmdObjects(allocator, cmd_args) catch |err| {
+                    std.log.err("  Error: {s}", .{@errorName(err)});
+                    fail_count += 1;
+                    continue;
+                };
+                success_count += 1;
+            }
+        } else if (std.mem.eql(u8, cmd, "gas")) {
+            if (cmd_args.len >= 1) {
+                cmdGas(allocator, cmd_args) catch |err| {
+                    std.log.err("  Error: {s}", .{@errorName(err)});
+                    fail_count += 1;
+                    continue;
+                };
+                success_count += 1;
+            }
+        } else {
+            std.log.warn("  Unknown command: {s}", .{cmd});
+            fail_count += 1;
+        }
+
+        rpc_client.deinit();
+        std.log.info("", .{});
+    }
+
+    std.log.info("Batch execution complete:", .{});
+    std.log.info("  Successful: {d}", .{success_count});
+    std.log.info("  Failed: {d}", .{fail_count});
+}
+
+fn cmdSearch(allocator: Allocator, args: []const []const u8) !void {
+    if (args.len < 1) {
+        std.log.err("Usage: search <address>", .{});
+        std.log.info("Search for objects and transactions by address", .{});
+        std.process.exit(1);
+    }
+
+    const address = args[0];
+    const rpc_url = getRpcUrl() orelse "https://fullnode.mainnet.sui.io:443";
+
+    var rpc_client = try SuiRpcClient.init(allocator, rpc_url);
+    defer rpc_client.deinit();
+
+    std.log.info("Searching for address: {s}", .{address});
+    std.log.info("", .{});
+
+    // Search 1: Get balance
+    std.log.info("=== Balance ===", .{});
+    const balance = sui_client.rpc_client_new.getBalance(
+        &rpc_client,
+        address,
+        null,
+    ) catch |err| {
+        std.log.info("  Error: {s}", .{@errorName(err)});
+        return;
+    };
+    std.log.info("  {d} MIST ({d}.{d} SUI)", .{
+        balance,
+        balance / 1_000_000_000,
+        balance % 1_000_000_000,
+    });
+
+    // Search 2: Get objects count
+    std.log.info("", .{});
+    std.log.info("=== Objects ===", .{});
+    const params = try std.fmt.allocPrint(
+        allocator,
+        "[\"{s}\",null,null,1]",
+        .{address},
+    );
+    defer allocator.free(params);
+
+    const response = try rpc_client.call("suix_getOwnedObjects", params);
+    defer allocator.free(response);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, response, .{});
+    defer parsed.deinit();
+
+    if (parsed.value.object.get("result")) |result| {
+        if (result.object.get("data")) |data| {
+            if (data == .array) {
+                std.log.info("  {d} objects owned", .{data.array.items.len});
+                
+                if (result.object.get("hasNextPage")) |has_next| {
+                    if (has_next == .bool and has_next.bool) {
+                        std.log.info("  (More objects available)", .{});
+                    }
+                }
+            }
+        }
+    }
+
+    std.log.info("", .{});
+    std.log.info("Use 'objects {s}' to list all objects", .{address});
 }
