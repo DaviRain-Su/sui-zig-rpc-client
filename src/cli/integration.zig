@@ -273,9 +273,11 @@ pub fn runWithNewCli(
         return 0;
     }
 
-    // Run with old command system
-    // TODO: Integrate with actual command runner
-    std.debug.print("Command: {s}\n", .{@tagName(old_parsed.command)});
+    // Command execution is now handled directly in main.zig
+    // This integration layer is kept for backward compatibility
+    // but new commands should be added directly to main.zig
+    std.log.info("Command parsed: {s}", .{@tagName(old_parsed.command)});
+    std.log.info("Note: Use main.zig for new command implementations", .{});
     return 0;
 }
 
